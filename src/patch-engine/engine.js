@@ -1,4 +1,5 @@
 const anchors = require('./anchors');
+const { applyStrategy } = require('./strategies');
 
 function injectStyle(id, css) {
   if (!css || document.querySelector(`style[data-shim="${id}"]`)) return;
@@ -78,29 +79,54 @@ function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
 }
 
 function applyRule(rule, spec, api, mutations, handlers) {
-  const mountedOutputs = new WeakMap(); // anchor -> Node[]
+  // anchor -> { outputs: Node[], cleanups: Function[] }
+  // Map (not WeakMap) so we can iterate and prune anchors that left the DOM,
+  // tearing down their portal/overlay listeners and removing nodes we parked
+  // in document.body.
+  const state = new Map();
   const inFlight = new WeakSet();
 
   async function mountOn(el) {
     const outputs = [];
+    const cleanups = [];
     for (const mut of rule.mutations || []) {
-      const out = await dispatchMutation(el, mut, rule, spec, api, mutations, handlers);
-      outputs.push(...out);
+      const raw = await dispatchMutation(el, mut, rule, spec, api, mutations, handlers);
+      const { placed, cleanup } = applyStrategy(raw, el, mut);
+      outputs.push(...placed);
+      if (cleanup) cleanups.push(cleanup);
     }
-    mountedOutputs.set(el, outputs);
+    state.set(el, { outputs, cleanups });
+  }
+
+  function teardown(entry) {
+    for (const fn of entry.cleanups) {
+      try { fn(); } catch (err) { console.error('[shim] cleanup failed', err); }
+    }
+    for (const node of entry.outputs) node.remove();
   }
 
   const scan = () => {
+    // Prune anchors that are no longer in the DOM. Without this, portal-mounted
+    // widgets (which live in document.body, unrelated to the anchor's parent)
+    // would leak when the anchor unmounts.
+    for (const [anchor, entry] of state) {
+      if (!document.contains(anchor)) {
+        teardown(entry);
+        state.delete(anchor);
+      }
+    }
+
     for (const el of anchors.resolveAll(rule.anchor)) {
       if (inFlight.has(el)) continue;
-      const existing = mountedOutputs.get(el);
-      if (existing !== undefined) {
+      const existing = state.get(el);
+      if (existing) {
         // Opted out of self-healing (no outputs returned) — never re-mount.
-        if (existing.length === 0) continue;
+        if (existing.outputs.length === 0) continue;
         // All outputs still attached — mounted state is healthy.
-        if (existing.every((n) => document.contains(n))) continue;
-        // Something got stomped: drop the record and fall through to re-mount.
-        mountedOutputs.delete(el);
+        if (existing.outputs.every((n) => document.contains(n))) continue;
+        // Something got stomped: tear down and re-mount.
+        teardown(existing);
+        state.delete(el);
       }
       inFlight.add(el);
       mountOn(el).finally(() => inFlight.delete(el));
