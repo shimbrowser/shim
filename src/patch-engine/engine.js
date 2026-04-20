@@ -34,54 +34,79 @@ function collectCssForSpec(spec, mutations) {
   return chunks;
 }
 
-const mounted = new Map();
-
-function isMounted(ruleId, el) {
-  return mounted.get(ruleId)?.has(el) ?? false;
+function normalizeOutputs(r) {
+  if (!r) return [];
+  if (Array.isArray(r)) return r.filter(Boolean);
+  return [r];
 }
 
-function markMounted(ruleId, el) {
-  if (!mounted.has(ruleId)) mounted.set(ruleId, new WeakSet());
-  mounted.get(ruleId).add(el);
-}
-
+// Invokes one mutation against the anchor and returns a Promise<Node[]> of the
+// nodes the handler produced. Handlers enable self-healing by returning the
+// root node(s) they mounted; handlers that return nothing opt out (we never
+// re-mount them, matching the pre-self-healing behavior).
 function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
+  const safe = (label, work) => {
+    try {
+      return Promise.resolve(work()).then(normalizeOutputs, (err) => {
+        console.error(`[shim] ${label} failed`, err);
+        return [];
+      });
+    } catch (err) {
+      console.error(`[shim] ${label} failed`, err);
+      return Promise.resolve([]);
+    }
+  };
+
   if (mut.kind === 'script') {
     const fn = handlers[mut.handler];
     if (!fn) {
       console.warn(`[shim] script: unknown handler "${mut.handler}"`);
-      return;
+      return Promise.resolve([]);
     }
-    try {
-      fn({ anchor: el, mutation: mut, rule, spec, api });
-    } catch (err) {
-      console.error(`[shim] script handler "${mut.handler}" failed`, err);
-    }
-    return;
+    return safe(`script handler "${mut.handler}"`, () =>
+      fn({ anchor: el, mutation: mut, rule, spec, api }),
+    );
   }
   const handler = mutations[mut.kind];
   if (!handler) {
     console.warn(`[shim] unknown mutation kind: ${mut.kind}`);
-    return;
+    return Promise.resolve([]);
   }
-  try {
-    handler.mount(el, mut, rule, spec, api);
-  } catch (err) {
-    console.error(`[shim] mount failed for ${rule.id}/${mut.kind}`, err);
-  }
+  return safe(`mount ${rule.id}/${mut.kind}`, () =>
+    handler.mount(el, mut, rule, spec, api),
+  );
 }
 
 function applyRule(rule, spec, api, mutations, handlers) {
+  const mountedOutputs = new WeakMap(); // anchor -> Node[]
+  const inFlight = new WeakSet();
+
+  async function mountOn(el) {
+    const outputs = [];
+    for (const mut of rule.mutations || []) {
+      const out = await dispatchMutation(el, mut, rule, spec, api, mutations, handlers);
+      outputs.push(...out);
+    }
+    mountedOutputs.set(el, outputs);
+  }
+
   const scan = () => {
-    const matches = anchors.resolveAll(rule.anchor);
-    for (const el of matches) {
-      if (isMounted(rule.id, el)) continue;
-      markMounted(rule.id, el);
-      for (const mut of rule.mutations || []) {
-        dispatchMutation(el, mut, rule, spec, api, mutations, handlers);
+    for (const el of anchors.resolveAll(rule.anchor)) {
+      if (inFlight.has(el)) continue;
+      const existing = mountedOutputs.get(el);
+      if (existing !== undefined) {
+        // Opted out of self-healing (no outputs returned) — never re-mount.
+        if (existing.length === 0) continue;
+        // All outputs still attached — mounted state is healthy.
+        if (existing.every((n) => document.contains(n))) continue;
+        // Something got stomped: drop the record and fall through to re-mount.
+        mountedOutputs.delete(el);
       }
+      inFlight.add(el);
+      mountOn(el).finally(() => inFlight.delete(el));
     }
   };
+
   scan();
   new MutationObserver(scan).observe(document.body, {
     childList: true,
