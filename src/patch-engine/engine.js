@@ -8,13 +8,25 @@ function injectStyle(id, css) {
   (document.head || document.documentElement).appendChild(style);
 }
 
-function collectCssForSpec(spec, mutations) {
-  const kinds = new Set();
+function collectMutationKinds(spec, mutations) {
+  const direct = new Set();
   for (const rule of spec.rules || []) {
-    for (const mut of rule.mutations || []) kinds.add(mut.kind);
+    for (const mut of rule.mutations || []) direct.add(mut.kind);
   }
+  const resolved = new Set();
+  const walk = (kind) => {
+    if (resolved.has(kind)) return;
+    resolved.add(kind);
+    const handler = mutations[kind];
+    if (handler?.deps) for (const d of handler.deps) walk(d);
+  };
+  for (const k of direct) walk(k);
+  return resolved;
+}
+
+function collectCssForSpec(spec, mutations) {
   const chunks = [];
-  for (const kind of kinds) {
+  for (const kind of collectMutationKinds(spec, mutations)) {
     const handler = mutations[kind];
     if (handler?.css) chunks.push({ id: `mutation-${kind}`, css: handler.css });
   }
