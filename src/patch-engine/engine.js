@@ -45,23 +45,40 @@ function markMounted(ruleId, el) {
   mounted.get(ruleId).add(el);
 }
 
-function applyRule(rule, spec, api, mutations) {
+function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
+  if (mut.kind === 'script') {
+    const fn = handlers[mut.handler];
+    if (!fn) {
+      console.warn(`[shim] script: unknown handler "${mut.handler}"`);
+      return;
+    }
+    try {
+      fn({ anchor: el, mutation: mut, rule, spec, api });
+    } catch (err) {
+      console.error(`[shim] script handler "${mut.handler}" failed`, err);
+    }
+    return;
+  }
+  const handler = mutations[mut.kind];
+  if (!handler) {
+    console.warn(`[shim] unknown mutation kind: ${mut.kind}`);
+    return;
+  }
+  try {
+    handler.mount(el, mut, rule, spec, api);
+  } catch (err) {
+    console.error(`[shim] mount failed for ${rule.id}/${mut.kind}`, err);
+  }
+}
+
+function applyRule(rule, spec, api, mutations, handlers) {
   const scan = () => {
     const matches = anchors.resolveAll(rule.anchor);
     for (const el of matches) {
       if (isMounted(rule.id, el)) continue;
       markMounted(rule.id, el);
       for (const mut of rule.mutations || []) {
-        const handler = mutations[mut.kind];
-        if (!handler) {
-          console.warn(`[shim] unknown mutation kind: ${mut.kind}`);
-          continue;
-        }
-        try {
-          handler.mount(el, mut, rule, spec, api);
-        } catch (err) {
-          console.error(`[shim] mount failed for ${rule.id}/${mut.kind}`, err);
-        }
+        dispatchMutation(el, mut, rule, spec, api, mutations, handlers);
       }
     }
   };
@@ -72,7 +89,9 @@ function applyRule(rule, spec, api, mutations) {
   });
 }
 
-function run(spec, api, mutations) {
+function run(patch, api) {
+  const { spec, mutations = {}, handlers = {} } = patch;
+
   for (const { id, css } of collectCssForSpec(spec, mutations)) {
     const inject = () => injectStyle(id, css);
     if (document.head) inject();
@@ -81,7 +100,7 @@ function run(spec, api, mutations) {
 
   api.onReady(() => {
     for (const rule of spec.rules || []) {
-      applyRule(rule, spec, api, mutations);
+      applyRule(rule, spec, api, mutations, handlers);
     }
   });
 }
