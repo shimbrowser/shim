@@ -9,6 +9,43 @@ function injectStyle(id, css) {
   (document.head || document.documentElement).appendChild(style);
 }
 
+// Tier-1 CSS built-ins (`hide`, `restyle`) target elements via a shared
+// `data-shim-css` attribute. Each rule owns a CSS fragment keyed by a token
+// (e.g. `shim-<patchId>-<ruleId>-<kind>`); the engine stamps that token onto
+// the resolved anchor and appends the fragment to a shared <style> tag. React
+// (and other reconcilers) don't touch data-* attributes they didn't declare,
+// so styling survives re-renders without needing self-healing.
+const tier1RulesInjected = new Set();
+function ensureTier1Sheet() {
+  let sheet = document.querySelector('style[data-shim="tier1-css"]');
+  if (!sheet) {
+    sheet = document.createElement('style');
+    sheet.setAttribute('data-shim', 'tier1-css');
+    (document.head || document.documentElement).appendChild(sheet);
+  }
+  return sheet;
+}
+function injectTier1Rule(token, cssBody) {
+  if (tier1RulesInjected.has(token)) return;
+  tier1RulesInjected.add(token);
+  ensureTier1Sheet().appendChild(
+    document.createTextNode(`[data-shim-css~="${token}"] { ${cssBody} }\n`),
+  );
+}
+function tagElement(el, token) {
+  const current = el.getAttribute('data-shim-css') || '';
+  const tokens = current.split(/\s+/).filter(Boolean);
+  if (tokens.includes(token)) return;
+  tokens.push(token);
+  el.setAttribute('data-shim-css', tokens.join(' '));
+}
+const toKebab = (s) => s.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase());
+function cssBodyFromProps(props) {
+  return Object.entries(props || {})
+    .map(([k, v]) => `${toKebab(k)}: ${v} !important;`)
+    .join(' ');
+}
+
 function collectMutationKinds(spec, mutations) {
   const direct = new Set();
   for (const rule of spec.rules || []) {
@@ -68,6 +105,23 @@ function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
       fn({ anchor: el, mutation: mut, rule, spec, api }),
     );
   }
+
+  if (mut.kind === 'hide') {
+    const token = `shim-${spec.id}-${rule.id}-hide`;
+    injectTier1Rule(token, 'display: none !important;');
+    tagElement(el, token);
+    return Promise.resolve([]);
+  }
+
+  if (mut.kind === 'restyle') {
+    const body = cssBodyFromProps(mut.properties);
+    if (!body) return Promise.resolve([]);
+    const token = `shim-${spec.id}-${rule.id}-restyle`;
+    injectTier1Rule(token, body);
+    tagElement(el, token);
+    return Promise.resolve([]);
+  }
+
   const handler = mutations[mut.kind];
   if (!handler) {
     console.warn(`[shim] unknown mutation kind: ${mut.kind}`);
