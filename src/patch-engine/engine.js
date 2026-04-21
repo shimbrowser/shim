@@ -15,7 +15,11 @@ function injectStyle(id, css) {
 // the resolved anchor and appends the fragment to a shared <style> tag. React
 // (and other reconcilers) don't touch data-* attributes they didn't declare,
 // so styling survives re-renders without needing self-healing.
-const tier1RulesInjected = new Set();
+//
+// The per-token Map (rather than a bare Set) lets us (a) update a rule's CSS
+// in place when it's re-applied with different properties, and (b) cleanly
+// remove it from the sheet during rule teardown.
+const tier1RuleNodes = new Map();
 function ensureTier1Sheet() {
   let sheet = document.querySelector('style[data-shim="tier1-css"]');
   if (!sheet) {
@@ -26,11 +30,21 @@ function ensureTier1Sheet() {
   return sheet;
 }
 function injectTier1Rule(token, cssBody) {
-  if (tier1RulesInjected.has(token)) return;
-  tier1RulesInjected.add(token);
-  ensureTier1Sheet().appendChild(
-    document.createTextNode(`[data-shim-css~="${token}"] { ${cssBody} }\n`),
-  );
+  const text = `[data-shim-css~="${token}"] { ${cssBody} }\n`;
+  const existing = tier1RuleNodes.get(token);
+  if (existing) {
+    existing.nodeValue = text;
+    return;
+  }
+  const node = document.createTextNode(text);
+  ensureTier1Sheet().appendChild(node);
+  tier1RuleNodes.set(token, node);
+}
+function removeTier1Rule(token) {
+  const node = tier1RuleNodes.get(token);
+  if (!node) return;
+  node.remove();
+  tier1RuleNodes.delete(token);
 }
 function tagElement(el, token) {
   const current = el.getAttribute('data-shim-css') || '';
@@ -38,6 +52,12 @@ function tagElement(el, token) {
   if (tokens.includes(token)) return;
   tokens.push(token);
   el.setAttribute('data-shim-css', tokens.join(' '));
+}
+function stripToken(el, token) {
+  const current = el.getAttribute('data-shim-css') || '';
+  const tokens = current.split(/\s+/).filter((t) => t && t !== token);
+  if (tokens.length) el.setAttribute('data-shim-css', tokens.join(' '));
+  else el.removeAttribute('data-shim-css');
 }
 const toKebab = (s) => s.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase());
 function cssBodyFromProps(props) {
@@ -132,6 +152,10 @@ function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
   );
 }
 
+// Returns a teardown function that unobserves, removes all mounted outputs,
+// runs per-entry cleanups, and strips any Tier-1 CSS this rule stamped onto
+// its anchors (plus the rule text from the shared stylesheet). Preview
+// iterative refinement in the authoring UI relies on this.
 function applyRule(rule, spec, api, mutations, handlers) {
   // anchor -> { outputs: Node[], cleanups: Function[] }
   // Map (not WeakMap) so we can iterate and prune anchors that left the DOM,
@@ -152,7 +176,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
     state.set(el, { outputs, cleanups });
   }
 
-  function teardown(entry) {
+  function teardownEntry(entry) {
     for (const fn of entry.cleanups) {
       try { fn(); } catch (err) { console.error('[shim] cleanup failed', err); }
     }
@@ -165,7 +189,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
     // would leak when the anchor unmounts.
     for (const [anchor, entry] of state) {
       if (!document.contains(anchor)) {
-        teardown(entry);
+        teardownEntry(entry);
         state.delete(anchor);
       }
     }
@@ -179,7 +203,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
         // All outputs still attached — mounted state is healthy.
         if (existing.outputs.every((n) => document.contains(n))) continue;
         // Something got stomped: tear down and re-mount.
-        teardown(existing);
+        teardownEntry(existing);
         state.delete(el);
       }
       inFlight.add(el);
@@ -188,10 +212,29 @@ function applyRule(rule, spec, api, mutations, handlers) {
   };
 
   scan();
-  new MutationObserver(scan).observe(document.body, {
+  const observer = new MutationObserver(scan);
+  observer.observe(document.body, {
     childList: true,
     subtree: true,
   });
+
+  return function teardownRule() {
+    observer.disconnect();
+    for (const [anchor, entry] of state) {
+      teardownEntry(entry);
+      for (const mut of rule.mutations || []) {
+        if (mut.kind === 'hide' || mut.kind === 'restyle') {
+          stripToken(anchor, `shim-${spec.id}-${rule.id}-${mut.kind}`);
+        }
+      }
+    }
+    state.clear();
+    for (const mut of rule.mutations || []) {
+      if (mut.kind === 'hide' || mut.kind === 'restyle') {
+        removeTier1Rule(`shim-${spec.id}-${rule.id}-${mut.kind}`);
+      }
+    }
+  };
 }
 
 // A rule whose anchor declares `iframe: { kind: 'css', value }` targets elements
@@ -261,13 +304,33 @@ function run(patch, api) {
     }
   });
 
-  // Apply a rule that wasn't declared in this patch — used by the preload to
-  // run rules forwarded from a parent frame. `specIdOverride` namespaces CSS
-  // tokens so forwarded rules can't collide with this frame's own tokens.
+  // Extra rules are those applied *after* the patch's own spec.rules — used by
+  // the preload for rules forwarded in from a parent frame's bridge, and by
+  // the authoring UI for live previews. Keyed rules can be updated in place
+  // (same key replaces previous apply) and torn down via `removeExtraRule`.
+  const extraTeardowns = new Map();
+
   return {
-    applyExtraRule(rule, specIdOverride) {
+    applyExtraRule(rule, specIdOverride, ruleKey) {
       const effectiveSpec = specIdOverride ? { ...spec, id: specIdOverride } : spec;
-      api.onReady(() => applyRule(rule, effectiveSpec, api, mutations, handlers));
+      api.onReady(() => {
+        if (ruleKey) {
+          const prev = extraTeardowns.get(ruleKey);
+          if (prev) {
+            prev();
+            extraTeardowns.delete(ruleKey);
+          }
+        }
+        const teardown = applyRule(rule, effectiveSpec, api, mutations, handlers);
+        if (ruleKey) extraTeardowns.set(ruleKey, teardown);
+      });
+    },
+    removeExtraRule(ruleKey) {
+      const teardown = extraTeardowns.get(ruleKey);
+      if (!teardown) return false;
+      teardown();
+      extraTeardowns.delete(ruleKey);
+      return true;
     },
   };
 }
