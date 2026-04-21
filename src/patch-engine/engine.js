@@ -194,6 +194,57 @@ function applyRule(rule, spec, api, mutations, handlers) {
   });
 }
 
+// A rule whose anchor declares `iframe: { kind: 'css', value }` targets elements
+// inside a child iframe instead of this frame. Resolve the iframe(s) locally,
+// derive each one's origin from its `src`, then ask main to deliver the rule
+// (with the iframe field stripped) to every frame of that origin. The iframe's
+// own engine receives it via bridge:rule and applies it locally.
+function bridgeRule(rule, spec, api) {
+  if (!api.bridge?.forwardRule) {
+    console.warn('[shim] anchor.iframe set but api.bridge unavailable');
+    return;
+  }
+  const sel = rule.anchor?.iframe;
+  if (sel?.kind !== 'css') {
+    console.warn('[shim] anchor.iframe currently only supports kind:"css"');
+    return;
+  }
+
+  const innerRule = { ...rule, anchor: { ...rule.anchor } };
+  delete innerRule.anchor.iframe;
+
+  // iframe element → last origin we forwarded to. When an iframe navigates
+  // cross-origin (src changes) we re-forward to the new origin.
+  const forwardedTo = new Map();
+
+  const scan = () => {
+    for (const el of forwardedTo.keys()) {
+      if (!document.contains(el)) forwardedTo.delete(el);
+    }
+    for (const el of document.querySelectorAll(sel.value)) {
+      const src = el.getAttribute('src');
+      if (!src) continue;
+      let origin;
+      try {
+        origin = new URL(src, location.href).origin;
+      } catch {
+        continue;
+      }
+      if (forwardedTo.get(el) === origin) continue;
+      forwardedTo.set(el, origin);
+      api.bridge.forwardRule(origin, innerRule, spec.id);
+    }
+  };
+
+  scan();
+  new MutationObserver(scan).observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['src'],
+  });
+}
+
 function run(patch, api) {
   const { spec, mutations = {}, handlers = {} } = patch;
 
@@ -205,9 +256,20 @@ function run(patch, api) {
 
   api.onReady(() => {
     for (const rule of spec.rules || []) {
-      applyRule(rule, spec, api, mutations, handlers);
+      if (rule.anchor?.iframe) bridgeRule(rule, spec, api);
+      else applyRule(rule, spec, api, mutations, handlers);
     }
   });
+
+  // Apply a rule that wasn't declared in this patch — used by the preload to
+  // run rules forwarded from a parent frame. `specIdOverride` namespaces CSS
+  // tokens so forwarded rules can't collide with this frame's own tokens.
+  return {
+    applyExtraRule(rule, specIdOverride) {
+      const effectiveSpec = specIdOverride ? { ...spec, id: specIdOverride } : spec;
+      api.onReady(() => applyRule(rule, effectiveSpec, api, mutations, handlers));
+    },
+  };
 }
 
 module.exports = { run };
