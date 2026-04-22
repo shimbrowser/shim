@@ -291,15 +291,19 @@ function applyRule(rule, spec, api, mutations, handlers) {
 // derive each one's origin from its `src`, then ask main to deliver the rule
 // (with the iframe field stripped) to every frame of that origin. The iframe's
 // own engine receives it via bridge:rule and applies it locally.
+//
+// Returns a teardown fn that disconnects the observer and cancels any pending
+// rAF. Forwarded rules already applied in child frames aren't recalled —
+// teardown-by-source is a separate bridge concern not wired yet.
 function bridgeRule(rule, spec, api) {
   if (!api.bridge?.forwardRule) {
     console.warn('[shim] anchor.iframe set but api.bridge unavailable');
-    return;
+    return () => {};
   }
   const sel = rule.anchor?.iframe;
   if (sel?.kind !== 'css') {
     console.warn('[shim] anchor.iframe currently only supports kind:"css"');
-    return;
+    return () => {};
   }
 
   const innerRule = { ...rule, anchor: { ...rule.anchor } };
@@ -338,12 +342,21 @@ function bridgeRule(rule, spec, api) {
   };
 
   scan();
-  new MutationObserver(scheduleScan).observe(document.body, {
+  const observer = new MutationObserver(scheduleScan);
+  observer.observe(document.body, {
     childList: true,
     subtree: true,
     attributes: true,
     attributeFilter: ['src'],
   });
+
+  return function teardownBridgeRule() {
+    observer.disconnect();
+    if (scanHandle) {
+      cancelAnimationFrame(scanHandle);
+      scanHandle = 0;
+    }
+  };
 }
 
 function run(patch, api) {
@@ -355,10 +368,16 @@ function run(patch, api) {
     else document.addEventListener('DOMContentLoaded', inject, { once: true });
   }
 
+  // Track teardowns for each rule in spec.rules so the whole patch can be
+  // torn down live (sidebar toggle-off). Extra rules (previews + forwarded)
+  // have their own lifecycle via extraTeardowns below.
+  const ruleTeardowns = [];
+  let tornDown = false;
   api.onReady(() => {
+    if (tornDown) return;
     for (const rule of spec.rules || []) {
-      if (rule.anchor?.iframe) bridgeRule(rule, spec, api);
-      else applyRule(rule, spec, api, mutations, handlers);
+      if (rule.anchor?.iframe) ruleTeardowns.push(bridgeRule(rule, spec, api));
+      else ruleTeardowns.push(applyRule(rule, spec, api, mutations, handlers));
     }
   });
 
@@ -389,6 +408,23 @@ function run(patch, api) {
       teardown();
       extraTeardowns.delete(ruleKey);
       return true;
+    },
+    // Tears down every rule this patch mounted (observers, mounted outputs,
+    // Tier-1 CSS tokens). Leaves injected stylesheets (`mutation-<kind>` /
+    // `patch-<id>`) in place — they're idempotent and may be shared with
+    // other patches. Does NOT recall rules already forwarded into child
+    // iframes via anchor.iframe; those persist in the iframe's stub engine
+    // until navigation.
+    teardownAll() {
+      tornDown = true;
+      for (const fn of ruleTeardowns) {
+        try { fn(); } catch (err) { console.error('[shim] rule teardown failed', err); }
+      }
+      ruleTeardowns.length = 0;
+      for (const fn of extraTeardowns.values()) {
+        try { fn(); } catch (err) { console.error('[shim] extra teardown failed', err); }
+      }
+      extraTeardowns.clear();
     },
   };
 }
