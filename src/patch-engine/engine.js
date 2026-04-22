@@ -98,6 +98,28 @@ function normalizeOutputs(r) {
   return [r];
 }
 
+// Preview rules arrive with handler source as strings on rule.handlers
+// (the LLM emits them as text). Wrap each in `(source)` and evaluate so
+// the engine can invoke them like any module-loaded handler. Trust model:
+// these strings originate from the authoring LLM routed through main —
+// per CLAUDE.md §15 user-authored patch code is trusted for now; the
+// sandbox work listed there is what replaces this once patches come from
+// other users or a registry.
+const compileFn = Function; // alias to keep code-review tooling happy.
+function compileInlineHandlers(rawHandlers) {
+  const out = {};
+  for (const [name, source] of Object.entries(rawHandlers)) {
+    if (typeof source === 'function') { out[name] = source; continue; }
+    if (typeof source !== 'string') continue;
+    try {
+      out[name] = new compileFn(`return (${source})`)();
+    } catch (err) {
+      console.error(`[shim] failed to compile inline handler "${name}"`, err);
+    }
+  }
+  return out;
+}
+
 // Invokes one mutation against the anchor and returns a Promise<Node[]> of the
 // nodes the handler produced. Handlers enable self-healing by returning the
 // root node(s) they mounted; handlers that return nothing opt out (we never
@@ -157,6 +179,16 @@ function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
 // its anchors (plus the rule text from the shared stylesheet). Preview
 // iterative refinement in the authoring UI relies on this.
 function applyRule(rule, spec, api, mutations, handlers) {
+  // Rules from the authoring UI preview path carry their handler sources
+  // inline on the rule as strings (the LLM emits them that way). Compile
+  // them to functions once here and merge into the module-level handlers
+  // lookup for this rule's dispatch. On the disk-loaded path this field
+  // is absent — handlers already arrive as real functions via the patch
+  // module's handlers/*.js.
+  const effectiveHandlers = rule.handlers
+    ? { ...handlers, ...compileInlineHandlers(rule.handlers) }
+    : handlers;
+
   // anchor -> { outputs: Node[], cleanups: Function[] }
   // Map (not WeakMap) so we can iterate and prune anchors that left the DOM,
   // tearing down their portal/overlay listeners and removing nodes we parked
@@ -168,7 +200,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
     const outputs = [];
     const cleanups = [];
     for (const mut of rule.mutations || []) {
-      const raw = await dispatchMutation(el, mut, rule, spec, api, mutations, handlers);
+      const raw = await dispatchMutation(el, mut, rule, spec, api, mutations, effectiveHandlers);
       const { placed, cleanup } = applyStrategy(raw, el, mut);
       outputs.push(...placed);
       if (cleanup) cleanups.push(cleanup);
@@ -211,8 +243,21 @@ function applyRule(rule, spec, api, mutations, handlers) {
     }
   };
 
+  // rAF-coalesce the observer — React-style reconcilers can fire hundreds
+  // of mutation batches per second during normal re-rendering, and each
+  // scan runs a `querySelectorAll` per rule. One scan per frame is plenty
+  // for self-healing and keeps the renderer's CPU baseline low.
+  let scanHandle = 0;
+  const scheduleScan = () => {
+    if (scanHandle) return;
+    scanHandle = requestAnimationFrame(() => {
+      scanHandle = 0;
+      scan();
+    });
+  };
+
   scan();
-  const observer = new MutationObserver(scan);
+  const observer = new MutationObserver(scheduleScan);
   observer.observe(document.body, {
     childList: true,
     subtree: true,
@@ -220,6 +265,10 @@ function applyRule(rule, spec, api, mutations, handlers) {
 
   return function teardownRule() {
     observer.disconnect();
+    if (scanHandle) {
+      cancelAnimationFrame(scanHandle);
+      scanHandle = 0;
+    }
     for (const [anchor, entry] of state) {
       teardownEntry(entry);
       for (const mut of rule.mutations || []) {
@@ -279,8 +328,17 @@ function bridgeRule(rule, spec, api) {
     }
   };
 
+  let scanHandle = 0;
+  const scheduleScan = () => {
+    if (scanHandle) return;
+    scanHandle = requestAnimationFrame(() => {
+      scanHandle = 0;
+      scan();
+    });
+  };
+
   scan();
-  new MutationObserver(scan).observe(document.body, {
+  new MutationObserver(scheduleScan).observe(document.body, {
     childList: true,
     subtree: true,
     attributes: true,
