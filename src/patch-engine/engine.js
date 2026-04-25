@@ -106,13 +106,35 @@ function normalizeOutputs(r) {
 // sandbox work listed there is what replaces this once patches come from
 // other users or a registry.
 const compileFn = Function; // alias to keep code-review tooling happy.
-function compileInlineHandlers(rawHandlers) {
+function compileInlineHandlers(rawHandlers, spec) {
   const out = {};
+  const specId = spec?.id || 'inline';
   for (const [name, source] of Object.entries(rawHandlers)) {
     if (typeof source === 'function') { out[name] = source; continue; }
     if (typeof source !== 'string') continue;
     try {
-      out[name] = new compileFn(`return (${source})`)();
+      // Tag dynamically-compiled previews with a virtual sourceURL pragma
+      // so DevTools stacktraces — and the page-preload's runtime-error
+      // attribution regex — point at this exact handler. Without it,
+      // throws from a preview would land in `<anonymous>` and the
+      // sidebar would never know which shim caused them. Mirrors the
+      // `filename:` arg the committed-handler path passes to vm.runIn-
+      // ThisContext (page-preload.js compileBag).
+      //
+      // Layout matters: the closing `)` of the inner function expression
+      // MUST come BEFORE the `//# sourceURL=...` line. `//` starts a
+      // single-line comment that runs to the next newline; if the
+      // pragma sat between `${source}` and `)`, the comment would eat
+      // the paren and the function expression never closes — every
+      // user-authored shim with rule.handlers would log a SyntaxError
+      // on every page load, and live previews of script rules would
+      // silently fail to compile (committed shims kept working only
+      // because compileBag in the page-preload provides a fallback in
+      // the engine's `handlers` map).
+      const sourceURL = `shim://patches/${specId}/handlers/${name}.js`;
+      out[name] = new compileFn(
+        `return (${source})\n//# sourceURL=${sourceURL}\n`,
+      )();
     } catch (err) {
       console.error(`[shim] failed to compile inline handler "${name}"`, err);
     }
@@ -125,14 +147,36 @@ function compileInlineHandlers(rawHandlers) {
 // root node(s) they mounted; handlers that return nothing opt out (we never
 // re-mount them, matching the pre-self-healing behavior).
 function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
-  const safe = (label, work) => {
+  // Emit a handler-error event into the authoring channel. Handler throws
+  // are caught by the wrapper below (so a buggy handler can't take down
+  // the whole engine), which means they never bubble to window.error —
+  // we'd only see them in the console without this. Reporting from here
+  // is the primary path for synchronous mount-time throws + initial
+  // promise rejections; the page-preload's window.error / unhandled-
+  // rejection listeners stay the backstop for async throws that escape
+  // the wrapper (e.g. event listeners installed by a successful mount
+  // that throw later).
+  const reportError = (handlerName, err) => {
+    if (typeof api.reportEvent !== 'function') return;
+    api.reportEvent('handler-error', {
+      specId: spec.id,
+      handlerName: handlerName || '(anonymous)',
+      ruleId: rule.id,
+      message: err?.message || String(err),
+      stack: trimStackForEvent(err?.stack || ''),
+    });
+  };
+
+  const safe = (label, handlerName, work) => {
     try {
       return Promise.resolve(work()).then(normalizeOutputs, (err) => {
         console.error(`[shim] ${label} failed`, err);
+        if (handlerName) reportError(handlerName, err);
         return [];
       });
     } catch (err) {
       console.error(`[shim] ${label} failed`, err);
+      if (handlerName) reportError(handlerName, err);
       return Promise.resolve([]);
     }
   };
@@ -141,9 +185,21 @@ function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
     const fn = handlers[mut.handler];
     if (!fn) {
       console.warn(`[shim] script: unknown handler "${mut.handler}"`);
+      // Missing handler is a kind of authoring error too — surface it the
+      // same way as a throw so the LLM learns the rule emitted a handler
+      // name that doesn't exist (probably a typo or stale ref).
+      if (typeof api.reportEvent === 'function') {
+        api.reportEvent('handler-error', {
+          specId: spec.id,
+          handlerName: mut.handler,
+          ruleId: rule.id,
+          message: `unknown handler "${mut.handler}" — the rule references a handler name that wasn't compiled with this shim`,
+          stack: '',
+        });
+      }
       return Promise.resolve([]);
     }
-    return safe(`script handler "${mut.handler}"`, () =>
+    return safe(`script handler "${mut.handler}"`, mut.handler, () =>
       fn({ anchor: el, mutation: mut, rule, spec, api }),
     );
   }
@@ -169,9 +225,22 @@ function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
     console.warn(`[shim] unknown mutation kind: ${mut.kind}`);
     return Promise.resolve([]);
   }
-  return safe(`mount ${rule.id}/${mut.kind}`, () =>
+  // Custom declarative mutations don't carry a handler-name slot in the
+  // event vocabulary; pass null so the throw still hits the console but
+  // no event is emitted. (None ship today — see CLAUDE.md §22 step 23.)
+  return safe(`mount ${rule.id}/${mut.kind}`, null, () =>
     handler.mount(el, mut, rule, spec, api),
   );
+}
+
+// Trim a stack trace to the top 8 frames — enough to see the throwing line
+// + immediate callers, not enough to bury the LLM in V8 internals. Mirrors
+// the page-preload's `trimStack` (kept local rather than imported because
+// the engine is loaded from both Node and the page-preload's vm context,
+// and an import cycle would be awkward).
+function trimStackForEvent(stack) {
+  if (!stack) return '';
+  return stack.split('\n').slice(0, 8).join('\n');
 }
 
 // Returns a teardown function that unobserves, removes all mounted outputs,
@@ -186,7 +255,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
   // is absent — handlers already arrive as real functions via the patch
   // module's handlers/*.js.
   const effectiveHandlers = rule.handlers
-    ? { ...handlers, ...compileInlineHandlers(rule.handlers) }
+    ? { ...handlers, ...compileInlineHandlers(rule.handlers, spec) }
     : handlers;
 
   // anchor -> { outputs: Node[], cleanups: Function[] }
@@ -195,6 +264,12 @@ function applyRule(rule, spec, api, mutations, handlers) {
   // in document.body.
   const state = new Map();
   const inFlight = new WeakSet();
+
+  // Zero-match warning state — declared up here so scan() (defined below)
+  // can clear the timer when something finally anchors. Wire-up (timer
+  // schedule + teardown clear) happens after scan is defined.
+  let noMatchTimer = 0;
+  let noMatchReported = false;
 
   async function mountOn(el) {
     const outputs = [];
@@ -241,6 +316,14 @@ function applyRule(rule, spec, api, mutations, handlers) {
       inFlight.add(el);
       mountOn(el).finally(() => inFlight.delete(el));
     }
+
+    // Clear any pending no-match warning the moment something anchors —
+    // late-mounting content (React hydration, async-rendered list) is the
+    // common false positive otherwise.
+    if (noMatchTimer && state.size > 0) {
+      clearTimeout(noMatchTimer);
+      noMatchTimer = 0;
+    }
   };
 
   // rAF-coalesce the observer — React-style reconcilers can fire hundreds
@@ -257,6 +340,29 @@ function applyRule(rule, spec, api, mutations, handlers) {
   };
 
   scan();
+
+  // Zero-match feedback for the authoring flow: if a rule is applied and
+  // resolves zero anchors, give the page a beat to settle (React hydration,
+  // late-arriving content) and then phone the signal back to the sidebar so
+  // the LLM's next turn knows the selector missed. Fired at most once per
+  // applyRule lifecycle — re-emitting on subtree churn would be too noisy.
+  // Cleared inside scan() on first match, scrapped at teardown.
+  const NO_MATCH_DELAY_MS = 1500;
+  const maybeReportNoMatch = () => {
+    noMatchTimer = 0;
+    if (state.size > 0 || noMatchReported) return;
+    noMatchReported = true;
+    if (typeof api.reportEvent !== 'function') return;
+    api.reportEvent('rule-no-match', {
+      specId: spec.id,
+      ruleId: rule.id,
+      selector: rule.anchor?.primary?.value || '',
+    });
+  };
+  if (state.size === 0) {
+    noMatchTimer = setTimeout(maybeReportNoMatch, NO_MATCH_DELAY_MS);
+  }
+
   const observer = new MutationObserver(scheduleScan);
   observer.observe(document.body, {
     childList: true,
@@ -268,6 +374,10 @@ function applyRule(rule, spec, api, mutations, handlers) {
     if (scanHandle) {
       cancelAnimationFrame(scanHandle);
       scanHandle = 0;
+    }
+    if (noMatchTimer) {
+      clearTimeout(noMatchTimer);
+      noMatchTimer = 0;
     }
     for (const [anchor, entry] of state) {
       teardownEntry(entry);
