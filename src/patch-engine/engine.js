@@ -271,6 +271,25 @@ function applyRule(rule, spec, api, mutations, handlers) {
   let noMatchTimer = 0;
   let noMatchReported = false;
 
+  // Rule-status reporting for the inspector panel. We only emit when the
+  // current anchor count changes (transitioned from N → M, where N ≠ M),
+  // not on every scan — most scans are no-ops because the DOM churns
+  // around the rule's anchor without affecting it. `lastReportedCount`
+  // starts at -1 so the first scan always emits, even if it resolves 0
+  // anchors (the inspector wants to know "rule is mounted but not yet
+  // matching" which is distinct from "rule hasn't run").
+  let lastReportedCount = -1;
+  const reportStatusIfChanged = () => {
+    if (state.size === lastReportedCount) return;
+    lastReportedCount = state.size;
+    if (typeof api.reportEvent !== 'function') return;
+    api.reportEvent('rule-status', {
+      specId: spec.id,
+      ruleId: rule.id,
+      matched: state.size,
+    });
+  };
+
   async function mountOn(el) {
     const outputs = [];
     const cleanups = [];
@@ -314,7 +333,13 @@ function applyRule(rule, spec, api, mutations, handlers) {
         state.delete(el);
       }
       inFlight.add(el);
-      mountOn(el).finally(() => inFlight.delete(el));
+      mountOn(el).finally(() => {
+        inFlight.delete(el);
+        // mountOn updates state.size as it inserts. Re-report so the
+        // inspector sees the bump even when the surrounding scan() found
+        // no further changes.
+        reportStatusIfChanged();
+      });
     }
 
     // Clear any pending no-match warning the moment something anchors —
@@ -324,6 +349,8 @@ function applyRule(rule, spec, api, mutations, handlers) {
       clearTimeout(noMatchTimer);
       noMatchTimer = 0;
     }
+
+    reportStatusIfChanged();
   };
 
   // rAF-coalesce the observer — React-style reconcilers can fire hundreds
