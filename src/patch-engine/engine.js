@@ -293,8 +293,28 @@ function applyRule(rule, spec, api, mutations, handlers) {
   async function mountOn(el) {
     const outputs = [];
     const cleanups = [];
+    // Per-mount api proxy. Handlers call `api.cleanup(fn)` to register
+    // tear-down work — event listeners on document, intervals, inner
+    // MutationObservers, anything that won't unwind by itself when the
+    // handler's returned DOM is removed. The engine runs each fn when
+    // the anchor leaves the DOM (scan-time pruning) or the rule itself
+    // tears down (toggle-off / shim-delete / patch teardownAll). Cleanups
+    // run in registration order, BEFORE the strategy cleanup that
+    // unparks portal/overlay nodes — so handler state is gone before
+    // the DOM it observed disappears.
+    //
+    // `Object.create(api)` prototypically inherits storage/bridge/host/
+    // reportEvent/etc. from the shared api, then we add `cleanup` as an
+    // own property scoped to this mount's `cleanups` array. Concurrent
+    // mounts of the same rule on different anchors get distinct proxies
+    // — one anchor's cleanup registrations don't leak into another's.
+    const mountApi = Object.assign(Object.create(api), {
+      cleanup(fn) {
+        if (typeof fn === 'function') cleanups.push(fn);
+      },
+    });
     for (const mut of rule.mutations || []) {
-      const raw = await dispatchMutation(el, mut, rule, spec, api, mutations, effectiveHandlers);
+      const raw = await dispatchMutation(el, mut, rule, spec, mountApi, mutations, effectiveHandlers);
       const { placed, cleanup } = applyStrategy(raw, el, mut);
       outputs.push(...placed);
       if (cleanup) cleanups.push(cleanup);
