@@ -19,10 +19,35 @@
 // metadata is what matters: the rebase engine will read `kind` to decide
 // witness-fingerprint shape, fallback ordering, and quarantine reasons.
 
+// Resolve an anchor's primary spec; if it returns no matches, walk the
+// optional `fallbacks` array in order and return the first one that does.
+// Empty array (or no fallbacks field) keeps the prior behavior — one shot
+// at primary, then nothing.
+//
+// Why this and not "merge all matches": a rule that mounted via a
+// fallback should mount the SAME element across runs. If both primary
+// and a fallback resolved on the same page, dedup-by-element would still
+// be a hidden surprise the first time the site changes and primary stops
+// matching. First-with-matches semantics keep the ladder predictable:
+// authors order strongest → weakest, the strongest live one wins, ties
+// only happen within the same level (which the resolver doesn't know
+// about).
+//
+// The rebase engine (§8) will later layer witness-fingerprint validation
+// on top — "primary resolved, but the matched element doesn't look like
+// what we anchored to at commit time, fall through anyway." Today there's
+// no fingerprint so primary is trusted whenever it returns ≥1 match.
 function resolveAll(anchor, root = document) {
   const primary = anchor?.primary;
   if (!primary) return [];
-  return resolveOne(primary, root);
+  const head = resolveOne(primary, root);
+  if (head.length > 0) return head;
+  const fallbacks = Array.isArray(anchor.fallbacks) ? anchor.fallbacks : [];
+  for (const fb of fallbacks) {
+    const next = resolveOne(fb, root);
+    if (next.length > 0) return next;
+  }
+  return [];
 }
 
 function resolveOne(spec, root) {
