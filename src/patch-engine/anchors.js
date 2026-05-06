@@ -38,16 +38,27 @@
 // what we anchored to at commit time, fall through anyway." Today there's
 // no fingerprint so primary is trusted whenever it returns ≥1 match.
 function resolveAll(anchor, root = document) {
+  return resolveAllWithSource(anchor, root).nodes;
+}
+
+// Same as resolveAll but tells the caller WHICH spec actually resolved —
+// `'primary'`, `'fallback:0'`, `'fallback:1'`, ... or `null` if nothing
+// matched. The engine surfaces this through the `rule-status` event so the
+// inspector panel can show "via fallback[0]" when the primary is broken
+// and a backup is carrying the rule. Without this, fallbacks would be
+// silent magic — a rule "still works" but the user has no signal that
+// the primary they wrote is now wrong.
+function resolveAllWithSource(anchor, root = document) {
   const primary = anchor?.primary;
-  if (!primary) return [];
+  if (!primary) return { nodes: [], source: null };
   const head = resolveOne(primary, root);
-  if (head.length > 0) return head;
+  if (head.length > 0) return { nodes: head, source: 'primary' };
   const fallbacks = Array.isArray(anchor.fallbacks) ? anchor.fallbacks : [];
-  for (const fb of fallbacks) {
-    const next = resolveOne(fb, root);
-    if (next.length > 0) return next;
+  for (let i = 0; i < fallbacks.length; i++) {
+    const next = resolveOne(fallbacks[i], root);
+    if (next.length > 0) return { nodes: next, source: `fallback:${i}` };
   }
-  return [];
+  return { nodes: [], source: null };
 }
 
 function resolveOne(spec, root) {
@@ -179,4 +190,4 @@ function escapeAttrValue(v) {
   return v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-module.exports = { resolveAll };
+module.exports = { resolveAll, resolveAllWithSource };

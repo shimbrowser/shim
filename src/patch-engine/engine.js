@@ -279,14 +279,25 @@ function applyRule(rule, spec, api, mutations, handlers) {
   // anchors (the inspector wants to know "rule is mounted but not yet
   // matching" which is distinct from "rule hasn't run").
   let lastReportedCount = -1;
+  let lastReportedSource = '__unset__';
+  // `matchedVia` carries which anchor spec ended up resolving — `'primary'`,
+  // `'fallback:0'`, ..., or `null` when nothing matched. Tracked separately
+  // from count because a rule can keep its match count steady while
+  // sliding from primary to a fallback (e.g. site renames `data-testid`,
+  // primary now zero, fallback aria-role takes over with the same count).
+  // Inspector surfaces this so users can spot "rule still works, but the
+  // primary I wrote is now wrong."
+  let lastMatchedSource = null;
   const reportStatusIfChanged = () => {
-    if (state.size === lastReportedCount) return;
+    if (state.size === lastReportedCount && lastMatchedSource === lastReportedSource) return;
     lastReportedCount = state.size;
+    lastReportedSource = lastMatchedSource;
     if (typeof api.reportEvent !== 'function') return;
     api.reportEvent('rule-status', {
       specId: spec.id,
       ruleId: rule.id,
       matched: state.size,
+      matchedVia: lastMatchedSource,
     });
   };
 
@@ -340,7 +351,14 @@ function applyRule(rule, spec, api, mutations, handlers) {
       }
     }
 
-    for (const el of anchors.resolveAll(rule.anchor)) {
+    const { nodes, source } = anchors.resolveAllWithSource(rule.anchor);
+    // Track which spec carried the rule this scan. When state.size goes
+    // to 0 (no match), we keep the last source for context — the inspector
+    // can still show "previously via fallback:0" if useful, though today
+    // we just null it. The matchedVia is most informative right when
+    // mounts exist; on no-match it's redundant with `state.size === 0`.
+    lastMatchedSource = source;
+    for (const el of nodes) {
       if (inFlight.has(el)) continue;
       const existing = state.get(el);
       if (existing) {
