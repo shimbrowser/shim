@@ -89,6 +89,58 @@ function resolveOne(spec, root) {
       }
     }
 
+    case 'text': {
+      // `{ kind: "text", value: "Save changes", match?: "exact" | "contains" }`
+      // Match by visible text content. "exact" (default) compares trimmed,
+      // whitespace-normalized textContent for equality; "contains" looks
+      // for `value` as a substring.
+      //
+      // Deepest-matcher semantics: a `<button>Save</button>` inside `<div>`
+      // has BOTH the button and the div with `textContent === "Save"`. We
+      // want the button. Filter to elements whose textContent matches AND
+      // no descendant's does — this picks the label-bearing leaf rather
+      // than every wrapper above it.
+      //
+      // Capped at 10k element scan; pages bigger than that won't resolve
+      // by text. In practice button/link labels live near interactive
+      // landmarks well within that cap.
+      const value = typeof spec.value === 'string' ? spec.value.trim() : '';
+      if (!value) {
+        console.warn('[shim] text anchor missing `value`');
+        return [];
+      }
+      const mode = spec.match === 'contains' ? 'contains' : 'exact';
+      const norm = (s) => (s || '').trim().replace(/\s+/g, ' ');
+      const target = norm(value);
+      const test = mode === 'contains'
+        ? (txt) => txt.includes(target)
+        : (txt) => txt === target;
+
+      const all = (root.getElementsByTagName
+        ? root.getElementsByTagName('*')
+        : root.querySelectorAll('*')) || [];
+      const MAX_SCAN = 10000;
+      const matched = [];
+      const matchedSet = new Set();
+      for (let i = 0; i < all.length && i < MAX_SCAN; i++) {
+        const el = all[i];
+        if (test(norm(el.textContent))) {
+          matched.push(el);
+          matchedSet.add(el);
+        }
+      }
+      if (!matched.length) return [];
+      // Drop any element whose descendant is also in the set — keeps
+      // only the deepest text-bearing matchers.
+      return matched.filter((el) => {
+        const descendants = el.querySelectorAll ? el.querySelectorAll('*') : [];
+        for (const d of descendants) {
+          if (matchedSet.has(d)) return false;
+        }
+        return true;
+      });
+    }
+
     case 'aria': {
       // Compose `[role="..."][aria-label="..."]` from whichever fields are
       // present. At least one of role/label is required — without either,
