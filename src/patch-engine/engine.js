@@ -1,3 +1,4 @@
+const vm = require('vm');
 const anchors = require('./anchors');
 const { applyStrategy } = require('./strategies');
 
@@ -99,13 +100,22 @@ function normalizeOutputs(r) {
 }
 
 // Preview rules arrive with handler source as strings on rule.handlers
-// (the LLM emits them as text). Wrap each in `(source)` and evaluate so
+// (the LLM emits them as text). Evaluate each as a function expression so
 // the engine can invoke them like any module-loaded handler. Trust model:
 // these strings originate from the authoring LLM routed through main —
 // per CLAUDE.md §15 user-authored patch code is trusted for now; the
 // sandbox work listed there is what replaces this once patches come from
 // other users or a registry.
-const compileFn = Function; // alias to keep code-review tooling happy.
+//
+// `vm.runInThisContext` (not the dynamic-code-generation alternative) is
+// load-bearing: pages with a strict CSP (reddit, many bank sites) set
+// `script-src` without `'unsafe-eval'`, and V8 enforces that by throwing
+// `EvalError: Code generation from strings disallowed for this context`
+// from the eval/Function path. The preload's Node-equipped isolated
+// world sits outside the page's CSP and `vm` works regardless — same
+// path `compileBag` in the page-preload uses for committed handlers,
+// kept identical here so preview and committed share one trust +
+// capability surface.
 function compileInlineHandlers(rawHandlers, spec) {
   const out = {};
   const specId = spec?.id || 'inline';
@@ -117,24 +127,18 @@ function compileInlineHandlers(rawHandlers, spec) {
       // so DevTools stacktraces — and the page-preload's runtime-error
       // attribution regex — point at this exact handler. Without it,
       // throws from a preview would land in `<anonymous>` and the
-      // sidebar would never know which shim caused them. Mirrors the
-      // `filename:` arg the committed-handler path passes to vm.runIn-
-      // ThisContext (page-preload.js compileBag).
+      // sidebar would never know which shim caused them.
       //
       // Layout matters: the closing `)` of the inner function expression
       // MUST come BEFORE the `//# sourceURL=...` line. `//` starts a
       // single-line comment that runs to the next newline; if the
       // pragma sat between `${source}` and `)`, the comment would eat
-      // the paren and the function expression never closes — every
-      // user-authored shim with rule.handlers would log a SyntaxError
-      // on every page load, and live previews of script rules would
-      // silently fail to compile (committed shims kept working only
-      // because compileBag in the page-preload provides a fallback in
-      // the engine's `handlers` map).
+      // the paren and the function expression never closes.
       const sourceURL = `shim://patches/${specId}/handlers/${name}.js`;
-      out[name] = new compileFn(
-        `return (${source})\n//# sourceURL=${sourceURL}\n`,
-      )();
+      out[name] = vm.runInThisContext(
+        `(${source})\n//# sourceURL=${sourceURL}\n`,
+        { filename: sourceURL },
+      );
     } catch (err) {
       console.error(`[shim] failed to compile inline handler "${name}"`, err);
     }
