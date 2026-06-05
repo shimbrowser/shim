@@ -224,6 +224,17 @@ function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
     return Promise.resolve([]);
   }
 
+  // Tier 3 — delete the anchor outright. Hostile to reconcilers by design:
+  // the engine's scan loop catches re-rendered nodes and re-removes them.
+  // Irreversible by nature — toggle-off can't restore a deleted node; the
+  // user reloads, or the framework re-renders, to recover. Prefer `hide`
+  // unless the parent's layout actually depends on child count / structural
+  // selectors (`:nth-child`, flex/grid count, etc.).
+  if (mut.kind === 'remove') {
+    el.remove();
+    return Promise.resolve([]);
+  }
+
   const handler = mutations[mut.kind];
   if (!handler) {
     console.warn(`[shim] unknown mutation kind: ${mut.kind}`);
