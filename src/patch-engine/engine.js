@@ -67,6 +67,61 @@ function cssBodyFromProps(props) {
     .join(' ');
 }
 
+// Tier-4 `replace-root` machinery. Distinct attr + sheet from Tier-1 because
+// the rule shape differs: Tier-1 styles the anchor; replace-root styles the
+// anchor's direct children (hiding them so the handler's mounted DOM can
+// occupy the space). Same token-per-rule discipline so teardown can pull
+// just this rule's CSS out of the sheet.
+const replaceRootRuleNodes = new Map();
+function ensureReplaceRootSheet() {
+  let sheet = document.querySelector('style[data-shim="replace-root"]');
+  if (!sheet) {
+    sheet = document.createElement('style');
+    sheet.setAttribute('data-shim', 'replace-root');
+    (document.head || document.documentElement).appendChild(sheet);
+  }
+  return sheet;
+}
+function injectReplaceRootRule(token) {
+  if (replaceRootRuleNodes.has(token)) return;
+  // The `:not([data-shim-mounted~="..."])` clause keeps the handler's own
+  // mounted output visible; without it the children-hide rule would also
+  // hit the node the handler appended to the anchor. The handler tags its
+  // returned roots with a matching `data-shim-mounted` token (see the
+  // dispatch path) so the rule excludes them.
+  const text = `[data-shim-replace-root~="${token}"] > *:not([data-shim-mounted~="${token}"]) { display: none !important; }\n`;
+  const node = document.createTextNode(text);
+  ensureReplaceRootSheet().appendChild(node);
+  replaceRootRuleNodes.set(token, node);
+}
+function removeReplaceRootRule(token) {
+  const node = replaceRootRuleNodes.get(token);
+  if (!node) return;
+  node.remove();
+  replaceRootRuleNodes.delete(token);
+}
+function tagReplaceRootAnchor(el, token) {
+  const current = el.getAttribute('data-shim-replace-root') || '';
+  const tokens = current.split(/\s+/).filter(Boolean);
+  if (tokens.includes(token)) return;
+  tokens.push(token);
+  el.setAttribute('data-shim-replace-root', tokens.join(' '));
+}
+function stripReplaceRootToken(el, token) {
+  const current = el.getAttribute('data-shim-replace-root') || '';
+  const tokens = current.split(/\s+/).filter((t) => t && t !== token);
+  if (tokens.length) el.setAttribute('data-shim-replace-root', tokens.join(' '));
+  else el.removeAttribute('data-shim-replace-root');
+}
+function tagMountedNode(node, token) {
+  if (!(node instanceof Element)) return;
+  const current = node.getAttribute('data-shim-mounted') || '';
+  const tokens = current.split(/\s+/).filter(Boolean);
+  if (tokens.includes(token)) return;
+  tokens.push(token);
+  node.setAttribute('data-shim-mounted', tokens.join(' '));
+}
+
 function collectMutationKinds(spec, mutations) {
   const direct = new Set();
   for (const rule of spec.rules || []) {
@@ -233,6 +288,40 @@ function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
   if (mut.kind === 'remove') {
     el.remove();
     return Promise.resolve([]);
+  }
+
+  // Tier 4 `replace-root` — mount handler-returned DOM inside the anchor and
+  // hide the anchor's original children via CSS. Reversible: toggle-off
+  // strips the token, the CSS rule comes out of the sheet, original children
+  // reappear. Handler contract mirrors `script`: it returns the node(s) it
+  // mounted; the engine tags each with `data-shim-mounted="<token>"` so the
+  // children-hide rule's `:not(...)` clause spares them. Self-healing comes
+  // for free from the scan loop — if the framework reconciles our mount
+  // away, the next scan re-runs the handler.
+  if (mut.kind === 'replace-root') {
+    const fn = handlers[mut.handler];
+    if (!fn) {
+      console.warn(`[shim] replace-root: unknown handler "${mut.handler}"`);
+      if (typeof api.reportEvent === 'function') {
+        api.reportEvent('handler-error', {
+          specId: spec.id,
+          handlerName: mut.handler,
+          ruleId: rule.id,
+          message: `unknown handler "${mut.handler}" — the rule references a handler name that wasn't compiled with this shim`,
+          stack: '',
+        });
+      }
+      return Promise.resolve([]);
+    }
+    const token = `shim-${spec.id}-${rule.id}-replace-root`;
+    injectReplaceRootRule(token);
+    tagReplaceRootAnchor(el, token);
+    return safe(`replace-root handler "${mut.handler}"`, mut.handler, () =>
+      fn({ anchor: el, mutation: mut, rule, spec, api }),
+    ).then((nodes) => {
+      for (const n of nodes) tagMountedNode(n, token);
+      return nodes;
+    });
   }
 
   const handler = mutations[mut.kind];
@@ -464,6 +553,8 @@ function applyRule(rule, spec, api, mutations, handlers) {
       for (const mut of rule.mutations || []) {
         if (mut.kind === 'hide' || mut.kind === 'restyle') {
           stripToken(anchor, `shim-${spec.id}-${rule.id}-${mut.kind}`);
+        } else if (mut.kind === 'replace-root') {
+          stripReplaceRootToken(anchor, `shim-${spec.id}-${rule.id}-replace-root`);
         }
       }
     }
@@ -471,6 +562,8 @@ function applyRule(rule, spec, api, mutations, handlers) {
     for (const mut of rule.mutations || []) {
       if (mut.kind === 'hide' || mut.kind === 'restyle') {
         removeTier1Rule(`shim-${spec.id}-${rule.id}-${mut.kind}`);
+      } else if (mut.kind === 'replace-root') {
+        removeReplaceRootRule(`shim-${spec.id}-${rule.id}-replace-root`);
       }
     }
   };
