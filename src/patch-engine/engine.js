@@ -1,6 +1,7 @@
 const vm = require('vm');
 const anchors = require('./anchors');
 const { applyStrategy } = require('./strategies');
+const routeMatch = require('./route-match');
 
 function injectStyle(id, css) {
   if (!css || document.querySelector(`style[data-shim="${id}"]`)) return;
@@ -99,6 +100,28 @@ function removeReplaceRootRule(token) {
   if (!node) return;
   node.remove();
   replaceRootRuleNodes.delete(token);
+}
+
+// Route-only environment pinning. The shadow root isolates a route page's
+// CONTENTS, but the page still sits inside the host document's <html>/<body>
+// — and those differ per entry path: soft nav keeps the site's stylesheet
+// (body max-width / margins / html font-size, which rem resolves against),
+// hard load is a bare shell with UA defaults. Pinning both to a neutral state
+// while a route is mounted is what makes the two paths render identically.
+// NOT applied for the `replace-root` kind — an in-place region replacement is
+// supposed to live in the site's layout context; a route page replaces it.
+function injectRouteEnvRule(token) {
+  const key = `${token}::env`;
+  if (replaceRootRuleNodes.has(key)) return;
+  const text =
+    `html:has(> body[data-shim-replace-root~="${token}"]) { margin: 0 !important; padding: 0 !important; font-size: 16px !important; background: #fff !important; }\n` +
+    `body[data-shim-replace-root~="${token}"] { margin: 0 !important; padding: 0 !important; max-width: none !important; width: auto !important; min-height: 100vh !important; background: #fff !important; display: block !important; }\n`;
+  const node = document.createTextNode(text);
+  ensureReplaceRootSheet().appendChild(node);
+  replaceRootRuleNodes.set(key, node);
+}
+function removeRouteEnvRule(token) {
+  removeReplaceRootRule(`${token}::env`);
 }
 function tagReplaceRootAnchor(el, token) {
   const current = el.getAttribute('data-shim-replace-root') || '';
@@ -642,6 +665,223 @@ function bridgeRule(rule, spec, api) {
   };
 }
 
+// A rule carrying a `mount-route` mutation registers a virtual route: a URL
+// path pattern (`/budgets`, `/budgets/:id`) plus a handler that renders the
+// page for matching navigations. Two entry paths converge here:
+//
+//   - Soft nav: the user clicks an <a> whose path matches, or back/forward
+//     lands on a matching path. We intercept clicks (preventDefault +
+//     history.pushState) and listen for popstate. No server round-trip.
+//   - Hard load: the user types the URL or reloads. Main serves a same-origin
+//     local shell for registered routes (see src/main/route-protocol.js), so
+//     the document loads at the real URL with the site's session intact; the
+//     engine boots and `evaluate()` below sees the path already matches.
+//
+// Both reduce to one question — does `location.pathname` match the pattern? —
+// so mounting is identical regardless of how the path was reached. The page
+// itself is mounted at `document.body` and the site's own body children are
+// hidden, reusing the Tier-4 `replace-root` token machinery.
+function routeRule(rule, spec, api, handlers) {
+  const effectiveHandlers = rule.handlers
+    ? { ...handlers, ...compileInlineHandlers(rule.handlers, spec) }
+    : handlers;
+
+  const mut = (rule.mutations || []).find((m) => m.kind === 'mount-route');
+  if (!mut || !mut.pattern) {
+    console.warn('[shim] mount-route rule missing `pattern`');
+    return () => {};
+  }
+
+  const reportHandlerError = (err) => {
+    if (typeof api.reportEvent !== 'function') return;
+    api.reportEvent('handler-error', {
+      specId: spec.id,
+      handlerName: mut.handler || '(anonymous)',
+      ruleId: rule.id,
+      message: err?.message || String(err),
+      stack: trimStackForEvent(err?.stack || ''),
+    });
+  };
+
+  const handlerFn = effectiveHandlers[mut.handler];
+  if (!handlerFn) {
+    console.warn(`[shim] mount-route: unknown handler "${mut.handler}"`);
+    reportHandlerError(new Error(`unknown handler "${mut.handler}" — the rule references a handler name that wasn't compiled with this shim`));
+    return () => {};
+  }
+
+  const match = routeMatch.matcher(mut.pattern);
+  const token = `shim-${spec.id}-${rule.id}-mount-route`;
+
+  let lastReportedMatched = -1;
+  const reportStatus = (matched) => {
+    if (matched === lastReportedMatched) return;
+    lastReportedMatched = matched;
+    if (typeof api.reportEvent !== 'function') return;
+    api.reportEvent('rule-status', {
+      specId: spec.id,
+      ruleId: rule.id,
+      matched,
+      matchedVia: matched ? 'route' : null,
+    });
+  };
+
+  // { outputs: Node[], cleanups: Function[], path: string } while a route is
+  // mounted; null when the current path doesn't match.
+  let mounted = null;
+
+  function mountRoute(m) {
+    const cleanups = [];
+    const mountApi = Object.assign(Object.create(api), {
+      cleanup(fn) { if (typeof fn === 'function') cleanups.push(fn); },
+    });
+    let outputs = [];
+    try {
+      const raw = handlerFn({
+        match: { path: routeMatch.normalizePath(location.pathname), params: m.params },
+        mutation: mut,
+        rule,
+        spec,
+        api: mountApi,
+      });
+      outputs = normalizeOutputs(raw);
+    } catch (err) {
+      console.error('[shim] mount-route handler failed', err);
+      reportHandlerError(err);
+      return;
+    }
+    const body = document.body;
+    if (!body) return;
+    injectReplaceRootRule(token);
+    injectRouteEnvRule(token);
+    tagReplaceRootAnchor(body, token);
+    // The page mounts inside a shadow root so soft nav and hard load render
+    // IDENTICALLY. The two paths live in different CSS universes — soft nav
+    // keeps the site's stylesheets loaded, hard load is a bare shell — and
+    // without isolation the same handler output looks different per path
+    // (site h1 sizing, fonts, even site-targeting Tier-1 rules leak in).
+    // `all: initial` severs inherited properties (font, color) from the host
+    // document for the same reason. Route pages are self-contained by
+    // contract: they style themselves via inline styles or their own <style>.
+    const host = document.createElement('div');
+    host.setAttribute('data-shim', 'route-host');
+    tagMountedNode(host, token);
+    const shadow = host.attachShadow({ mode: 'open' });
+    const base = document.createElement('style');
+    base.textContent = ':host { all: initial; display: block; }';
+    shadow.appendChild(base);
+    for (const n of outputs) shadow.appendChild(n);
+    body.appendChild(host);
+    // Tab title: the hard-load shell has an empty <title> and on soft nav the
+    // site's own title would linger. `mutation.title` declares the route's;
+    // the previous value is restored on unmount either way (handlers that set
+    // document.title themselves are unwound by the same restore).
+    const prevTitle = document.title;
+    if (typeof mut.title === 'string') document.title = mut.title;
+    // Match real-navigation behavior: a fresh route view starts at the top.
+    try { window.scrollTo(0, 0); } catch { /* jsdom / detached */ }
+    mounted = { outputs: [host], cleanups, path: routeMatch.normalizePath(location.pathname), prevTitle };
+    reportStatus(1);
+  }
+
+  function unmountRoute() {
+    if (!mounted) return;
+    for (const fn of mounted.cleanups) {
+      try { fn(); } catch (err) { console.error('[shim] route cleanup failed', err); }
+    }
+    for (const node of mounted.outputs) node.remove();
+    if (document.body) stripReplaceRootToken(document.body, token);
+    removeReplaceRootRule(token);
+    removeRouteEnvRule(token);
+    document.title = mounted.prevTitle;
+    mounted = null;
+    reportStatus(0);
+  }
+
+  // The single source of truth: reconcile mounted-state against the current
+  // path. Called on init (covers hard load), on every click we intercept,
+  // and on popstate (back/forward). A path that still matches but changed
+  // params (`/budgets/1` → `/budgets/2`) re-mounts so the handler re-renders
+  // with the new params.
+  function evaluate() {
+    const here = routeMatch.normalizePath(location.pathname);
+    const m = match(here);
+    if (m && !mounted) mountRoute(m);
+    else if (m && mounted && mounted.path !== here) { unmountRoute(); mountRoute(m); }
+    else if (!m && mounted) unmountRoute();
+  }
+
+  function onClick(e) {
+    if (e.defaultPrevented || e.button !== 0) return;
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return; // let the browser open new tab/window
+    // composedPath()[0], not e.target: clicks inside the route page's shadow
+    // root retarget to the host element at the document level, which would
+    // hide the actual <a>. composedPath sees through the shadow boundary, so
+    // route-to-route links inside a mounted page keep getting intercepted.
+    const rawTarget = e.composedPath ? e.composedPath()[0] : e.target;
+    const el = rawTarget instanceof Element ? rawTarget : rawTarget?.parentElement;
+    const a = el?.closest?.('a[href]');
+    if (!a || a.target === '_blank' || a.hasAttribute('download')) return;
+    let url;
+    try { url = new URL(a.href, location.href); } catch { return; }
+    if (url.origin !== location.origin) return; // external link — real navigation
+    if (!match(routeMatch.normalizePath(url.pathname))) return; // not one of our routes
+    e.preventDefault();
+    if (url.href !== location.href) {
+      history.pushState({}, '', url.pathname + url.search + url.hash);
+    }
+    evaluate();
+  }
+
+  function onPopState() { evaluate(); }
+  // bfcache restores can land a frozen document on a different history entry
+  // WITHOUT firing popstate (only pageshow with persisted=true). Re-evaluate
+  // so a doc frozen on /notes and restored on / unmounts, and vice versa.
+  function onPageShow(e) { if (e.persisted) evaluate(); }
+
+  // Light self-heal: if a framework re-render detaches our mounted root while
+  // the route is still active, re-attach it. The replace-root CSS keeps the
+  // site's own (re-rendered) body children hidden on its own, so this only
+  // has to worry about our own node going missing.
+  let healHandle = 0;
+  const observer = new MutationObserver(() => {
+    if (!mounted || healHandle) return;
+    healHandle = requestAnimationFrame(() => {
+      healHandle = 0;
+      if (!mounted || !document.body) return;
+      tagReplaceRootAnchor(document.body, token);
+      for (const n of mounted.outputs) {
+        if (!document.contains(n)) document.body.appendChild(n);
+      }
+    });
+  });
+
+  document.addEventListener('click', onClick, true); // capture, so we beat the site's own handlers
+  window.addEventListener('popstate', onPopState);
+  window.addEventListener('pageshow', onPageShow);
+  if (document.body) observer.observe(document.body, { childList: true });
+  evaluate(); // hard-load / initial-path case
+
+  return function teardownRouteRule() {
+    document.removeEventListener('click', onClick, true);
+    window.removeEventListener('popstate', onPopState);
+    window.removeEventListener('pageshow', onPageShow);
+    observer.disconnect();
+    if (healHandle) { cancelAnimationFrame(healHandle); healHandle = 0; }
+    unmountRoute();
+  };
+}
+
+// Pick the right setup path for a rule. Route rules and iframe-bridge rules
+// take dedicated lifecycles; everything else is a normal anchored rule.
+function setupRule(rule, spec, api, mutations, handlers) {
+  if (rule.anchor?.iframe) return bridgeRule(rule, spec, api);
+  if ((rule.mutations || []).some((m) => m.kind === 'mount-route')) {
+    return routeRule(rule, spec, api, handlers);
+  }
+  return applyRule(rule, spec, api, mutations, handlers);
+}
+
 function run(patch, api) {
   const { spec, mutations = {}, handlers = {} } = patch;
 
@@ -659,8 +899,7 @@ function run(patch, api) {
   api.onReady(() => {
     if (tornDown) return;
     for (const rule of spec.rules || []) {
-      if (rule.anchor?.iframe) ruleTeardowns.push(bridgeRule(rule, spec, api));
-      else ruleTeardowns.push(applyRule(rule, spec, api, mutations, handlers));
+      ruleTeardowns.push(setupRule(rule, spec, api, mutations, handlers));
     }
   });
 
@@ -681,7 +920,7 @@ function run(patch, api) {
             extraTeardowns.delete(ruleKey);
           }
         }
-        const teardown = applyRule(rule, effectiveSpec, api, mutations, handlers);
+        const teardown = setupRule(rule, effectiveSpec, api, mutations, handlers);
         if (ruleKey) extraTeardowns.set(ruleKey, teardown);
       });
     },
