@@ -1,5 +1,6 @@
 const vm = require('vm');
 const anchors = require('./anchors');
+const witnessMod = require('./witness');
 const { applyStrategy } = require('./strategies');
 const routeMatch = require('./route-match');
 
@@ -397,6 +398,10 @@ function applyRule(rule, spec, api, mutations, handlers) {
   // schedule + teardown clear) happens after scan is defined.
   let noMatchTimer = 0;
   let noMatchReported = false;
+  // Witness state: capture fires at most once per lifecycle; the latest
+  // rejection verdict feeds the settle-delayed unresolved reporter.
+  let witnessCaptured = false;
+  let lastWitnessRejection = null;
 
   // Rule-status reporting for the inspector panel. We only emit when the
   // current anchor count changes (transitioned from N → M, where N ≠ M),
@@ -478,13 +483,38 @@ function applyRule(rule, spec, api, mutations, handlers) {
       }
     }
 
-    const { nodes, source } = anchors.resolveAllWithSource(rule.anchor);
+    const { nodes, source, witnessRejected, rejectedSample } =
+      anchors.resolveAllWithSource(rule.anchor);
     // Track which spec carried the rule this scan. When state.size goes
     // to 0 (no match), we keep the last source for context — the inspector
     // can still show "previously via fallback:0" if useful, though today
     // we just null it. The matchedVia is most informative right when
     // mounts exist; on no-match it's redundant with `state.size === 0`.
     lastMatchedSource = source;
+    // Remember the latest witness verdict so the settle-delayed reporter
+    // can tell quarantine ("selector found something that isn't the
+    // thing") apart from plain no-match ("selector found nothing").
+    lastWitnessRejection = witnessRejected ? (rejectedSample || { detail: [] }) : null;
+
+    // Witness capture (§8): a rule without a witness that resolves to
+    // exactly ONE element gets fingerprinted, and the fingerprint is
+    // reported up. During authoring previews the loop attaches it to the
+    // rule before commit; for committed rules the event is groundwork for
+    // the rebase pass to backfill. Once per applyRule lifecycle — the
+    // shape doesn't change scan-to-scan, and re-emitting on churn would
+    // be noise. Multi-match rules skip capture: one witness can't
+    // describe N different elements (§8 v1 scope).
+    if (!witnessCaptured && !rule.anchor?.witness && nodes.length === 1) {
+      witnessCaptured = true;
+      const w = witnessMod.buildWitness(nodes[0]);
+      if (w && typeof api.reportEvent === 'function') {
+        api.reportEvent('rule-witness', {
+          specId: spec.id,
+          ruleId: rule.id,
+          witness: w,
+        });
+      }
+    }
     for (const el of nodes) {
       if (inFlight.has(el)) continue;
       const existing = state.get(el);
@@ -533,18 +563,36 @@ function applyRule(rule, spec, api, mutations, handlers) {
 
   scan();
 
-  // Zero-match feedback for the authoring flow: if a rule is applied and
-  // resolves zero anchors, give the page a beat to settle (React hydration,
-  // late-arriving content) and then phone the signal back to the sidebar so
-  // the LLM's next turn knows the selector missed. Fired at most once per
-  // applyRule lifecycle — re-emitting on subtree churn would be too noisy.
-  // Cleared inside scan() on first match, scrapped at teardown.
+  // Unresolved-rule feedback for the authoring flow: if a rule is applied
+  // and resolves zero anchors, give the page a beat to settle (React
+  // hydration, late-arriving content) and then phone the signal back so
+  // the LLM / inspector knows. Two flavors, decided at fire time by the
+  // latest scan's witness verdict:
+  //   - rule-quarantined — the selector DID resolve elements, but none
+  //     passed the witness. The dangerous case (§14): something matches,
+  //     and it isn't the thing the rule anchored to. Carries the
+  //     expected witness + the best-scoring rejected candidate's diff.
+  //   - rule-no-match   — the selector resolved nothing at all.
+  // Fired at most once per applyRule lifecycle — re-emitting on subtree
+  // churn would be too noisy. Cleared inside scan() on first match,
+  // scrapped at teardown.
   const NO_MATCH_DELAY_MS = 1500;
   const maybeReportNoMatch = () => {
     noMatchTimer = 0;
     if (state.size > 0 || noMatchReported) return;
     noMatchReported = true;
     if (typeof api.reportEvent !== 'function') return;
+    if (lastWitnessRejection) {
+      api.reportEvent('rule-quarantined', {
+        specId: spec.id,
+        ruleId: rule.id,
+        selector: rule.anchor?.primary?.value || '',
+        expected: rule.anchor?.witness || null,
+        seen: lastWitnessRejection.detail || [],
+        rejectedVia: lastWitnessRejection.source || null,
+      });
+      return;
+    }
     api.reportEvent('rule-no-match', {
       specId: spec.id,
       ruleId: rule.id,

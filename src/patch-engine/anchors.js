@@ -19,6 +19,8 @@
 // metadata is what matters: the rebase engine will read `kind` to decide
 // witness-fingerprint shape, fallback ordering, and quarantine reasons.
 
+const witness = require('./witness');
+
 // Resolve an anchor's primary spec; if it returns no matches, walk the
 // optional `fallbacks` array in order and return the first one that does.
 // Empty array (or no fallbacks field) keeps the prior behavior — one shot
@@ -33,10 +35,12 @@
 // only happen within the same level (which the resolver doesn't know
 // about).
 //
-// The rebase engine (§8) will later layer witness-fingerprint validation
-// on top — "primary resolved, but the matched element doesn't look like
-// what we anchored to at commit time, fall through anyway." Today there's
-// no fingerprint so primary is trusted whenever it returns ≥1 match.
+// Witness-fingerprint validation (§8, §14): when the anchor carries a
+// `witness`, every rung's matches are filtered through it before being
+// trusted — "primary resolved, but the matched element doesn't look like
+// what we anchored to at commit time, fall through anyway." Anchors
+// without a witness keep the original behavior: trusted whenever they
+// return ≥1 match.
 function resolveAll(anchor, root = document) {
   return resolveAllWithSource(anchor, root).nodes;
 }
@@ -48,17 +52,50 @@ function resolveAll(anchor, root = document) {
 // and a backup is carrying the rule. Without this, fallbacks would be
 // silent magic — a rule "still works" but the user has no signal that
 // the primary they wrote is now wrong.
+//
+// Witness semantics: the witness describes the TARGET ELEMENT, not any
+// particular selector, so every rung verifies against the same witness.
+// A rung that resolves nodes but has them ALL witness-rejected is
+// treated as not-resolved (fall through), and the result carries
+// `witnessRejected: true` so the engine can tell "selector dead"
+// (rule-no-match) apart from "selector found something that isn't the
+// thing" — the quarantine signal. `rejectedSample` carries the best-
+// scoring rejected candidate's detail for the quarantine report.
 function resolveAllWithSource(anchor, root = document) {
   const primary = anchor?.primary;
-  if (!primary) return { nodes: [], source: null };
-  const head = resolveOne(primary, root);
-  if (head.length > 0) return { nodes: head, source: 'primary' };
+  if (!primary) return { nodes: [], source: null, witnessRejected: false };
+  const w = anchor.witness || null;
+  let witnessRejected = false;
+  let rejectedSample = null;
+
+  const tryRung = (spec, source) => {
+    const found = resolveOne(spec, root);
+    if (found.length === 0) return null;
+    if (!w) return { nodes: found, source, witnessRejected: false };
+    const passing = [];
+    for (const el of found) {
+      const verdict = witness.matchWitness(w, el);
+      if (verdict.pass) {
+        passing.push(el);
+      } else if (!rejectedSample || verdict.score > rejectedSample.score) {
+        rejectedSample = { score: verdict.score, detail: verdict.detail, source };
+      }
+    }
+    if (passing.length === 0) {
+      witnessRejected = true;
+      return null;
+    }
+    return { nodes: passing, source, witnessRejected: false };
+  };
+
+  const head = tryRung(primary, 'primary');
+  if (head) return head;
   const fallbacks = Array.isArray(anchor.fallbacks) ? anchor.fallbacks : [];
   for (let i = 0; i < fallbacks.length; i++) {
-    const next = resolveOne(fallbacks[i], root);
-    if (next.length > 0) return { nodes: next, source: `fallback:${i}` };
+    const next = tryRung(fallbacks[i], `fallback:${i}`);
+    if (next) return next;
   }
-  return { nodes: [], source: null };
+  return { nodes: [], source: null, witnessRejected, rejectedSample };
 }
 
 function resolveOne(spec, root) {
