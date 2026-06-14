@@ -4,6 +4,30 @@ const witnessMod = require('./witness');
 const { applyStrategy } = require('./strategies');
 const routeMatch = require('./route-match');
 
+// All shim CSS lives inside one named cascade layer, `shim`. This is what
+// makes "your local layer wins over the site" a guarantee rather than a
+// specificity gamble (CLAUDE.md §6). The load-bearing CSS rule: for
+// `!important` declarations, a *layered* style beats an *un-layered* style —
+// regardless of selector specificity or source order. Virtually every real
+// site ships un-layered CSS, so a shim `!important` rule in `@layer shim`
+// wins against the site's `!important` rules even when the site's selector is
+// far more specific. Multiple `@layer shim { … }` blocks merge by name into
+// the one layer, so each rule keeps its own removable text node (teardown is
+// unchanged) while all of them share the layer's precedence.
+const SHIM_LAYER = 'shim';
+function layered(cssText) {
+  return `@layer ${SHIM_LAYER} { ${cssText} }\n`;
+}
+
+// Cross-shim cascade priority (higher wins). Stamped onto the runtime spec by
+// `run()` from the patch's `priority` (assigned in main: user shims above
+// platform fixtures; among user shims, sidebar list order). Read here rather
+// than threaded through every rule-processing signature. Previews / forwarded
+// rules that shallow-copy the spec inherit it.
+function cssPriorityOf(spec) {
+  return Number.isFinite(spec && spec.__cssPriority) ? spec.__cssPriority : 0;
+}
+
 function injectStyle(id, css) {
   if (!css || document.querySelector(`style[data-shim="${id}"]`)) return;
   const style = document.createElement('style');
@@ -21,7 +45,9 @@ function injectStyle(id, css) {
 //
 // The per-token Map (rather than a bare Set) lets us (a) update a rule's CSS
 // in place when it's re-applied with different properties, and (b) cleanly
-// remove it from the sheet during rule teardown.
+// remove it from the sheet during rule teardown. Each entry stores the text
+// node plus its `priority` so cross-shim conflicts resolve deterministically
+// (see injectTier1Rule).
 const tier1RuleNodes = new Map();
 function ensureTier1Sheet() {
   let sheet = document.querySelector('style[data-shim="tier1-css"]');
@@ -32,21 +58,60 @@ function ensureTier1Sheet() {
   }
   return sheet;
 }
-function injectTier1Rule(token, cssBody) {
-  const text = `[data-shim-css~="${token}"] { ${cssBody} }\n`;
+// All tier-1 rules share one `@layer shim` (so they all beat the site), which
+// means a conflict between two shims on the same element+property is decided
+// by SOURCE ORDER within the layer — later wins. Blind append makes that
+// order depend on apply timing (which shim's rule resolved first, whether a
+// rule self-healed late), so the winner flips between reload and toggle. We
+// instead insert each rule at a position keyed by `priority` (higher wins):
+// the sheet stays sorted low→high, so the highest-priority shim's rule is
+// always last and always wins, regardless of when it resolved. Priority is
+// assigned in main (user shims > platform fixtures; among user shims, the
+// one higher in the sidebar list) and threaded in via the spec.
+function injectTier1Rule(token, cssBody, priority = 0) {
+  const text = layered(`[data-shim-css~="${token}"] { ${cssBody} }`);
   const existing = tier1RuleNodes.get(token);
   if (existing) {
-    existing.nodeValue = text;
+    existing.node.nodeValue = text;
+    existing.priority = priority;
     return;
   }
   const node = document.createTextNode(text);
-  ensureTier1Sheet().appendChild(node);
-  tier1RuleNodes.set(token, node);
+  const sheet = ensureTier1Sheet();
+  // Keep the sheet ordered ascending by priority: insert before the first
+  // already-placed node whose priority is strictly higher. Ties (same
+  // priority — e.g. two rules of one shim) fall to append-after, preserving
+  // intra-shim authoring order. Walking childNodes (DOM order) keeps the
+  // position correct even as nodes are added and removed over time.
+  const children = Array.from(sheet.childNodes);
+  const priorities = children.map((c) => {
+    const entry = nodeToEntry(c);
+    return entry ? entry.priority : -Infinity; // untracked nodes sort first
+  });
+  const idx = firstGreaterIndex(priorities, priority);
+  sheet.insertBefore(node, children[idx] || null); // out-of-range → append
+  tier1RuleNodes.set(token, { node, priority });
+}
+// First index whose value is strictly greater than `priority`, else the
+// array length (append). Pure — exported for scripts/css-priority-harness.js.
+function firstGreaterIndex(priorities, priority) {
+  for (let i = 0; i < priorities.length; i++) {
+    if (priorities[i] > priority) return i;
+  }
+  return priorities.length;
+}
+// Reverse lookup (text node → its tracked entry) for the ordered insert.
+// The rule set is small (a handful per page), so the linear scan is cheap.
+function nodeToEntry(node) {
+  for (const entry of tier1RuleNodes.values()) {
+    if (entry.node === node) return entry;
+  }
+  return null;
 }
 function removeTier1Rule(token) {
-  const node = tier1RuleNodes.get(token);
-  if (!node) return;
-  node.remove();
+  const entry = tier1RuleNodes.get(token);
+  if (!entry) return;
+  entry.node.remove();
   tier1RuleNodes.delete(token);
 }
 function tagElement(el, token) {
@@ -91,7 +156,7 @@ function injectReplaceRootRule(token) {
   // hit the node the handler appended to the anchor. The handler tags its
   // returned roots with a matching `data-shim-mounted` token (see the
   // dispatch path) so the rule excludes them.
-  const text = `[data-shim-replace-root~="${token}"] > *:not([data-shim-mounted~="${token}"]) { display: none !important; }\n`;
+  const text = layered(`[data-shim-replace-root~="${token}"] > *:not([data-shim-mounted~="${token}"]) { display: none !important; }`);
   const node = document.createTextNode(text);
   ensureReplaceRootSheet().appendChild(node);
   replaceRootRuleNodes.set(token, node);
@@ -115,8 +180,8 @@ function injectRouteEnvRule(token) {
   const key = `${token}::env`;
   if (replaceRootRuleNodes.has(key)) return;
   const text =
-    `html:has(> body[data-shim-replace-root~="${token}"]) { margin: 0 !important; padding: 0 !important; font-size: 16px !important; background: #fff !important; }\n` +
-    `body[data-shim-replace-root~="${token}"] { margin: 0 !important; padding: 0 !important; max-width: none !important; width: auto !important; min-height: 100vh !important; background: #fff !important; display: block !important; }\n`;
+    layered(`html:has(> body[data-shim-replace-root~="${token}"]) { margin: 0 !important; padding: 0 !important; font-size: 16px !important; background: #fff !important; }`) +
+    layered(`body[data-shim-replace-root~="${token}"] { margin: 0 !important; padding: 0 !important; max-width: none !important; width: auto !important; min-height: 100vh !important; background: #fff !important; display: block !important; }`);
   const node = document.createTextNode(text);
   ensureReplaceRootSheet().appendChild(node);
   replaceRootRuleNodes.set(key, node);
@@ -289,7 +354,7 @@ function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
 
   if (mut.kind === 'hide') {
     const token = `shim-${spec.id}-${rule.id}-hide`;
-    injectTier1Rule(token, 'display: none !important;');
+    injectTier1Rule(token, 'display: none !important;', cssPriorityOf(spec));
     tagElement(el, token);
     return Promise.resolve([]);
   }
@@ -298,7 +363,7 @@ function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
     const body = cssBodyFromProps(mut.properties);
     if (!body) return Promise.resolve([]);
     const token = `shim-${spec.id}-${rule.id}-restyle`;
-    injectTier1Rule(token, body);
+    injectTier1Rule(token, body, cssPriorityOf(spec));
     tagElement(el, token);
     return Promise.resolve([]);
   }
@@ -931,7 +996,15 @@ function setupRule(rule, spec, api, mutations, handlers) {
 }
 
 function run(patch, api) {
-  const { spec, mutations = {}, handlers = {} } = patch;
+  const { mutations = {}, handlers = {} } = patch;
+  // Stamp the cross-shim cascade priority onto the runtime spec so the
+  // tier-1 injector can read it without threading a param through every
+  // rule-processing function. Shallow copy — the authored spec is untouched,
+  // and the preview/forwarded paths that spread `spec` inherit the field.
+  const spec = {
+    ...patch.spec,
+    __cssPriority: Number.isFinite(patch.priority) ? patch.priority : 0,
+  };
 
   for (const { id, css } of collectCssForSpec(spec, mutations)) {
     const inject = () => injectStyle(id, css);
@@ -999,4 +1072,6 @@ function run(patch, api) {
   };
 }
 
-module.exports = { run };
+// firstGreaterIndex exported for scripts/css-priority-harness.js (the cross-
+// shim ordering policy); not used elsewhere at runtime.
+module.exports = { run, firstGreaterIndex };
