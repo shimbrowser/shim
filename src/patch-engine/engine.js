@@ -467,6 +467,13 @@ function applyRule(rule, spec, api, mutations, handlers) {
   // rejection verdict feeds the settle-delayed unresolved reporter.
   let witnessCaptured = false;
   let lastWitnessRejection = null;
+  // Rebase state (§14): the latest scan's resolution, read by the
+  // settle-delayed rebase reconciler. `lastResolvedEl` is the single
+  // resolved element (for capturing a fresh witness on a promote); null
+  // when zero or multiple matched.
+  let lastNodesLen = 0;
+  let lastResolvedEl = null;
+  let rebaseReported = false;
 
   // Rule-status reporting for the inspector panel. We only emit when the
   // current anchor count changes (transitioned from N → M, where N ≠ M),
@@ -560,6 +567,9 @@ function applyRule(rule, spec, api, mutations, handlers) {
     // can tell quarantine ("selector found something that isn't the
     // thing") apart from plain no-match ("selector found nothing").
     lastWitnessRejection = witnessRejected ? (rejectedSample || { detail: [] }) : null;
+    // Snapshot resolution for the settle-delayed rebase reconciler.
+    lastNodesLen = nodes.length;
+    lastResolvedEl = nodes.length === 1 ? nodes[0] : null;
 
     // Witness capture (§8): a rule without a witness that resolves to
     // exactly ONE element gets fingerprinted, and the fingerprint is
@@ -602,14 +612,6 @@ function applyRule(rule, spec, api, mutations, handlers) {
       });
     }
 
-    // Clear any pending no-match warning the moment something anchors —
-    // late-mounting content (React hydration, async-rendered list) is the
-    // common false positive otherwise.
-    if (noMatchTimer && state.size > 0) {
-      clearTimeout(noMatchTimer);
-      noMatchTimer = 0;
-    }
-
     reportStatusIfChanged();
   };
 
@@ -628,24 +630,33 @@ function applyRule(rule, spec, api, mutations, handlers) {
 
   scan();
 
-  // Unresolved-rule feedback for the authoring flow: if a rule is applied
-  // and resolves zero anchors, give the page a beat to settle (React
-  // hydration, late-arriving content) and then phone the signal back so
-  // the LLM / inspector knows. Two flavors, decided at fire time by the
-  // latest scan's witness verdict:
-  //   - rule-quarantined — the selector DID resolve elements, but none
-  //     passed the witness. The dangerous case (§14): something matches,
-  //     and it isn't the thing the rule anchored to. Carries the
-  //     expected witness + the best-scoring rejected candidate's diff.
-  //   - rule-no-match   — the selector resolved nothing at all.
-  // Fired at most once per applyRule lifecycle — re-emitting on subtree
-  // churn would be too noisy. Cleared inside scan() on first match,
-  // scrapped at teardown.
-  const NO_MATCH_DELAY_MS = 1500;
-  const maybeReportNoMatch = () => {
-    noMatchTimer = 0;
-    if (state.size > 0 || noMatchReported) return;
-    noMatchReported = true;
+  // Settle-delayed reconciliation. After the page has had a beat to render
+  // (React hydration, async content), look once at how the rule resolved and
+  // act. This subsumes the old no-match/quarantine reporter and adds the
+  // rebase pass (§14):
+  //   - resolving via PRIMARY on a changed bundle → just refresh the stored
+  //     baseline hash (no anchor change), so the next deploy is measured
+  //     against the current bundle (keeps A/B vs deploy honest).
+  //   - resolving via a FALLBACK on a changed bundle → the primary died in a
+  //     deploy; promote the working fallback to primary (Strategy 1).
+  //   - resolving NOTHING on a changed bundle → scan for the target by its
+  //     witness and re-anchor to it (Strategy 2); if that can't find a
+  //     unique strong match, emit the existing no-match / quarantine signal.
+  // The bundle gate avoids rewriting anchors over a transient A/B variant or
+  // logged-out state (same bundle → the element returns on its own). The
+  // witness stays the safety net: every rebase TARGET must pass it, so even a
+  // mis-fired gate can't mis-attach — worst case it no-ops. Fires once.
+  const SETTLE_DELAY_MS = 1500;
+  // The current page fingerprint, resolved lazily here (not at run() time):
+  // boot() builds the getter before the page's scripts are in the DOM, so it
+  // would compute null then. By reconcile time the DOM is settled.
+  let currentBundle = null;
+  const summarizeAnchor = (a) => {
+    const p = a && a.primary;
+    if (!p) return '(none)';
+    return `${p.kind}:${p.value || p.name || p.role || p.label || ''}`;
+  };
+  const reportUnresolved = () => {
     if (typeof api.reportEvent !== 'function') return;
     if (lastWitnessRejection) {
       api.reportEvent('rule-quarantined', {
@@ -664,9 +675,104 @@ function applyRule(rule, spec, api, mutations, handlers) {
       selector: rule.anchor?.primary?.value || '',
     });
   };
-  if (state.size === 0) {
-    noMatchTimer = setTimeout(maybeReportNoMatch, NO_MATCH_DELAY_MS);
-  }
+  const emitRebase = (payload) => {
+    if (rebaseReported || typeof api.reportEvent !== 'function') return;
+    rebaseReported = true;
+    api.reportEvent('rule-rebase', {
+      specId: spec.id,
+      ruleId: rule.id,
+      bundleHash: currentBundle,
+      ...payload,
+    });
+  };
+  const reconcile = () => {
+    noMatchTimer = 0;
+    if (rebaseReported || noMatchReported) return;
+    // Resolve the current bundle hash now (DOM is settled). A deploy is when
+    // the shim has a stored baseline that differs from it.
+    try { currentBundle = spec.__bundleHashFn(); } catch (_) { currentBundle = null; }
+    const baselineStale = typeof currentBundle === 'string' && currentBundle !== spec.bundleHash;
+    const deploy = typeof spec.bundleHash === 'string' && baselineStale;
+    // Per-shim auto-repair (§14). On by default; when off, a deploy that
+    // breaks the anchor is NOT silently re-pointed — it surfaces as
+    // no-match / quarantine so the user decides. The baseline refresh below
+    // (primary path) still runs either way: it only tracks the bundle hash,
+    // never changes an anchor, and keeps the gate honest if they re-enable.
+    const canRebase = deploy && spec.autoRepair !== false;
+
+    // Resolving cleanly via primary — keep the stored baseline current.
+    // Fires when the baseline is MISSING (freshly-committed shim → initialize
+    // the gate) or STALE (deploy the primary survived → advance it). Skips
+    // when already current. This is what bootstraps the deploy gate: a shim
+    // can only be judged "deployed since last reconciled" once it has a
+    // baseline, and a clean primary resolution is when we record one.
+    if (state.size > 0 && lastMatchedSource === 'primary') {
+      if (baselineStale && typeof api.reportEvent === 'function') {
+        api.reportEvent('spec-bundle-update', {
+          specId: spec.id,
+          bundleHash: currentBundle,
+        });
+      }
+      return;
+    }
+
+    // Resolving via a fallback — the primary is dead. On a deploy, promote
+    // the working fallback to primary and demote the dead primary (keep it
+    // as a fallback — cheap insurance if the site A/B-flips back). Same
+    // bundle → leave the ladder alone; matchedVia already surfaces it.
+    if (state.size > 0 && typeof lastMatchedSource === 'string' &&
+        lastMatchedSource.startsWith('fallback:')) {
+      // Not a deploy, or auto-repair off → leave the ladder as-is. The rule
+      // still works via the fallback; matchedVia already surfaces that the
+      // primary is stale, so nothing is broken for the user to see.
+      if (!canRebase) return;
+      const idx = parseInt(lastMatchedSource.slice('fallback:'.length), 10);
+      const fallbacks = Array.isArray(rule.anchor.fallbacks) ? rule.anchor.fallbacks : [];
+      const promoted = fallbacks[idx];
+      if (!promoted) return;
+      const newAnchor = {
+        primary: promoted,
+        fallbacks: [rule.anchor.primary, ...fallbacks.filter((_, i) => i !== idx)],
+      };
+      const fresh = lastResolvedEl ? witnessMod.buildWitness(lastResolvedEl) : null;
+      if (fresh) newAnchor.witness = fresh;
+      else if (rule.anchor.witness) newAnchor.witness = rule.anchor.witness;
+      emitRebase({
+        strategy: 'promote',
+        anchor: newAnchor,
+        from: summarizeAnchor(rule.anchor),
+        to: summarizeAnchor(newAnchor),
+      });
+      return;
+    }
+
+    // Resolving nothing. On a deploy with a witness (and auto-repair on), try
+    // to recover the target by scanning for it; else emit the no-match /
+    // quarantine signal (which is also the auto-repair-off behavior — the
+    // drift surfaces instead of self-healing).
+    if (state.size === 0) {
+      if (canRebase && rule.anchor?.witness) {
+        const found = anchors.witnessRecover(rule.anchor.witness, document);
+        const synthesized = found ? anchors.suggestAnchorFor(found) : null;
+        if (found && synthesized) {
+          emitRebase({
+            strategy: 'recover',
+            anchor: {
+              primary: synthesized,
+              fallbacks: Array.isArray(rule.anchor.fallbacks) ? rule.anchor.fallbacks : [],
+              witness: witnessMod.buildWitness(found) || rule.anchor.witness,
+            },
+            from: summarizeAnchor(rule.anchor),
+            to: summarizeAnchor({ primary: synthesized }),
+          });
+          return;
+        }
+      }
+      noMatchReported = true;
+      reportUnresolved();
+    }
+  };
+  noMatchTimer = setTimeout(reconcile, SETTLE_DELAY_MS);
 
   const observer = new MutationObserver(scheduleScan);
   observer.observe(document.body, {
@@ -1005,13 +1111,24 @@ function setupRule(rule, spec, api, mutations, handlers) {
 
 function run(patch, api) {
   const { mutations = {}, handlers = {} } = patch;
-  // Stamp the cross-shim cascade priority onto the runtime spec so the
-  // tier-1 injector can read it without threading a param through every
-  // rule-processing function. Shallow copy — the authored spec is untouched,
-  // and the preview/forwarded paths that spread `spec` inherit the field.
+  // Stamp two runtime-only fields onto the spec so the deep rule-processing
+  // path can read them without threading params through every signature.
+  // Shallow copy keeps the authored spec untouched; preview/forwarded paths
+  // that spread `spec` inherit both.
+  //   - `__cssPriority` — cross-shim cascade priority for the tier-1 injector
+  //     (main: user shims above platform fixtures; sidebar order among users).
+  //   - `__bundleHashFn` — getter for the current page fingerprint, compared
+  //     by the rebase pass against the stored `spec.bundleHash` to detect a
+  //     deploy (§14). A getter (not a value) because it must be evaluated at
+  //     reconcile time — boot() computes it before the page's scripts are in
+  //     the DOM. A plain string is accepted too (tests/stubs).
+  const bundleHashFn = typeof patch.bundleHash === 'function'
+    ? patch.bundleHash
+    : () => (typeof patch.bundleHash === 'string' ? patch.bundleHash : null);
   const spec = {
     ...patch.spec,
     __cssPriority: Number.isFinite(patch.priority) ? patch.priority : 0,
+    __bundleHashFn: bundleHashFn,
   };
 
   for (const { id, css } of collectCssForSpec(spec, mutations)) {

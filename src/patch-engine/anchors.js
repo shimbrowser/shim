@@ -227,4 +227,114 @@ function escapeAttrValue(v) {
   return v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-module.exports = { resolveAll, resolveAllWithSource };
+// --- Auto-rebase support (§14): synthesize a fresh anchor + find a drifted
+// element by its witness. Used by the engine's rebase pass to re-point a rule
+// whose primary selector died, deterministically (no LLM). ---
+
+// `data-shim*` are Shim's own stamped tokens (ephemeral, apply-order-
+// dependent) — never anchor to them (mirrors page-preload's picker exclusion
+// and the witness module). A site `data-shimmer` would also be skipped; it
+// still has tag/text/other signals.
+function isSiteDataAttr(name) {
+  return name.startsWith('data-') && !name.startsWith('data-shim');
+}
+
+// Best single stable anchor spec for an element, strongest kind first:
+// id → site data-* → aria(role/label) → label-like text → positional CSS
+// path (last resort). Mirrors the picker's `suggestAnchors` ranking but
+// returns one spec, since a rebase needs a single new `primary`. The witness
+// re-verifies whatever this produces, so even the positional fallback is safe
+// (a wrong-but-resolving anchor fails the witness and re-quarantines).
+function suggestAnchorFor(el) {
+  if (!el || !el.tagName) return null;
+  const tag = el.tagName.toLowerCase();
+
+  const id = el.getAttribute && el.getAttribute('id');
+  if (id && /^[A-Za-z][\w-]*$/.test(id)) {
+    return { kind: 'css', value: `#${id}` };
+  }
+
+  for (const attr of el.attributes || []) {
+    if (isSiteDataAttr(attr.name) && /^[a-zA-Z][\w-]*$/.test(attr.name)) {
+      return { kind: 'data-attr', name: attr.name, value: attr.value };
+    }
+  }
+
+  const role = el.getAttribute && el.getAttribute('role');
+  const label = el.getAttribute && el.getAttribute('aria-label');
+  if ((role && role.trim()) || (label && label.trim())) {
+    const a = { kind: 'aria' };
+    if (role && role.trim()) a.role = role.trim();
+    if (label && label.trim()) a.label = label.trim();
+    return a;
+  }
+
+  const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
+  const labelLike = /^(button|a|label|h[1-6])$/.test(tag) ||
+    role === 'button' || role === 'link';
+  if (labelLike && text && text.length <= 60 && !text.includes('\n')) {
+    return { kind: 'text', value: text };
+  }
+
+  // Last resort: a short positional CSS path. Walk up to 3 levels, using
+  // :nth-of-type so the path survives sibling text/attribute churn better
+  // than a bare tag. Anchored at an id'd ancestor if one is close.
+  return { kind: 'css', value: positionalPath(el) };
+}
+
+function positionalPath(el) {
+  const parts = [];
+  let cur = el;
+  for (let depth = 0; cur && cur.tagName && depth < 3; depth++) {
+    const tag = cur.tagName.toLowerCase();
+    const cid = cur.getAttribute && cur.getAttribute('id');
+    if (cid && /^[A-Za-z][\w-]*$/.test(cid)) {
+      parts.unshift(`#${cid}`);
+      break; // an id'd ancestor is a stable enough root
+    }
+    const parent = cur.parentElement;
+    if (parent) {
+      const sibs = Array.from(parent.children).filter((c) => c.tagName === cur.tagName);
+      const idx = sibs.indexOf(cur) + 1;
+      parts.unshift(sibs.length > 1 ? `${tag}:nth-of-type(${idx})` : tag);
+    } else {
+      parts.unshift(tag);
+    }
+    cur = parent;
+  }
+  return parts.join(' > ');
+}
+
+// Scan the page for the element a witness describes — used when a rule's
+// selector(s) resolve nothing but the target may have just moved/renamed.
+// Returns the single element that matches the witness *strongly and
+// uniquely*, else null. Two guards make a silent re-anchor safe: a bar a
+// touch above resolve-time's 0.5 verification (margin against a coincidental
+// match in the much larger scan pool — but low enough that real drift, like
+// losing one stable attr while keeping another, still recovers), and the
+// exactly-one requirement (multiple strong candidates mean "ask the LLM/user",
+// not "guess"). Tuning point if recovery proves too eager or too shy.
+const RECOVER_MIN_SCORE = 0.6;
+function witnessRecover(w, root = document) {
+  if (!w || !w.tag) return null;
+  const scope = root.getElementsByTagName ? root : document;
+  const candidates = scope.getElementsByTagName(w.tag);
+  let best = null;
+  let strongCount = 0;
+  for (let i = 0; i < candidates.length && i < 5000; i++) {
+    const el = candidates[i];
+    const verdict = witness.matchWitness(w, el);
+    if (verdict.pass && verdict.score >= RECOVER_MIN_SCORE) {
+      strongCount++;
+      if (!best || verdict.score > best.score) best = { el, score: verdict.score };
+    }
+  }
+  return strongCount === 1 ? best.el : null;
+}
+
+module.exports = {
+  resolveAll,
+  resolveAllWithSource,
+  suggestAnchorFor,
+  witnessRecover,
+};
