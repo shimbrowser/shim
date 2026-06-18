@@ -751,7 +751,8 @@ function applyRule(rule, spec, api, mutations, handlers) {
     // quarantine signal (which is also the auto-repair-off behavior — the
     // drift surfaces instead of self-healing).
     if (state.size === 0) {
-      if (canRebase && rule.anchor?.witness) {
+      const hasWitness = !!rule.anchor?.witness;
+      if (canRebase && hasWitness) {
         const found = anchors.witnessRecover(rule.anchor.witness, document);
         const synthesized = found ? anchors.suggestAnchorFor(found) : null;
         if (found && synthesized) {
@@ -769,6 +770,32 @@ function applyRule(rule, spec, api, mutations, handlers) {
         }
       }
       noMatchReported = true;
+      // Deploy + a witness we couldn't deterministically recover → the element
+      // changed beyond witness recognition (e.g. a tag swap killed the
+      // selector AND the witness can't re-find it). That's a real break that
+      // needs the LLM, not a transient absence — route it into the
+      // quarantine/re-anchor flow (banner + auto-reanchor). Gated on `deploy`
+      // (NOT auto-repair) so it still surfaces for manual review when
+      // auto-repair is off; the auto-fire itself is auto-repair-gated
+      // downstream (shouldAutoReanchor). Without a deploy, a bare no-match
+      // stays transient (reportUnresolved → rule-no-match). The empty `seen`
+      // distinguishes this from a witness-rejection quarantine (nothing
+      // resolved, so there's no element to diff against).
+      // Only a *true* no-match (selector matched nothing) routes here. A
+      // witness-rejection (selector resolved a wrong element → lastWitnessRejection
+      // set) falls through to reportUnresolved, which emits the quarantine WITH
+      // its expected-vs-seen diff — don't preempt that and lose the diff.
+      if (deploy && hasWitness && !lastWitnessRejection) {
+        api.reportEvent('rule-quarantined', {
+          specId: spec.id,
+          ruleId: rule.id,
+          selector: rule.anchor?.primary?.value || '',
+          expected: rule.anchor.witness,
+          seen: [],
+          rejectedVia: null,
+        });
+        return;
+      }
       reportUnresolved();
     }
   };
