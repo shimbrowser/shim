@@ -1,6 +1,7 @@
 const vm = require('vm');
 const anchors = require('./anchors');
 const witnessMod = require('./witness');
+const componentId = require('./component-id');
 const { applyStrategy } = require('./strategies');
 const routeMatch = require('./route-match');
 
@@ -581,13 +582,29 @@ function applyRule(rule, spec, api, mutations, handlers) {
     // describe N different elements (§8 v1 scope).
     if (!witnessCaptured && !rule.anchor?.witness && nodes.length === 1) {
       witnessCaptured = true;
-      const w = witnessMod.buildWitness(nodes[0]);
+      const el = nodes[0];
+      const w = witnessMod.buildWitness(el);
       if (w && typeof api.reportEvent === 'function') {
-        api.reportEvent('rule-witness', {
+        // Enrich with framework-component-identity via the main-world bridge
+        // (§8) before emitting — the isolated world can't read fibers itself.
+        // Resolves null on non-React pages / no bridge, in which case the
+        // witness simply omits `component`. The slight defer is harmless: this
+        // event is groundwork the authoring loop / rebase pass consume async.
+        const emit = () => api.reportEvent('rule-witness', {
           specId: spec.id,
           ruleId: rule.id,
           witness: w,
         });
+        const verifyFn = api.componentId && api.componentId.verify;
+        if (typeof verifyFn === 'function') {
+          Promise.resolve()
+            .then(() => verifyFn(el))
+            .then((cid) => { if (cid && Array.isArray(cid.path) && cid.path.length) w.component = cid; })
+            .catch(() => {})
+            .finally(emit);
+        } else {
+          emit();
+        }
       }
     }
     for (const el of nodes) {
@@ -685,7 +702,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
       ...payload,
     });
   };
-  const reconcile = () => {
+  const reconcile = async () => {
     noMatchTimer = 0;
     if (rebaseReported || noMatchReported) return;
     // Resolve the current bundle hash now (DOM is settled). A deploy is when
@@ -707,6 +724,34 @@ function applyRule(rule, spec, api, mutations, handlers) {
     // can only be judged "deployed since last reconciled" once it has a
     // baseline, and a clean primary resolution is when we record one.
     if (state.size > 0 && lastMatchedSource === 'primary') {
+      // Component-identity verification (§8). The sync resolve path filters by
+      // the witness's tag/attr/text/child signals but CAN'T read fibers, so the
+      // strongest signal is checked here via the main-world bridge. A confident
+      // mismatch means the selector latched onto the wrong element (right
+      // tag/attrs, wrong component) — a mis-attach, quarantined like any other
+      // witness rejection. Checked regardless of deploy: never silently
+      // mis-attach is the core contract, deploy or not. The bridge resolving
+      // null (non-React / timeout) → applicable:false → skipped, never failed.
+      if (lastResolvedEl && rule.anchor?.witness?.component &&
+          api.componentId && typeof api.componentId.verify === 'function') {
+        const actual = await api.componentId.verify(lastResolvedEl);
+        const verdict = componentId.matchComponent(rule.anchor.witness.component, actual);
+        if (verdict.applicable && !verdict.pass) {
+          noMatchReported = true;
+          if (typeof api.reportEvent === 'function') {
+            const seen = actual && Array.isArray(actual.path) ? actual.path.join(' > ') : 'none';
+            api.reportEvent('rule-quarantined', {
+              specId: spec.id,
+              ruleId: rule.id,
+              selector: rule.anchor?.primary?.value || '',
+              expected: rule.anchor.witness,
+              seen: [`component: expected [${rule.anchor.witness.component.path.join(' > ')}], saw [${seen}]`],
+              rejectedVia: 'primary',
+            });
+          }
+          return;
+        }
+      }
       if (baselineStale && typeof api.reportEvent === 'function') {
         api.reportEvent('spec-bundle-update', {
           specId: spec.id,
@@ -752,6 +797,35 @@ function applyRule(rule, spec, api, mutations, handlers) {
     // drift surfaces instead of self-healing).
     if (state.size === 0) {
       const hasWitness = !!rule.anchor?.witness;
+      // Component-identity recovery (§8), tried first because it's the strongest
+      // signal: the selector died, but the component that rendered the target
+      // may still be on the page. The main-world helper scans for nodes whose
+      // fiber identity matches the captured one; a UNIQUE match re-anchors. This
+      // catches the exact deploy class css anchors can't survive — markup/class
+      // rewrite with the React tree intact. Falls through to witnessRecover
+      // (tag/attr/text scan) when there's no component witness or no unique hit.
+      if (canRebase && rule.anchor?.witness?.component &&
+          api.componentId && typeof api.componentId.find === 'function') {
+        const matches = await api.componentId.find(rule.anchor.witness.component);
+        if (Array.isArray(matches) && matches.length === 1) {
+          const synthesized = anchors.suggestAnchorFor(matches[0]);
+          if (synthesized) {
+            const fresh = witnessMod.buildWitness(matches[0], { component: rule.anchor.witness.component })
+              || rule.anchor.witness;
+            emitRebase({
+              strategy: 'recover',
+              anchor: {
+                primary: synthesized,
+                fallbacks: Array.isArray(rule.anchor.fallbacks) ? rule.anchor.fallbacks : [],
+                witness: fresh,
+              },
+              from: summarizeAnchor(rule.anchor),
+              to: summarizeAnchor({ primary: synthesized }),
+            });
+            return;
+          }
+        }
+      }
       if (canRebase && hasWitness) {
         const found = anchors.witnessRecover(rule.anchor.witness, document);
         const synthesized = found ? anchors.suggestAnchorFor(found) : null;

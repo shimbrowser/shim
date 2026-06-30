@@ -31,6 +31,15 @@ const WITNESS_VERSION = 1;
 // signals PRESENT in the witness) — absent signals don't count against
 // a candidate, so a witness captured from a sparse element (no id, no
 // text) still verifies on what it has.
+//
+// NOTE: framework-component-identity (`witness.component`, §8) is NOT scored
+// here. It can't be read synchronously (it lives in the page's main world,
+// reachable only via the async bridge), and it's a *veto* signal — a confident
+// component mismatch means the wrong element, full stop, even if a data-testid
+// coincidentally matches, which this tolerant N-of-M average would dilute. So
+// the engine verifies it directly via component-id.matchComponent at settle
+// time. buildWitness still stores it (it travels on the spec); matchWitness
+// just doesn't fold it into the soft score.
 const WEIGHTS = {
   attr: 3, // per stable attribute (id / role / aria-label / data-*)
   textStem: 2,
@@ -66,8 +75,11 @@ function textStemOf(el) {
 }
 
 // Build a witness from a live element. Returns a plain-JSON object safe
-// to embed in the spec.
-function buildWitness(el) {
+// to embed in the spec. `opts.component` (a descriptor from the main-world
+// fiber bridge — §8) is attached when supplied; the isolated world can't read
+// fibers itself, so the engine fetches it via api.componentId and passes it in
+// here at capture time. Omitted on non-React pages (bridge resolves null).
+function buildWitness(el, opts = {}) {
   if (!el || !el.tagName) return null;
   const attrs = {};
   for (const attr of el.attributes || []) {
@@ -88,6 +100,9 @@ function buildWitness(el) {
   if (childTags.length) witness.childTags = childTags;
   const parentTag = el.parentElement?.tagName;
   if (parentTag) witness.parentTag = parentTag.toLowerCase();
+  if (opts.component && Array.isArray(opts.component.path) && opts.component.path.length) {
+    witness.component = opts.component;
+  }
   return witness;
 }
 
@@ -98,6 +113,7 @@ function buildWitness(el) {
 // Unknown witness versions pass unconditionally: an old engine meeting
 // a newer witness must not quarantine healthy rules over a shape it
 // can't read.
+//
 function matchWitness(witness, el) {
   if (!witness || witness.v !== WITNESS_VERSION) {
     return { pass: true, score: 1, detail: ['witness missing or unknown version — skipped'] };
