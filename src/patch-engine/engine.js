@@ -864,6 +864,10 @@ function applyRule(rule, spec, api, mutations, handlers) {
               || rule.anchor.witness;
             emitRebase({
               strategy: 'recover',
+              // `via` names the rung that found the element — component
+              // identity (the strongest signal) vs the witness shape-scan.
+              // Diagnostics-only: lets a human tell WHICH recovery fired.
+              via: 'component-identity',
               anchor: {
                 primary: synthesized,
                 fallbacks: Array.isArray(rule.anchor.fallbacks) ? rule.anchor.fallbacks : [],
@@ -882,6 +886,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
         if (found && synthesized) {
           emitRebase({
             strategy: 'recover',
+            via: 'witness',
             anchor: {
               primary: synthesized,
               fallbacks: Array.isArray(rule.anchor.fallbacks) ? rule.anchor.fallbacks : [],
