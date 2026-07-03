@@ -903,20 +903,28 @@ function applyRule(rule, spec, api, mutations, handlers) {
           return;
         }
       }
-      // Late-render grace (one retry, deploy path only). Reaching this point
-      // on a deploy is about to ESCALATE — quarantine banner, and with
-      // auto-repair on, an LLM re-anchor turn — but SPA content routinely
-      // renders seconds after the settle delay (a dashboard card behind a data
-      // fetch), in which case the selector, the component scan, and the
-      // witness scan all missed simply because the element didn't exist yet.
-      // Found live: a heal that the witness rung should have made for free
-      // fell through to the LLM tier this way. So before concluding, re-run
-      // reconcile once more after a second beat: if the element has rendered
-      // by then, either the scan loop already mounted it (selector alive →
-      // trigger-1 baseline refresh) or the recovery scans above get a real
-      // shot at it. Non-deploy misses stay single-pass — rule-no-match is
+      // Late-render grace (one retry) for the two paths about to ESCALATE —
+      // quarantine banner, and with auto-repair on, an LLM re-anchor turn:
+      //
+      //   - deploy + nothing resolved: SPA content routinely renders seconds
+      //     after the settle delay (a dashboard card behind a data fetch), so
+      //     the selector, the component scan, and the witness scan all missed
+      //     an element that simply didn't exist yet. Found live: a heal the
+      //     witness rung should have made for free fell to the LLM tier.
+      //   - witness REJECTION (deploy or not): a generic selector can resolve
+      //     the page's OTHER elements while the real target is still
+      //     rendering — the veto correctly rejects those impostors, but
+      //     quarantining on that single look escalates a transient
+      //     mis-resolution to an LLM turn even though the target mounts fine
+      //     moments later (found live: two wasted AI turns ~40min apart on a
+      //     healthy shim). The veto stays deploy-independent — only the
+      //     ESCALATION waits one beat.
+      //
+      // On the retry, a now-rendered target either mounted via the scan loop
+      // (state > 0 → healthy verify path) or gives the recovery scans a real
+      // shot. Plain non-deploy no-match stays single-pass — rule-no-match is
       // transient/informational and authoring wants that feedback promptly.
-      if (deploy && !reconcileRetried) {
+      if (!reconcileRetried && (deploy || lastWitnessRejection)) {
         reconcileRetried = true;
         noMatchTimer = setTimeout(reconcile, RECONCILE_RETRY_MS);
         return;
