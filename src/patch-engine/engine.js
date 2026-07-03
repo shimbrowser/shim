@@ -691,6 +691,11 @@ function applyRule(rule, spec, api, mutations, handlers) {
   // witness stays the safety net: every rebase TARGET must pass it, so even a
   // mis-fired gate can't mis-attach — worst case it no-ops. Fires once.
   const SETTLE_DELAY_MS = 1500;
+  // One extra beat granted before a deploy-path miss escalates to
+  // quarantine/recovery-failure — covers content that renders after settle
+  // (see the late-render grace note in reconcile).
+  const RECONCILE_RETRY_MS = 2500;
+  let reconcileRetried = false;
   // The current page fingerprint, resolved lazily here (not at run() time):
   // boot() builds the getter before the page's scripts are in the DOM, so it
   // would compute null then. By reconcile time the DOM is settled.
@@ -897,6 +902,24 @@ function applyRule(rule, spec, api, mutations, handlers) {
           });
           return;
         }
+      }
+      // Late-render grace (one retry, deploy path only). Reaching this point
+      // on a deploy is about to ESCALATE — quarantine banner, and with
+      // auto-repair on, an LLM re-anchor turn — but SPA content routinely
+      // renders seconds after the settle delay (a dashboard card behind a data
+      // fetch), in which case the selector, the component scan, and the
+      // witness scan all missed simply because the element didn't exist yet.
+      // Found live: a heal that the witness rung should have made for free
+      // fell through to the LLM tier this way. So before concluding, re-run
+      // reconcile once more after a second beat: if the element has rendered
+      // by then, either the scan loop already mounted it (selector alive →
+      // trigger-1 baseline refresh) or the recovery scans above get a real
+      // shot at it. Non-deploy misses stay single-pass — rule-no-match is
+      // transient/informational and authoring wants that feedback promptly.
+      if (deploy && !reconcileRetried) {
+        reconcileRetried = true;
+        noMatchTimer = setTimeout(reconcile, RECONCILE_RETRY_MS);
+        return;
       }
       noMatchReported = true;
       // Deploy + a witness we couldn't deterministically recover → the element

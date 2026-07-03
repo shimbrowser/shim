@@ -67,11 +67,33 @@ function isStableAttr(name) {
 // text: leading content (a label, a heading) is the part humans treat
 // as identity; trailing content (counts, timestamps) is the part that
 // churns.
+//
+// Digit runs are stripped BEFORE slicing: numbers inside a stem are live data
+// (badge counts, quantities, dates), not identity — a card captured as
+// "estimates needing attention94colin's pal…" bakes a badge count and row data
+// into the signal, and the prefix tolerance below can't save it once the count
+// ticks (the divergence lands mid-stem, so neither side is a prefix of the
+// other). Found live: exactly that stem cost witnessRecover a heal it should
+// have made, dropping the repair to the LLM tier. Stripping digits keeps the
+// stable words and buys 40 chars of actual identity.
 const TEXT_STEM_LEN = 40;
+// Minimum shared-prefix length for a partial stem match (see matchWitness) —
+// long enough that two DIFFERENT normalized labels virtually never share it,
+// short enough that a real heading ("estimates needing attention…") clears it.
+const STEM_SHARED_PREFIX_MIN = 12;
+function normalizeStemText(s) {
+  return s.replace(/\d+/g, '').replace(/\s+/g, ' ').trim();
+}
+function sharedPrefixLen(a, b) {
+  const n = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < n && a[i] === b[i]) i++;
+  return i;
+}
 function textStemOf(el) {
   const raw = (el.textContent || '').trim().replace(/\s+/g, ' ');
   if (!raw) return '';
-  return raw.slice(0, TEXT_STEM_LEN).toLowerCase();
+  return normalizeStemText(raw.toLowerCase()).slice(0, TEXT_STEM_LEN);
 }
 
 // Build a witness from a live element. Returns a plain-JSON object safe
@@ -142,16 +164,31 @@ function matchWitness(witness, el) {
     }
   }
 
-  if (witness.textStem) {
+  // The STORED stem is normalized too: witnesses captured before digit-
+  // stripping carry counts/dates in the stem, and comparing them raw against a
+  // digit-free live stem would fail every pre-existing witness. Normalizing
+  // both sides makes the generations compatible. A stem that normalizes to
+  // empty was ALL volatile content (a bare count) — no stable identity signal,
+  // so it contributes nothing rather than penalizing the candidate.
+  const expectedStem = witness.textStem ? normalizeStemText(witness.textStem) : '';
+  if (expectedStem) {
     total += WEIGHTS.textStem;
     const stem = textStemOf(el);
-    // Prefix tolerance both ways: "my notes" still matches an element
-    // that now reads "my notes (3)", and vice versa. Empty stems never
-    // match a non-empty expectation.
-    if (stem && (stem.startsWith(witness.textStem) || witness.textStem.startsWith(stem))) {
+    // Two ways to match:
+    //   - containment (one stem is a prefix of the other): "my notes" vs
+    //     "my notes (extra)" — the original tolerance.
+    //   - a MEANINGFUL SHARED PREFIX: container elements concatenate a stable
+    //     heading with volatile body content ("estimates needing attention" +
+    //     whatever rows render today), so the two stems diverge mid-string and
+    //     neither contains the other — but the long shared head IS the
+    //     identity. ≥12 shared chars is far beyond coincidence for normalized
+    //     lowercase text, while sibling headings ("estimates …" vs "expenses
+    //     …") diverge within a word or two and still fail.
+    const shared = sharedPrefixLen(stem, expectedStem);
+    if (stem && (shared === Math.min(stem.length, expectedStem.length) || shared >= STEM_SHARED_PREFIX_MIN)) {
       matched += WEIGHTS.textStem;
     } else {
-      detail.push(`text: expected "${witness.textStem}…", saw "${stem ? stem + '…' : '(empty)'}"`);
+      detail.push(`text: expected "${expectedStem}…", saw "${stem ? stem + '…' : '(empty)'}"`);
     }
   }
 

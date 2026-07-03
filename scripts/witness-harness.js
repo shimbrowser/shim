@@ -154,9 +154,51 @@ function tLadder() {
   check('witness-less anchors keep legacy trust', r5.source === 'primary' && r5.nodes[0] === impostor, '');
 }
 
+// Volatile-text normalization: digits are live data (badge counts, dates), not
+// identity — stripped from the stem on BOTH sides. The live regression this
+// pins: a dashboard card captured as "estimates needing attention94colin's
+// pal…" (badge count + row data baked mid-stem) failed witnessRecover the
+// moment the count ticked, dropping a heal that should have been free to the
+// LLM tier.
+function tStemVolatility() {
+  console.log('textStem digit normalization:');
+
+  // Capture strips digit runs — the stored stem is stable words only.
+  const card = el('div', {}, { text: 'Estimates Needing Attention94Colin\'s Palace Remodel' });
+  const w = buildWitness(card);
+  check('capture strips digits from the stem', w.textStem && !/\d/.test(w.textStem), JSON.stringify(w.textStem));
+
+  // THE regression: same card next visit — count ticked, rows changed.
+  const later = el('div', {}, { text: 'Estimates Needing Attention97Beacon Tower Phase 2' });
+  const verdict = matchWitness(w, later);
+  check('count tick + row churn mid-stem still matches', verdict.pass, JSON.stringify(verdict));
+
+  // Back-compat: a PRE-normalization witness (digits stored in the stem)
+  // matches a live element through stored-side normalization.
+  const legacy = { v: WITNESS_VERSION, tag: 'div', textStem: 'estimates needing attention94colin\'s pal' };
+  const legacyVerdict = matchWitness(legacy, later);
+  check('legacy digit-bearing stored stem still matches', legacyVerdict.pass, JSON.stringify(legacyVerdict));
+
+  // An all-digits stem normalizes to nothing — no stable signal, so it neither
+  // matches nor penalizes (a genuinely different element must fail on OTHER
+  // signals, not sneak through on a bare count).
+  const counter = el('span', { role: 'status' }, { text: '42' });
+  const wc = buildWitness(counter);
+  check('all-digit text → no stem stored', !('textStem' in wc), JSON.stringify(wc));
+  const legacyCount = { v: WITNESS_VERSION, tag: 'span', attrs: { role: 'status' }, textStem: '42' };
+  const other = el('span', { role: 'status' }, { text: '7' });
+  check('legacy all-digit stem contributes nothing (passes on attrs)', matchWitness(legacyCount, other).pass, '');
+
+  // A genuinely different label still fails — normalization must not blunt
+  // the signal into mush.
+  const different = el('div', {}, { text: 'Recent Payments12Acme Corp' });
+  check('different label still rejected', !matchWitness(w, different).pass, JSON.stringify(matchWitness(w, different)));
+}
+
 tBuild();
 tMatchTolerance();
 tMatchRejection();
+tStemVolatility();
 tLadder();
 
 if (failures) {
