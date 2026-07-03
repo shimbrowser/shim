@@ -29,6 +29,18 @@ function cssPriorityOf(spec) {
   return Number.isFinite(spec && spec.__cssPriority) ? spec.__cssPriority : 0;
 }
 
+// Current deploy's {minified: original} component-name map (§8 Stage B), via
+// the api bridge. Null-safe on every degraded surface — stub apis, forwarded
+// frames, harnesses — and never throws; null means "compare raw names".
+function getSymbols(api) {
+  if (!api || !api.componentId || typeof api.componentId.symbols !== 'function') {
+    return Promise.resolve(null);
+  }
+  return Promise.resolve()
+    .then(() => api.componentId.symbols())
+    .catch(() => null);
+}
+
 function injectStyle(id, css) {
   if (!css || document.querySelector(`style[data-shim="${id}"]`)) return;
   const style = document.createElement('style');
@@ -597,9 +609,24 @@ function applyRule(rule, spec, api, mutations, handlers) {
         });
         const verifyFn = api.componentId && api.componentId.verify;
         if (typeof verifyFn === 'function') {
+          // Store the identity in ORIGINAL-name space when the deploy's symbol
+          // map is available (§8 Stage B): `Wc` → `TrackRow`. That's what makes
+          // the witness deploy-durable — the next build renames Wc to Xd, but
+          // both translate back to TrackRow. No map (or Discovery not finished
+          // yet) → raw names, exactly the pre-Stage-B behavior.
           Promise.resolve()
-            .then(() => verifyFn(el))
-            .then((cid) => { if (cid && Array.isArray(cid.path) && cid.path.length) w.component = cid; })
+            .then(() => Promise.all([verifyFn(el), getSymbols(api)]))
+            .then(([cid, syms]) => {
+              if (cid && Array.isArray(cid.path) && cid.path.length) {
+                const t = componentId.translateComponent(cid, syms);
+                // `mapped: true` marks a witness whose names only exist through
+                // a symbol map (translation actually renamed them) — the verify
+                // veto then refuses to score it raw against minified fibers
+                // when no map is available (see matchComponent). Untranslated
+                // captures (no map, or names already original) stay unmarked.
+                w.component = t !== cid ? { ...t, mapped: true } : t;
+              }
+            })
             .catch(() => {})
             .finally(emit);
         } else {
@@ -735,7 +762,13 @@ function applyRule(rule, spec, api, mutations, handlers) {
       if (lastResolvedEl && rule.anchor?.witness?.component &&
           api.componentId && typeof api.componentId.verify === 'function') {
         const actual = await api.componentId.verify(lastResolvedEl);
-        const verdict = componentId.matchComponent(rule.anchor.witness.component, actual);
+        // Dual raw/translated scoring (§8 Stage B): the stored identity may be
+        // in original-name space (new witnesses) or minified space (pre-map
+        // witnesses); matchComponent takes the max of comparing the live fiber
+        // names raw and translated through the deploy's symbol map, so neither
+        // generation false-quarantines.
+        const syms = await getSymbols(api);
+        const verdict = componentId.matchComponent(rule.anchor.witness.component, actual, syms);
         if (verdict.applicable && !verdict.pass) {
           noMatchReported = true;
           if (typeof api.reportEvent === 'function') {
@@ -779,7 +812,13 @@ function applyRule(rule, spec, api, mutations, handlers) {
         primary: promoted,
         fallbacks: [rule.anchor.primary, ...fallbacks.filter((_, i) => i !== idx)],
       };
-      const fresh = lastResolvedEl ? witnessMod.buildWitness(lastResolvedEl) : null;
+      // Carry the component identity into the refreshed witness — it names the
+      // COMPONENT, not the markup, so it stays valid across the promote (and,
+      // stored in original-name space, across deploys). Rebuilding without it
+      // silently dropped the strongest signal on every promotion.
+      const fresh = lastResolvedEl
+        ? witnessMod.buildWitness(lastResolvedEl, { component: rule.anchor.witness?.component })
+        : null;
       if (fresh) newAnchor.witness = fresh;
       else if (rule.anchor.witness) newAnchor.witness = rule.anchor.witness;
       emitRebase({
@@ -806,11 +845,22 @@ function applyRule(rule, spec, api, mutations, handlers) {
       // (tag/attr/text scan) when there's no component witness or no unique hit.
       if (canRebase && rule.anchor?.witness?.component &&
           api.componentId && typeof api.componentId.find === 'function') {
-        const matches = await api.componentId.find(rule.anchor.witness.component);
+        // The stored identity is (for post-map witnesses) in ORIGINAL-name
+        // space; live fibers carry the CURRENT deploy's minified names. Invert
+        // the symbol map (original→minified; ambiguous originals dropped) and
+        // scan for BOTH the translated and the raw descriptor — the helper
+        // scores max across the list. This is the cross-deploy payoff: a
+        // TrackRow witness finds the node now named Xd. No map → raw only,
+        // the pre-Stage-B behavior.
+        const stored = rule.anchor.witness.component;
+        const syms = await getSymbols(api);
+        const toMin = componentId.translateComponent(stored, componentId.invertSymbols(syms));
+        const expectedList = toMin !== stored ? [toMin, stored] : stored;
+        const matches = await api.componentId.find(expectedList);
         if (Array.isArray(matches) && matches.length === 1) {
           const synthesized = anchors.suggestAnchorFor(matches[0]);
           if (synthesized) {
-            const fresh = witnessMod.buildWitness(matches[0], { component: rule.anchor.witness.component })
+            const fresh = witnessMod.buildWitness(matches[0], { component: stored })
               || rule.anchor.witness;
             emitRebase({
               strategy: 'recover',

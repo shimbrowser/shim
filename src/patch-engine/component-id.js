@@ -77,10 +77,12 @@ function __shimComponentIdentity(el) {
 //
 // Weighting rationale: the nearest component name is the dominant identity
 // signal (0.5); deeper ancestry adds confidence (0.2); prop-key overlap
-// distinguishes two instances of the same component type (0.3). Name equality
-// is correct for Stage A's uses — verify (same page) and same-deploy recovery.
-// Cross-deploy minification renames (TrackRow→Wc→Xd) are Stage C's rename-map,
-// not this comparison.
+// distinguishes two instances of the same component type (0.3). The comparison
+// itself is name-equality; cross-deploy minification renames (TrackRow→Wc→Xd)
+// are handled ABOVE it by translating descriptors into original-name space via
+// the deploy's sourcemap-symbol map (translateComponent / the symbols arg to
+// matchComponent) before scoring — where no map exists, raw names compare
+// exactly as before.
 function componentScore(expected, actual) {
   if (!expected || !actual) return 0;
   var ep = expected.path || [];
@@ -116,6 +118,49 @@ function componentScore(expected, actual) {
   return score;
 }
 
+// --- Sourcemap-symbol translation (§8, Stage B "consume the map") -----------
+//
+// Component names read from a fiber are the CURRENT deploy's minified names
+// (`Wc`); the durable, legible identity is the ORIGINAL name (`TrackRow`).
+// Bundle Discovery caches a per-(host, bundleHash) `{ minified: original }`
+// map; these helpers move descriptors between the two name spaces. Both are
+// pure and null-tolerant: no map (or no entry for a name) → the name passes
+// through unchanged, so an unmapped site behaves exactly as before.
+
+// Return a copy of `desc` with every path name looked up through `symbols`
+// (minified→original). Names without an entry stay as-is. Returns `desc`
+// itself when nothing changed (cheap identity for the common no-map case).
+function translateComponent(desc, symbols) {
+  if (!desc || !Array.isArray(desc.path) || !desc.path.length) return desc;
+  if (!symbols || typeof symbols !== 'object') return desc;
+  let changed = false;
+  const path = desc.path.map((n) => {
+    const orig = symbols[n];
+    if (typeof orig === 'string' && orig && orig !== n) { changed = true; return orig; }
+    return n;
+  });
+  return changed ? { ...desc, path } : desc;
+}
+
+// Invert a {minified: original} map into {original: minified} for the reverse
+// translation (a stored ORIGINAL-space descriptor → the CURRENT deploy's
+// minified names, so the main-world find scan can match live fibers). An
+// original claimed by several minified tokens (memo/forwardRef aliases like
+// `StyledMenuOption$1/$2/$3` → `StyledMenuOption`) is AMBIGUOUS — dropped, not
+// guessed; the untranslated name rides along as the raw fallback descriptor.
+function invertSymbols(symbols) {
+  if (!symbols || typeof symbols !== 'object') return null;
+  const inv = {};
+  const dupes = {};
+  for (const [min, orig] of Object.entries(symbols)) {
+    if (typeof orig !== 'string' || !orig) continue;
+    if (dupes[orig]) continue;
+    if (orig in inv) { delete inv[orig]; dupes[orig] = true; continue; }
+    inv[orig] = min;
+  }
+  return inv;
+}
+
 // Pass threshold for verification. Mirrors the witness module's 0.5 — a clean
 // nearest-name match alone clears it; a nearest-name mismatch (score ≤ 0.2 + a
 // little prop overlap) does not.
@@ -131,14 +176,50 @@ const RECOVER_THRESHOLD = 0.6;
 // must SKIP the signal (treat as absent), never fail the candidate. This graceful
 // degradation is what lets the component signal only ever strengthen
 // verification where readable and never weaken it where not.
-function matchComponent(expected, actual) {
+//
+// `symbols` (optional): the CURRENT deploy's {minified: original} map. When
+// present, the actual descriptor is ALSO scored after translating its names to
+// original space, and the max of the two scores wins. The dual scoring is the
+// back-compat contract: a NEW witness (stored in original space) passes via the
+// translated comparison, while a PRE-EXISTING witness (stored minified names)
+// keeps passing via the raw one — translating unconditionally would false-
+// quarantine every witness captured before the symbol map existed.
+//
+// `expected.mapped` (stamped at capture when translation actually renamed the
+// stored path) says the witness can ONLY match through a map — its names are
+// originals that never appear raw in a minified fiber tree. For such a witness
+// the veto refuses to judge on uninterpretable evidence:
+//   - no map at all (Discovery raced/failed, shims paused during it, site
+//     stopped shipping maps) → applicable:false, NOT a fail — scoring raw
+//     original-vs-minified would false-quarantine a healthy shim on the first
+//     load after every deploy;
+//   - a map that can't express the expected nearest name (ambiguity-dropped
+//     alias, component renamed at source) → applicable:false for the same
+//     reason: "the map doesn't know this name" is indistinguishable from a
+//     rename, and never-false-quarantine outranks catching one more mis-attach
+//     (matchWitness's other signals still guard the anchor).
+function matchComponent(expected, actual, symbols) {
   if (!expected || !Array.isArray(expected.path) || !expected.path.length) {
     return { applicable: false, pass: true, score: 1 };
   }
   if (!actual || !Array.isArray(actual.path) || !actual.path.length) {
     return { applicable: false, pass: true, score: 1 };
   }
-  const score = componentScore(expected, actual);
+  if (expected.mapped) {
+    if (!symbols) return { applicable: false, pass: true, score: 1 };
+    let known = false;
+    for (const orig of Object.values(symbols)) {
+      if (orig === expected.path[0]) { known = true; break; }
+    }
+    if (!known) return { applicable: false, pass: true, score: 1 };
+  }
+  let score = componentScore(expected, actual);
+  if (symbols) {
+    const translated = translateComponent(actual, symbols);
+    if (translated !== actual) {
+      score = Math.max(score, componentScore(expected, translated));
+    }
+  }
   return { applicable: true, score, pass: score >= MATCH_THRESHOLD };
 }
 
@@ -176,14 +257,23 @@ function buildHelperSrc() {
       } else if (op === 'find') {
         var expected = null;
         try { expected = JSON.parse(root.getAttribute('data-shim-cid-expected') || 'null'); } catch (e) {}
-        if (expected) {
+        // Accept one descriptor or an ARRAY of them (a candidate matches if any
+        // scores). The engine passes [translated-to-minified, raw-original] so a
+        // stored original-space identity matches live minified fibers when the
+        // deploy ships a symbol map, and unmapped names still match raw.
+        var expectedList = Array.isArray(expected) ? expected : (expected ? [expected] : []);
+        if (expectedList.length) {
           var all = document.getElementsByTagName('*');
           var count = 0;
           for (var i = 0; i < all.length && i < 8000 && count < 10; i++) {
             var cid = __shimComponentIdentity(all[i]);
-            if (cid && componentScore(expected, cid) >= RECOVER_THRESHOLD) {
-              all[i].setAttribute('data-shim-cid-found', reqId);
-              count++;
+            if (!cid) continue;
+            for (var x = 0; x < expectedList.length; x++) {
+              if (expectedList[x] && componentScore(expectedList[x], cid) >= RECOVER_THRESHOLD) {
+                all[i].setAttribute('data-shim-cid-found', reqId);
+                count++;
+                break;
+              }
             }
           }
         }
@@ -203,6 +293,8 @@ module.exports = {
   buildHelperSrc,
   componentScore,
   matchComponent,
+  translateComponent,
+  invertSymbols,
   MATCH_THRESHOLD,
   RECOVER_THRESHOLD,
 };

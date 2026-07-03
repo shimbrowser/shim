@@ -77,6 +77,66 @@ function tMatch() {
   check('no expected → applicable:false', matchComponent(null, cid(['X'])).applicable === false, '');
 }
 
+// Sourcemap-symbol consumption (§8 Stage B): descriptors stored in original-name
+// space, live fibers compared through the deploy's {minified: original} map.
+function tSymbols() {
+  console.log('symbol translation (cross-deploy renames):');
+  const { translateComponent, invertSymbols, matchComponent } = componentId;
+
+  const symsA = { Wc: 'TrackRow', Xd: 'TrackList' };            // deploy A
+  const symsB = { Qq: 'TrackRow', Rr: 'TrackList' };            // deploy B renames
+
+  // Capture on deploy A: minified fiber names → stored as originals.
+  const captured = translateComponent(cid(['Wc', 'Xd', 'App'], ['trackId']), symsA);
+  check('capture translates min→original', captured.path.join(',') === 'TrackRow,TrackList,App', JSON.stringify(captured));
+  check('unmapped names pass through (App)', captured.path[2] === 'App', '');
+
+  // No map / no change → the SAME object back (cheap identity).
+  const untouched = cid(['App'], []);
+  check('no map → identity', translateComponent(untouched, null) === untouched, '');
+  check('no renames → identity', translateComponent(untouched, symsA) === untouched, '');
+
+  // Verify on deploy B: stored originals vs live minified names — raw score
+  // fails (Wc→Qq rename), the map-translated comparison passes. THE payoff.
+  const liveB = cid(['Qq', 'Rr', 'App'], ['trackId']);
+  check('cross-deploy verify FAILS without map', !matchComponent(captured, liveB).pass, '');
+  const withMap = matchComponent(captured, liveB, symsB);
+  check('cross-deploy verify PASSES with map', withMap.pass && withMap.score === 1, JSON.stringify(withMap));
+
+  // Back-compat: a PRE-map witness (stored minified) on the same deploy still
+  // passes via the raw comparison even when a map is supplied (max-of-both).
+  const legacy = matchComponent(cid(['Wc'], ['trackId']), cid(['Wc'], ['trackId']), symsA);
+  check('legacy minified witness still passes (dual scoring)', legacy.pass && legacy.score === 1, JSON.stringify(legacy));
+
+  // Recovery direction: invert deploy B's map, translate the stored original
+  // descriptor into B's minified space for the main-world scan.
+  const inv = invertSymbols(symsB);
+  check('invertSymbols flips the map', inv.TrackRow === 'Qq' && inv.TrackList === 'Rr', JSON.stringify(inv));
+  const toMin = translateComponent(captured, inv);
+  check('stored original → current minified for find', toMin.path.join(',') === 'Qq,Rr,App', JSON.stringify(toMin));
+
+  // Ambiguous inversion: several minified aliases of one original (memo/
+  // forwardRef `$1/$2/$3` suffix pattern) → dropped, not guessed.
+  const ambig = invertSymbols({ A1: 'StyledMenuOption', A2: 'StyledMenuOption', Bz: 'Sidebar' });
+  check('ambiguous original dropped on invert', !('StyledMenuOption' in ambig) && ambig.Sidebar === 'Bz', JSON.stringify(ambig));
+  check('invertSymbols(null) → null', invertSymbols(null) === null, '');
+
+  // The `mapped` veto guard — a witness whose names only exist through a map
+  // must never be scored raw against minified fibers. This is the first-load-
+  // after-a-deploy race: Discovery for the new bundle hasn't landed, symbols
+  // are null, and without the guard a HEALTHY shim would false-quarantine.
+  const mapped = { ...captured, mapped: true };
+  const noMap = matchComponent(mapped, liveB, null);
+  check('mapped witness + no map → skipped, never failed', noMap.applicable === false && noMap.pass, JSON.stringify(noMap));
+  const unknown = matchComponent(mapped, liveB, { Zz: 'SomethingElse' });
+  check('mapped witness + map lacking the name → skipped', unknown.applicable === false && unknown.pass, JSON.stringify(unknown));
+  const knownMap = matchComponent(mapped, liveB, symsB);
+  check('mapped witness + map knowing the name → scored normally', knownMap.applicable && knownMap.pass, JSON.stringify(knownMap));
+  // A mapped witness with a usable map still catches a REAL mis-attach.
+  const misattach = matchComponent(mapped, cid(['AdBanner'], ['campaignId']), symsB);
+  check('mapped witness still vetoes a real mismatch', misattach.applicable && !misattach.pass, JSON.stringify(misattach));
+}
+
 // Minimal element stub shaped like the subset matchWitness/buildWitness read.
 function el(tag, attrs = {}, { text = '', children = [], parent = null } = {}) {
   const node = {
@@ -118,6 +178,7 @@ function tHelperSrc() {
   check('contains the fiber walk', src.includes('__shimComponentIdentity'), '');
   check('inlines componentScore (one source of truth)', src.includes('function'), '');
   check('guards against double-install', src.includes('__shimCidHelper'), '');
+  check('find accepts a descriptor list (translated + raw)', src.includes('expectedList'), '');
   // Must parse as a standalone script (no external refs leaked in). vm.Script
   // compiles without executing — enough to catch a syntax error in the injected
   // source. `src` is our own generated helper, not untrusted input.
@@ -129,6 +190,7 @@ function tHelperSrc() {
 console.log('\n=== component-id harness ===\n');
 tScore();
 tMatch();
+tSymbols();
 tWitnessIntegration();
 tHelperSrc();
 console.log('');
