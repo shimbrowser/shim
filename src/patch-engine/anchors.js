@@ -308,28 +308,61 @@ function positionalPath(el) {
 // Scan the page for the element a witness describes — used when a rule's
 // selector(s) resolve nothing but the target may have just moved/renamed.
 // Returns the single element that matches the witness *strongly and
-// uniquely*, else null. Two guards make a silent re-anchor safe: a bar a
+// unambiguously*, else null. Guards that make a silent re-anchor safe: a bar a
 // touch above resolve-time's 0.5 verification (margin against a coincidental
 // match in the much larger scan pool — but low enough that real drift, like
-// losing one stable attr while keeping another, still recovers), and the
-// exactly-one requirement (multiple strong candidates mean "ask the LLM/user",
-// not "guess"). Tuning point if recovery proves too eager or too shy.
+// losing one stable attr while keeping another, still recovers), and DISJOINT
+// strong candidates mean "ask the LLM/user", not "guess".
+//
+// NESTED strong candidates are a different story (live-caught: this veto sank
+// every witness recovery on a real dashboard). textContent propagates upward,
+// so a target's wrapper ancestors — and the grid parent when the target is its
+// first child — score nearly as well as the target itself, purely by
+// CONTAINING it. A same-tag containment chain of strong matches is therefore
+// one finding, not genuine ambiguity: collapse it and take the best-scoring
+// element (the real target outscores ancestors on parent/child shape); on a
+// score tie prefer the DEEPER one — hiding too deep under-hides, hiding an
+// ancestor can take out innocent siblings. Tuning point if recovery proves
+// too eager or too shy.
 const RECOVER_MIN_SCORE = 0.6;
+const RECOVER_MAX_STRONG = 8;
+// Stub-friendly containment (harness elements have parentElement, not
+// .contains): is `b` inside `a`?
+function containsNode(a, b) {
+  for (let n = b && b.parentElement; n; n = n.parentElement) {
+    if (n === a) return true;
+  }
+  return false;
+}
 function witnessRecover(w, root = document) {
   if (!w || !w.tag) return null;
   const scope = root.getElementsByTagName ? root : document;
   const candidates = scope.getElementsByTagName(w.tag);
-  let best = null;
-  let strongCount = 0;
+  const strong = [];
   for (let i = 0; i < candidates.length && i < 5000; i++) {
     const el = candidates[i];
     const verdict = witness.matchWitness(w, el);
     if (verdict.pass && verdict.score >= RECOVER_MIN_SCORE) {
-      strongCount++;
-      if (!best || verdict.score > best.score) best = { el, score: verdict.score };
+      strong.push({ el, score: verdict.score });
+      if (strong.length > RECOVER_MAX_STRONG) return null; // a page full of look-alikes — don't guess
     }
   }
-  return strongCount === 1 ? best.el : null;
+  if (!strong.length) return null;
+  if (strong.length === 1) return strong[0].el;
+  // Multiple strong matches: only safe when they form ONE containment chain.
+  for (let i = 0; i < strong.length; i++) {
+    for (let j = i + 1; j < strong.length; j++) {
+      if (!containsNode(strong[i].el, strong[j].el) && !containsNode(strong[j].el, strong[i].el)) {
+        return null; // disjoint strong candidates — genuinely ambiguous
+      }
+    }
+  }
+  let pick = strong[0];
+  for (const c of strong.slice(1)) {
+    if (c.score > pick.score + 1e-9) pick = c;
+    else if (Math.abs(c.score - pick.score) <= 1e-9 && containsNode(pick.el, c.el)) pick = c;
+  }
+  return pick.el;
 }
 
 module.exports = {

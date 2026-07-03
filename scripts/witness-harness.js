@@ -195,10 +195,47 @@ function tStemVolatility() {
   check('different label still rejected', !matchWitness(w, different).pass, JSON.stringify(matchWitness(w, different)));
 }
 
+// witnessRecover containment-chain collapse. The live failure this pins: a
+// dashboard card's wrapper ancestors (and the grid parent, when the card is
+// its first child) inherit the card's textContent, so several same-tag
+// elements pass the witness strongly and the old exactly-one veto declined —
+// every witness recovery on a nested-div dashboard fell to the LLM tier.
+function tRecoverChain() {
+  console.log('witnessRecover chain collapse:');
+  const anchors = require('../src/patch-engine/anchors');
+
+  // grid > card > title — title/text nest so all three carry the same stem.
+  const title = el('div', {}, { text: 'Estimates Needing Attention' });
+  const bodyA = el('div', {}, { text: 'Colin\'s Palace Remodel' });
+  const card = el('div', {}, { children: [title, bodyA] });
+  const sibling = el('div', {}, { text: 'Recent Payments' });
+  const grid = el('div', {}, { children: [card, sibling] });
+  // Witness as captured from the card: div, stem, two div children, div parent.
+  const w = { v: WITNESS_VERSION, tag: 'div', textStem: 'estimates needing attentioncolin\'s pala', childTags: ['div', 'div'], parentTag: 'div' };
+  // grid also passes (stem inherited via first child, div children, and we give
+  // it a div parent so its parentTag signal matches too).
+  el('div', {}, { children: [grid] });
+
+  const root = { getElementsByTagName: (tag) => (tag === 'div' ? [grid, card, title, bodyA, sibling] : []) };
+  const found = anchors.witnessRecover(w, root);
+  check('nested chain collapses to the best-scoring element (the card)', found === card,
+    found === grid ? 'picked grid (ancestor)' : found === title ? 'picked title (descendant)' : found === null ? 'null (old veto)' : 'other');
+
+  // Two DISJOINT strong candidates (identical twin cards) — genuinely
+  // ambiguous, still declined.
+  const twinTitle = el('div', {}, { text: 'Estimates Needing Attention' });
+  const twinBody = el('div', {}, { text: 'Colin\'s Palace Remodel' });
+  const twin = el('div', {}, { children: [twinTitle, twinBody] });
+  el('div', {}, { children: [twin] });
+  const root2 = { getElementsByTagName: (tag) => (tag === 'div' ? [card, twin] : []) };
+  check('disjoint twins still decline (no guessing)', anchors.witnessRecover(w, root2) === null, '');
+}
+
 tBuild();
 tMatchTolerance();
 tMatchRejection();
 tStemVolatility();
+tRecoverChain();
 tLadder();
 
 if (failures) {
