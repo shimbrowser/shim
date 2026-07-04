@@ -484,7 +484,6 @@ function applyRule(rule, spec, api, mutations, handlers) {
   // settle-delayed rebase reconciler. `lastResolvedEl` is the single
   // resolved element (for capturing a fresh witness on a promote); null
   // when zero or multiple matched.
-  let lastNodesLen = 0;
   let lastResolvedEl = null;
   let rebaseReported = false;
 
@@ -581,7 +580,6 @@ function applyRule(rule, spec, api, mutations, handlers) {
     // thing") apart from plain no-match ("selector found nothing").
     lastWitnessRejection = witnessRejected ? (rejectedSample || { detail: [] }) : null;
     // Snapshot resolution for the settle-delayed rebase reconciler.
-    lastNodesLen = nodes.length;
     lastResolvedEl = nodes.length === 1 ? nodes[0] : null;
 
     // Witness capture (§8): a rule without a witness that resolves to
@@ -1184,7 +1182,7 @@ function routeRule(rule, spec, api, handlers) {
     const mountApi = Object.assign(Object.create(api), {
       cleanup(fn) { if (typeof fn === 'function') cleanups.push(fn); },
     });
-    let outputs = [];
+    let outputs;
     try {
       const raw = handlerFn({
         match: { path: routeMatch.normalizePath(location.pathname), params: m.params },
