@@ -9,11 +9,13 @@
 //
 // Covers:
 //   - suggestAnchorFor ranking (id > site data-* > aria > text > positional),
-//     and that it never anchors to data-shim* engine tokens
+//     and that it never anchors to data-shim* engine tokens. This exercises
+//     the LADDER HEAD in unverifiable-scope mode; the full ranked/DOM-verified
+//     ladder is covered by scripts/anchor-synthesis-harness.js
 //   - witnessRecover: finds the unique strong match, refuses when zero or
 //     when multiple strong candidates exist (ambiguity → no auto-rebase)
 
-const { suggestAnchorFor, witnessRecover } = require('../src/patch-engine/anchors');
+const { suggestAnchorFor, witnessRecover, witnessRecoverDetail } = require('../src/patch-engine/anchors');
 const { buildWitness } = require('../src/patch-engine/witness');
 
 let failures = 0;
@@ -85,6 +87,17 @@ function tWitnessRecover() {
   // Wrong tag entirely → witness tag gate means no candidates scanned.
   const root4 = makeRoot({ a: [el('a', { 'data-testid': 'favorite' }, { text: 'Favorite' })] });
   check('tag mismatch → null (getElementsByTagName(button) empty)', witnessRecover(w, root4) === null, '');
+
+  // Detail form: a refused scan says WHY (surfaced via the quarantine event
+  // + diagnostics so failed recoveries are debuggable).
+  const d1 = witnessRecoverDetail(w, root1);
+  check('detail: success carries el + null reason', d1.el === moved && d1.reason === null, JSON.stringify(d1.reason));
+  const d2 = witnessRecoverDetail(w, root2);
+  check('detail: absence reason names the miss', d2.el === null && /0 of \d+ <button>/.test(d2.reason), d2.reason);
+  const d3 = witnessRecoverDetail(w, root3);
+  check('detail: ambiguity reason counts disjoint strong', d3.el === null && /ambiguous — 2 disjoint/.test(d3.reason), d3.reason);
+  const d5 = witnessRecoverDetail(null, root1);
+  check('detail: no witness → explicit reason', d5.el === null && /no witness/.test(d5.reason), d5.reason);
 }
 
 tSuggestRanking();

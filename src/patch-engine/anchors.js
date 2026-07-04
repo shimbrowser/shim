@@ -141,7 +141,11 @@ function resolveOne(spec, root) {
       // `{ kind: "text", value: "Save changes", match?: "exact" | "contains" }`
       // Match by visible text content. "exact" (default) compares trimmed,
       // whitespace-normalized textContent for equality; "contains" looks
-      // for `value` as a substring.
+      // for `value` as a substring. Both are CASE-INSENSITIVE: sites restyle
+      // casing freely (CSS text-transform, copy edits), and the authoring
+      // model sees case-normalized witness stems in quarantine context —
+      // live-caught: an AI re-anchor to "Forgot password?" matched 0 because
+      // the page said "Forgot Password?". Case carries no identity here.
       //
       // Deepest-matcher semantics: a `<button>Save</button>` inside `<div>`
       // has BOTH the button and the div with `textContent === "Save"`. We
@@ -158,7 +162,7 @@ function resolveOne(spec, root) {
         return [];
       }
       const mode = spec.match === 'contains' ? 'contains' : 'exact';
-      const norm = (s) => (s || '').trim().replace(/\s+/g, ' ');
+      const norm = (s) => (s || '').trim().replace(/\s+/g, ' ').toLowerCase();
       const target = norm(value);
       const test = mode === 'contains'
         ? (txt) => txt.includes(target)
@@ -239,24 +243,40 @@ function isSiteDataAttr(name) {
   return name.startsWith('data-') && !name.startsWith('data-shim');
 }
 
-// Best single stable anchor spec for an element, strongest kind first:
-// id → site data-* → aria(role/label) → label-like text → positional CSS
-// path (last resort). Mirrors the picker's `suggestAnchors` ranking but
-// returns one spec, since a rebase needs a single new `primary`. The witness
-// re-verifies whatever this produces, so even the positional fallback is safe
-// (a wrong-but-resolving anchor fails the witness and re-quarantines).
-function suggestAnchorFor(el) {
-  if (!el || !el.tagName) return null;
+// Ranked ladder of stable anchor specs for an element, strongest first:
+// id → site data-* → aria(role/label) → text → semantic class → ancestor-
+// scoped → positional CSS path (true last resort). Mirrors the picker's
+// `suggestAnchors` ranking, plus DOM verification: when a real document is
+// available each candidate is resolved live, candidates that don't find the
+// element are dropped, and candidates that find it UNIQUELY outrank stronger
+// kinds that also match a crowd (a `data-testid` shared by 20 rows loses to
+// a text anchor that finds exactly this one — the recover paths only ever
+// re-point single-target rules, so uniqueness is the right tiebreak). The
+// witness re-verifies whatever this produces, so even the positional tail is
+// safe (a wrong-but-resolving anchor fails the witness and re-quarantines).
+//
+// Consumers: `suggestAnchorFor` (head of the ladder — a rebase's new
+// `primary`) and the engine's recover paths, which commit the runner-up
+// rungs as fresh fallbacks so the NEXT deploy has a ladder to promote from
+// instead of a lone primary.
+const LADDER_MAX = 4;
+
+function suggestAnchorLadder(el, root) {
+  if (!el || !el.tagName) return [];
+  const scope = root || (typeof document !== 'undefined' ? document : null);
+  const verifiable = !!(scope && typeof scope.querySelectorAll === 'function');
   const tag = el.tagName.toLowerCase();
+
+  const candidates = [];
 
   const id = el.getAttribute && el.getAttribute('id');
   if (id && /^[A-Za-z][\w-]*$/.test(id)) {
-    return { kind: 'css', value: `#${id}` };
+    candidates.push({ kind: 'css', value: `#${id}` });
   }
 
   for (const attr of el.attributes || []) {
     if (isSiteDataAttr(attr.name) && /^[a-zA-Z][\w-]*$/.test(attr.name)) {
-      return { kind: 'data-attr', name: attr.name, value: attr.value };
+      candidates.push({ kind: 'data-attr', name: attr.name, value: attr.value });
     }
   }
 
@@ -266,20 +286,120 @@ function suggestAnchorFor(el) {
     const a = { kind: 'aria' };
     if (role && role.trim()) a.role = role.trim();
     if (label && label.trim()) a.label = label.trim();
-    return a;
+    candidates.push(a);
   }
 
+  // Text rung. Label-like tags/roles as before, but ALSO leaf elements of
+  // any tag — an attribute-poor `<div>Watchlist</div>` used to fall straight
+  // through to a positional path even though its text is the most durable
+  // signal it has. Deepest-matcher semantics make leaf-only safe: a wrapper
+  // whose text lives in a child wouldn't resolve to itself anyway (the
+  // verification pass below catches exactly that and drops the candidate).
   const text = (el.textContent || '').trim().replace(/\s+/g, ' ');
   const labelLike = /^(button|a|label|h[1-6])$/.test(tag) ||
     role === 'button' || role === 'link';
-  if (labelLike && text && text.length <= 60 && !text.includes('\n')) {
-    return { kind: 'text', value: text };
+  const leaf = !el.children || el.children.length === 0;
+  if ((labelLike || leaf) && text && text.length <= 60 && !text.includes('\n')) {
+    candidates.push({ kind: 'text', value: text });
   }
 
-  // Last resort: a short positional CSS path. Walk up to 3 levels, using
-  // :nth-of-type so the path survives sibling text/attribute churn better
-  // than a bare tag. Anchored at an id'd ancestor if one is close.
-  return { kind: 'css', value: positionalPath(el) };
+  // Semantic-class rung: human-named classes (`.login-form`, `.track-row`)
+  // survive deploys that reshuffle siblings; generated ones (css-modules /
+  // styled-components hashes) churn every build and are excluded.
+  const stableClasses = stableClassesOf(el).slice(0, 2);
+  if (stableClasses.length === 2) {
+    candidates.push({ kind: 'css', value: `${tag}.${stableClasses[0]}.${stableClasses[1]}` });
+  }
+  if (stableClasses.length >= 1) {
+    candidates.push({ kind: 'css', value: `${tag}.${stableClasses[0]}` });
+  }
+
+  // Ancestor-scoped rung: `#stable-ancestor tag[.class]` — often unique where
+  // the bare tag/class isn't, and still structural-churn-proof above the
+  // scope point. Only worth emitting when we can verify it (unverified it's
+  // just a guess that would outrank the positional tail on nothing).
+  if (verifiable) {
+    const anc = stableAncestorSelector(el);
+    if (anc) {
+      const tail = stableClasses.length ? `${tag}.${stableClasses[0]}` : tag;
+      candidates.push({ kind: 'css', value: `${anc} ${tail}` });
+    }
+  }
+
+  // Verify + rank. Unverifiable scope (bare-node harness stubs): keep the
+  // kind order as-is. Verifiable: drop candidates that don't resolve to this
+  // element, then stable-partition unique-hitters ahead of crowd-matchers.
+  let ranked;
+  if (!verifiable) {
+    ranked = candidates;
+  } else {
+    const unique = [];
+    const crowd = [];
+    for (const spec of candidates) {
+      let found;
+      try {
+        found = resolveOne(spec, scope);
+      } catch (_) {
+        continue;
+      }
+      if (!found.includes(el)) continue;
+      (found.length === 1 ? unique : crowd).push(spec);
+    }
+    ranked = unique.concat(crowd);
+  }
+
+  // Positional path: always last (dropped only when the cap is already full
+  // of stronger verified rungs) — the ladder must return SOMETHING for a
+  // witness-recovered element even when it has no signal at all, and the
+  // witness veto keeps a brittle tail from mis-attaching.
+  ranked.push({ kind: 'css', value: positionalPath(el) });
+  return ranked.slice(0, LADDER_MAX);
+}
+
+// Back-compat single-spec form — the strongest rung of the ladder.
+function suggestAnchorFor(el, root) {
+  const ladder = suggestAnchorLadder(el, root);
+  return ladder.length ? ladder[0] : null;
+}
+
+// Class tokens that look authored rather than generated by a build tool.
+// Generated patterns excluded: css-in-js prefixes (`css-1a2b3c`), hash-y
+// hex runs, long digit runs, css-modules `Block_elem__x7Kd2` suffixes,
+// 1-2-letter+digit minified names (`x9`). BEM (`card__title`) and plain
+// utilities survive the filter — a broad utility combo just loses the
+// uniqueness ranking instead.
+function looksGeneratedClass(cls) {
+  if (!/^[A-Za-z_][\w-]*$/.test(cls)) return true; // needs escaping → skip
+  if (cls.length < 3) return true;
+  if (/^(css|jss|jsx|sc|svelte|emotion|chakra)-/i.test(cls)) return true;
+  if (/\d{3,}/.test(cls)) return true;
+  if (/[0-9a-f]{6,}/i.test(cls)) return true;
+  if (/^[A-Za-z]{1,2}\d/.test(cls)) return true;
+  if (/__[\w-]*\d[\w-]*$/.test(cls)) return true;
+  return false;
+}
+
+function stableClassesOf(el) {
+  const raw = el.getAttribute && el.getAttribute('class');
+  if (!raw || typeof raw !== 'string') return [];
+  return raw.trim().split(/\s+/).filter((c) => c && !looksGeneratedClass(c));
+}
+
+// Nearest ancestor (within 5 levels) carrying an id or a site data-*
+// attribute — a stable scope to hang a descendant selector off.
+function stableAncestorSelector(el) {
+  let cur = el.parentElement;
+  for (let depth = 0; cur && cur.tagName && depth < 5; depth++, cur = cur.parentElement) {
+    const aid = cur.getAttribute && cur.getAttribute('id');
+    if (aid && /^[A-Za-z][\w-]*$/.test(aid)) return `#${aid}`;
+    for (const attr of cur.attributes || []) {
+      if (isSiteDataAttr(attr.name) && /^[a-zA-Z][\w-]*$/.test(attr.name)) {
+        const v = attr.value != null ? `="${escapeAttrValue(String(attr.value))}"` : '';
+        return `[${attr.name}${v}]`;
+      }
+    }
+  }
+  return null;
 }
 
 function positionalPath(el) {
@@ -334,8 +454,12 @@ function containsNode(a, b) {
   }
   return false;
 }
-function witnessRecover(w, root = document) {
-  if (!w || !w.tag) return null;
+// Detail-returning form: `{ el, reason }` where a null `el` carries WHY the
+// scan refused — surfaced through the quarantine event/diagnostics so a
+// failed recovery is debuggable after the fact (live-caught: a recovery
+// failure escalated to an LLM turn and nothing recorded which veto fired).
+function witnessRecoverDetail(w, root = document) {
+  if (!w || !w.tag) return { el: null, reason: 'no witness to scan with' };
   const scope = root.getElementsByTagName ? root : document;
   const candidates = scope.getElementsByTagName(w.tag);
   const strong = [];
@@ -344,16 +468,22 @@ function witnessRecover(w, root = document) {
     const verdict = witness.matchWitness(w, el);
     if (verdict.pass && verdict.score >= RECOVER_MIN_SCORE) {
       strong.push({ el, score: verdict.score });
-      if (strong.length > RECOVER_MAX_STRONG) return null; // a page full of look-alikes — don't guess
+      if (strong.length > RECOVER_MAX_STRONG) {
+        // a page full of look-alikes — don't guess
+        return { el: null, reason: `>${RECOVER_MAX_STRONG} strong matches — page full of look-alikes` };
+      }
     }
   }
-  if (!strong.length) return null;
-  if (strong.length === 1) return strong[0].el;
+  if (!strong.length) {
+    return { el: null, reason: `0 of ${Math.min(candidates.length, 5000)} <${w.tag}> candidates matched strongly` };
+  }
+  if (strong.length === 1) return { el: strong[0].el, reason: null };
   // Multiple strong matches: only safe when they form ONE containment chain.
   for (let i = 0; i < strong.length; i++) {
     for (let j = i + 1; j < strong.length; j++) {
       if (!containsNode(strong[i].el, strong[j].el) && !containsNode(strong[j].el, strong[i].el)) {
-        return null; // disjoint strong candidates — genuinely ambiguous
+        // disjoint strong candidates — genuinely ambiguous
+        return { el: null, reason: `ambiguous — ${strong.length} disjoint strong matches` };
       }
     }
   }
@@ -362,12 +492,18 @@ function witnessRecover(w, root = document) {
     if (c.score > pick.score + 1e-9) pick = c;
     else if (Math.abs(c.score - pick.score) <= 1e-9 && containsNode(pick.el, c.el)) pick = c;
   }
-  return pick.el;
+  return { el: pick.el, reason: null };
+}
+
+function witnessRecover(w, root = document) {
+  return witnessRecoverDetail(w, root).el;
 }
 
 module.exports = {
   resolveAll,
   resolveAllWithSource,
   suggestAnchorFor,
+  suggestAnchorLadder,
   witnessRecover,
+  witnessRecoverDetail,
 };

@@ -26,6 +26,32 @@ const MUTATION_KEYS = new Set([
   'kind', 'properties', 'handler', 'mount', 'pattern', 'title', 'from', 'to', 'exceptPaths',
 ]);
 
+// Anchor-quality lint (§8): the model drifts toward positional CSS
+// (`:nth-child(3)`) and build-generated classes (`.css-1a2b3c`) — selectors
+// that resolve today and die on the next deploy/reorder, turning into
+// quarantine → re-anchor churn. Warn on the PRIMARY only: the engine's own
+// synthesis legitimately keeps a positional spec as the ladder's last
+// fallback, so a positional tail is fine — a positional primary is the smell.
+const POSITIONAL_RE = /:(?:nth-child|nth-of-type|nth-last-child|nth-last-of-type|first-child|last-child|first-of-type|last-of-type|only-child|only-of-type)\b/i;
+const GENERATED_CLASS_RE = /\.(?:css|jss|jsx|sc|svelte|emotion|chakra)-[A-Za-z0-9_-]+|\.[\w-]*[0-9a-f]{6,}/i;
+
+function lintPrimaryAnchor(rid, primary, warnings) {
+  if (!primary || primary.kind !== 'css' || typeof primary.value !== 'string') return;
+  if (POSITIONAL_RE.test(primary.value)) {
+    warnings.push(
+      `rule "${rid}": primary anchor "${primary.value}" is positional — it breaks when the site reorders or `
+      + 'inserts siblings, which happens on most deploys. Anchor on WHY this element is the target instead: '
+      + 'a data-* attribute, aria role/label, or its text. Positional CSS is acceptable only as the last fallback.',
+    );
+  }
+  if (GENERATED_CLASS_RE.test(primary.value)) {
+    warnings.push(
+      `rule "${rid}": primary anchor "${primary.value}" uses a build-generated class name — these are rewritten `
+      + 'on every deploy. Prefer a data-* attribute, aria role/label, text, or a human-named class.',
+    );
+  }
+}
+
 function lintSpec(spec) {
   const errors = [];
   const warnings = [];
@@ -53,6 +79,7 @@ function lintSpec(spec) {
           warnings.push(`rule "${rid}": unknown anchor field "${k}" — ignored by the engine.`);
         }
       }
+      lintPrimaryAnchor(rid, rule.anchor.primary, warnings);
     }
 
     for (const mut of rule.mutations || []) {

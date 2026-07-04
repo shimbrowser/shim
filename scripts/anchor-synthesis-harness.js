@@ -1,0 +1,254 @@
+// Diagnostic harness for anchor synthesis quality (§8): suggestAnchorLadder /
+// suggestAnchorFor — the ranked, DOM-verified ladder the auto-rebase recover
+// paths use to re-point a rule. Bare node — no DOM, no Electron: elements are
+// stubs, and the "document" stub implements just enough querySelectorAll for
+// the selector shapes synthesis emits (#id, [attr="v"], tag.cls, descendant
+// combos). Run when touching the synthesis/ranking logic:
+//
+//   node scripts/anchor-synthesis-harness.js
+//
+// Covers:
+//   - uniqueness ranking: a unique weaker-kind anchor outranks a strong kind
+//     shared by a crowd (the recover paths only re-point single-target rules)
+//   - candidates that resolve to a DIFFERENT element are dropped (text
+//     deepest-matcher resolving to a child, not the wrapper)
+//   - generated-class filtering (css-in-js hashes, minified names, css-module
+//     suffixes) vs human-named / BEM classes
+//   - text rung for attribute-poor leaf elements (not just button/link/heading)
+//   - ancestor-scoped rung beating a crowd-matching bare class
+//   - positional path always present, always last; ladder capped
+//   - suggestAnchorFor back-compat: head of the ladder, kind-ordered when the
+//     scope can't verify (stub roots without querySelectorAll)
+
+const { suggestAnchorFor, suggestAnchorLadder, resolveAll } = require('../src/patch-engine/anchors');
+
+let failures = 0;
+function check(label, cond, detail) {
+  if (cond) console.log(`  ✓ ${label}`);
+  else { failures++; console.error(`  ✗ ${label}${detail ? ` — ${detail}` : ''}`); }
+}
+
+// --- element + document stubs -------------------------------------------
+// Rich enough for synthesis verification: parentElement links, descendant
+// walks, and a micro selector matcher for the grammar synthesis generates.
+
+function el(tag, attrs = {}, { text = '', children = [] } = {}) {
+  const node = {
+    tagName: tag.toUpperCase(),
+    attributes: Object.entries(attrs).map(([name, value]) => ({ name, value })),
+    children,
+    parentElement: null,
+    getAttribute(n) {
+      const f = this.attributes.find((a) => a.name === n);
+      return f ? f.value : null;
+    },
+    get textContent() { return text + children.map((c) => c.textContent).join(''); },
+    querySelectorAll(sel) {
+      if (sel === '*') return descendantsOf(this);
+      return [];
+    },
+  };
+  for (const c of children) c.parentElement = node;
+  return node;
+}
+
+function descendantsOf(node) {
+  const out = [];
+  for (const c of node.children || []) {
+    out.push(c, ...descendantsOf(c));
+  }
+  return out;
+}
+
+// Micro selector matcher. Supports what synthesis emits for its verifiable
+// candidates: `#id`, `[attr]`, `[attr="v"]`, `tag`, `.cls`, compounds of
+// those, and descendant combinators (single space). No `>` / `:nth-*` — the
+// positional tail is appended AFTER verification, never resolved here.
+function matchesSimple(node, part) {
+  const tokens = part.match(/^[a-z0-9-]+|#[\w-]+|\.[\w-]+|\[[^\]]+\]/gi) || [];
+  let consumed = 0;
+  for (const t of tokens) {
+    consumed += t.length;
+    if (t.startsWith('#')) {
+      if (node.getAttribute('id') !== t.slice(1)) return false;
+    } else if (t.startsWith('.')) {
+      const cls = (node.getAttribute('class') || '').split(/\s+/);
+      if (!cls.includes(t.slice(1))) return false;
+    } else if (t.startsWith('[')) {
+      const m = t.slice(1, -1).match(/^([\w-]+)(?:="(.*)")?$/);
+      if (!m) return false;
+      const v = node.getAttribute(m[1]);
+      if (m[2] !== undefined ? v !== m[2] : v === null) return false;
+    } else if (node.tagName.toLowerCase() !== t.toLowerCase()) {
+      return false;
+    }
+  }
+  return consumed === part.length && tokens.length > 0;
+}
+
+function makeDoc(rootChildren) {
+  const rootEl = el('body', {}, { children: rootChildren });
+  const all = descendantsOf(rootEl);
+  return {
+    querySelectorAll(sel) {
+      const parts = sel.trim().split(/\s+/);
+      return all.filter((node) => {
+        if (!matchesSimple(node, parts[parts.length - 1])) return false;
+        let i = parts.length - 2;
+        let cur = node.parentElement;
+        while (i >= 0 && cur) {
+          if (matchesSimple(cur, parts[i])) i--;
+          cur = cur.parentElement;
+        }
+        return i < 0;
+      });
+    },
+    getElementsByTagName(tag) {
+      if (tag === '*') return all;
+      return all.filter((n) => n.tagName.toLowerCase() === tag.toLowerCase());
+    },
+  };
+}
+
+// --- tests ----------------------------------------------------------------
+
+function tUniquenessRanking() {
+  console.log('uniqueness ranking:');
+  // Three rows share data-testid="row"; the target alone says "Watchlist".
+  const target = el('button', { 'data-testid': 'row' }, { text: 'Watchlist' });
+  const rows = [
+    el('button', { 'data-testid': 'row' }, { text: 'Discover' }),
+    target,
+    el('button', { 'data-testid': 'row' }, { text: 'Library' }),
+  ];
+  const doc = makeDoc(rows);
+  const ladder = suggestAnchorLadder(target, doc);
+  check('unique text outranks crowd data-attr',
+    ladder[0] && ladder[0].kind === 'text' && ladder[0].value === 'Watchlist',
+    JSON.stringify(ladder[0]));
+  check('crowd data-attr kept as a runner-up rung',
+    ladder.some((s) => s.kind === 'data-attr' && s.name === 'data-testid'),
+    JSON.stringify(ladder));
+
+  // When the strong kind IS unique, it stays on top.
+  const solo = el('button', { 'data-testid': 'fav' }, { text: 'Favorite' });
+  const doc2 = makeDoc([solo, el('button', {}, { text: 'Other' })]);
+  const ladder2 = suggestAnchorLadder(solo, doc2);
+  check('unique data-attr stays primary',
+    ladder2[0] && ladder2[0].kind === 'data-attr' && ladder2[0].value === 'fav',
+    JSON.stringify(ladder2[0]));
+}
+
+function tWrongElementDropped() {
+  console.log('wrong-element candidates dropped:');
+  // Wrapper div whose text lives in a child leaf: the text candidate
+  // deepest-matches the child, so it must be dropped for the wrapper.
+  const label = el('span', {}, { text: 'Settings' });
+  const wrapper = el('div', { class: 'nav-item' }, { children: [label] });
+  const doc = makeDoc([wrapper, el('div', { class: 'nav-item' }, { children: [el('span', {}, { text: 'Home' })] })]);
+  const ladder = suggestAnchorLadder(wrapper, doc);
+  check('text anchor resolving to the child is not used for the wrapper',
+    !ladder.some((s) => s.kind === 'text'),
+    JSON.stringify(ladder));
+}
+
+function tGeneratedClassFilter() {
+  console.log('generated-class filtering:');
+  const target = el('div', { class: 'css-1a2b3c4 track-row x9' }, { text: 'A very long piece of body text that exceeds sixty characters total' });
+  const doc = makeDoc([target, el('div', { class: 'css-9z8y7x6' })]);
+  const ladder = suggestAnchorLadder(target, doc);
+  check('human-named class used',
+    ladder.some((s) => s.kind === 'css' && s.value === 'div.track-row'),
+    JSON.stringify(ladder));
+  check('generated classes never appear',
+    !ladder.some((s) => s.kind === 'css' && /css-|x9/.test(s.value)),
+    JSON.stringify(ladder));
+}
+
+function tLeafTextRung() {
+  console.log('attribute-poor leaf text:');
+  // Plain div, no attrs, short distinctive text — used to fall straight to a
+  // positional path.
+  const target = el('div', {}, { text: 'Recently played' });
+  const doc = makeDoc([target, el('div', {}, { text: 'Made for you' })]);
+  const ladder = suggestAnchorLadder(target, doc);
+  check('leaf div gets a text anchor',
+    ladder[0] && ladder[0].kind === 'text' && ladder[0].value === 'Recently played',
+    JSON.stringify(ladder[0]));
+}
+
+function tAncestorScoping() {
+  console.log('ancestor scoping:');
+  // `.row` matches in both panels; only `#main .row`-style scoping is unique.
+  const target = el('div', { class: 'row' });
+  const main = el('section', { id: 'main' }, { children: [target] });
+  const side = el('section', { id: 'side' }, { children: [el('div', { class: 'row' }), el('div', { class: 'row' })] });
+  const doc = makeDoc([main, side]);
+  const ladder = suggestAnchorLadder(target, doc);
+  check('scoped selector wins over crowd bare class',
+    ladder[0] && ladder[0].kind === 'css' && ladder[0].value === '#main div.row',
+    JSON.stringify(ladder[0]));
+  check('bare class demoted but kept',
+    ladder.some((s) => s.kind === 'css' && s.value === 'div.row'),
+    JSON.stringify(ladder));
+}
+
+function tPositionalTail() {
+  console.log('positional tail:');
+  // No signal at all → ladder is just the positional path.
+  const bare = el('span', {}, { text: 'x'.repeat(80) });
+  const doc = makeDoc([bare]);
+  const ladder = suggestAnchorLadder(bare, doc);
+  check('signal-less element still gets a (positional) anchor',
+    ladder.length === 1 && ladder[0].kind === 'css' && ladder[0].value.includes('span'),
+    JSON.stringify(ladder));
+
+  // Rich element: positional still present but never first, ladder capped.
+  const rich = el('button', { id: 'fav', 'data-testid': 'fav', role: 'button', 'aria-label': 'Favorite' }, { text: 'Favorite' });
+  const doc2 = makeDoc([rich]);
+  const ladder2 = suggestAnchorLadder(rich, doc2);
+  check('ladder capped at 4', ladder2.length <= 4, `${ladder2.length}`);
+  check('positional never first on a rich element',
+    !/nth-of-type|>/.test(ladder2[0].value || ''),
+    JSON.stringify(ladder2[0]));
+}
+
+function tBackCompat() {
+  console.log('suggestAnchorFor back-compat (unverifiable stub → kind order):');
+  check('id wins',
+    JSON.stringify(suggestAnchorFor(el('div', { id: 'cart', 'data-testid': 'x' }))) === JSON.stringify({ kind: 'css', value: '#cart' }), '');
+  check('site data-* when no id',
+    JSON.stringify(suggestAnchorFor(el('div', { 'data-testid': 'cart' }))) === JSON.stringify({ kind: 'data-attr', name: 'data-testid', value: 'cart' }), '');
+  check('never anchors to data-shim* tokens',
+    JSON.stringify(suggestAnchorFor(el('button', { 'data-shim-css': 'shim-x', role: 'button', 'aria-label': 'Buy' }))) === JSON.stringify({ kind: 'aria', role: 'button', label: 'Buy' }), '');
+}
+
+function tTextCaseInsensitive() {
+  console.log('text matching is case-insensitive:');
+  // The live bug: an AI re-anchor copied the witness stem's lowercase form
+  // ("Forgot password?") while the page said "Forgot Password?" — exact text
+  // matching was case-sensitive, so the committed anchor matched 0 elements.
+  const target = el('button', {}, { text: 'Forgot Password?' });
+  const doc = makeDoc([target, el('button', {}, { text: 'Sign In' })]);
+  check('exact match ignores case',
+    resolveAll({ primary: { kind: 'text', value: 'Forgot password?' } }, doc)[0] === target, '');
+  check('contains match ignores case',
+    resolveAll({ primary: { kind: 'text', value: 'forgot', match: 'contains' } }, doc)[0] === target, '');
+  check('non-matching text still resolves nothing',
+    resolveAll({ primary: { kind: 'text', value: 'Reset Password?' } }, doc).length === 0, '');
+}
+
+tUniquenessRanking();
+tTextCaseInsensitive();
+tWrongElementDropped();
+tGeneratedClassFilter();
+tLeafTextRung();
+tAncestorScoping();
+tPositionalTail();
+tBackCompat();
+
+if (failures) {
+  console.error(`\n${failures} check(s) FAILED`);
+  process.exit(1);
+}
+console.log('\nall checks passed');

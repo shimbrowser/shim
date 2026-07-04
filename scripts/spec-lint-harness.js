@@ -58,6 +58,26 @@ console.log('per-patch declarative kind is allowed');
 res = lintSpec({ mutations: { 'my-custom': {} }, rules: [{ id: 'a', mutations: [{ kind: 'my-custom' }] }] });
 check('declared custom kind: no error', res.errors.length === 0, JSON.stringify(res.errors));
 
+console.log('anchor-quality warnings (positional / generated-class primaries)');
+res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: 'div > div:nth-child(3) span' } }, mutations: [{ kind: 'hide' }] }] });
+check('positional primary warns', res.warnings.some((w) => /positional/.test(w)), JSON.stringify(res.warnings));
+check('positional primary is NOT an error', res.errors.length === 0);
+res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.css-1a2b3c4' } }, mutations: [{ kind: 'hide' }] }] });
+check('generated-class primary warns', res.warnings.some((w) => /generated/.test(w)), JSON.stringify(res.warnings));
+res = lintSpec({
+  rules: [{
+    id: 'a',
+    anchor: {
+      primary: { kind: 'data-attr', name: 'data-testid', value: 'cart' },
+      fallbacks: [{ kind: 'css', value: 'main > div:nth-of-type(2)' }],
+    },
+    mutations: [{ kind: 'hide' }],
+  }],
+});
+check('positional FALLBACK does not warn (legit ladder tail)', res.warnings.length === 0, JSON.stringify(res.warnings));
+res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: 'main .track-row' } }, mutations: [{ kind: 'hide' }] }] });
+check('human-named class primary does not warn', res.warnings.length === 0, JSON.stringify(res.warnings));
+
 console.log('assertNoSpecErrors');
 let threw = false;
 try { assertNoSpecErrors({ rules: [{ id: 'a', mutations: [{ kind: 'fake' }] }] }); } catch (_) { threw = true; }

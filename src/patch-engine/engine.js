@@ -696,6 +696,11 @@ function applyRule(rule, spec, api, mutations, handlers) {
   // (see the late-render grace note in reconcile).
   const RECONCILE_RETRY_MS = 2500;
   let reconcileRetried = false;
+  // Why the deterministic recoveries refused, for the quarantine that follows
+  // — "component-id: no match; witness-scan: ambiguous — 2 disjoint strong
+  // matches". Emitted on the quarantine event + diagnostics so a failed
+  // recovery is debuggable after the fact instead of silently escalating.
+  let lastRecoveryDetail = null;
   // The current page fingerprint, resolved lazily here (not at run() time):
   // boot() builds the getter before the page's scripts are in the DOM, so it
   // would compute null then. By reconcile time the DOM is settled.
@@ -704,6 +709,24 @@ function applyRule(rule, spec, api, mutations, handlers) {
     const p = a && a.primary;
     if (!p) return '(none)';
     return `${p.kind}:${p.value || p.name || p.role || p.label || ''}`;
+  };
+  // Fallbacks for a recovered anchor: the synthesis ladder's runner-up rungs
+  // first (fresh, verified against the found element — they give the NEXT
+  // deploy something to promote from), then the rule's previous fallbacks
+  // (A/B-flip insurance), deduped against the new primary and each other,
+  // capped so the ladder never grows without bound across repeated recovers.
+  const mergeFallbacks = (ladder, prevFallbacks) => {
+    const seen = new Set([JSON.stringify(ladder[0])]);
+    const out = [];
+    const prev = Array.isArray(prevFallbacks) ? prevFallbacks : [];
+    for (const spec of [...ladder.slice(1), ...prev]) {
+      const key = JSON.stringify(spec);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(spec);
+      if (out.length >= 4) break;
+    }
+    return out;
   };
   const reportUnresolved = () => {
     if (typeof api.reportEvent !== 'function') return;
@@ -715,6 +738,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
         expected: rule.anchor?.witness || null,
         seen: lastWitnessRejection.detail || [],
         rejectedVia: lastWitnessRejection.source || null,
+        recovery: lastRecoveryDetail,
       });
       return;
     }
@@ -841,6 +865,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
     // drift surfaces instead of self-healing).
     if (state.size === 0) {
       const hasWitness = !!rule.anchor?.witness;
+      const recoveryNotes = [];
       // Component-identity recovery (§8), tried first because it's the strongest
       // signal: the selector died, but the component that rendered the target
       // may still be on the page. The main-world helper scans for nodes whose
@@ -863,8 +888,8 @@ function applyRule(rule, spec, api, mutations, handlers) {
         const expectedList = toMin !== stored ? [toMin, stored] : stored;
         const matches = await api.componentId.find(expectedList);
         if (Array.isArray(matches) && matches.length === 1) {
-          const synthesized = anchors.suggestAnchorFor(matches[0]);
-          if (synthesized) {
+          const ladder = anchors.suggestAnchorLadder(matches[0]);
+          if (ladder.length) {
             const fresh = witnessMod.buildWitness(matches[0], { component: stored })
               || rule.anchor.witness;
             emitRebase({
@@ -874,35 +899,49 @@ function applyRule(rule, spec, api, mutations, handlers) {
               // Diagnostics-only: lets a human tell WHICH recovery fired.
               via: 'component-identity',
               anchor: {
-                primary: synthesized,
-                fallbacks: Array.isArray(rule.anchor.fallbacks) ? rule.anchor.fallbacks : [],
+                primary: ladder[0],
+                fallbacks: mergeFallbacks(ladder, rule.anchor.fallbacks),
                 witness: fresh,
               },
               from: summarizeAnchor(rule.anchor),
-              to: summarizeAnchor({ primary: synthesized }),
+              to: summarizeAnchor({ primary: ladder[0] }),
             });
             return;
           }
         }
+        recoveryNotes.push(!Array.isArray(matches) || matches.length === 0
+          ? 'component-id: no match'
+          : `component-id: ${matches.length} matches (not unique)`);
       }
       if (canRebase && hasWitness) {
-        const found = anchors.witnessRecover(rule.anchor.witness, document);
-        const synthesized = found ? anchors.suggestAnchorFor(found) : null;
-        if (found && synthesized) {
+        const rec = anchors.witnessRecoverDetail(rule.anchor.witness, document);
+        const found = rec.el;
+        const ladder = found ? anchors.suggestAnchorLadder(found) : [];
+        if (rec.reason) recoveryNotes.push(`witness-scan: ${rec.reason}`);
+        if (found && ladder.length) {
           emitRebase({
             strategy: 'recover',
             via: 'witness',
             anchor: {
-              primary: synthesized,
-              fallbacks: Array.isArray(rule.anchor.fallbacks) ? rule.anchor.fallbacks : [],
+              primary: ladder[0],
+              fallbacks: mergeFallbacks(ladder, rule.anchor.fallbacks),
               witness: witnessMod.buildWitness(found) || rule.anchor.witness,
             },
             from: summarizeAnchor(rule.anchor),
-            to: summarizeAnchor({ primary: synthesized }),
+            to: summarizeAnchor({ primary: ladder[0] }),
           });
           return;
         }
+      } else if (canRebase && !hasWitness) {
+        // No witness at all (e.g. a prior bad commit dropped it): recovery is
+        // structurally impossible and the rule can only ever report no-match.
+        // Say so where a human debugging "why isn't this healing" will look.
+        console.warn(
+          `[shim] rule "${rule.id}" cannot auto-recover: no witness on the anchor `
+          + '(re-commit the rule while it resolves to re-capture one)',
+        );
       }
+      lastRecoveryDetail = recoveryNotes.length ? recoveryNotes.join('; ') : null;
       // Late-render grace (one retry) for the two paths about to ESCALATE —
       // quarantine banner, and with auto-repair on, an LLM re-anchor turn:
       //
@@ -946,6 +985,9 @@ function applyRule(rule, spec, api, mutations, handlers) {
       // set) falls through to reportUnresolved, which emits the quarantine WITH
       // its expected-vs-seen diff — don't preempt that and lose the diff.
       if (deploy && hasWitness && !lastWitnessRejection) {
+        if (lastRecoveryDetail) {
+          console.warn(`[shim] rule "${rule.id}" recovery failed → quarantine (${lastRecoveryDetail})`);
+        }
         api.reportEvent('rule-quarantined', {
           specId: spec.id,
           ruleId: rule.id,
@@ -953,6 +995,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
           expected: rule.anchor.witness,
           seen: [],
           rejectedVia: null,
+          recovery: lastRecoveryDetail,
         });
         return;
       }
