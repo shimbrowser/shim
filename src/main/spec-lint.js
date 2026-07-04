@@ -105,6 +105,26 @@ function lintSpec(spec) {
         }
       }
     }
+
+    // api.ai without the 'ai' permission declared (§19): the call would
+    // reject at runtime with a permission error, so the shim ships broken.
+    // A WARNING (not error): the source scan is heuristic (comments/strings
+    // can false-positive), and the runtime failure is loud + explicable.
+    if (rule.handlers && typeof rule.handlers === 'object') {
+      const declared = Array.isArray(spec?.permissions) ? spec.permissions : [];
+      if (!declared.includes('ai')) {
+        for (const [name, src] of Object.entries(rule.handlers)) {
+          if (typeof src === 'string' && /\bapi\s*\.\s*ai\b/.test(src)) {
+            warnings.push(
+              `rule "${rid}": handler "${name}" calls api.ai but the spec does not declare the "ai" permission — `
+              + 'every api.ai call will return { ok: false } until it is declared AND the user grants it. '
+              + 'Emit a set-permissions op with ["ai"].',
+            );
+            break;
+          }
+        }
+      }
+    }
   }
   return { errors, warnings };
 }

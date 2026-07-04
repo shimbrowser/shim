@@ -78,6 +78,23 @@ check('positional FALLBACK does not warn (legit ladder tail)', res.warnings.leng
 res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: 'main .track-row' } }, mutations: [{ kind: 'hide' }] }] });
 check('human-named class primary does not warn', res.warnings.length === 0, JSON.stringify(res.warnings));
 
+console.log('api.ai without the "ai" permission declared (§19)');
+const AI_HANDLER = 'async function tag({ anchor, api }) { const r = await api.ai.complete({ prompt: "x" }); }';
+res = lintSpec({
+  rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.row' } }, mutations: [{ kind: 'script', handler: 'tag' }], handlers: { tag: AI_HANDLER } }],
+});
+check('api.ai without declaration warns', res.warnings.some((w) => /set-permissions/.test(w)), JSON.stringify(res.warnings));
+check('…as a warning, not an error', res.errors.length === 0);
+res = lintSpec({
+  permissions: ['ai'],
+  rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.row' } }, mutations: [{ kind: 'script', handler: 'tag' }], handlers: { tag: AI_HANDLER } }],
+});
+check('api.ai WITH declaration is silent', res.warnings.length === 0, JSON.stringify(res.warnings));
+res = lintSpec({
+  rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.row' } }, mutations: [{ kind: 'script', handler: 'tag' }], handlers: { tag: 'function tag() { /* no ai here */ }' } }],
+});
+check('handler without api.ai is silent', res.warnings.length === 0, JSON.stringify(res.warnings));
+
 console.log('assertNoSpecErrors');
 let threw = false;
 try { assertNoSpecErrors({ rules: [{ id: 'a', mutations: [{ kind: 'fake' }] }] }); } catch (_) { threw = true; }
