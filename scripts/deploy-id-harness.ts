@@ -8,7 +8,7 @@
 // NOT change the id (lazy chunks / route CSS / third-party tags are noise), but
 // a deploy (content-hashed entry filename rewritten) MUST change it.
 
-const { computeDeployId, sameRegistrableDomain } = require('../src/patch-engine/deploy-id');
+import { computeDeployId, sameRegistrableDomain } from '../src/patch-engine/deploy-id';
 
 let failures = 0;
 function check(label, cond, detail) {

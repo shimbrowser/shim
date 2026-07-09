@@ -17,9 +17,12 @@
 //   - buildHelperSrc embeds a syntactically-valid, self-contained main-world
 //     helper (componentScore stringified in, no external refs)
 
-const vm = require('vm');
-const componentId = require('../src/patch-engine/component-id');
-const { buildWitness, matchWitness } = require('../src/patch-engine/witness');
+import vm from 'vm';
+import * as componentId from '../src/patch-engine/component-id';
+import { buildWitness, matchWitness as _matchWitness } from '../src/patch-engine/witness';
+// Harness calls matchWitness with an extra (unused-by-the-real-signature)
+// arg in one assertion below — cast to any rather than touching witness.ts.
+const matchWitness: any = _matchWitness;
 
 let failures = 0;
 function check(label, cond, detail) {
@@ -62,7 +65,9 @@ function tScore() {
 
 function tMatch() {
   console.log('matchComponent:');
-  const { matchComponent } = componentId;
+  // Harness calls matchComponent with 2 args (omitting the optional-in-
+  // practice `symbols` param) in some assertions — cast to any.
+  const { matchComponent }: any = componentId;
 
   const good = matchComponent(cid(['TrackRow'], ['trackId']), cid(['TrackRow'], ['trackId']));
   check('match → applicable + pass', good.applicable && good.pass, JSON.stringify(good));
@@ -81,7 +86,7 @@ function tMatch() {
 // space, live fibers compared through the deploy's {minified: original} map.
 function tSymbols() {
   console.log('symbol translation (cross-deploy renames):');
-  const { translateComponent, invertSymbols, matchComponent } = componentId;
+  const { translateComponent, invertSymbols, matchComponent }: any = componentId;
 
   const symsA = { Wc: 'TrackRow', Xd: 'TrackList' };            // deploy A
   const symsB = { Qq: 'TrackRow', Rr: 'TrackList' };            // deploy B renames

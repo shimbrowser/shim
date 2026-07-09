@@ -1,9 +1,9 @@
-const vm = require('vm');
-const anchors = require('./anchors');
-const witnessMod = require('./witness');
-const componentId = require('./component-id');
-const { applyStrategy } = require('./strategies');
-const routeMatch = require('./route-match');
+import vm from 'vm';
+import * as anchors from './anchors';
+import * as witnessMod from './witness';
+import * as componentId from './component-id';
+import { applyStrategy } from './strategies';
+import * as routeMatch from './route-match';
 
 // All shim CSS lives inside one named cascade layer, `shim`. This is what
 // makes "your local layer wins over the site" a guarantee rather than a
@@ -225,11 +225,11 @@ function tagMountedNode(node, token) {
 }
 
 function collectMutationKinds(spec, mutations) {
-  const direct = new Set();
+  const direct = new Set<any>();
   for (const rule of spec.rules || []) {
     for (const mut of rule.mutations || []) direct.add(mut.kind);
   }
-  const resolved = new Set();
+  const resolved = new Set<any>();
   const walk = (kind) => {
     if (resolved.has(kind)) return;
     resolved.add(kind);
@@ -474,7 +474,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
   // Zero-match warning state — declared up here so scan() (defined below)
   // can clear the timer when something finally anchors. Wire-up (timer
   // schedule + teardown clear) happens after scan is defined.
-  let noMatchTimer = 0;
+  let noMatchTimer: any = 0;
   let noMatchReported = false;
   // Witness state: capture fires at most once per lifecycle; the latest
   // rejection verdict feeds the settle-delayed unresolved reporter.
@@ -835,7 +835,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
       const fallbacks = Array.isArray(rule.anchor.fallbacks) ? rule.anchor.fallbacks : [];
       const promoted = fallbacks[idx];
       if (!promoted) return;
-      const newAnchor = {
+      const newAnchor: any = {
         primary: promoted,
         fallbacks: [rule.anchor.primary, ...fallbacks.filter((_, i) => i !== idx)],
       };
@@ -1427,4 +1427,4 @@ function run(patch, api) {
 
 // firstGreaterIndex exported for scripts/css-priority-harness.js (the cross-
 // shim ordering policy); not used elsewhere at runtime.
-module.exports = { run, firstGreaterIndex };
+export { run, firstGreaterIndex };

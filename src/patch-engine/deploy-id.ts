@@ -32,7 +32,7 @@
 // Pure + bare-node testable (scripts/deploy-id-harness.js); the preload only
 // contributes DOM collection.
 
-const crypto = require('crypto');
+import crypto from 'crypto';
 
 // Same last-two-labels semantics as redirect-net's trust gate — no Public
 // Suffix List, imprecise for multi-part suffixes (a.co.uk vs b.co.uk read as
@@ -85,4 +85,4 @@ function computeDeployId({ scriptUrls = [], styleUrls = [], pageHost = '' } = {}
   return hashUrls([...httpScripts, ...styleUrls.filter(isHttp)]);
 }
 
-module.exports = { computeDeployId, sameRegistrableDomain };
+export { computeDeployId, sameRegistrableDomain };

@@ -16,7 +16,7 @@
 //     nothing survives
 //   - unknown witness versions never quarantine
 
-const { buildWitness, matchWitness, WITNESS_VERSION } = require('../src/patch-engine/witness');
+import { buildWitness, matchWitness, WITNESS_VERSION } from '../src/patch-engine/witness';
 
 let failures = 0;
 function check(label, cond, detail) {

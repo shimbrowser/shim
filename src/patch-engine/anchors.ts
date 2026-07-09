@@ -19,7 +19,7 @@
 // metadata is what matters: the rebase engine will read `kind` to decide
 // witness-fingerprint shape, fallback ordering, and quarantine reasons.
 
-const witness = require('./witness');
+import * as witness from './witness';
 
 // Resolve an anchor's primary spec; if it returns no matches, walk the
 // optional `fallbacks` array in order and return the first one that does.
@@ -61,7 +61,7 @@ function resolveAll(anchor, root = document) {
 // (rule-no-match) apart from "selector found something that isn't the
 // thing" — the quarantine signal. `rejectedSample` carries the best-
 // scoring rejected candidate's detail for the quarantine report.
-function resolveAllWithSource(anchor, root = document) {
+function resolveAllWithSource(anchor, root = document): any {
   const primary = anchor?.primary;
   if (!primary) return { nodes: [], source: null, witnessRejected: false };
   const w = anchor.witness || null;
@@ -261,7 +261,7 @@ function isSiteDataAttr(name) {
 // instead of a lone primary.
 const LADDER_MAX = 4;
 
-function suggestAnchorLadder(el, root) {
+function suggestAnchorLadder(el, root?) {
   if (!el || !el.tagName) return [];
   const scope = root || (typeof document !== 'undefined' ? document : null);
   const verifiable = !!(scope && typeof scope.querySelectorAll === 'function');
@@ -283,7 +283,7 @@ function suggestAnchorLadder(el, root) {
   const role = el.getAttribute && el.getAttribute('role');
   const label = el.getAttribute && el.getAttribute('aria-label');
   if ((role && role.trim()) || (label && label.trim())) {
-    const a = { kind: 'aria' };
+    const a: any = { kind: 'aria' };
     if (role && role.trim()) a.role = role.trim();
     if (label && label.trim()) a.label = label.trim();
     candidates.push(a);
@@ -414,7 +414,7 @@ function positionalPath(el) {
     }
     const parent = cur.parentElement;
     if (parent) {
-      const sibs = Array.from(parent.children).filter((c) => c.tagName === cur.tagName);
+      const sibs = Array.from(parent.children).filter((c: any) => c.tagName === cur.tagName);
       const idx = sibs.indexOf(cur) + 1;
       parts.unshift(sibs.length > 1 ? `${tag}:nth-of-type(${idx})` : tag);
     } else {
@@ -499,11 +499,4 @@ function witnessRecover(w, root = document) {
   return witnessRecoverDetail(w, root).el;
 }
 
-module.exports = {
-  resolveAll,
-  resolveAllWithSource,
-  suggestAnchorFor,
-  suggestAnchorLadder,
-  witnessRecover,
-  witnessRecoverDetail,
-};
+export { resolveAll, resolveAllWithSource, suggestAnchorFor, suggestAnchorLadder, witnessRecover, witnessRecoverDetail };

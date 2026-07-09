@@ -15,8 +15,19 @@
 //   - witnessRecover: finds the unique strong match, refuses when zero or
 //     when multiple strong candidates exist (ambiguity → no auto-rebase)
 
-const { suggestAnchorFor, witnessRecover, witnessRecoverDetail } = require('../src/patch-engine/anchors');
-const { buildWitness } = require('../src/patch-engine/witness');
+import {
+  suggestAnchorFor as _suggestAnchorFor,
+  witnessRecover as _witnessRecover,
+  witnessRecoverDetail as _witnessRecoverDetail,
+} from '../src/patch-engine/anchors';
+import { buildWitness } from '../src/patch-engine/witness';
+
+// Harness calls these with stub root/element objects shaped like the subset
+// of Document/Element they actually read, and omits the optional `root` arg
+// in some calls — cast to any rather than touching anchors.ts.
+const suggestAnchorFor: any = _suggestAnchorFor;
+const witnessRecover: any = _witnessRecover;
+const witnessRecoverDetail: any = _witnessRecoverDetail;
 
 let failures = 0;
 function check(label, cond, detail) {

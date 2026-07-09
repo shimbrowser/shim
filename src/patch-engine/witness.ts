@@ -101,7 +101,7 @@ function textStemOf(el) {
 // fiber bridge — §8) is attached when supplied; the isolated world can't read
 // fibers itself, so the engine fetches it via api.componentId and passes it in
 // here at capture time. Omitted on non-React pages (bridge resolves null).
-function buildWitness(el, opts = {}) {
+function buildWitness(el, opts: any = {}) {
   if (!el || !el.tagName) return null;
   const attrs = {};
   for (const attr of el.attributes || []) {
@@ -112,7 +112,7 @@ function buildWitness(el, opts = {}) {
     if (child.tagName) childTags.push(child.tagName.toLowerCase());
     if (childTags.length >= 8) break; // shape, not census
   }
-  const witness = {
+  const witness: any = {
     v: WITNESS_VERSION,
     tag: el.tagName.toLowerCase(),
   };
@@ -232,4 +232,4 @@ function matchWitness(witness, el) {
   return { pass: score >= PASS_THRESHOLD, score, detail };
 }
 
-module.exports = { buildWitness, matchWitness, WITNESS_VERSION };
+export { buildWitness, matchWitness, WITNESS_VERSION };

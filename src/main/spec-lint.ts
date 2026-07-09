@@ -135,10 +135,10 @@ function lintSpec(spec) {
 function assertNoSpecErrors(spec) {
   const { errors } = lintSpec(spec);
   if (errors.length === 0) return;
-  const err = new Error(`spec uses unsupported constructs: ${errors.join('; ')}`);
+  const err: any = new Error(`spec uses unsupported constructs: ${errors.join('; ')}`);
   err.code = 'unsupported_spec';
   err.errors = errors;
   throw err;
 }
 
-module.exports = { lintSpec, assertNoSpecErrors, BUILTIN_KINDS };
+export { lintSpec, assertNoSpecErrors, BUILTIN_KINDS };

@@ -116,4 +116,4 @@ function matchPath(pattern, pathname) {
   return matcher(pattern)(pathname);
 }
 
-module.exports = { matcher, matchPath, normalizePath };
+export { matcher, matchPath, normalizePath };

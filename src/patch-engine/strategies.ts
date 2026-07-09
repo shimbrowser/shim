@@ -100,4 +100,4 @@ function applyStrategy(nodes, anchor, mutation) {
   return { placed: nodes, cleanup: null };
 }
 
-module.exports = { applyStrategy };
+export { applyStrategy };

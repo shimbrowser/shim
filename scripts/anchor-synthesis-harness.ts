@@ -20,7 +20,7 @@
 //   - suggestAnchorFor back-compat: head of the ladder, kind-ordered when the
 //     scope can't verify (stub roots without querySelectorAll)
 
-const { suggestAnchorFor, suggestAnchorLadder, resolveAll } = require('../src/patch-engine/anchors');
+import { suggestAnchorFor, suggestAnchorLadder, resolveAll } from '../src/patch-engine/anchors';
 
 let failures = 0;
 function check(label, cond, detail) {
@@ -86,7 +86,7 @@ function matchesSimple(node, part) {
   return consumed === part.length && tokens.length > 0;
 }
 
-function makeDoc(rootChildren) {
+function makeDoc(rootChildren): any {
   const rootEl = el('body', {}, { children: rootChildren });
   const all = descendantsOf(rootEl);
   return {
@@ -216,11 +216,11 @@ function tPositionalTail() {
 function tBackCompat() {
   console.log('suggestAnchorFor back-compat (unverifiable stub → kind order):');
   check('id wins',
-    JSON.stringify(suggestAnchorFor(el('div', { id: 'cart', 'data-testid': 'x' }))) === JSON.stringify({ kind: 'css', value: '#cart' }), '');
+    JSON.stringify(suggestAnchorFor(el('div', { id: 'cart', 'data-testid': 'x' }), undefined)) === JSON.stringify({ kind: 'css', value: '#cart' }), '');
   check('site data-* when no id',
-    JSON.stringify(suggestAnchorFor(el('div', { 'data-testid': 'cart' }))) === JSON.stringify({ kind: 'data-attr', name: 'data-testid', value: 'cart' }), '');
+    JSON.stringify(suggestAnchorFor(el('div', { 'data-testid': 'cart' }), undefined)) === JSON.stringify({ kind: 'data-attr', name: 'data-testid', value: 'cart' }), '');
   check('never anchors to data-shim* tokens',
-    JSON.stringify(suggestAnchorFor(el('button', { 'data-shim-css': 'shim-x', role: 'button', 'aria-label': 'Buy' }))) === JSON.stringify({ kind: 'aria', role: 'button', label: 'Buy' }), '');
+    JSON.stringify(suggestAnchorFor(el('button', { 'data-shim-css': 'shim-x', role: 'button', 'aria-label': 'Buy' }), undefined)) === JSON.stringify({ kind: 'aria', role: 'button', label: 'Buy' }), '');
 }
 
 function tTextCaseInsensitive() {

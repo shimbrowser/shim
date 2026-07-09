@@ -85,34 +85,34 @@ function __shimComponentIdentity(el) {
 // exactly as before.
 function componentScore(expected, actual) {
   if (!expected || !actual) return 0;
-  var ep = expected.path || [];
-  var ap = actual.path || [];
+  const ep = expected.path || [];
+  const ap = actual.path || [];
   if (!ep.length || !ap.length) return 0;
 
-  var score = 0;
+  let score = 0;
   if (ep[0] === ap[0]) score += 0.5;
 
-  var prefix = 0;
-  var lim = Math.min(ep.length, ap.length);
-  for (var i = 0; i < lim; i++) {
+  let prefix = 0;
+  const lim = Math.min(ep.length, ap.length);
+  for (let i = 0; i < lim; i++) {
     if (ep[i] === ap[i]) prefix++;
     else break;
   }
   score += 0.2 * (prefix / ep.length);
 
-  var a = expected.propKeys || [];
-  var b = actual.propKeys || [];
+  const a = expected.propKeys || [];
+  const b = actual.propKeys || [];
   if (!a.length && !b.length) {
     score += 0.3; // neither carries prop keys → no disagreement
   } else {
-    var bset = {};
-    for (var j = 0; j < b.length; j++) bset[b[j]] = true;
-    var inter = 0;
-    for (var m = 0; m < a.length; m++) if (bset[a[m]]) inter++;
-    var union = {};
-    for (var n = 0; n < a.length; n++) union[a[n]] = true;
-    for (var q = 0; q < b.length; q++) union[b[q]] = true;
-    var unionN = Object.keys(union).length;
+    const bset = {};
+    for (let j = 0; j < b.length; j++) bset[b[j]] = true;
+    let inter = 0;
+    for (let m = 0; m < a.length; m++) if (bset[a[m]]) inter++;
+    const union = {};
+    for (let n = 0; n < a.length; n++) union[a[n]] = true;
+    for (let q = 0; q < b.length; q++) union[b[q]] = true;
+    const unionN = Object.keys(union).length;
     score += 0.3 * (unionN ? inter / unionN : 1);
   }
   return score;
@@ -287,14 +287,4 @@ function buildHelperSrc() {
 })();`;
 }
 
-module.exports = {
-  COMPONENT_ID_VERSION,
-  FIBER_WALK_SRC,
-  buildHelperSrc,
-  componentScore,
-  matchComponent,
-  translateComponent,
-  invertSymbols,
-  MATCH_THRESHOLD,
-  RECOVER_THRESHOLD,
-};
+export { COMPONENT_ID_VERSION, FIBER_WALK_SRC, buildHelperSrc, componentScore, matchComponent, translateComponent, invertSymbols, MATCH_THRESHOLD, RECOVER_THRESHOLD };
