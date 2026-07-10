@@ -11,8 +11,10 @@
 // appendChild into the anchor still work — the engine just re-parents when
 // a non-inline strategy is declared on the mutation spec.
 
-let portalRoot = null;
-function ensurePortalRoot() {
+import type { Mutation } from './types';
+
+let portalRoot: HTMLElement | null = null;
+function ensurePortalRoot(): HTMLElement {
   if (portalRoot && document.contains(portalRoot)) return portalRoot;
   portalRoot = document.createElement('div');
   portalRoot.setAttribute('data-shim', 'portal-root');
@@ -29,7 +31,7 @@ function ensurePortalRoot() {
   return portalRoot;
 }
 
-function applyFloatPositioning(nodes, anchor, mutation, strategy) {
+function applyFloatPositioning(nodes: HTMLElement[], anchor: HTMLElement, mutation: Mutation, strategy: string) {
   for (const n of nodes) {
     n.style.position = 'fixed';
     n.style.pointerEvents = 'auto';
@@ -52,7 +54,7 @@ function applyFloatPositioning(nodes, anchor, mutation, strategy) {
     }
   };
 
-  let rafId = null;
+  let rafId: number | null = null;
   const schedule = () => {
     if (rafId != null) return;
     rafId = requestAnimationFrame(() => {
@@ -77,7 +79,7 @@ function applyFloatPositioning(nodes, anchor, mutation, strategy) {
   };
 }
 
-function applyStrategy(nodes, anchor, mutation) {
+function applyStrategy(nodes: HTMLElement[], anchor: HTMLElement, mutation: Mutation) {
   const strategy = mutation.mount?.strategy || 'inline';
   if (nodes.length === 0 || strategy === 'inline') {
     return { placed: nodes, cleanup: null };

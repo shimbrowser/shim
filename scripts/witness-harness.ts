@@ -41,7 +41,12 @@ function el(tag, attrs = {}, { text = '', children = [], parent = null } = {}) {
     },
   };
   for (const c of children) c.parentElement = node;
-  return node;
+  // Stub is shaped like the subset of Element the witness code reads (see
+  // header comment), not a real DOM Element — cast at this single choke
+  // point so every caller downstream can pass it to the now-typed
+  // buildWitness/matchWitness without widening those signatures back to
+  // `any` for the sake of a bare-node test double.
+  return node as unknown as Element;
 }
 
 function tBuild() {

@@ -23,6 +23,8 @@
 //   - Versioned. `v: 1` is stamped into every witness so a future shape
 //     change can re-fingerprint old rules instead of mis-scoring them.
 
+import type { Witness, ComponentDescriptor } from './types';
+
 const WITNESS_VERSION = 1;
 
 // Signals weigh differently because they differ in entropy: an id or
@@ -58,7 +60,7 @@ const PASS_THRESHOLD = 0.5;
 // class is deliberately EXCLUDED too: utility-CSS class lists (Tailwind
 // et al) churn on every build, which is exactly the deploy-noise a
 // witness must survive.
-function isStableAttr(name) {
+function isStableAttr(name: string) {
   if (name.startsWith('data-shim')) return false;
   return name === 'id' || name === 'role' || name === 'aria-label' || name.startsWith('data-');
 }
@@ -81,16 +83,16 @@ const TEXT_STEM_LEN = 40;
 // long enough that two DIFFERENT normalized labels virtually never share it,
 // short enough that a real heading ("estimates needing attention…") clears it.
 const STEM_SHARED_PREFIX_MIN = 12;
-function normalizeStemText(s) {
+function normalizeStemText(s: string) {
   return s.replace(/\d+/g, '').replace(/\s+/g, ' ').trim();
 }
-function sharedPrefixLen(a, b) {
+function sharedPrefixLen(a: string, b: string) {
   const n = Math.min(a.length, b.length);
   let i = 0;
   while (i < n && a[i] === b[i]) i++;
   return i;
 }
-function textStemOf(el) {
+function textStemOf(el: Element) {
   const raw = (el.textContent || '').trim().replace(/\s+/g, ' ');
   if (!raw) return '';
   return normalizeStemText(raw.toLowerCase()).slice(0, TEXT_STEM_LEN);
@@ -101,18 +103,18 @@ function textStemOf(el) {
 // fiber bridge — §8) is attached when supplied; the isolated world can't read
 // fibers itself, so the engine fetches it via api.componentId and passes it in
 // here at capture time. Omitted on non-React pages (bridge resolves null).
-function buildWitness(el, opts: any = {}) {
+function buildWitness(el: Element, opts: { component?: ComponentDescriptor } = {}) {
   if (!el || !el.tagName) return null;
-  const attrs = {};
+  const attrs: Record<string, string> = {};
   for (const attr of el.attributes || []) {
     if (isStableAttr(attr.name)) attrs[attr.name] = attr.value;
   }
-  const childTags = [];
+  const childTags: string[] = [];
   for (const child of el.children || []) {
     if (child.tagName) childTags.push(child.tagName.toLowerCase());
     if (childTags.length >= 8) break; // shape, not census
   }
-  const witness: any = {
+  const witness: Witness = {
     v: WITNESS_VERSION,
     tag: el.tagName.toLowerCase(),
   };
@@ -136,7 +138,7 @@ function buildWitness(el, opts: any = {}) {
 // a newer witness must not quarantine healthy rules over a shape it
 // can't read.
 //
-function matchWitness(witness, el) {
+function matchWitness(witness: Witness | null | undefined, el: Element | null | undefined) {
   if (!witness || witness.v !== WITNESS_VERSION) {
     return { pass: true, score: 1, detail: ['witness missing or unknown version — skipped'] };
   }
@@ -150,7 +152,7 @@ function matchWitness(witness, el) {
 
   let total = 0;
   let matched = 0;
-  const detail = [];
+  const detail: string[] = [];
 
   if (witness.attrs) {
     for (const [name, expected] of Object.entries(witness.attrs)) {
@@ -194,7 +196,7 @@ function matchWitness(witness, el) {
 
   if (witness.childTags) {
     total += WEIGHTS.childTags;
-    const tags = [];
+    const tags: string[] = [];
     for (const child of el.children || []) {
       if (child.tagName) tags.push(child.tagName.toLowerCase());
       if (tags.length >= 8) break;

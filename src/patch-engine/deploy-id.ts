@@ -39,14 +39,14 @@ import crypto from 'crypto';
 // the same site). Here the failure mode of a false-same is merely including a
 // third-party script in the hash (possible route noise on exotic TLDs), not a
 // trust decision — acceptable until the PSL-backed version lands (§15).
-function sameRegistrableDomain(a, b) {
+function sameRegistrableDomain(a: string, b: string): boolean {
   if (!a || !b) return false;
   if (a === b) return true;
-  const reg = (host) => host.split('.').slice(-2).join('.');
+  const reg = (host: string) => host.split('.').slice(-2).join('.');
   return reg(a) === reg(b);
 }
 
-function stripVolatile(url) {
+function stripVolatile(url: string): string {
   try {
     const u = new URL(url);
     return u.origin + u.pathname;
@@ -55,7 +55,7 @@ function stripVolatile(url) {
   }
 }
 
-function hashUrls(urls) {
+function hashUrls(urls: string[]): string | null {
   const cleaned = [...new Set(urls.map(stripVolatile))].sort();
   if (!cleaned.length) return null;
   return crypto.createHash('sha256').update(cleaned.join('\n')).digest('hex').slice(0, 16);
@@ -64,7 +64,7 @@ function hashUrls(urls) {
 // Only http(s) URLs carry deploy signal: `blob:` script URLs are random per
 // page LOAD (hashing them would flip the id on every visit) and `data:` URLs
 // are content, not a fetchable artifact.
-function isHttp(u) {
+function isHttp(u: string): boolean {
   try {
     const p = new URL(u).protocol;
     return p === 'http:' || p === 'https:';
@@ -74,7 +74,10 @@ function isHttp(u) {
 // scriptUrls / styleUrls: absolute URLs collected from the live DOM.
 // pageHost: location.hostname. Returns a 16-hex hash or null (no assets at all
 // → the gate can't judge, engine treats it as "no deploy detected").
-function computeDeployId({ scriptUrls = [], styleUrls = [], pageHost = '' } = {}) {
+function computeDeployId(
+  { scriptUrls = [], styleUrls = [], pageHost = '' }:
+    { scriptUrls?: string[]; styleUrls?: string[]; pageHost?: string } = {},
+): string | null {
   const httpScripts = scriptUrls.filter(isHttp);
   const sameSite = httpScripts.filter((u) => {
     try {

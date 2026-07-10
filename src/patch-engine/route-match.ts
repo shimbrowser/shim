@@ -21,7 +21,7 @@
 // Strip query + hash and collapse a trailing slash. Applied to concrete
 // PATHNAMES only — never to patterns, where `?` is the optional-param marker
 // (`/budgets/:id?`) rather than a query-string delimiter.
-function normalizePath(path) {
+function normalizePath(path: string): string {
   if (!path) return '/';
   const q = path.search(/[?#]/);
   let p = q === -1 ? path : path.slice(0, q);
@@ -32,21 +32,26 @@ function normalizePath(path) {
 
 // Split into non-empty segments, no query/hash handling. Used for patterns
 // (which may carry a literal `?`) and, after normalizePath, for pathnames.
-function splitSegments(str) {
+function splitSegments(str: string): string[] {
   return String(str).split('/').filter(Boolean);
 }
 
 // Segments of a concrete pathname: query/hash stripped first. "/" → [].
-function pathSegments(path) {
+function pathSegments(path: string): string[] {
   return splitSegments(normalizePath(path));
 }
+
+type Token =
+  | { type: 'literal'; value: string }
+  | { type: 'param'; name: string; optional: boolean }
+  | { type: 'wildcard' };
 
 // Compile a pattern string into { tokens, hasWildcard }. Each token is one of:
 //   { type: 'literal', value }
 //   { type: 'param', name, optional }
 //   { type: 'wildcard' }
-function compile(pattern) {
-  const toks = [];
+function compile(pattern: string): { toks: Token[]; hasWildcard: boolean } {
+  const toks: Token[] = [];
   let hasWildcard = false;
   for (const seg of splitSegments(pattern)) {
     if (seg === '*') {
@@ -66,11 +71,11 @@ function compile(pattern) {
 }
 
 // Returns a function (pathname) -> { params } | null.
-function matcher(pattern) {
+function matcher(pattern: string): (pathname: string) => { params: Record<string, string | undefined> } | null {
   const { toks } = compile(pattern);
-  return function match(pathname) {
+  return function match(pathname: string): { params: Record<string, string | undefined> } | null {
     const segs = pathSegments(pathname);
-    const params = {};
+    const params: Record<string, string | undefined> = {};
     let si = 0; // index into the concrete path segments
     for (let ti = 0; ti < toks.length; ti++) {
       const tok = toks[ti];
@@ -101,7 +106,7 @@ function matcher(pattern) {
   };
 }
 
-function decodeSegment(s) {
+function decodeSegment(s: string): string {
   try {
     return decodeURIComponent(s);
   } catch {
@@ -112,7 +117,7 @@ function decodeSegment(s) {
 // Convenience one-shot: does `pathname` match `pattern`? Returns the match
 // object or null. Callers that test the same pattern repeatedly should hold
 // onto matcher(pattern) instead of re-compiling each call.
-function matchPath(pattern, pathname) {
+function matchPath(pattern: string, pathname: string): { params: Record<string, string | undefined> } | null {
   return matcher(pattern)(pathname);
 }
 

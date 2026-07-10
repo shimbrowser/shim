@@ -25,6 +25,8 @@
 // `path` is nearest-composite-component first, capped in depth; `propKeys` are
 // the sorted own prop-keys of the nearest composite (minus `children`).
 
+import type { ComponentDescriptor } from './types';
+
 const COMPONENT_ID_VERSION = 1;
 
 // Main-world fiber walk. Defined as a string because it must execute in the
@@ -83,7 +85,7 @@ function __shimComponentIdentity(el) {
 // the deploy's sourcemap-symbol map (translateComponent / the symbols arg to
 // matchComponent) before scoring — where no map exists, raw names compare
 // exactly as before.
-function componentScore(expected, actual) {
+function componentScore(expected: ComponentDescriptor | null | undefined, actual: ComponentDescriptor | null | undefined) {
   if (!expected || !actual) return 0;
   const ep = expected.path || [];
   const ap = actual.path || [];
@@ -105,11 +107,11 @@ function componentScore(expected, actual) {
   if (!a.length && !b.length) {
     score += 0.3; // neither carries prop keys → no disagreement
   } else {
-    const bset = {};
+    const bset: Record<string, boolean> = {};
     for (let j = 0; j < b.length; j++) bset[b[j]] = true;
     let inter = 0;
     for (let m = 0; m < a.length; m++) if (bset[a[m]]) inter++;
-    const union = {};
+    const union: Record<string, boolean> = {};
     for (let n = 0; n < a.length; n++) union[a[n]] = true;
     for (let q = 0; q < b.length; q++) union[b[q]] = true;
     const unionN = Object.keys(union).length;
@@ -130,7 +132,7 @@ function componentScore(expected, actual) {
 // Return a copy of `desc` with every path name looked up through `symbols`
 // (minified→original). Names without an entry stay as-is. Returns `desc`
 // itself when nothing changed (cheap identity for the common no-map case).
-function translateComponent(desc, symbols) {
+function translateComponent(desc: ComponentDescriptor | null | undefined, symbols: Record<string, string> | null | undefined) {
   if (!desc || !Array.isArray(desc.path) || !desc.path.length) return desc;
   if (!symbols || typeof symbols !== 'object') return desc;
   let changed = false;
@@ -148,10 +150,10 @@ function translateComponent(desc, symbols) {
 // original claimed by several minified tokens (memo/forwardRef aliases like
 // `StyledMenuOption$1/$2/$3` → `StyledMenuOption`) is AMBIGUOUS — dropped, not
 // guessed; the untranslated name rides along as the raw fallback descriptor.
-function invertSymbols(symbols) {
+function invertSymbols(symbols: Record<string, string> | null | undefined) {
   if (!symbols || typeof symbols !== 'object') return null;
-  const inv = {};
-  const dupes = {};
+  const inv: Record<string, string> = {};
+  const dupes: Record<string, boolean> = {};
   for (const [min, orig] of Object.entries(symbols)) {
     if (typeof orig !== 'string' || !orig) continue;
     if (dupes[orig]) continue;
@@ -198,7 +200,7 @@ const RECOVER_THRESHOLD = 0.6;
 //     reason: "the map doesn't know this name" is indistinguishable from a
 //     rename, and never-false-quarantine outranks catching one more mis-attach
 //     (matchWitness's other signals still guard the anchor).
-function matchComponent(expected, actual, symbols) {
+function matchComponent(expected: ComponentDescriptor | null | undefined, actual: ComponentDescriptor | null | undefined, symbols?: Record<string, string> | null) {
   if (!expected || !Array.isArray(expected.path) || !expected.path.length) {
     return { applicable: false, pass: true, score: 1 };
   }

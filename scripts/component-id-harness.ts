@@ -157,7 +157,10 @@ function el(tag, attrs = {}, { text = '', children = [], parent = null } = {}) {
     get textContent() { return text + children.map((c) => c.textContent).join(''); },
   };
   for (const c of children) c.parentElement = node;
-  return node;
+  // Stub shaped like the subset of Element buildWitness/matchWitness read
+  // (see comment above), not a real DOM Element — cast at this single
+  // choke point rather than widening those signatures back to `any`.
+  return node as unknown as Element;
 }
 
 function tWitnessIntegration() {

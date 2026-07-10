@@ -4,6 +4,108 @@ import * as witnessMod from './witness';
 import * as componentId from './component-id';
 import { applyStrategy } from './strategies';
 import * as routeMatch from './route-match';
+import type { Spec, Rule, Mutation, Anchor, AnchorSpec } from './types';
+import type { ShimApiBase, ShimApi } from '../preload/shim-api-types';
+import { errMessage } from '../shared/error';
+
+// --- Local runtime/engine-only type extensions -----------------------------
+//
+// The shared `Spec` (./types.ts) models the AUTHORED spec shape every stage
+// of the pipeline agrees on. `run()` below stamps two fields onto it purely
+// for internal use by the rule-processing path (see the comment at run()):
+// `__cssPriority` already lives on the shared type (other files read it
+// too); `__bundleHashFn` never crosses out of this file, so it's kept local
+// rather than widening the shared contract for a field only this module
+// reads. `css` is a legitimate top-level authored field (a whole-patch CSS
+// block, folded into collectCssForSpec) that no shipped shim actually emits
+// today but the engine has always supported — also kept local since nothing
+// outside this file reads it.
+interface RuntimeSpec extends Spec {
+  // `css?` now lives on the shared Spec (a real persistable field). Only the
+  // runtime-stamped bundle-hash accessor is engine-local.
+  __bundleHashFn: () => string | null;
+}
+
+// A patch-declared custom mutation kind (rare — the seven built-ins in
+// CLAUDE.md §6 cover nearly every authored shim; both shipped fixtures
+// declare an empty registry, `mutations: {}`). `deps` lets one custom kind
+// pull in another's CSS; `mount` is invoked exactly like a script handler
+// against the resolved anchor.
+interface MutationHandlerDef {
+  deps?: string[];
+  css?: string;
+  mount(el: Element, mut: Mutation, rule: Rule, spec: Spec, api: ShimApiBase): unknown;
+}
+type MutationRegistry = Record<string, MutationHandlerDef>;
+
+// Args a compiled handler function is invoked with. Two shapes: `script` /
+// `replace-root` mutations hand the handler the resolved DOM anchor;
+// `mount-route` handlers get the route match instead (routeRule has no DOM
+// anchor to give). A handler is arbitrary vm-eval'd or `require`d source —
+// its RETURN value is the one genuinely dynamic boundary in this file,
+// handled via normalizeOutputs below (`unknown` in, `Node[]` out).
+interface ScriptHandlerArgs {
+  anchor: Element;
+  mutation: Mutation;
+  rule: Rule;
+  spec: Spec;
+  api: ShimApi;
+}
+interface RouteHandlerArgs {
+  match: { path: string; params: Record<string, string | undefined> };
+  mutation: Mutation;
+  rule: Rule;
+  spec: Spec;
+  api: ShimApi;
+}
+type PatchHandler = (args: ScriptHandlerArgs | RouteHandlerArgs) => unknown;
+type HandlerMap = Record<string, PatchHandler>;
+
+// The bundle run() receives from page-preload — NOT the same shape as
+// `Spec`: this is the compiled module/bag (`{ spec, mutations, handlers }`)
+// plus two fields page-preload adds before calling in (`priority`, the
+// sidebar/registry ordering; `bundleHash`, the current-deploy fingerprint —
+// see the comment on run() for why it may be a function).
+interface PatchBundle {
+  spec: Spec;
+  mutations?: MutationRegistry;
+  handlers?: HandlerMap;
+  priority?: number;
+  bundleHash?: string | (() => string | null);
+}
+
+// The control object run() returns to page-preload — lets the sidebar /
+// cross-frame bridge apply live-preview or forwarded rules and tear the
+// whole patch down.
+interface PatchControl {
+  applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string): void;
+  removeExtraRule(ruleKey: string): boolean;
+  teardownAll(): void;
+}
+
+// Structural echo of anchors.ts's (unexported) RejectedSample — only the
+// fields this file reads (`detail`, `source`); anchors.ts's internal
+// `score` field is irrelevant here.
+interface RejectedSample {
+  detail: string[];
+  source?: string | null;
+}
+
+// Per-anchor mounted state applyRule tracks: the DOM nodes a rule's
+// mutations produced (post mount-strategy, so always real HTMLElements —
+// see mountOn) plus the cleanup callbacks registered against them.
+interface RuleMountEntry {
+  outputs: HTMLElement[];
+  cleanups: Array<() => void>;
+}
+
+// routeRule's single mounted-route record — see mountRoute/unmountRoute.
+interface MountedRoute {
+  outputs: HTMLElement[];
+  cleanups: Array<() => void>;
+  path: string;
+  prevTitle: string;
+}
 
 // All shim CSS lives inside one named cascade layer, `shim`. This is what
 // makes "your local layer wins over the site" a guarantee rather than a
@@ -16,7 +118,7 @@ import * as routeMatch from './route-match';
 // the one layer, so each rule keeps its own removable text node (teardown is
 // unchanged) while all of them share the layer's precedence.
 const SHIM_LAYER = 'shim';
-function layered(cssText) {
+function layered(cssText: string): string {
   return `@layer ${SHIM_LAYER} { ${cssText} }\n`;
 }
 
@@ -25,14 +127,14 @@ function layered(cssText) {
 // platform fixtures; among user shims, sidebar list order). Read here rather
 // than threaded through every rule-processing signature. Previews / forwarded
 // rules that shallow-copy the spec inherit it.
-function cssPriorityOf(spec) {
-  return Number.isFinite(spec && spec.__cssPriority) ? spec.__cssPriority : 0;
+function cssPriorityOf(spec: Spec): number {
+  return Number.isFinite(spec && spec.__cssPriority) ? (spec.__cssPriority as number) : 0;
 }
 
 // Current deploy's {minified: original} component-name map (§8 Stage B), via
 // the api bridge. Null-safe on every degraded surface — stub apis, forwarded
 // frames, harnesses — and never throws; null means "compare raw names".
-function getSymbols(api) {
+function getSymbols(api: ShimApiBase): Promise<Record<string, string> | null> {
   if (!api || !api.componentId || typeof api.componentId.symbols !== 'function') {
     return Promise.resolve(null);
   }
@@ -41,7 +143,7 @@ function getSymbols(api) {
     .catch(() => null);
 }
 
-function injectStyle(id, css) {
+function injectStyle(id: string, css: string): void {
   if (!css || document.querySelector(`style[data-shim="${id}"]`)) return;
   const style = document.createElement('style');
   style.setAttribute('data-shim', id);
@@ -61,9 +163,13 @@ function injectStyle(id, css) {
 // remove it from the sheet during rule teardown. Each entry stores the text
 // node plus its `priority` so cross-shim conflicts resolve deterministically
 // (see injectTier1Rule).
-const tier1RuleNodes = new Map();
-function ensureTier1Sheet() {
-  let sheet = document.querySelector('style[data-shim="tier1-css"]');
+interface Tier1RuleEntry {
+  node: Text;
+  priority: number;
+}
+const tier1RuleNodes = new Map<string, Tier1RuleEntry>();
+function ensureTier1Sheet(): HTMLStyleElement {
+  let sheet = document.querySelector('style[data-shim="tier1-css"]') as HTMLStyleElement | null;
   if (!sheet) {
     sheet = document.createElement('style');
     sheet.setAttribute('data-shim', 'tier1-css');
@@ -81,7 +187,7 @@ function ensureTier1Sheet() {
 // always last and always wins, regardless of when it resolved. Priority is
 // assigned in main (user shims > platform fixtures; among user shims, the
 // one higher in the sidebar list) and threaded in via the spec.
-function injectTier1Rule(token, cssBody, priority = 0) {
+function injectTier1Rule(token: string, cssBody: string, priority = 0): void {
   const text = layered(`[data-shim-css~="${token}"] { ${cssBody} }`);
   const existing = tier1RuleNodes.get(token);
   if (existing) {
@@ -107,7 +213,7 @@ function injectTier1Rule(token, cssBody, priority = 0) {
 }
 // First index whose value is strictly greater than `priority`, else the
 // array length (append). Pure — exported for scripts/css-priority-harness.js.
-function firstGreaterIndex(priorities, priority) {
+function firstGreaterIndex(priorities: number[], priority: number): number {
   for (let i = 0; i < priorities.length; i++) {
     if (priorities[i] > priority) return i;
   }
@@ -115,33 +221,33 @@ function firstGreaterIndex(priorities, priority) {
 }
 // Reverse lookup (text node → its tracked entry) for the ordered insert.
 // The rule set is small (a handful per page), so the linear scan is cheap.
-function nodeToEntry(node) {
+function nodeToEntry(node: Node): Tier1RuleEntry | null {
   for (const entry of tier1RuleNodes.values()) {
     if (entry.node === node) return entry;
   }
   return null;
 }
-function removeTier1Rule(token) {
+function removeTier1Rule(token: string): void {
   const entry = tier1RuleNodes.get(token);
   if (!entry) return;
   entry.node.remove();
   tier1RuleNodes.delete(token);
 }
-function tagElement(el, token) {
+function tagElement(el: Element, token: string): void {
   const current = el.getAttribute('data-shim-css') || '';
   const tokens = current.split(/\s+/).filter(Boolean);
   if (tokens.includes(token)) return;
   tokens.push(token);
   el.setAttribute('data-shim-css', tokens.join(' '));
 }
-function stripToken(el, token) {
+function stripToken(el: Element, token: string): void {
   const current = el.getAttribute('data-shim-css') || '';
   const tokens = current.split(/\s+/).filter((t) => t && t !== token);
   if (tokens.length) el.setAttribute('data-shim-css', tokens.join(' '));
   else el.removeAttribute('data-shim-css');
 }
-const toKebab = (s) => s.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase());
-function cssBodyFromProps(props) {
+const toKebab = (s: string): string => s.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase());
+function cssBodyFromProps(props?: Record<string, string>): string {
   return Object.entries(props || {})
     .map(([k, v]) => `${toKebab(k)}: ${v} !important;`)
     .join(' ');
@@ -152,9 +258,9 @@ function cssBodyFromProps(props) {
 // anchor's direct children (hiding them so the handler's mounted DOM can
 // occupy the space). Same token-per-rule discipline so teardown can pull
 // just this rule's CSS out of the sheet.
-const replaceRootRuleNodes = new Map();
-function ensureReplaceRootSheet() {
-  let sheet = document.querySelector('style[data-shim="replace-root"]');
+const replaceRootRuleNodes = new Map<string, Text>();
+function ensureReplaceRootSheet(): HTMLStyleElement {
+  let sheet = document.querySelector('style[data-shim="replace-root"]') as HTMLStyleElement | null;
   if (!sheet) {
     sheet = document.createElement('style');
     sheet.setAttribute('data-shim', 'replace-root');
@@ -162,7 +268,7 @@ function ensureReplaceRootSheet() {
   }
   return sheet;
 }
-function injectReplaceRootRule(token) {
+function injectReplaceRootRule(token: string): void {
   if (replaceRootRuleNodes.has(token)) return;
   // The `:not([data-shim-mounted~="..."])` clause keeps the handler's own
   // mounted output visible; without it the children-hide rule would also
@@ -174,7 +280,7 @@ function injectReplaceRootRule(token) {
   ensureReplaceRootSheet().appendChild(node);
   replaceRootRuleNodes.set(token, node);
 }
-function removeReplaceRootRule(token) {
+function removeReplaceRootRule(token: string): void {
   const node = replaceRootRuleNodes.get(token);
   if (!node) return;
   node.remove();
@@ -189,7 +295,7 @@ function removeReplaceRootRule(token) {
 // while a route is mounted is what makes the two paths render identically.
 // NOT applied for the `replace-root` kind — an in-place region replacement is
 // supposed to live in the site's layout context; a route page replaces it.
-function injectRouteEnvRule(token) {
+function injectRouteEnvRule(token: string): void {
   const key = `${token}::env`;
   if (replaceRootRuleNodes.has(key)) return;
   const text =
@@ -199,23 +305,23 @@ function injectRouteEnvRule(token) {
   ensureReplaceRootSheet().appendChild(node);
   replaceRootRuleNodes.set(key, node);
 }
-function removeRouteEnvRule(token) {
+function removeRouteEnvRule(token: string): void {
   removeReplaceRootRule(`${token}::env`);
 }
-function tagReplaceRootAnchor(el, token) {
+function tagReplaceRootAnchor(el: Element, token: string): void {
   const current = el.getAttribute('data-shim-replace-root') || '';
   const tokens = current.split(/\s+/).filter(Boolean);
   if (tokens.includes(token)) return;
   tokens.push(token);
   el.setAttribute('data-shim-replace-root', tokens.join(' '));
 }
-function stripReplaceRootToken(el, token) {
+function stripReplaceRootToken(el: Element, token: string): void {
   const current = el.getAttribute('data-shim-replace-root') || '';
   const tokens = current.split(/\s+/).filter((t) => t && t !== token);
   if (tokens.length) el.setAttribute('data-shim-replace-root', tokens.join(' '));
   else el.removeAttribute('data-shim-replace-root');
 }
-function tagMountedNode(node, token) {
+function tagMountedNode(node: Node, token: string): void {
   if (!(node instanceof Element)) return;
   const current = node.getAttribute('data-shim-mounted') || '';
   const tokens = current.split(/\s+/).filter(Boolean);
@@ -224,13 +330,13 @@ function tagMountedNode(node, token) {
   node.setAttribute('data-shim-mounted', tokens.join(' '));
 }
 
-function collectMutationKinds(spec, mutations) {
-  const direct = new Set<any>();
+function collectMutationKinds(spec: Spec, mutations: MutationRegistry): Set<string> {
+  const direct = new Set<string>();
   for (const rule of spec.rules || []) {
     for (const mut of rule.mutations || []) direct.add(mut.kind);
   }
-  const resolved = new Set<any>();
-  const walk = (kind) => {
+  const resolved = new Set<string>();
+  const walk = (kind: string) => {
     if (resolved.has(kind)) return;
     resolved.add(kind);
     const handler = mutations[kind];
@@ -240,8 +346,8 @@ function collectMutationKinds(spec, mutations) {
   return resolved;
 }
 
-function collectCssForSpec(spec, mutations) {
-  const chunks = [];
+function collectCssForSpec(spec: RuntimeSpec, mutations: MutationRegistry): Array<{ id: string; css: string }> {
+  const chunks: Array<{ id: string; css: string }> = [];
   for (const kind of collectMutationKinds(spec, mutations)) {
     const handler = mutations[kind];
     if (handler?.css) chunks.push({ id: `mutation-${kind}`, css: handler.css });
@@ -250,10 +356,15 @@ function collectCssForSpec(spec, mutations) {
   return chunks;
 }
 
-function normalizeOutputs(r) {
+// The one genuinely dynamic boundary in this file: a handler is arbitrary
+// vm-eval'd or `require`d source, so its return value is `unknown` until
+// normalized here. Array outputs are filtered for falsy entries (a handler
+// that conditionally returns nothing for some of several roots); non-array
+// truthy outputs are wrapped as a single-element result.
+function normalizeOutputs(r: unknown): Node[] {
   if (!r) return [];
-  if (Array.isArray(r)) return r.filter(Boolean);
-  return [r];
+  if (Array.isArray(r)) return r.filter(Boolean) as Node[];
+  return [r as Node];
 }
 
 // Preview rules arrive with handler source as strings on rule.handlers
@@ -273,8 +384,8 @@ function normalizeOutputs(r) {
 // path `compileBag` in the page-preload uses for committed handlers,
 // kept identical here so preview and committed share one trust +
 // capability surface.
-function compileInlineHandlers(rawHandlers, spec) {
-  const out = {};
+function compileInlineHandlers(rawHandlers: Record<string, string>, spec: Spec): HandlerMap {
+  const out: HandlerMap = {};
   const specId = spec?.id || 'inline';
   for (const [name, source] of Object.entries(rawHandlers)) {
     if (typeof source === 'function') { out[name] = source; continue; }
@@ -303,11 +414,29 @@ function compileInlineHandlers(rawHandlers, spec) {
   return out;
 }
 
+// Trim a stack trace to the top 8 frames — enough to see the throwing line
+// + immediate callers, not enough to bury the LLM in V8 internals. Mirrors
+// the page-preload's `trimStack` (kept local rather than imported because
+// the engine is loaded from both Node and the page-preload's vm context,
+// and an import cycle would be awkward).
+function trimStackForEvent(stack: string): string {
+  if (!stack) return '';
+  return stack.split('\n').slice(0, 8).join('\n');
+}
+
 // Invokes one mutation against the anchor and returns a Promise<Node[]> of the
 // nodes the handler produced. Handlers enable self-healing by returning the
 // root node(s) they mounted; handlers that return nothing opt out (we never
 // re-mount them, matching the pre-self-healing behavior).
-function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
+function dispatchMutation(
+  el: Element,
+  mut: Mutation,
+  rule: Rule,
+  spec: Spec,
+  api: ShimApi,
+  mutations: MutationRegistry,
+  handlers: HandlerMap,
+): Promise<Node[]> {
   // Emit a handler-error event into the authoring channel. Handler throws
   // are caught by the wrapper below (so a buggy handler can't take down
   // the whole engine), which means they never bubble to window.error —
@@ -317,18 +446,18 @@ function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
   // rejection listeners stay the backstop for async throws that escape
   // the wrapper (e.g. event listeners installed by a successful mount
   // that throw later).
-  const reportError = (handlerName, err) => {
+  const reportError = (handlerName: string, err: unknown) => {
     if (typeof api.reportEvent !== 'function') return;
     api.reportEvent('handler-error', {
       specId: spec.id,
       handlerName: handlerName || '(anonymous)',
       ruleId: rule.id,
-      message: err?.message || String(err),
-      stack: trimStackForEvent(err?.stack || ''),
+      message: errMessage(err),
+      stack: trimStackForEvent(err instanceof Error ? err.stack || '' : ''),
     });
   };
 
-  const safe = (label, handlerName, work) => {
+  const safe = (label: string, handlerName: string | null | undefined, work: () => unknown): Promise<Node[]> => {
     try {
       return Promise.resolve(work()).then(normalizeOutputs, (err) => {
         console.error(`[shim] ${label} failed`, err);
@@ -343,7 +472,8 @@ function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
   };
 
   if (mut.kind === 'script') {
-    const fn = handlers[mut.handler];
+    const handlerName = typeof mut.handler === 'string' ? mut.handler : '';
+    const fn = handlers[handlerName];
     if (!fn) {
       console.warn(`[shim] script: unknown handler "${mut.handler}"`);
       // Missing handler is a kind of authoring error too — surface it the
@@ -401,7 +531,8 @@ function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
   // for free from the scan loop — if the framework reconciles our mount
   // away, the next scan re-runs the handler.
   if (mut.kind === 'replace-root') {
-    const fn = handlers[mut.handler];
+    const handlerName = typeof mut.handler === 'string' ? mut.handler : '';
+    const fn = handlers[handlerName];
     if (!fn) {
       console.warn(`[shim] replace-root: unknown handler "${mut.handler}"`);
       if (typeof api.reportEvent === 'function') {
@@ -439,52 +570,48 @@ function dispatchMutation(el, mut, rule, spec, api, mutations, handlers) {
   );
 }
 
-// Trim a stack trace to the top 8 frames — enough to see the throwing line
-// + immediate callers, not enough to bury the LLM in V8 internals. Mirrors
-// the page-preload's `trimStack` (kept local rather than imported because
-// the engine is loaded from both Node and the page-preload's vm context,
-// and an import cycle would be awkward).
-function trimStackForEvent(stack) {
-  if (!stack) return '';
-  return stack.split('\n').slice(0, 8).join('\n');
-}
-
 // Returns a teardown function that unobserves, removes all mounted outputs,
 // runs per-entry cleanups, and strips any Tier-1 CSS this rule stamped onto
 // its anchors (plus the rule text from the shared stylesheet). Preview
 // iterative refinement in the authoring UI relies on this.
-function applyRule(rule, spec, api, mutations, handlers) {
+function applyRule(
+  rule: Rule,
+  spec: RuntimeSpec,
+  api: ShimApiBase,
+  mutations: MutationRegistry,
+  handlers: HandlerMap,
+): () => void {
   // Rules from the authoring UI preview path carry their handler sources
   // inline on the rule as strings (the LLM emits them that way). Compile
   // them to functions once here and merge into the module-level handlers
   // lookup for this rule's dispatch. On the disk-loaded path this field
   // is absent — handlers already arrive as real functions via the patch
   // module's handlers/*.js.
-  const effectiveHandlers = rule.handlers
+  const effectiveHandlers: HandlerMap = rule.handlers
     ? { ...handlers, ...compileInlineHandlers(rule.handlers, spec) }
     : handlers;
 
-  // anchor -> { outputs: Node[], cleanups: Function[] }
+  // anchor -> { outputs: HTMLElement[], cleanups: Function[] }
   // Map (not WeakMap) so we can iterate and prune anchors that left the DOM,
   // tearing down their portal/overlay listeners and removing nodes we parked
   // in document.body.
-  const state = new Map();
-  const inFlight = new WeakSet();
+  const state = new Map<Element, RuleMountEntry>();
+  const inFlight = new WeakSet<Element>();
 
   // Zero-match warning state — declared up here so scan() (defined below)
   // can clear the timer when something finally anchors. Wire-up (timer
   // schedule + teardown clear) happens after scan is defined.
-  let noMatchTimer: any = 0;
+  let noMatchTimer: ReturnType<typeof setTimeout> | 0 = 0;
   let noMatchReported = false;
   // Witness state: capture fires at most once per lifecycle; the latest
   // rejection verdict feeds the settle-delayed unresolved reporter.
   let witnessCaptured = false;
-  let lastWitnessRejection = null;
+  let lastWitnessRejection: RejectedSample | null = null;
   // Rebase state (§14): the latest scan's resolution, read by the
   // settle-delayed rebase reconciler. `lastResolvedEl` is the single
   // resolved element (for capturing a fresh witness on a promote); null
   // when zero or multiple matched.
-  let lastResolvedEl = null;
+  let lastResolvedEl: Element | null = null;
   let rebaseReported = false;
 
   // Rule-status reporting for the inspector panel. We only emit when the
@@ -495,7 +622,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
   // anchors (the inspector wants to know "rule is mounted but not yet
   // matching" which is distinct from "rule hasn't run").
   let lastReportedCount = -1;
-  let lastReportedSource = '__unset__';
+  let lastReportedSource: string | null = '__unset__';
   // `matchedVia` carries which anchor spec ended up resolving — `'primary'`,
   // `'fallback:0'`, ..., or `null` when nothing matched. Tracked separately
   // from count because a rule can keep its match count steady while
@@ -503,7 +630,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
   // primary now zero, fallback aria-role takes over with the same count).
   // Inspector surfaces this so users can spot "rule still works, but the
   // primary I wrote is now wrong."
-  let lastMatchedSource = null;
+  let lastMatchedSource: string | null = null;
   const reportStatusIfChanged = () => {
     if (state.size === lastReportedCount && lastMatchedSource === lastReportedSource) return;
     lastReportedCount = state.size;
@@ -517,9 +644,9 @@ function applyRule(rule, spec, api, mutations, handlers) {
     });
   };
 
-  async function mountOn(el) {
-    const outputs = [];
-    const cleanups = [];
+  async function mountOn(el: Element): Promise<void> {
+    const outputs: HTMLElement[] = [];
+    const cleanups: Array<() => void> = [];
     // Per-mount api proxy. Handlers call `api.cleanup(fn)` to register
     // tear-down work — event listeners on document, intervals, inner
     // MutationObservers, anything that won't unwind by itself when the
@@ -535,21 +662,27 @@ function applyRule(rule, spec, api, mutations, handlers) {
     // own property scoped to this mount's `cleanups` array. Concurrent
     // mounts of the same rule on different anchors get distinct proxies
     // — one anchor's cleanup registrations don't leak into another's.
-    const mountApi = Object.assign(Object.create(api), {
-      cleanup(fn) {
+    const mountApi: ShimApi = Object.assign(Object.create(api) as ShimApiBase, {
+      cleanup(fn: () => void) {
         if (typeof fn === 'function') cleanups.push(fn);
       },
     });
     for (const mut of rule.mutations || []) {
       const raw = await dispatchMutation(el, mut, rule, spec, mountApi, mutations, effectiveHandlers);
-      const { placed, cleanup } = applyStrategy(raw, el, mut);
+      // dispatchMutation's contract is the broader `Node[]` (handlers may
+      // return any Node); applyStrategy's portal/overlay/shadow machinery
+      // needs `.style`/`.offsetHeight` and so is typed against
+      // `HTMLElement` (strategies.ts). Every real mount target is one in
+      // practice — script/replace-root handlers build ordinary elements —
+      // so this is a boundary cast, not a loosening of either contract.
+      const { placed, cleanup } = applyStrategy(raw as HTMLElement[], el as HTMLElement, mut);
       outputs.push(...placed);
       if (cleanup) cleanups.push(cleanup);
     }
     state.set(el, { outputs, cleanups });
   }
 
-  function teardownEntry(entry) {
+  function teardownEntry(entry: RuleMountEntry) {
     for (const fn of entry.cleanups) {
       try { fn(); } catch (err) { console.error('[shim] cleanup failed', err); }
     }
@@ -567,8 +700,13 @@ function applyRule(rule, spec, api, mutations, handlers) {
       }
     }
 
+    // Only reached for anchored rules — setupRule forks iframe / mount-route
+    // / redirect rules to their own lifecycles before falling through to
+    // applyRule, so `rule.anchor` is always present here for a well-formed
+    // spec. The shared `Rule` type keeps it optional to also describe those
+    // anchor-less rule shapes.
     const { nodes, source, witnessRejected, rejectedSample } =
-      anchors.resolveAllWithSource(rule.anchor);
+      anchors.resolveAllWithSource(rule.anchor as Anchor);
     // Track which spec carried the rule this scan. When state.size goes
     // to 0 (no match), we keep the last source for context — the inspector
     // can still show "previously via fallback:0" if useful, though today
@@ -622,7 +760,11 @@ function applyRule(rule, spec, api, mutations, handlers) {
                 // veto then refuses to score it raw against minified fibers
                 // when no map is available (see matchComponent). Untranslated
                 // captures (no map, or names already original) stay unmarked.
-                w.component = t !== cid ? { ...t, mapped: true } : t;
+                // (translateComponent's signature allows null/undefined for
+                // callers with a possibly-absent descriptor; `cid` is already
+                // verified non-empty above, so `t` is always populated here —
+                // this guard just satisfies the type, not a behavior change.)
+                if (t) w.component = t !== cid ? { ...t, mapped: true } : t;
               }
             })
             .catch(() => {})
@@ -698,12 +840,12 @@ function applyRule(rule, spec, api, mutations, handlers) {
   // — "component-id: no match; witness-scan: ambiguous — 2 disjoint strong
   // matches". Emitted on the quarantine event + diagnostics so a failed
   // recovery is debuggable after the fact instead of silently escalating.
-  let lastRecoveryDetail = null;
+  let lastRecoveryDetail: string | null = null;
   // The current page fingerprint, resolved lazily here (not at run() time):
   // boot() builds the getter before the page's scripts are in the DOM, so it
   // would compute null then. By reconcile time the DOM is settled.
-  let currentBundle = null;
-  const summarizeAnchor = (a) => {
+  let currentBundle: string | null = null;
+  const summarizeAnchor = (a: Anchor | undefined): string => {
     const p = a && a.primary;
     if (!p) return '(none)';
     return `${p.kind}:${p.value || p.name || p.role || p.label || ''}`;
@@ -713,15 +855,15 @@ function applyRule(rule, spec, api, mutations, handlers) {
   // deploy something to promote from), then the rule's previous fallbacks
   // (A/B-flip insurance), deduped against the new primary and each other,
   // capped so the ladder never grows without bound across repeated recovers.
-  const mergeFallbacks = (ladder, prevFallbacks) => {
-    const seen = new Set([JSON.stringify(ladder[0])]);
-    const out = [];
+  const mergeFallbacks = (ladder: AnchorSpec[], prevFallbacks: AnchorSpec[] | undefined): AnchorSpec[] => {
+    const seen = new Set<string>([JSON.stringify(ladder[0])]);
+    const out: AnchorSpec[] = [];
     const prev = Array.isArray(prevFallbacks) ? prevFallbacks : [];
-    for (const spec of [...ladder.slice(1), ...prev]) {
-      const key = JSON.stringify(spec);
+    for (const candidate of [...ladder.slice(1), ...prev]) {
+      const key = JSON.stringify(candidate);
       if (seen.has(key)) continue;
       seen.add(key);
-      out.push(spec);
+      out.push(candidate);
       if (out.length >= 4) break;
     }
     return out;
@@ -746,7 +888,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
       selector: rule.anchor?.primary?.value || '',
     });
   };
-  const emitRebase = (payload) => {
+  const emitRebase = (payload: Record<string, unknown>) => {
     if (rebaseReported || typeof api.reportEvent !== 'function') return;
     rebaseReported = true;
     api.reportEvent('rule-rebase', {
@@ -786,7 +928,13 @@ function applyRule(rule, spec, api, mutations, handlers) {
       // witness rejection. Checked regardless of deploy: never silently
       // mis-attach is the core contract, deploy or not. The bridge resolving
       // null (non-React / timeout) → applicable:false → skipped, never failed.
-      if (lastResolvedEl && rule.anchor?.witness?.component &&
+      //
+      // Captured into a local const BEFORE the `await`s below: narrowing of a
+      // dotted property path like `rule.anchor?.witness?.component` doesn't
+      // survive an intervening async call, so `expectedComponent` is what
+      // carries the non-null fact across them.
+      const expectedComponent = rule.anchor?.witness?.component;
+      if (lastResolvedEl && expectedComponent &&
           api.componentId && typeof api.componentId.verify === 'function') {
         const actual = await api.componentId.verify(lastResolvedEl);
         // Dual raw/translated scoring (§8 Stage B): the stored identity may be
@@ -795,7 +943,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
         // names raw and translated through the deploy's symbol map, so neither
         // generation false-quarantines.
         const syms = await getSymbols(api);
-        const verdict = componentId.matchComponent(rule.anchor.witness.component, actual, syms);
+        const verdict = componentId.matchComponent(expectedComponent, actual, syms);
         if (verdict.applicable && !verdict.pass) {
           noMatchReported = true;
           if (typeof api.reportEvent === 'function') {
@@ -804,8 +952,8 @@ function applyRule(rule, spec, api, mutations, handlers) {
               specId: spec.id,
               ruleId: rule.id,
               selector: rule.anchor?.primary?.value || '',
-              expected: rule.anchor.witness,
-              seen: [`component: expected [${rule.anchor.witness.component.path.join(' > ')}], saw [${seen}]`],
+              expected: rule.anchor?.witness,
+              seen: [`component: expected [${expectedComponent.path.join(' > ')}], saw [${seen}]`],
               rejectedVia: 'primary',
             });
           }
@@ -832,22 +980,26 @@ function applyRule(rule, spec, api, mutations, handlers) {
       // primary is stale, so nothing is broken for the user to see.
       if (!canRebase) return;
       const idx = parseInt(lastMatchedSource.slice('fallback:'.length), 10);
-      const fallbacks = Array.isArray(rule.anchor.fallbacks) ? rule.anchor.fallbacks : [];
+      // Same "only reached for anchored rules" invariant as scan()'s resolve
+      // call — a 'fallback:N' matchedVia can only have been produced by a
+      // rule whose anchor (primary + fallbacks) was actually resolved.
+      const definiteAnchor = rule.anchor as Anchor;
+      const fallbacks = Array.isArray(definiteAnchor.fallbacks) ? definiteAnchor.fallbacks : [];
       const promoted = fallbacks[idx];
       if (!promoted) return;
-      const newAnchor: any = {
+      const newAnchor: Anchor = {
         primary: promoted,
-        fallbacks: [rule.anchor.primary, ...fallbacks.filter((_, i) => i !== idx)],
+        fallbacks: [definiteAnchor.primary, ...fallbacks.filter((_, i) => i !== idx)],
       };
       // Carry the component identity into the refreshed witness — it names the
       // COMPONENT, not the markup, so it stays valid across the promote (and,
       // stored in original-name space, across deploys). Rebuilding without it
       // silently dropped the strongest signal on every promotion.
       const fresh = lastResolvedEl
-        ? witnessMod.buildWitness(lastResolvedEl, { component: rule.anchor.witness?.component })
+        ? witnessMod.buildWitness(lastResolvedEl, { component: definiteAnchor.witness?.component })
         : null;
       if (fresh) newAnchor.witness = fresh;
-      else if (rule.anchor.witness) newAnchor.witness = rule.anchor.witness;
+      else if (definiteAnchor.witness) newAnchor.witness = definiteAnchor.witness;
       emitRebase({
         strategy: 'promote',
         anchor: newAnchor,
@@ -863,7 +1015,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
     // drift surfaces instead of self-healing).
     if (state.size === 0) {
       const hasWitness = !!rule.anchor?.witness;
-      const recoveryNotes = [];
+      const recoveryNotes: string[] = [];
       // Component-identity recovery (§8), tried first because it's the strongest
       // signal: the selector died, but the component that rendered the target
       // may still be on the page. The main-world helper scans for nodes whose
@@ -871,7 +1023,8 @@ function applyRule(rule, spec, api, mutations, handlers) {
       // catches the exact deploy class css anchors can't survive — markup/class
       // rewrite with the React tree intact. Falls through to witnessRecover
       // (tag/attr/text scan) when there's no component witness or no unique hit.
-      if (canRebase && rule.anchor?.witness?.component &&
+      const storedComponent = rule.anchor?.witness?.component;
+      if (canRebase && storedComponent &&
           api.componentId && typeof api.componentId.find === 'function') {
         // The stored identity is (for post-map witnesses) in ORIGINAL-name
         // space; live fibers carry the CURRENT deploy's minified names. Invert
@@ -880,16 +1033,21 @@ function applyRule(rule, spec, api, mutations, handlers) {
         // scores max across the list. This is the cross-deploy payoff: a
         // TrackRow witness finds the node now named Xd. No map → raw only,
         // the pre-Stage-B behavior.
-        const stored = rule.anchor.witness.component;
+        const stored = storedComponent;
         const syms = await getSymbols(api);
         const toMin = componentId.translateComponent(stored, componentId.invertSymbols(syms));
-        const expectedList = toMin !== stored ? [toMin, stored] : stored;
+        // `toMin` is only ever null/undefined per translateComponent's general
+        // signature — with a defined, non-empty `stored` input (guaranteed by
+        // the guard above) every one of its return paths yields a real
+        // descriptor. The truthy check just narrows the type for the array
+        // literal below; it's never false in practice.
+        const expectedList = toMin && toMin !== stored ? [toMin, stored] : stored;
         const matches = await api.componentId.find(expectedList);
         if (Array.isArray(matches) && matches.length === 1) {
           const ladder = anchors.suggestAnchorLadder(matches[0]);
           if (ladder.length) {
             const fresh = witnessMod.buildWitness(matches[0], { component: stored })
-              || rule.anchor.witness;
+              || rule.anchor?.witness;
             emitRebase({
               strategy: 'recover',
               // `via` names the rung that found the element — component
@@ -898,7 +1056,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
               via: 'component-identity',
               anchor: {
                 primary: ladder[0],
-                fallbacks: mergeFallbacks(ladder, rule.anchor.fallbacks),
+                fallbacks: mergeFallbacks(ladder, rule.anchor?.fallbacks),
                 witness: fresh,
               },
               from: summarizeAnchor(rule.anchor),
@@ -912,7 +1070,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
           : `component-id: ${matches.length} matches (not unique)`);
       }
       if (canRebase && hasWitness) {
-        const rec = anchors.witnessRecoverDetail(rule.anchor.witness, document);
+        const rec = anchors.witnessRecoverDetail(rule.anchor?.witness, document);
         const found = rec.el;
         const ladder = found ? anchors.suggestAnchorLadder(found) : [];
         if (rec.reason) recoveryNotes.push(`witness-scan: ${rec.reason}`);
@@ -922,8 +1080,8 @@ function applyRule(rule, spec, api, mutations, handlers) {
             via: 'witness',
             anchor: {
               primary: ladder[0],
-              fallbacks: mergeFallbacks(ladder, rule.anchor.fallbacks),
-              witness: witnessMod.buildWitness(found) || rule.anchor.witness,
+              fallbacks: mergeFallbacks(ladder, rule.anchor?.fallbacks),
+              witness: witnessMod.buildWitness(found) || rule.anchor?.witness,
             },
             from: summarizeAnchor(rule.anchor),
             to: summarizeAnchor({ primary: ladder[0] }),
@@ -986,15 +1144,17 @@ function applyRule(rule, spec, api, mutations, handlers) {
         if (lastRecoveryDetail) {
           console.warn(`[shim] rule "${rule.id}" recovery failed → quarantine (${lastRecoveryDetail})`);
         }
-        api.reportEvent('rule-quarantined', {
-          specId: spec.id,
-          ruleId: rule.id,
-          selector: rule.anchor?.primary?.value || '',
-          expected: rule.anchor.witness,
-          seen: [],
-          rejectedVia: null,
-          recovery: lastRecoveryDetail,
-        });
+        if (typeof api.reportEvent === 'function') {
+          api.reportEvent('rule-quarantined', {
+            specId: spec.id,
+            ruleId: rule.id,
+            selector: rule.anchor?.primary?.value || '',
+            expected: rule.anchor?.witness,
+            seen: [],
+            rejectedVia: null,
+            recovery: lastRecoveryDetail,
+          });
+        }
         return;
       }
       reportUnresolved();
@@ -1048,7 +1208,7 @@ function applyRule(rule, spec, api, mutations, handlers) {
 // Returns a teardown fn that disconnects the observer and cancels any pending
 // rAF. Forwarded rules already applied in child frames aren't recalled —
 // teardown-by-source is a separate bridge concern not wired yet.
-function bridgeRule(rule, spec, api) {
+function bridgeRule(rule: Rule, spec: Spec, api: ShimApiBase): () => void {
   if (!api.bridge?.forwardRule) {
     console.warn('[shim] anchor.iframe set but api.bridge unavailable');
     return () => {};
@@ -1059,12 +1219,16 @@ function bridgeRule(rule, spec, api) {
     return () => {};
   }
 
-  const innerRule = { ...rule, anchor: { ...rule.anchor } };
+  // `sel` is only ever derived from `rule.anchor?.iframe`, so having reached
+  // here (past the `sel?.kind !== 'css'` check) means `rule.anchor` itself is
+  // necessarily defined too.
+  const anchor = rule.anchor as Anchor;
+  const innerRule = { ...rule, anchor: { ...anchor } };
   delete innerRule.anchor.iframe;
 
   // iframe element → last origin we forwarded to. When an iframe navigates
   // cross-origin (src changes) we re-forward to the new origin.
-  const forwardedTo = new Map();
+  const forwardedTo = new Map<Element, string>();
 
   const scan = () => {
     for (const el of forwardedTo.keys()) {
@@ -1073,7 +1237,7 @@ function bridgeRule(rule, spec, api) {
     for (const el of document.querySelectorAll(sel.value)) {
       const src = el.getAttribute('src');
       if (!src) continue;
-      let origin;
+      let origin: string;
       try {
         origin = new URL(src, location.href).origin;
       } catch {
@@ -1128,8 +1292,8 @@ function bridgeRule(rule, spec, api) {
 // so mounting is identical regardless of how the path was reached. The page
 // itself is mounted at `document.body` and the site's own body children are
 // hidden, reusing the Tier-4 `replace-root` token machinery.
-function routeRule(rule, spec, api, handlers) {
-  const effectiveHandlers = rule.handlers
+function routeRule(rule: Rule, spec: Spec, api: ShimApiBase, handlers: HandlerMap): () => void {
+  const effectiveHandlers: HandlerMap = rule.handlers
     ? { ...handlers, ...compileInlineHandlers(rule.handlers, spec) }
     : handlers;
 
@@ -1139,18 +1303,19 @@ function routeRule(rule, spec, api, handlers) {
     return () => {};
   }
 
-  const reportHandlerError = (err) => {
+  const reportHandlerError = (err: unknown) => {
     if (typeof api.reportEvent !== 'function') return;
     api.reportEvent('handler-error', {
       specId: spec.id,
       handlerName: mut.handler || '(anonymous)',
       ruleId: rule.id,
-      message: err?.message || String(err),
-      stack: trimStackForEvent(err?.stack || ''),
+      message: errMessage(err),
+      stack: trimStackForEvent(err instanceof Error ? err.stack || '' : ''),
     });
   };
 
-  const handlerFn = effectiveHandlers[mut.handler];
+  const handlerName = typeof mut.handler === 'string' ? mut.handler : '';
+  const handlerFn = effectiveHandlers[handlerName];
   if (!handlerFn) {
     console.warn(`[shim] mount-route: unknown handler "${mut.handler}"`);
     reportHandlerError(new Error(`unknown handler "${mut.handler}" — the rule references a handler name that wasn't compiled with this shim`));
@@ -1161,7 +1326,7 @@ function routeRule(rule, spec, api, handlers) {
   const token = `shim-${spec.id}-${rule.id}-mount-route`;
 
   let lastReportedMatched = -1;
-  const reportStatus = (matched) => {
+  const reportStatus = (matched: number) => {
     if (matched === lastReportedMatched) return;
     lastReportedMatched = matched;
     if (typeof api.reportEvent !== 'function') return;
@@ -1173,16 +1338,21 @@ function routeRule(rule, spec, api, handlers) {
     });
   };
 
-  // { outputs: Node[], cleanups: Function[], path: string } while a route is
-  // mounted; null when the current path doesn't match.
-  let mounted = null;
+  // { outputs, cleanups, path } while a route is mounted; null when the
+  // current path doesn't match.
+  let mounted: MountedRoute | null = null;
 
-  function mountRoute(m) {
-    const cleanups = [];
-    const mountApi = Object.assign(Object.create(api), {
-      cleanup(fn) { if (typeof fn === 'function') cleanups.push(fn); },
+  // A `const` arrow (not a hoisted `function` declaration): TS's narrowing
+  // of `mut` from the guard above doesn't survive into a hoisted function
+  // body (it could in principle run before the narrowing check), but does
+  // survive into a `const`-bound closure defined after it — which this
+  // always is.
+  const mountRoute = (m: { params: Record<string, string | undefined> }) => {
+    const cleanups: Array<() => void> = [];
+    const mountApi: ShimApi = Object.assign(Object.create(api) as ShimApiBase, {
+      cleanup(fn: () => void) { if (typeof fn === 'function') cleanups.push(fn); },
     });
-    let outputs;
+    let outputs: Node[];
     try {
       const raw = handlerFn({
         match: { path: routeMatch.normalizePath(location.pathname), params: m.params },
@@ -1229,18 +1399,22 @@ function routeRule(rule, spec, api, handlers) {
     try { window.scrollTo(0, 0); } catch { /* jsdom / detached */ }
     mounted = { outputs: [host], cleanups, path: routeMatch.normalizePath(location.pathname), prevTitle };
     reportStatus(1);
-  }
+  };
 
   function unmountRoute() {
     if (!mounted) return;
-    for (const fn of mounted.cleanups) {
+    // Captured once so the narrowed (non-null) type survives the cleanup
+    // calls below — TS conservatively widens a re-checked `let` back to
+    // `MountedRoute | null` across an intervening function call.
+    const entry = mounted;
+    for (const fn of entry.cleanups) {
       try { fn(); } catch (err) { console.error('[shim] route cleanup failed', err); }
     }
-    for (const node of mounted.outputs) node.remove();
+    for (const node of entry.outputs) node.remove();
     if (document.body) stripReplaceRootToken(document.body, token);
     removeReplaceRootRule(token);
     removeRouteEnvRule(token);
-    document.title = mounted.prevTitle;
+    document.title = entry.prevTitle;
     mounted = null;
     reportStatus(0);
   }
@@ -1258,18 +1432,28 @@ function routeRule(rule, spec, api, handlers) {
     else if (!m && mounted) unmountRoute();
   }
 
-  function onClick(e) {
+  function onClick(e: MouseEvent) {
     if (e.defaultPrevented || e.button !== 0) return;
     if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return; // let the browser open new tab/window
     // composedPath()[0], not e.target: clicks inside the route page's shadow
     // root retarget to the host element at the document level, which would
     // hide the actual <a>. composedPath sees through the shadow boundary, so
     // route-to-route links inside a mounted page keep getting intercepted.
-    const rawTarget = e.composedPath ? e.composedPath()[0] : e.target;
-    const el = rawTarget instanceof Element ? rawTarget : rawTarget?.parentElement;
-    const a = el?.closest?.('a[href]');
+    const rawTarget: EventTarget | null = e.composedPath ? e.composedPath()[0] : e.target;
+    // A click's target is always a DOM Node in practice (Element or a text
+    // node inside one); `EventTarget` itself is too generic to carry
+    // `.parentElement`, so this narrows to the realistic domain rather than
+    // assuming every EventTarget is Element-shaped.
+    const el = rawTarget instanceof Element
+      ? rawTarget
+      : rawTarget instanceof Node
+        ? rawTarget.parentElement
+        : null;
+    // `closest('a[href]')` can't be typed to a specific tag from a runtime
+    // attribute selector string — it's provably an <a> or null at runtime.
+    const a = el?.closest?.('a[href]') as HTMLAnchorElement | null | undefined;
     if (!a || a.target === '_blank' || a.hasAttribute('download')) return;
-    let url;
+    let url: URL;
     try { url = new URL(a.href, location.href); } catch { return; }
     if (url.origin !== location.origin) return; // external link — real navigation
     if (!match(routeMatch.normalizePath(url.pathname))) return; // not one of our routes
@@ -1284,7 +1468,7 @@ function routeRule(rule, spec, api, handlers) {
   // bfcache restores can land a frozen document on a different history entry
   // WITHOUT firing popstate (only pageshow with persisted=true). Re-evaluate
   // so a doc frozen on /notes and restored on / unmounts, and vice versa.
-  function onPageShow(e) { if (e.persisted) evaluate(); }
+  function onPageShow(e: PageTransitionEvent) { if (e.persisted) evaluate(); }
 
   // Light self-heal: if a framework re-render detaches our mounted root while
   // the route is still active, re-attach it. The replace-root CSS keeps the
@@ -1321,7 +1505,7 @@ function routeRule(rule, spec, api, handlers) {
 
 // Pick the right setup path for a rule. Route rules and iframe-bridge rules
 // take dedicated lifecycles; everything else is a normal anchored rule.
-function setupRule(rule, spec, api, mutations, handlers) {
+function setupRule(rule: Rule, spec: RuntimeSpec, api: ShimApiBase, mutations: MutationRegistry, handlers: HandlerMap): () => void {
   if (rule.anchor?.iframe) return bridgeRule(rule, spec, api);
   if ((rule.mutations || []).some((m) => m.kind === 'mount-route')) {
     return routeRule(rule, spec, api, handlers);
@@ -1337,7 +1521,7 @@ function setupRule(rule, spec, api, mutations, handlers) {
   return applyRule(rule, spec, api, mutations, handlers);
 }
 
-function run(patch, api) {
+function run(patch: PatchBundle, api: ShimApiBase): PatchControl {
   const { mutations = {}, handlers = {} } = patch;
   // Stamp two runtime-only fields onto the spec so the deep rule-processing
   // path can read them without threading params through every signature.
@@ -1353,7 +1537,7 @@ function run(patch, api) {
   const bundleHashFn = typeof patch.bundleHash === 'function'
     ? patch.bundleHash
     : () => (typeof patch.bundleHash === 'string' ? patch.bundleHash : null);
-  const spec = {
+  const spec: RuntimeSpec = {
     ...patch.spec,
     __cssPriority: Number.isFinite(patch.priority) ? patch.priority : 0,
     __bundleHashFn: bundleHashFn,
@@ -1368,7 +1552,7 @@ function run(patch, api) {
   // Track teardowns for each rule in spec.rules so the whole patch can be
   // torn down live (sidebar toggle-off). Extra rules (previews + forwarded)
   // have their own lifecycle via extraTeardowns below.
-  const ruleTeardowns = [];
+  const ruleTeardowns: Array<() => void> = [];
   let tornDown = false;
   api.onReady(() => {
     if (tornDown) return;
@@ -1381,11 +1565,11 @@ function run(patch, api) {
   // the preload for rules forwarded in from a parent frame's bridge, and by
   // the authoring UI for live previews. Keyed rules can be updated in place
   // (same key replaces previous apply) and torn down via `removeExtraRule`.
-  const extraTeardowns = new Map();
+  const extraTeardowns = new Map<string, () => void>();
 
   return {
-    applyExtraRule(rule, specIdOverride, ruleKey) {
-      const effectiveSpec = specIdOverride ? { ...spec, id: specIdOverride } : spec;
+    applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string) {
+      const effectiveSpec: RuntimeSpec = specIdOverride ? { ...spec, id: specIdOverride } : spec;
       api.onReady(() => {
         if (ruleKey) {
           const prev = extraTeardowns.get(ruleKey);
@@ -1398,7 +1582,7 @@ function run(patch, api) {
         if (ruleKey) extraTeardowns.set(ruleKey, teardown);
       });
     },
-    removeExtraRule(ruleKey) {
+    removeExtraRule(ruleKey: string) {
       const teardown = extraTeardowns.get(ruleKey);
       if (!teardown) return false;
       teardown();

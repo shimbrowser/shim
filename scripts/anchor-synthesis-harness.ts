@@ -49,7 +49,13 @@ function el(tag, attrs = {}, { text = '', children = [] } = {}) {
     },
   };
   for (const c of children) c.parentElement = node;
-  return node;
+  // Stub is shaped like the subset of Element anchors.ts reads (see header
+  // comment), not a real DOM Element — cast at this single choke point,
+  // mirroring witness-harness.ts's `el()`, so every caller downstream can
+  // pass it to the now-typed suggestAnchorLadder/suggestAnchorFor/resolveAll
+  // without widening those signatures back to `any` for a bare-node test
+  // double's sake.
+  return node as unknown as Element;
 }
 
 function descendantsOf(node) {

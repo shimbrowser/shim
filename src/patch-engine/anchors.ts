@@ -21,6 +21,49 @@
 
 import * as witness from './witness';
 import { errMessage } from '../shared/error';
+import type { Anchor, AnchorSpec, Witness } from './types';
+
+// A DOM-shaped element sufficient for anchor synthesis (suggestAnchorLadder
+// / suggestAnchorFor and their helpers). Real DOM Elements satisfy this
+// trivially — every member below is always present on a real Element — but
+// it's declared with each member OPTIONAL on purpose: the bare-node
+// harnesses (scripts/anchor-synthesis-harness.ts, scripts/witness-harness.ts)
+// pass minimal duck-typed test doubles that don't implement the full DOM
+// Element interface (no NamedNodeMap, no HTMLCollection, etc.), and the
+// `el.method && …` / `!el.children || …` feature-detects sprinkled through
+// this file exist specifically to tolerate that. Declaring the members
+// optional keeps those checks genuine feature-detects rather than "this is
+// always defined" (which real, required DOM types would force — see
+// ScanRoot below for the same trade-off applied to scan roots).
+interface AnchorElement {
+  tagName: string;
+  attributes?: Iterable<{ name: string; value: unknown }>;
+  children?: ArrayLike<AnchorElement>;
+  parentElement?: AnchorElement | null;
+  textContent?: string | null;
+  // `unknown`, not `string | null`: a real Element's getAttribute always
+  // returns `string | null`, but the harnesses build their stub elements
+  // through an untyped `attrs` object (scripts/anchor-synthesis-harness.ts),
+  // which loses string-ness on the way through `Object.entries` and infers
+  // as `unknown`. `attrOf` below is the one place that narrows it back down.
+  getAttribute?(name: string): unknown;
+  querySelectorAll?(selectors: string): ArrayLike<AnchorElement>;
+}
+
+// Read a string attribute off an AnchorElement, tolerating both the
+// missing-method and non-string-return cases (see AnchorElement.getAttribute
+// above) the same way the file's existing `el.getAttribute && …` call sites
+// always have: anything that isn't a real string reads as "absent".
+function attrOf(el: AnchorElement, name: string): string | null {
+  const v = el.getAttribute && el.getAttribute(name);
+  return typeof v === 'string' ? v : null;
+}
+
+// A root sufficiently DOM-shaped to scan by tag name. getElementsByTagName
+// is genuinely optional here — see the resolveOne 'text' case and
+// witnessRecoverDetail below, both of which feature-detect it against a
+// root that may be a bare-node harness stub lacking it.
+type ScanRoot = { getElementsByTagName?(tag: string): ArrayLike<Element> };
 
 // Resolve an anchor's primary spec; if it returns no matches, walk the
 // optional `fallbacks` array in order and return the first one that does.
@@ -42,8 +85,16 @@ import { errMessage } from '../shared/error';
 // what we anchored to at commit time, fall through anyway." Anchors
 // without a witness keep the original behavior: trusted whenever they
 // return ≥1 match.
-function resolveAll(anchor, root = document) {
+function resolveAll(anchor: Anchor, root: Document | Element = document): Element[] {
   return resolveAllWithSource(anchor, root).nodes;
+}
+
+// Best-scoring rejected candidate's detail, for the quarantine report —
+// see the header comment on resolveAllWithSource for what this feeds.
+interface RejectedSample {
+  score: number;
+  detail: string[];
+  source: string;
 }
 
 // Same as resolveAll but tells the caller WHICH spec actually resolved —
@@ -62,18 +113,18 @@ function resolveAll(anchor, root = document) {
 // (rule-no-match) apart from "selector found something that isn't the
 // thing" — the quarantine signal. `rejectedSample` carries the best-
 // scoring rejected candidate's detail for the quarantine report.
-function resolveAllWithSource(anchor, root = document): any {
+function resolveAllWithSource(anchor: Anchor, root: Document | Element = document) {
   const primary = anchor?.primary;
-  if (!primary) return { nodes: [], source: null, witnessRejected: false };
+  if (!primary) return { nodes: [] as Element[], source: null as string | null, witnessRejected: false };
   const w = anchor.witness || null;
   let witnessRejected = false;
-  let rejectedSample = null;
+  let rejectedSample: RejectedSample | null = null;
 
-  const tryRung = (spec, source) => {
+  const tryRung = (spec: AnchorSpec, source: string) => {
     const found = resolveOne(spec, root);
     if (found.length === 0) return null;
     if (!w) return { nodes: found, source, witnessRejected: false };
-    const passing = [];
+    const passing: Element[] = [];
     for (const el of found) {
       const verdict = witness.matchWitness(w, el);
       if (verdict.pass) {
@@ -96,10 +147,10 @@ function resolveAllWithSource(anchor, root = document): any {
     const next = tryRung(fallbacks[i], `fallback:${i}`);
     if (next) return next;
   }
-  return { nodes: [], source: null, witnessRejected, rejectedSample };
+  return { nodes: [] as Element[], source: null as string | null, witnessRejected, rejectedSample };
 }
 
-function resolveOne(spec, root) {
+function resolveOne(spec: AnchorSpec, root: Document | Element): Element[] {
   switch (spec.kind) {
     case 'css':
       if (typeof spec.value !== 'string' || !spec.value.trim()) return [];
@@ -163,18 +214,26 @@ function resolveOne(spec, root) {
         return [];
       }
       const mode = spec.match === 'contains' ? 'contains' : 'exact';
-      const norm = (s) => (s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+      const norm = (s: string | null | undefined): string => (s || '').trim().replace(/\s+/g, ' ').toLowerCase();
       const target = norm(value);
       const test = mode === 'contains'
-        ? (txt) => txt.includes(target)
-        : (txt) => txt === target;
+        ? (txt: string) => txt.includes(target)
+        : (txt: string) => txt === target;
 
-      const all = (root.getElementsByTagName
-        ? root.getElementsByTagName('*')
+      // `root` is a real Document|Element here, whose getElementsByTagName
+      // is always defined — but this feature-detect exists for parity with
+      // bare-node harness roots that stand in for `root` at call sites one
+      // level up (suggestAnchorLadder's verification pass). Widen through a
+      // locally-typed view where the method is genuinely optional so the
+      // ternary stays a real feature-detect instead of tripping "this
+      // condition will always return true" (TS2774).
+      const scanRoot: ScanRoot = root;
+      const all = (scanRoot.getElementsByTagName
+        ? scanRoot.getElementsByTagName('*')
         : root.querySelectorAll('*')) || [];
       const MAX_SCAN = 10000;
-      const matched = [];
-      const matchedSet = new Set();
+      const matched: Element[] = [];
+      const matchedSet = new Set<Element>();
       for (let i = 0; i < all.length && i < MAX_SCAN; i++) {
         const el = all[i];
         if (test(norm(el.textContent))) {
@@ -186,7 +245,10 @@ function resolveOne(spec, root) {
       // Drop any element whose descendant is also in the set — keeps
       // only the deepest text-bearing matchers.
       return matched.filter((el) => {
-        const descendants = el.querySelectorAll ? el.querySelectorAll('*') : [];
+        // Same feature-detect rationale as `scanRoot` above, at element
+        // scope: widen to a view where querySelectorAll is optional.
+        const scanEl: { querySelectorAll?(selectors: string): Iterable<Element> } = el;
+        const descendants = scanEl.querySelectorAll ? scanEl.querySelectorAll('*') : [];
         for (const d of descendants) {
           if (matchedSet.has(d)) return false;
         }
@@ -199,7 +261,7 @@ function resolveOne(spec, root) {
       // present. At least one of role/label is required — without either,
       // an aria anchor has no signal and would silently match every
       // element on the page.
-      const parts = [];
+      const parts: string[] = [];
       if (typeof spec.role === 'string' && spec.role.trim()) {
         parts.push(`[role="${escapeAttrValue(spec.role.trim())}"]`);
       }
@@ -220,7 +282,7 @@ function resolveOne(spec, root) {
     }
 
     default:
-      console.warn(`[shim] unsupported anchor kind: ${spec.kind}`);
+      console.warn(`[shim] unsupported anchor kind: ${(spec as AnchorSpec).kind}`);
       return [];
   }
 }
@@ -228,7 +290,7 @@ function resolveOne(spec, root) {
 // Escape a value for inclusion inside a `[attr="..."]` selector. Only `"`
 // and `\` need escaping inside double-quoted attr selectors per the CSS
 // grammar; everything else (including spaces, hyphens, unicode) is fine.
-function escapeAttrValue(v) {
+function escapeAttrValue(v: string): string {
   return v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
@@ -240,7 +302,7 @@ function escapeAttrValue(v) {
 // dependent) — never anchor to them (mirrors page-preload's picker exclusion
 // and the witness module). A site `data-shimmer` would also be skipped; it
 // still has tag/text/other signals.
-function isSiteDataAttr(name) {
+function isSiteDataAttr(name: string): boolean {
   return name.startsWith('data-') && !name.startsWith('data-shim');
 }
 
@@ -262,29 +324,29 @@ function isSiteDataAttr(name) {
 // instead of a lone primary.
 const LADDER_MAX = 4;
 
-function suggestAnchorLadder(el, root?) {
+function suggestAnchorLadder(el: AnchorElement, root?: Document | Element): AnchorSpec[] {
   if (!el || !el.tagName) return [];
-  const scope = root || (typeof document !== 'undefined' ? document : null);
+  const scope: Document | Element | null = root || (typeof document !== 'undefined' ? document : null);
   const verifiable = !!(scope && typeof scope.querySelectorAll === 'function');
   const tag = el.tagName.toLowerCase();
 
-  const candidates = [];
+  const candidates: AnchorSpec[] = [];
 
-  const id = el.getAttribute && el.getAttribute('id');
+  const id = attrOf(el, 'id');
   if (id && /^[A-Za-z][\w-]*$/.test(id)) {
     candidates.push({ kind: 'css', value: `#${id}` });
   }
 
   for (const attr of el.attributes || []) {
     if (isSiteDataAttr(attr.name) && /^[a-zA-Z][\w-]*$/.test(attr.name)) {
-      candidates.push({ kind: 'data-attr', name: attr.name, value: attr.value });
+      candidates.push({ kind: 'data-attr', name: attr.name, value: String(attr.value) });
     }
   }
 
-  const role = el.getAttribute && el.getAttribute('role');
-  const label = el.getAttribute && el.getAttribute('aria-label');
+  const role = attrOf(el, 'role');
+  const label = attrOf(el, 'aria-label');
   if ((role && role.trim()) || (label && label.trim())) {
-    const a: any = { kind: 'aria' };
+    const a: AnchorSpec = { kind: 'aria' };
     if (role && role.trim()) a.role = role.trim();
     if (label && label.trim()) a.label = label.trim();
     candidates.push(a);
@@ -330,20 +392,25 @@ function suggestAnchorLadder(el, root?) {
   // Verify + rank. Unverifiable scope (bare-node harness stubs): keep the
   // kind order as-is. Verifiable: drop candidates that don't resolve to this
   // element, then stable-partition unique-hitters ahead of crowd-matchers.
-  let ranked;
-  if (!verifiable) {
+  let ranked: AnchorSpec[];
+  if (!verifiable || !scope) {
     ranked = candidates;
   } else {
-    const unique = [];
-    const crowd = [];
+    const unique: AnchorSpec[] = [];
+    const crowd: AnchorSpec[] = [];
     for (const spec of candidates) {
-      let found;
+      let found: Element[];
       try {
         found = resolveOne(spec, scope);
       } catch (_) {
         continue;
       }
-      if (!found.includes(el)) continue;
+      // `el` is the caller's DOM-shaped element — a real Element in
+      // production, a duck-typed test double in the bare-node harnesses.
+      // `resolveOne` always hands back real DOM query results, so this is
+      // an identity comparison only; safe regardless of which shape `el`
+      // actually is at runtime.
+      if (!found.includes(el as unknown as Element)) continue;
       (found.length === 1 ? unique : crowd).push(spec);
     }
     ranked = unique.concat(crowd);
@@ -358,7 +425,7 @@ function suggestAnchorLadder(el, root?) {
 }
 
 // Back-compat single-spec form — the strongest rung of the ladder.
-function suggestAnchorFor(el, root) {
+function suggestAnchorFor(el: AnchorElement, root?: Document | Element): AnchorSpec | null {
   const ladder = suggestAnchorLadder(el, root);
   return ladder.length ? ladder[0] : null;
 }
@@ -369,7 +436,7 @@ function suggestAnchorFor(el, root) {
 // 1-2-letter+digit minified names (`x9`). BEM (`card__title`) and plain
 // utilities survive the filter — a broad utility combo just loses the
 // uniqueness ranking instead.
-function looksGeneratedClass(cls) {
+function looksGeneratedClass(cls: string): boolean {
   if (!/^[A-Za-z_][\w-]*$/.test(cls)) return true; // needs escaping → skip
   if (cls.length < 3) return true;
   if (/^(css|jss|jsx|sc|svelte|emotion|chakra)-/i.test(cls)) return true;
@@ -380,18 +447,18 @@ function looksGeneratedClass(cls) {
   return false;
 }
 
-function stableClassesOf(el) {
-  const raw = el.getAttribute && el.getAttribute('class');
+function stableClassesOf(el: AnchorElement): string[] {
+  const raw = attrOf(el, 'class');
   if (!raw || typeof raw !== 'string') return [];
   return raw.trim().split(/\s+/).filter((c) => c && !looksGeneratedClass(c));
 }
 
 // Nearest ancestor (within 5 levels) carrying an id or a site data-*
 // attribute — a stable scope to hang a descendant selector off.
-function stableAncestorSelector(el) {
-  let cur = el.parentElement;
+function stableAncestorSelector(el: AnchorElement): string | null {
+  let cur: AnchorElement | null | undefined = el.parentElement;
   for (let depth = 0; cur && cur.tagName && depth < 5; depth++, cur = cur.parentElement) {
-    const aid = cur.getAttribute && cur.getAttribute('id');
+    const aid = attrOf(cur, 'id');
     if (aid && /^[A-Za-z][\w-]*$/.test(aid)) return `#${aid}`;
     for (const attr of cur.attributes || []) {
       if (isSiteDataAttr(attr.name) && /^[a-zA-Z][\w-]*$/.test(attr.name)) {
@@ -403,20 +470,21 @@ function stableAncestorSelector(el) {
   return null;
 }
 
-function positionalPath(el) {
-  const parts = [];
-  let cur = el;
+function positionalPath(el: AnchorElement): string {
+  const parts: string[] = [];
+  let cur: AnchorElement | null | undefined = el;
   for (let depth = 0; cur && cur.tagName && depth < 3; depth++) {
-    const tag = cur.tagName.toLowerCase();
-    const cid = cur.getAttribute && cur.getAttribute('id');
+    const curEl: AnchorElement = cur;
+    const tag = curEl.tagName.toLowerCase();
+    const cid = attrOf(curEl, 'id');
     if (cid && /^[A-Za-z][\w-]*$/.test(cid)) {
       parts.unshift(`#${cid}`);
       break; // an id'd ancestor is a stable enough root
     }
-    const parent = cur.parentElement;
+    const parent = curEl.parentElement;
     if (parent) {
-      const sibs = Array.from(parent.children).filter((c: any) => c.tagName === cur.tagName);
-      const idx = sibs.indexOf(cur) + 1;
+      const sibs = Array.from(parent.children || []).filter((c) => c.tagName === curEl.tagName);
+      const idx = sibs.indexOf(curEl) + 1;
       parts.unshift(sibs.length > 1 ? `${tag}:nth-of-type(${idx})` : tag);
     } else {
       parts.unshift(tag);
@@ -449,21 +517,32 @@ const RECOVER_MIN_SCORE = 0.6;
 const RECOVER_MAX_STRONG = 8;
 // Stub-friendly containment (harness elements have parentElement, not
 // .contains): is `b` inside `a`?
-function containsNode(a, b) {
+function containsNode(a: Element, b: Element): boolean {
   for (let n = b && b.parentElement; n; n = n.parentElement) {
     if (n === a) return true;
   }
   return false;
 }
+
+interface StrongMatch {
+  el: Element;
+  score: number;
+}
+
 // Detail-returning form: `{ el, reason }` where a null `el` carries WHY the
 // scan refused — surfaced through the quarantine event/diagnostics so a
 // failed recovery is debuggable after the fact (live-caught: a recovery
 // failure escalated to an LLM turn and nothing recorded which veto fired).
-function witnessRecoverDetail(w, root = document) {
-  if (!w || !w.tag) return { el: null, reason: 'no witness to scan with' };
-  const scope = root.getElementsByTagName ? root : document;
-  const candidates = scope.getElementsByTagName(w.tag);
-  const strong = [];
+function witnessRecoverDetail(w: Witness | null | undefined, root: ScanRoot | Document = document) {
+  if (!w || !w.tag) return { el: null as Element | null, reason: 'no witness to scan with' as string | null };
+  // Feature-detect inline (rather than via an intermediate `scope` variable)
+  // — TS's narrowing of an optional-vs-required method across a
+  // `ScanRoot | Document` union doesn't survive being stashed in a variable
+  // and dereferenced on a later line, so the guard and both call sites live
+  // in the same expression. Same runtime behavior as `root.getElementsByTagName
+  // ? root : document` — call on `root` when it has the method, else `document`.
+  const candidates = root.getElementsByTagName ? root.getElementsByTagName(w.tag) : document.getElementsByTagName(w.tag);
+  const strong: StrongMatch[] = [];
   for (let i = 0; i < candidates.length && i < 5000; i++) {
     const el = candidates[i];
     const verdict = witness.matchWitness(w, el);
@@ -471,20 +550,20 @@ function witnessRecoverDetail(w, root = document) {
       strong.push({ el, score: verdict.score });
       if (strong.length > RECOVER_MAX_STRONG) {
         // a page full of look-alikes — don't guess
-        return { el: null, reason: `>${RECOVER_MAX_STRONG} strong matches — page full of look-alikes` };
+        return { el: null as Element | null, reason: `>${RECOVER_MAX_STRONG} strong matches — page full of look-alikes` };
       }
     }
   }
   if (!strong.length) {
-    return { el: null, reason: `0 of ${Math.min(candidates.length, 5000)} <${w.tag}> candidates matched strongly` };
+    return { el: null as Element | null, reason: `0 of ${Math.min(candidates.length, 5000)} <${w.tag}> candidates matched strongly` };
   }
-  if (strong.length === 1) return { el: strong[0].el, reason: null };
+  if (strong.length === 1) return { el: strong[0].el as Element | null, reason: null as string | null };
   // Multiple strong matches: only safe when they form ONE containment chain.
   for (let i = 0; i < strong.length; i++) {
     for (let j = i + 1; j < strong.length; j++) {
       if (!containsNode(strong[i].el, strong[j].el) && !containsNode(strong[j].el, strong[i].el)) {
         // disjoint strong candidates — genuinely ambiguous
-        return { el: null, reason: `ambiguous — ${strong.length} disjoint strong matches` };
+        return { el: null as Element | null, reason: `ambiguous — ${strong.length} disjoint strong matches` };
       }
     }
   }
@@ -493,10 +572,10 @@ function witnessRecoverDetail(w, root = document) {
     if (c.score > pick.score + 1e-9) pick = c;
     else if (Math.abs(c.score - pick.score) <= 1e-9 && containsNode(pick.el, c.el)) pick = c;
   }
-  return { el: pick.el, reason: null };
+  return { el: pick.el as Element | null, reason: null as string | null };
 }
 
-function witnessRecover(w, root = document) {
+function witnessRecover(w: Witness | null | undefined, root: ScanRoot | Document = document): Element | null {
   return witnessRecoverDetail(w, root).el;
 }
 
