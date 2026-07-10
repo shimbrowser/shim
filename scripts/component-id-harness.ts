@@ -20,6 +20,7 @@
 import vm from 'vm';
 import * as componentId from '../src/patch-engine/component-id';
 import { buildWitness, matchWitness as _matchWitness } from '../src/patch-engine/witness';
+import { errMessage } from '../src/shared/error';
 // Harness calls matchWitness with an extra (unused-by-the-real-signature)
 // arg in one assertion below — cast to any rather than touching witness.ts.
 const matchWitness: any = _matchWitness;
@@ -188,7 +189,7 @@ function tHelperSrc() {
   // compiles without executing — enough to catch a syntax error in the injected
   // source. `src` is our own generated helper, not untrusted input.
   let parses = true;
-  try { new vm.Script(src); } catch (e) { parses = false; check('parse error', false, e.message); }
+  try { new vm.Script(src); } catch (e) { parses = false; check('parse error', false, errMessage(e)); }
   check('parses as a self-contained script', parses, '');
 }
 

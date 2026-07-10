@@ -20,6 +20,7 @@
 // witness-fingerprint shape, fallback ordering, and quarantine reasons.
 
 import * as witness from './witness';
+import { errMessage } from '../shared/error';
 
 // Resolve an anchor's primary spec; if it returns no matches, walk the
 // optional `fallbacks` array in order and return the first one that does.
@@ -105,7 +106,7 @@ function resolveOne(spec, root) {
       try {
         return Array.from(root.querySelectorAll(spec.value));
       } catch (err) {
-        console.warn(`[shim] invalid css selector "${spec.value}":`, err?.message || err);
+        console.warn(`[shim] invalid css selector "${spec.value}":`, errMessage(err));
         return [];
       }
 
@@ -132,7 +133,7 @@ function resolveOne(spec, root) {
       try {
         return Array.from(root.querySelectorAll(sel));
       } catch (err) {
-        console.warn(`[shim] data-attr resolve failed for "${sel}":`, err?.message || err);
+        console.warn(`[shim] data-attr resolve failed for "${sel}":`, errMessage(err));
         return [];
       }
     }
@@ -213,7 +214,7 @@ function resolveOne(spec, root) {
       try {
         return Array.from(root.querySelectorAll(sel));
       } catch (err) {
-        console.warn(`[shim] aria resolve failed for "${sel}":`, err?.message || err);
+        console.warn(`[shim] aria resolve failed for "${sel}":`, errMessage(err));
         return [];
       }
     }
