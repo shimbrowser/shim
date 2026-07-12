@@ -21,17 +21,21 @@ import vm from 'vm';
 import * as componentId from '../src/patch-engine/component-id';
 import { buildWitness, matchWitness as _matchWitness } from '../src/patch-engine/witness';
 import { errMessage } from '../src/shared/error';
-// Harness calls matchWitness with an extra (unused-by-the-real-signature)
-// arg in one assertion below — cast to any rather than touching witness.ts.
-const matchWitness: any = _matchWitness;
+import type { ComponentDescriptor, Witness } from '../src/patch-engine/types';
+
+// matchWitness's real signature takes only (witness, el); one assertion below
+// calls it with an extra ignored 3rd arg to prove the JS call site tolerates
+// extras. Widen just the call shape rather than casting to `any`.
+type MatchWitnessFn = (w: Witness | null | undefined, el: Element | null | undefined, extra?: unknown) => ReturnType<typeof _matchWitness>;
+const matchWitness = _matchWitness as unknown as MatchWitnessFn;
 
 let failures = 0;
-function check(label, cond, detail) {
+function check(label: string, cond: boolean, detail: unknown): void {
   if (cond) console.log(`  ✓ ${label}`);
   else { failures++; console.error(`  ✗ ${label}${detail ? ` — ${detail}` : ''}`); }
 }
 
-const cid = (path, propKeys = []) => ({ v: 1, path, propKeys });
+const cid = (path: string[], propKeys: string[] = []): ComponentDescriptor => ({ v: 1, path, propKeys });
 
 function tScore() {
   console.log('componentScore:');
@@ -66,9 +70,9 @@ function tScore() {
 
 function tMatch() {
   console.log('matchComponent:');
-  // Harness calls matchComponent with 2 args (omitting the optional-in-
-  // practice `symbols` param) in some assertions — cast to any.
-  const { matchComponent }: any = componentId;
+  // `symbols` is already optional on the real signature, so calling with 2
+  // args needs no cast.
+  const { matchComponent } = componentId;
 
   const good = matchComponent(cid(['TrackRow'], ['trackId']), cid(['TrackRow'], ['trackId']));
   check('match → applicable + pass', good.applicable && good.pass, JSON.stringify(good));
@@ -87,13 +91,17 @@ function tMatch() {
 // space, live fibers compared through the deploy's {minified: original} map.
 function tSymbols() {
   console.log('symbol translation (cross-deploy renames):');
-  const { translateComponent, invertSymbols, matchComponent }: any = componentId;
+  const { translateComponent, invertSymbols, matchComponent } = componentId;
 
   const symsA = { Wc: 'TrackRow', Xd: 'TrackList' };            // deploy A
   const symsB = { Qq: 'TrackRow', Rr: 'TrackList' };            // deploy B renames
 
-  // Capture on deploy A: minified fiber names → stored as originals.
-  const captured = translateComponent(cid(['Wc', 'Xd', 'App'], ['trackId']), symsA);
+  // Capture on deploy A: minified fiber names → stored as originals. The `!`s
+  // below are safe: translateComponent's return type is nullable only
+  // because its `desc` PARAM accepts null/undefined (a real DOM/no-op input);
+  // every call in this test passes a concrete `cid(...)` descriptor, so the
+  // function always returns a real ComponentDescriptor here.
+  const captured = translateComponent(cid(['Wc', 'Xd', 'App'], ['trackId']), symsA)!;
   check('capture translates min→original', captured.path.join(',') === 'TrackRow,TrackList,App', JSON.stringify(captured));
   check('unmapped names pass through (App)', captured.path[2] === 'App', '');
 
@@ -116,14 +124,16 @@ function tSymbols() {
 
   // Recovery direction: invert deploy B's map, translate the stored original
   // descriptor into B's minified space for the main-world scan.
-  const inv = invertSymbols(symsB);
+  // invertSymbols only returns null for a null/non-object input (guarded
+  // below); a real object always yields a real map.
+  const inv = invertSymbols(symsB)!;
   check('invertSymbols flips the map', inv.TrackRow === 'Qq' && inv.TrackList === 'Rr', JSON.stringify(inv));
-  const toMin = translateComponent(captured, inv);
+  const toMin = translateComponent(captured, inv)!;
   check('stored original → current minified for find', toMin.path.join(',') === 'Qq,Rr,App', JSON.stringify(toMin));
 
   // Ambiguous inversion: several minified aliases of one original (memo/
   // forwardRef `$1/$2/$3` suffix pattern) → dropped, not guessed.
-  const ambig = invertSymbols({ A1: 'StyledMenuOption', A2: 'StyledMenuOption', Bz: 'Sidebar' });
+  const ambig = invertSymbols({ A1: 'StyledMenuOption', A2: 'StyledMenuOption', Bz: 'Sidebar' })!;
   check('ambiguous original dropped on invert', !('StyledMenuOption' in ambig) && ambig.Sidebar === 'Bz', JSON.stringify(ambig));
   check('invertSymbols(null) → null', invertSymbols(null) === null, '');
 
@@ -143,20 +153,26 @@ function tSymbols() {
   check('mapped witness still vetoes a real mismatch', misattach.applicable && !misattach.pass, JSON.stringify(misattach));
 }
 
+interface ElOpts {
+  text?: string;
+  children?: Element[];
+  parent?: Element | null;
+}
+
 // Minimal element stub shaped like the subset matchWitness/buildWitness read.
-function el(tag, attrs = {}, { text = '', children = [], parent = null } = {}) {
+function el(tag: string, attrs: Record<string, string> = {}, { text = '', children = [], parent = null }: ElOpts = {}): Element {
   const node = {
     tagName: tag.toUpperCase(),
     attributes: Object.entries(attrs).map(([name, value]) => ({ name, value })),
     children,
     parentElement: parent,
-    getAttribute(name) {
+    getAttribute(name: string) {
       const f = this.attributes.find((a) => a.name === name);
       return f ? f.value : null;
     },
     get textContent() { return text + children.map((c) => c.textContent).join(''); },
   };
-  for (const c of children) c.parentElement = node;
+  for (const c of children) (c as unknown as { parentElement: Element | null }).parentElement = node as unknown as Element;
   // Stub shaped like the subset of Element buildWitness/matchWitness read
   // (see comment above), not a real DOM Element — cast at this single
   // choke point rather than widening those signatures back to `any`.
@@ -168,11 +184,12 @@ function tWitnessIntegration() {
   const target = el('div', { 'data-testid': 'row' }, { text: 'a track' });
 
   // buildWitness STORES a supplied descriptor (it travels on the spec); omits
-  // an empty one.
-  const w = buildWitness(target, { component: cid(['TrackRow', 'TrackList'], ['trackId']) });
-  check('buildWitness attaches component', w.component && w.component.path[0] === 'TrackRow', JSON.stringify(w.component));
-  check('buildWitness omits empty component', !('component' in buildWitness(target, { component: cid([]) })), '');
-  check('buildWitness without opts → no component', !('component' in buildWitness(target)), '');
+  // an empty one. `!` is safe throughout — buildWitness only returns null for
+  // an element with no tagName, and every `target` here is a real el() stub.
+  const w = buildWitness(target, { component: cid(['TrackRow', 'TrackList'], ['trackId']) })!;
+  check('buildWitness attaches component', !!(w.component && w.component.path[0] === 'TrackRow'), JSON.stringify(w.component));
+  check('buildWitness omits empty component', !('component' in buildWitness(target, { component: cid([]) })!), '');
+  check('buildWitness without opts → no component', !('component' in buildWitness(target)!), '');
 
   // matchWitness does NOT fold component into its tolerant soft score — that's
   // a veto the engine applies via matchComponent. So the aggregate is unchanged

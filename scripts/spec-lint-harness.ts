@@ -10,7 +10,7 @@
 import { lintSpec, assertNoSpecErrors } from '../src/main/spec-lint';
 
 let failures = 0;
-function check(label, cond, detail?) {
+function check(label: string, cond: boolean, detail?: string) {
   if (cond) console.log(`  ✓ ${label}`);
   else { failures++; console.error(`  ✗ ${label}${detail ? ` — ${detail}` : ''}`); }
 }

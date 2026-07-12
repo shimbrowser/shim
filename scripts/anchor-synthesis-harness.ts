@@ -23,7 +23,7 @@
 import { suggestAnchorFor, suggestAnchorLadder, resolveAll } from '../src/patch-engine/anchors';
 
 let failures = 0;
-function check(label, cond, detail) {
+function check(label: string, cond: boolean, detail: unknown): void {
   if (cond) console.log(`  ✓ ${label}`);
   else { failures++; console.error(`  ✗ ${label}${detail ? ` — ${detail}` : ''}`); }
 }
@@ -32,23 +32,28 @@ function check(label, cond, detail) {
 // Rich enough for synthesis verification: parentElement links, descendant
 // walks, and a micro selector matcher for the grammar synthesis generates.
 
-function el(tag, attrs = {}, { text = '', children = [] } = {}) {
+interface ElOpts {
+  text?: string;
+  children?: Element[];
+}
+
+function el(tag: string, attrs: Record<string, string> = {}, { text = '', children = [] }: ElOpts = {}): Element {
   const node = {
     tagName: tag.toUpperCase(),
     attributes: Object.entries(attrs).map(([name, value]) => ({ name, value })),
     children,
-    parentElement: null,
-    getAttribute(n) {
+    parentElement: null as Element | null,
+    getAttribute(n: string) {
       const f = this.attributes.find((a) => a.name === n);
       return f ? f.value : null;
     },
     get textContent() { return text + children.map((c) => c.textContent).join(''); },
-    querySelectorAll(sel) {
-      if (sel === '*') return descendantsOf(this);
+    querySelectorAll(sel: string): Element[] {
+      if (sel === '*') return descendantsOf(node as unknown as Element);
       return [];
     },
   };
-  for (const c of children) c.parentElement = node;
+  for (const c of children) (c as unknown as { parentElement: Element | null }).parentElement = node as unknown as Element;
   // Stub is shaped like the subset of Element anchors.ts reads (see header
   // comment), not a real DOM Element — cast at this single choke point,
   // mirroring witness-harness.ts's `el()`, so every caller downstream can
@@ -58,8 +63,8 @@ function el(tag, attrs = {}, { text = '', children = [] } = {}) {
   return node as unknown as Element;
 }
 
-function descendantsOf(node) {
-  const out = [];
+function descendantsOf(node: Element): Element[] {
+  const out: Element[] = [];
   for (const c of node.children || []) {
     out.push(c, ...descendantsOf(c));
   }
@@ -70,7 +75,7 @@ function descendantsOf(node) {
 // candidates: `#id`, `[attr]`, `[attr="v"]`, `tag`, `.cls`, compounds of
 // those, and descendant combinators (single space). No `>` / `:nth-*` — the
 // positional tail is appended AFTER verification, never resolved here.
-function matchesSimple(node, part) {
+function matchesSimple(node: Element, part: string): boolean {
   const tokens = part.match(/^[a-z0-9-]+|#[\w-]+|\.[\w-]+|\[[^\]]+\]/gi) || [];
   let consumed = 0;
   for (const t of tokens) {
@@ -92,11 +97,15 @@ function matchesSimple(node, part) {
   return consumed === part.length && tokens.length > 0;
 }
 
-function makeDoc(rootChildren): any {
+// Doc stub. Structurally a subset of Document (querySelectorAll +
+// getElementsByTagName, the only members anchors.ts's verification pass
+// reads off `root`) — cast at this single choke point rather than widening
+// suggestAnchorLadder/resolveAll's `root: Document | Element` param.
+function makeDoc(rootChildren: Element[]): Document {
   const rootEl = el('body', {}, { children: rootChildren });
   const all = descendantsOf(rootEl);
-  return {
-    querySelectorAll(sel) {
+  const doc = {
+    querySelectorAll(sel: string): Element[] {
       const parts = sel.trim().split(/\s+/);
       return all.filter((node) => {
         if (!matchesSimple(node, parts[parts.length - 1])) return false;
@@ -109,11 +118,12 @@ function makeDoc(rootChildren): any {
         return i < 0;
       });
     },
-    getElementsByTagName(tag) {
+    getElementsByTagName(tag: string): Element[] {
       if (tag === '*') return all;
       return all.filter((n) => n.tagName.toLowerCase() === tag.toLowerCase());
     },
   };
+  return doc as unknown as Document;
 }
 
 // --- tests ----------------------------------------------------------------
@@ -167,7 +177,7 @@ function tGeneratedClassFilter() {
     ladder.some((s) => s.kind === 'css' && s.value === 'div.track-row'),
     JSON.stringify(ladder));
   check('generated classes never appear',
-    !ladder.some((s) => s.kind === 'css' && /css-|x9/.test(s.value)),
+    !ladder.some((s) => s.kind === 'css' && /css-|x9/.test(String(s.value))),
     JSON.stringify(ladder));
 }
 
@@ -205,8 +215,9 @@ function tPositionalTail() {
   const bare = el('span', {}, { text: 'x'.repeat(80) });
   const doc = makeDoc([bare]);
   const ladder = suggestAnchorLadder(bare, doc);
+  // ladder.length === 1 is checked first, so index 0 is proven present.
   check('signal-less element still gets a (positional) anchor',
-    ladder.length === 1 && ladder[0].kind === 'css' && ladder[0].value.includes('span'),
+    ladder.length === 1 && ladder[0].kind === 'css' && ladder[0].value!.includes('span'),
     JSON.stringify(ladder));
 
   // Rich element: positional still present but never first, ladder capped.

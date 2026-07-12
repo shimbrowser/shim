@@ -17,22 +17,30 @@
 //   - unknown witness versions never quarantine
 
 import { buildWitness, matchWitness, WITNESS_VERSION } from '../src/patch-engine/witness';
+import * as anchors from '../src/patch-engine/anchors';
+import type { Anchor, Witness } from '../src/patch-engine/types';
 
 let failures = 0;
-function check(label, cond, detail) {
+function check(label: string, cond: boolean, detail: unknown): void {
   if (cond) console.log(`  ✓ ${label}`);
   else { failures++; console.error(`  ✗ ${label}${detail ? ` — ${detail}` : ''}`); }
 }
 
+interface ElOpts {
+  text?: string;
+  children?: Element[];
+  parent?: Element | null;
+}
+
 // Minimal element stub. attrs is a plain object; children an array of
 // stubs; parent wired by caller.
-function el(tag, attrs = {}, { text = '', children = [], parent = null } = {}) {
+function el(tag: string, attrs: Record<string, string> = {}, { text = '', children = [], parent = null }: ElOpts = {}): Element {
   const node = {
     tagName: tag.toUpperCase(),
     attributes: Object.entries(attrs).map(([name, value]) => ({ name, value })),
     children,
     parentElement: parent,
-    getAttribute(name) {
+    getAttribute(name: string) {
       const found = this.attributes.find((a) => a.name === name);
       return found ? found.value : null;
     },
@@ -40,7 +48,7 @@ function el(tag, attrs = {}, { text = '', children = [], parent = null } = {}) {
       return text + children.map((c) => c.textContent).join('');
     },
   };
-  for (const c of children) c.parentElement = node;
+  for (const c of children) (c as unknown as { parentElement: Element | null }).parentElement = node as unknown as Element;
   // Stub is shaped like the subset of Element the witness code reads (see
   // header comment), not a real DOM Element — cast at this single choke
   // point so every caller downstream can pass it to the now-typed
@@ -60,13 +68,15 @@ function tBuild() {
     'aria-label': 'favorite this track',
   }, { text: 'Favorite', children: [el('svg')], parent });
 
-  const w = buildWitness(target);
+  // buildWitness only returns null for an element with no tagName; every
+  // el() stub always has one, so `!` is safe throughout this file.
+  const w = buildWitness(target)!;
   check('captures tag', w.tag === 'button', JSON.stringify(w));
-  check('captures id + data-* + aria-label', w.attrs.id === 'fav-btn' && w.attrs['data-testid'] === 'favorite' && w.attrs['aria-label'] === 'favorite this track', JSON.stringify(w.attrs));
+  check('captures id + data-* + aria-label', w.attrs!.id === 'fav-btn' && w.attrs!['data-testid'] === 'favorite' && w.attrs!['aria-label'] === 'favorite this track', JSON.stringify(w.attrs));
   check('excludes class', !('class' in (w.attrs || {})), '');
   check('excludes data-shim-* (engine-stamped tokens)', !('data-shim-css' in (w.attrs || {})), '');
   check('captures text stem lowercased', w.textStem === 'favorite', JSON.stringify(w.textStem));
-  check('captures child shape + parent tag', w.childTags.join() === 'svg' && w.parentTag === 'section', '');
+  check('captures child shape + parent tag', w.childTags!.join() === 'svg' && w.parentTag === 'section', '');
   check('stamps version', w.v === WITNESS_VERSION, '');
 }
 
@@ -74,7 +84,7 @@ function tMatchTolerance() {
   console.log('matchWitness tolerance (site churn should pass):');
   const parent = el('section');
   const original = el('button', { id: 'fav-btn', 'data-testid': 'favorite' }, { text: 'Favorite', parent });
-  const w = buildWitness(original);
+  const w = buildWitness(original)!;
 
   // Deploy churn: class list changed (not captured), text gained a count
   // suffix, same identity attrs.
@@ -89,7 +99,7 @@ function tMatchTolerance() {
 function tMatchRejection() {
   console.log('matchWitness rejection (different element should fail):');
   const original = el('button', { id: 'fav-btn', 'data-testid': 'favorite' }, { text: 'Favorite', parent: el('section') });
-  const w = buildWitness(original);
+  const w = buildWitness(original)!;
 
   const tagSwap = el('a', { id: 'fav-btn', 'data-testid': 'favorite' }, { text: 'Favorite' });
   const v1 = matchWitness(w, tagSwap);
@@ -100,8 +110,22 @@ function tMatchRejection() {
   const v2 = matchWitness(w, impostor);
   check('impostor button fails with diff detail', !v2.pass && v2.detail.length >= 2, JSON.stringify(v2));
 
-  const future = { v: WITNESS_VERSION + 1, tag: 'div' };
+  const future: Witness = { v: WITNESS_VERSION + 1, tag: 'div' };
   check('unknown witness version passes (never quarantine on shape we cannot read)', matchWitness(future, impostor).pass, '');
+}
+
+// Doc stub for the ladder tests: only querySelectorAll/getElementsByTagName
+// are read (see anchors.ts's ScanRoot) — cast at this single choke point
+// rather than widening resolveAllWithSource's `root: Document | Element`.
+function makeRoot(bySelector: Record<string, Element[]>): Document {
+  const root = {
+    querySelectorAll(sel: string): Element[] {
+      if (!(sel in bySelector)) return [];
+      return bySelector[sel];
+    },
+    getElementsByTagName(): Element[] { return []; },
+  };
+  return root as unknown as Document;
 }
 
 function tLadder() {
@@ -110,21 +134,11 @@ function tLadder() {
   const parent = el('section');
   const realTarget = el('button', { id: 'fav-btn', 'data-testid': 'favorite' }, { text: 'Favorite', parent });
   const impostor = el('button', { 'data-testid': 'promo' }, { text: 'Subscribe', parent: el('nav') });
-  const w = buildWitness(realTarget);
-
-  const makeRoot = (bySelector) => ({
-    querySelectorAll(sel) {
-      if (!(sel in bySelector)) return [];
-      return bySelector[sel];
-    },
-    getElementsByTagName() { return []; },
-  });
-
-  const anchors = require('../src/patch-engine/anchors');
+  const w = buildWitness(realTarget)!;
 
   // Case 1: primary resolves the impostor; fallback resolves the real
   // target — witness filters the impostor, ladder falls through.
-  const anchor1 = {
+  const anchor1: Anchor = {
     primary: { kind: 'css', value: '.old-fav' },
     fallbacks: [{ kind: 'css', value: '[data-testid="favorite"]' }],
     witness: w,
@@ -137,7 +151,7 @@ function tLadder() {
 
   // Case 2: primary resolves both impostor AND target — witness picks
   // the target out of the match set, stays on primary.
-  const anchor2 = { primary: { kind: 'css', value: 'button' }, witness: w };
+  const anchor2: Anchor = { primary: { kind: 'css', value: 'button' }, witness: w };
   const r2 = anchors.resolveAllWithSource(anchor2, makeRoot({ button: [impostor, realTarget] }));
   check('witness filters multi-match down to the real target on primary', r2.source === 'primary' && r2.nodes.length === 1 && r2.nodes[0] === realTarget, JSON.stringify({ source: r2.source, n: r2.nodes.length }));
 
@@ -170,8 +184,8 @@ function tStemVolatility() {
 
   // Capture strips digit runs — the stored stem is stable words only.
   const card = el('div', {}, { text: 'Estimates Needing Attention94Colin\'s Palace Remodel' });
-  const w = buildWitness(card);
-  check('capture strips digits from the stem', w.textStem && !/\d/.test(w.textStem), JSON.stringify(w.textStem));
+  const w = buildWitness(card)!;
+  check('capture strips digits from the stem', !!(w.textStem && !/\d/.test(w.textStem)), JSON.stringify(w.textStem));
 
   // THE regression: same card next visit — count ticked, rows changed.
   const later = el('div', {}, { text: 'Estimates Needing Attention97Beacon Tower Phase 2' });
@@ -180,7 +194,7 @@ function tStemVolatility() {
 
   // Back-compat: a PRE-normalization witness (digits stored in the stem)
   // matches a live element through stored-side normalization.
-  const legacy = { v: WITNESS_VERSION, tag: 'div', textStem: 'estimates needing attention94colin\'s pal' };
+  const legacy: Witness = { v: WITNESS_VERSION, tag: 'div', textStem: 'estimates needing attention94colin\'s pal' };
   const legacyVerdict = matchWitness(legacy, later);
   check('legacy digit-bearing stored stem still matches', legacyVerdict.pass, JSON.stringify(legacyVerdict));
 
@@ -188,9 +202,9 @@ function tStemVolatility() {
   // matches nor penalizes (a genuinely different element must fail on OTHER
   // signals, not sneak through on a bare count).
   const counter = el('span', { role: 'status' }, { text: '42' });
-  const wc = buildWitness(counter);
+  const wc = buildWitness(counter)!;
   check('all-digit text → no stem stored', !('textStem' in wc), JSON.stringify(wc));
-  const legacyCount = { v: WITNESS_VERSION, tag: 'span', attrs: { role: 'status' }, textStem: '42' };
+  const legacyCount: Witness = { v: WITNESS_VERSION, tag: 'span', attrs: { role: 'status' }, textStem: '42' };
   const other = el('span', { role: 'status' }, { text: '7' });
   check('legacy all-digit stem contributes nothing (passes on attrs)', matchWitness(legacyCount, other).pass, '');
 
@@ -207,7 +221,6 @@ function tStemVolatility() {
 // every witness recovery on a nested-div dashboard fell to the LLM tier.
 function tRecoverChain() {
   console.log('witnessRecover chain collapse:');
-  const anchors = require('../src/patch-engine/anchors');
 
   // grid > card > title — title/text nest so all three carry the same stem.
   const title = el('div', {}, { text: 'Estimates Needing Attention' });
@@ -216,12 +229,12 @@ function tRecoverChain() {
   const sibling = el('div', {}, { text: 'Recent Payments' });
   const grid = el('div', {}, { children: [card, sibling] });
   // Witness as captured from the card: div, stem, two div children, div parent.
-  const w = { v: WITNESS_VERSION, tag: 'div', textStem: 'estimates needing attentioncolin\'s pala', childTags: ['div', 'div'], parentTag: 'div' };
+  const w: Witness = { v: WITNESS_VERSION, tag: 'div', textStem: 'estimates needing attentioncolin\'s pala', childTags: ['div', 'div'], parentTag: 'div' };
   // grid also passes (stem inherited via first child, div children, and we give
   // it a div parent so its parentTag signal matches too).
   el('div', {}, { children: [grid] });
 
-  const root = { getElementsByTagName: (tag) => (tag === 'div' ? [grid, card, title, bodyA, sibling] : []) };
+  const root = { getElementsByTagName(tag: string): Element[] { return tag === 'div' ? [grid, card, title, bodyA, sibling] : []; } };
   const found = anchors.witnessRecover(w, root);
   check('nested chain collapses to the best-scoring element (the card)', found === card,
     found === grid ? 'picked grid (ancestor)' : found === title ? 'picked title (descendant)' : found === null ? 'null (old veto)' : 'other');
@@ -232,7 +245,7 @@ function tRecoverChain() {
   const twinBody = el('div', {}, { text: 'Colin\'s Palace Remodel' });
   const twin = el('div', {}, { children: [twinTitle, twinBody] });
   el('div', {}, { children: [twin] });
-  const root2 = { getElementsByTagName: (tag) => (tag === 'div' ? [card, twin] : []) };
+  const root2 = { getElementsByTagName(tag: string): Element[] { return tag === 'div' ? [card, twin] : []; } };
   check('disjoint twins still decline (no guessing)', anchors.witnessRecover(w, root2) === null, '');
 }
 

@@ -16,40 +16,39 @@
 //     when multiple strong candidates exist (ambiguity → no auto-rebase)
 
 import {
-  suggestAnchorFor as _suggestAnchorFor,
-  witnessRecover as _witnessRecover,
-  witnessRecoverDetail as _witnessRecoverDetail,
+  suggestAnchorFor,
+  witnessRecover,
+  witnessRecoverDetail,
 } from '../src/patch-engine/anchors';
 import { buildWitness } from '../src/patch-engine/witness';
 
-// Harness calls these with stub root/element objects shaped like the subset
-// of Document/Element they actually read, and omits the optional `root` arg
-// in some calls — cast to any rather than touching anchors.ts.
-const suggestAnchorFor: any = _suggestAnchorFor;
-const witnessRecover: any = _witnessRecover;
-const witnessRecoverDetail: any = _witnessRecoverDetail;
-
 let failures = 0;
-function check(label, cond, detail) {
+function check(label: string, cond: boolean, detail: unknown): void {
   if (cond) console.log(`  ✓ ${label}`);
   else { failures++; console.error(`  ✗ ${label}${detail ? ` — ${detail}` : ''}`); }
 }
 
+interface ElOpts {
+  text?: string;
+  children?: Element[];
+  parent?: Element | null;
+}
+
 // Element stub. Supports the methods the rebase code calls: getAttribute,
 // attributes, textContent, children, parentElement, tagName.
-function el(tag, attrs = {}, { text = '', children = [], parent = null } = {}) {
+function el(tag: string, attrs: Record<string, string> = {}, { text = '', children = [], parent = null }: ElOpts = {}): Element {
   const node = {
     tagName: tag.toUpperCase(),
     attributes: Object.entries(attrs).map(([name, value]) => ({ name, value })),
     children,
     parentElement: parent,
-    getAttribute(n) {
+    getAttribute(n: string) {
       const f = this.attributes.find((a) => a.name === n);
       return f ? f.value : null;
     },
     get textContent() { return text + children.map((c) => c.textContent).join(''); },
   };
-  for (const c of children) c.parentElement = node;
+  for (const c of children) (c as unknown as { parentElement: Element }).parentElement = node as unknown as Element;
   // Stub shaped like the subset of Element buildWitness reads (see comment
   // above), not a real DOM Element — cast at this single choke point
   // rather than widening buildWitness's signature back to `any`.
@@ -66,15 +65,18 @@ function tSuggestRanking() {
     JSON.stringify(suggestAnchorFor(el('button', { 'data-shim-css': 'shim-x', role: 'button', 'aria-label': 'Buy' }))) === JSON.stringify({ kind: 'aria', role: 'button', label: 'Buy' }), JSON.stringify(suggestAnchorFor(el('button', { 'data-shim-css': 'shim-x', role: 'button', 'aria-label': 'Buy' }))));
   check('label-like text when no attrs',
     JSON.stringify(suggestAnchorFor(el('button', {}, { text: 'Save changes' }))) === JSON.stringify({ kind: 'text', value: 'Save changes' }), '');
-  const positional = suggestAnchorFor(el('span', {}, { text: 'x'.repeat(80) })); // long text, not label-like
-  check('positional css path as last resort', positional.kind === 'css' && positional.value.includes('span'), JSON.stringify(positional));
+  // long text, not label-like — this fixed stub always falls through to the
+  // css-path rung, so the `!` is safe (proven by the hardcoded input above,
+  // not assumed).
+  const positional = suggestAnchorFor(el('span', {}, { text: 'x'.repeat(80) }))!;
+  check('positional css path as last resort', positional.kind === 'css' && positional.value!.includes('span'), JSON.stringify(positional));
 }
 
 function tWitnessRecover() {
   console.log('witnessRecover:');
   // A page (root stub) exposing getElementsByTagName.
-  const makeRoot = (byTag) => ({
-    getElementsByTagName(tag) { return byTag[tag] || []; },
+  const makeRoot = (byTag: Record<string, Element[]>) => ({
+    getElementsByTagName(tag: string): Element[] { return byTag[tag] || []; },
   });
 
   const original = el('button', { id: 'fav', 'data-testid': 'favorite' }, { text: 'Favorite' });
@@ -107,11 +109,11 @@ function tWitnessRecover() {
   const d1 = witnessRecoverDetail(w, root1);
   check('detail: success carries el + null reason', d1.el === moved && d1.reason === null, JSON.stringify(d1.reason));
   const d2 = witnessRecoverDetail(w, root2);
-  check('detail: absence reason names the miss', d2.el === null && /0 of \d+ <button>/.test(d2.reason), d2.reason);
+  check('detail: absence reason names the miss', d2.el === null && /0 of \d+ <button>/.test(String(d2.reason)), d2.reason);
   const d3 = witnessRecoverDetail(w, root3);
-  check('detail: ambiguity reason counts disjoint strong', d3.el === null && /ambiguous — 2 disjoint/.test(d3.reason), d3.reason);
+  check('detail: ambiguity reason counts disjoint strong', d3.el === null && /ambiguous — 2 disjoint/.test(String(d3.reason)), d3.reason);
   const d5 = witnessRecoverDetail(null, root1);
-  check('detail: no witness → explicit reason', d5.el === null && /no witness/.test(d5.reason), d5.reason);
+  check('detail: no witness → explicit reason', d5.el === null && /no witness/.test(String(d5.reason)), d5.reason);
 }
 
 tSuggestRanking();

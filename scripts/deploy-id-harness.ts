@@ -11,7 +11,7 @@
 import { computeDeployId, sameRegistrableDomain } from '../src/patch-engine/deploy-id';
 
 let failures = 0;
-function check(label, cond, detail) {
+function check(label: string, cond: boolean, detail: string): void {
   if (cond) console.log(`  ✓ ${label}`);
   else { failures++; console.error(`  ✗ ${label}${detail ? ' — ' + detail : ''}`); }
 }
@@ -84,7 +84,10 @@ function tRegistrable() {
   console.log('sameRegistrableDomain:');
   check('subdomains match', sameRegistrableDomain('static.example.com', 'app.example.com'), '');
   check('different domains do not', !sameRegistrableDomain('example.com', 'other.com'), '');
-  check('null-safe', !sameRegistrableDomain(null, 'x.com'), '');
+  // Deliberately violates the declared `string` param to exercise the
+  // runtime falsy-guard (`if (!a || !b) return false`) — the signature says
+  // `string` but the implementation is defensive against bad callers.
+  check('null-safe', !sameRegistrableDomain(null as unknown as string, 'x.com'), '');
 }
 
 console.log('\n=== deploy-id harness ===\n');
