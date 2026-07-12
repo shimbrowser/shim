@@ -282,7 +282,7 @@ function resolveOne(spec: AnchorSpec, root: Document | Element): Element[] {
     }
 
     default:
-      console.warn(`[shim] unsupported anchor kind: ${(spec as AnchorSpec).kind}`);
+      console.warn(`[shim] unsupported anchor kind: ${(spec).kind}`);
       return [];
   }
 }
