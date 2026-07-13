@@ -77,8 +77,7 @@ function matcher(pattern: string): (pathname: string) => { params: Record<string
     const segs = pathSegments(pathname);
     const params: Record<string, string | undefined> = {};
     let si = 0; // index into the concrete path segments
-    for (let ti = 0; ti < toks.length; ti++) {
-      const tok = toks[ti];
+    for (const tok of toks) {
       if (tok.type === 'wildcard') {
         // Capture everything remaining (possibly empty) and stop.
         params['*'] = segs.slice(si).join('/');
@@ -89,9 +88,12 @@ function matcher(pattern: string): (pathname: string) => { params: Record<string
         si++;
         continue;
       }
-      // param
-      if (si < segs.length) {
-        params[tok.name] = decodeSegment(segs[si]);
+      // param — segs never holds empty/undefined entries (splitSegments
+      // filters falsy segments), so `seg !== undefined` is exactly
+      // `si < segs.length`.
+      const seg = segs[si];
+      if (seg !== undefined) {
+        params[tok.name] = decodeSegment(seg);
         si++;
       } else if (tok.optional) {
         params[tok.name] = undefined;

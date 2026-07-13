@@ -103,7 +103,8 @@ function tMatchRejection() {
 
   const tagSwap = el('a', { id: 'fav-btn', 'data-testid': 'favorite' }, { text: 'Favorite' });
   const v1 = matchWitness(w, tagSwap);
-  check('tag swap is a hard fail', !v1.pass && /tag mismatch/.test(v1.detail[0]), JSON.stringify(v1));
+  const [v1FirstDetail] = v1.detail;
+  check('tag swap is a hard fail', !v1.pass && !!v1FirstDetail && /tag mismatch/.test(v1FirstDetail), JSON.stringify(v1));
 
   // Same tag, but it's a different button: no identity attrs, different label.
   const impostor = el('button', { 'data-testid': 'subscribe' }, { text: 'Subscribe now', parent: el('nav') });
@@ -120,8 +121,9 @@ function tMatchRejection() {
 function makeRoot(bySelector: Record<string, Element[]>): Document {
   const root = {
     querySelectorAll(sel: string): Element[] {
-      if (!(sel in bySelector)) return [];
-      return bySelector[sel];
+      // A dynamic-key lookup is `T | undefined` under noUncheckedIndexedAccess;
+      // fall back to [] for an absent selector, same as the old `in`-guarded miss.
+      return bySelector[sel] ?? [];
     },
     getElementsByTagName(): Element[] { return []; },
   };

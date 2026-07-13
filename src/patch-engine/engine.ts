@@ -214,8 +214,8 @@ function injectTier1Rule(token: string, cssBody: string, priority = 0): void {
 // First index whose value is strictly greater than `priority`, else the
 // array length (append). Pure — exported for scripts/css-priority-harness.js.
 function firstGreaterIndex(priorities: number[], priority: number): number {
-  for (let i = 0; i < priorities.length; i++) {
-    if (priorities[i] > priority) return i;
+  for (const [i, p] of priorities.entries()) {
+    if (p > priority) return i;
   }
   return priorities.length;
 }
@@ -717,8 +717,11 @@ function applyRule(
     // can tell quarantine ("selector found something that isn't the
     // thing") apart from plain no-match ("selector found nothing").
     lastWitnessRejection = witnessRejected ? (rejectedSample || { detail: [] }) : null;
-    // Snapshot resolution for the settle-delayed rebase reconciler.
-    lastResolvedEl = nodes.length === 1 ? nodes[0] : null;
+    // Snapshot resolution for the settle-delayed rebase reconciler. `nodes`
+    // has exactly one element in this branch, so the destructured head is
+    // always present — the `?? null` only guards the length !== 1 case.
+    const [singleNode] = nodes;
+    lastResolvedEl = nodes.length === 1 ? (singleNode ?? null) : null;
 
     // Witness capture (§8): a rule without a witness that resolves to
     // exactly ONE element gets fingerprinted, and the fingerprint is
@@ -728,9 +731,9 @@ function applyRule(
     // shape doesn't change scan-to-scan, and re-emitting on churn would
     // be noise. Multi-match rules skip capture: one witness can't
     // describe N different elements (§8 v1 scope).
-    if (!witnessCaptured && !rule.anchor?.witness && nodes.length === 1) {
+    if (!witnessCaptured && !rule.anchor?.witness && nodes.length === 1 && singleNode) {
       witnessCaptured = true;
-      const el = nodes[0];
+      const el = singleNode;
       const w = witnessMod.buildWitness(el);
       if (w && typeof api.reportEvent === 'function') {
         // Enrich with framework-component-identity via the main-world bridge
@@ -1043,27 +1046,30 @@ function applyRule(
         // literal below; it's never false in practice.
         const expectedList = toMin && toMin !== stored ? [toMin, stored] : stored;
         const matches = await api.componentId.find(expectedList);
-        if (Array.isArray(matches) && matches.length === 1) {
-          const ladder = anchors.suggestAnchorLadder(matches[0]);
-          if (ladder.length) {
-            const fresh = witnessMod.buildWitness(matches[0], { component: stored })
-              || rule.anchor?.witness;
-            emitRebase({
-              strategy: 'recover',
-              // `via` names the rung that found the element — component
-              // identity (the strongest signal) vs the witness shape-scan.
-              // Diagnostics-only: lets a human tell WHICH recovery fired.
-              via: 'component-identity',
-              anchor: {
-                primary: ladder[0],
-                fallbacks: mergeFallbacks(ladder, rule.anchor?.fallbacks),
-                witness: fresh,
-              },
-              from: summarizeAnchor(rule.anchor),
-              to: summarizeAnchor({ primary: ladder[0] }),
-            });
-            return;
-          }
+        // `matched`/`ladderHead` are the "first element" idiom: the length
+        // checks above/below guarantee they're present, but the guard keeps
+        // the access honest rather than asserting it.
+        const [matched] = Array.isArray(matches) && matches.length === 1 ? matches : [];
+        const ladder = matched ? anchors.suggestAnchorLadder(matched) : [];
+        const [ladderHead] = ladder;
+        if (matched && ladderHead) {
+          const fresh = witnessMod.buildWitness(matched, { component: stored })
+            || rule.anchor?.witness;
+          emitRebase({
+            strategy: 'recover',
+            // `via` names the rung that found the element — component
+            // identity (the strongest signal) vs the witness shape-scan.
+            // Diagnostics-only: lets a human tell WHICH recovery fired.
+            via: 'component-identity',
+            anchor: {
+              primary: ladderHead,
+              fallbacks: mergeFallbacks(ladder, rule.anchor?.fallbacks),
+              witness: fresh,
+            },
+            from: summarizeAnchor(rule.anchor),
+            to: summarizeAnchor({ primary: ladderHead }),
+          });
+          return;
         }
         recoveryNotes.push(!Array.isArray(matches) || matches.length === 0
           ? 'component-id: no match'
@@ -1073,18 +1079,19 @@ function applyRule(
         const rec = anchors.witnessRecoverDetail(rule.anchor?.witness, document);
         const found = rec.el;
         const ladder = found ? anchors.suggestAnchorLadder(found) : [];
+        const [ladderHead] = ladder;
         if (rec.reason) recoveryNotes.push(`witness-scan: ${rec.reason}`);
-        if (found && ladder.length) {
+        if (found && ladderHead) {
           emitRebase({
             strategy: 'recover',
             via: 'witness',
             anchor: {
-              primary: ladder[0],
+              primary: ladderHead,
               fallbacks: mergeFallbacks(ladder, rule.anchor?.fallbacks),
               witness: witnessMod.buildWitness(found) || rule.anchor?.witness,
             },
             from: summarizeAnchor(rule.anchor),
-            to: summarizeAnchor({ primary: ladder[0] }),
+            to: summarizeAnchor({ primary: ladderHead }),
           });
           return;
         }
@@ -1439,7 +1446,7 @@ function routeRule(rule: Rule, spec: Spec, api: ShimApiBase, handlers: HandlerMa
     // root retarget to the host element at the document level, which would
     // hide the actual <a>. composedPath sees through the shadow boundary, so
     // route-to-route links inside a mounted page keep getting intercepted.
-    const rawTarget: EventTarget | null = e.composedPath ? e.composedPath()[0] : e.target;
+    const rawTarget: EventTarget | null = e.composedPath ? (e.composedPath()[0] ?? null) : e.target;
     // A click's target is always a DOM Node in practice (Element or a text
     // node inside one); `EventTarget` itself is too generic to carry
     // `.parentElement`, so this narrows to the realistic domain rather than

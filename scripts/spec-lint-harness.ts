@@ -31,12 +31,14 @@ check('clean: no warnings', res.warnings.length === 0, JSON.stringify(res.warnin
 
 console.log('unknown mutation kind → error');
 res = lintSpec({ rules: [{ id: 'a', mutations: [{ kind: 'cspRelax' }] }] });
-check('unknown kind flagged as error', res.errors.length === 1 && /cspRelax/.test(res.errors[0]));
-check('error names the supported kinds', /hide.*restyle.*script/.test(res.errors[0]));
+const [cspError] = res.errors;
+check('unknown kind flagged as error', res.errors.length === 1 && !!cspError && /cspRelax/.test(cspError));
+check('error names the supported kinds', !!cspError && /hide.*restyle.*script/.test(cspError));
 
 console.log('missing kind → error');
 res = lintSpec({ rules: [{ id: 'a', mutations: [{ handler: 'h' }] }] });
-check('missing kind flagged', res.errors.length === 1 && /missing/.test(res.errors[0]));
+const [missingKindError] = res.errors;
+check('missing kind flagged', res.errors.length === 1 && !!missingKindError && /missing/.test(missingKindError));
 
 console.log('the cspRelax-as-rule-field case → warning, not silent');
 res = lintSpec({

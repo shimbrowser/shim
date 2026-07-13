@@ -21,6 +21,7 @@
 //     scope can't verify (stub roots without querySelectorAll)
 
 import { suggestAnchorFor, suggestAnchorLadder, resolveAll } from '../src/patch-engine/anchors';
+import { must } from '../src/shared/assert';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail: unknown): void {
@@ -88,8 +89,11 @@ function matchesSimple(node: Element, part: string): boolean {
     } else if (t.startsWith('[')) {
       const m = t.slice(1, -1).match(/^([\w-]+)(?:="(.*)")?$/);
       if (!m) return false;
-      const v = node.getAttribute(m[1]);
-      if (m[2] !== undefined ? v !== m[2] : v === null) return false;
+      // Capture group 1 is mandatory in the pattern above, so a successful
+      // match always has it.
+      const [, attrName, attrValue] = m;
+      const v = node.getAttribute(must(attrName, 'attribute-selector name'));
+      if (attrValue !== undefined ? v !== attrValue : v === null) return false;
     } else if (node.tagName.toLowerCase() !== t.toLowerCase()) {
       return false;
     }
@@ -108,11 +112,13 @@ function makeDoc(rootChildren: Element[]): Document {
     querySelectorAll(sel: string): Element[] {
       const parts = sel.trim().split(/\s+/);
       return all.filter((node) => {
-        if (!matchesSimple(node, parts[parts.length - 1])) return false;
+        // split() on a trimmed, non-empty string always yields ≥1 part, so
+        // the last-part and i-th-part indices below are always in range.
+        if (!matchesSimple(node, must(parts[parts.length - 1], 'selector last part'))) return false;
         let i = parts.length - 2;
         let cur = node.parentElement;
         while (i >= 0 && cur) {
-          if (matchesSimple(cur, parts[i])) i--;
+          if (matchesSimple(cur, must(parts[i], 'selector part'))) i--;
           cur = cur.parentElement;
         }
         return i < 0;
@@ -139,9 +145,10 @@ function tUniquenessRanking() {
   ];
   const doc = makeDoc(rows);
   const ladder = suggestAnchorLadder(target, doc);
+  const head = ladder[0];
   check('unique text outranks crowd data-attr',
-    ladder[0] && ladder[0].kind === 'text' && ladder[0].value === 'Watchlist',
-    JSON.stringify(ladder[0]));
+    !!head && head.kind === 'text' && head.value === 'Watchlist',
+    JSON.stringify(head));
   check('crowd data-attr kept as a runner-up rung',
     ladder.some((s) => s.kind === 'data-attr' && s.name === 'data-testid'),
     JSON.stringify(ladder));
@@ -150,9 +157,10 @@ function tUniquenessRanking() {
   const solo = el('button', { 'data-testid': 'fav' }, { text: 'Favorite' });
   const doc2 = makeDoc([solo, el('button', {}, { text: 'Other' })]);
   const ladder2 = suggestAnchorLadder(solo, doc2);
+  const head2 = ladder2[0];
   check('unique data-attr stays primary',
-    ladder2[0] && ladder2[0].kind === 'data-attr' && ladder2[0].value === 'fav',
-    JSON.stringify(ladder2[0]));
+    !!head2 && head2.kind === 'data-attr' && head2.value === 'fav',
+    JSON.stringify(head2));
 }
 
 function tWrongElementDropped() {
@@ -188,9 +196,10 @@ function tLeafTextRung() {
   const target = el('div', {}, { text: 'Recently played' });
   const doc = makeDoc([target, el('div', {}, { text: 'Made for you' })]);
   const ladder = suggestAnchorLadder(target, doc);
+  const head = ladder[0];
   check('leaf div gets a text anchor',
-    ladder[0] && ladder[0].kind === 'text' && ladder[0].value === 'Recently played',
-    JSON.stringify(ladder[0]));
+    !!head && head.kind === 'text' && head.value === 'Recently played',
+    JSON.stringify(head));
 }
 
 function tAncestorScoping() {
@@ -201,9 +210,10 @@ function tAncestorScoping() {
   const side = el('section', { id: 'side' }, { children: [el('div', { class: 'row' }), el('div', { class: 'row' })] });
   const doc = makeDoc([main, side]);
   const ladder = suggestAnchorLadder(target, doc);
+  const head = ladder[0];
   check('scoped selector wins over crowd bare class',
-    ladder[0] && ladder[0].kind === 'css' && ladder[0].value === '#main div.row',
-    JSON.stringify(ladder[0]));
+    !!head && head.kind === 'css' && head.value === '#main div.row',
+    JSON.stringify(head));
   check('bare class demoted but kept',
     ladder.some((s) => s.kind === 'css' && s.value === 'div.row'),
     JSON.stringify(ladder));
@@ -215,9 +225,10 @@ function tPositionalTail() {
   const bare = el('span', {}, { text: 'x'.repeat(80) });
   const doc = makeDoc([bare]);
   const ladder = suggestAnchorLadder(bare, doc);
+  const [onlyHead] = ladder;
   // ladder.length === 1 is checked first, so index 0 is proven present.
   check('signal-less element still gets a (positional) anchor',
-    ladder.length === 1 && ladder[0].kind === 'css' && ladder[0].value!.includes('span'),
+    ladder.length === 1 && !!onlyHead && onlyHead.kind === 'css' && onlyHead.value!.includes('span'),
     JSON.stringify(ladder));
 
   // Rich element: positional still present but never first, ladder capped.
@@ -225,9 +236,12 @@ function tPositionalTail() {
   const doc2 = makeDoc([rich]);
   const ladder2 = suggestAnchorLadder(rich, doc2);
   check('ladder capped at 4', ladder2.length <= 4, `${ladder2.length}`);
+  // ladder2 was just shown non-empty above (ladder capped at 4, and rich has
+  // multiple strong signals so it's never empty); index 0 is present.
+  const richHead = must(ladder2[0], 'rich-element ladder head');
   check('positional never first on a rich element',
-    !/nth-of-type|>/.test(ladder2[0].value || ''),
-    JSON.stringify(ladder2[0]));
+    !/nth-of-type|>/.test(richHead.value || ''),
+    JSON.stringify(richHead));
 }
 
 function tBackCompat() {

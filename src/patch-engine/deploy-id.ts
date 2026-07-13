@@ -33,6 +33,7 @@
 // contributes DOM collection.
 
 import crypto from 'crypto';
+import { must } from '../shared/assert';
 
 // Same last-two-labels semantics as redirect-net's trust gate — no Public
 // Suffix List, imprecise for multi-part suffixes (a.co.uk vs b.co.uk read as
@@ -51,7 +52,9 @@ function stripVolatile(url: string): string {
     const u = new URL(url);
     return u.origin + u.pathname;
   } catch (_) {
-    return String(url).split('?')[0].split('#')[0];
+    // String.split always returns ≥1 element, so index 0 is provably safe.
+    const beforeQuery = must(String(url).split('?')[0], 'stripVolatile: url before ?');
+    return must(beforeQuery.split('#')[0], 'stripVolatile: url before #');
   }
 }
 

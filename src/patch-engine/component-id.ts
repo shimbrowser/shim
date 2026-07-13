@@ -107,15 +107,11 @@ function componentScore(expected: ComponentDescriptor | null | undefined, actual
   if (!a.length && !b.length) {
     score += 0.3; // neither carries prop keys → no disagreement
   } else {
-    const bset: Record<string, boolean> = {};
-    for (let j = 0; j < b.length; j++) bset[b[j]] = true;
+    const bset = new Set(b);
     let inter = 0;
-    for (let m = 0; m < a.length; m++) if (bset[a[m]]) inter++;
-    const union: Record<string, boolean> = {};
-    for (let n = 0; n < a.length; n++) union[a[n]] = true;
-    for (let q = 0; q < b.length; q++) union[b[q]] = true;
-    const unionN = Object.keys(union).length;
-    score += 0.3 * (unionN ? inter / unionN : 1);
+    for (const key of a) if (bset.has(key)) inter++;
+    const union = new Set([...a, ...b]);
+    score += 0.3 * (union.size ? inter / union.size : 1);
   }
   return score;
 }
