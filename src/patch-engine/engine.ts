@@ -636,11 +636,28 @@ function applyRule(
     lastReportedCount = state.size;
     lastReportedSource = lastMatchedSource;
     if (typeof api.reportEvent !== 'function') return;
+    // Measured box of the first matched anchor (viewport CSS px, post-apply —
+    // tier-1 stamps land synchronously in mountOn, and mountOn's .finally
+    // re-report runs after handler mounts too). This is the deterministic
+    // half of authoring-time visual verification: "make X the same size as
+    // Y" is a numbers problem, and the authoring feedback loop reads this
+    // straight out of the rule-status event instead of eyeballing a
+    // screenshot. Zero matches → no box; multi-match → first element only
+    // (representative, and the common visual-tuning case is single-target).
+    let box: { x: number; y: number; w: number; h: number } | undefined;
+    if (state.size) {
+      const first = state.keys().next().value;
+      if (first) {
+        const r = first.getBoundingClientRect();
+        box = { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+      }
+    }
     api.reportEvent('rule-status', {
       specId: spec.id,
       ruleId: rule.id,
       matched: state.size,
       matchedVia: lastMatchedSource,
+      ...(box ? { box } : {}),
     });
   };
 
