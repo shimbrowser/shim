@@ -40,9 +40,14 @@ interface ElOpts {
 
 function el(tag: string, attrs: Record<string, string> = {}, { text = '', children = [] }: ElOpts = {}): Element {
   const node = {
+    nodeType: 1,
     tagName: tag.toUpperCase(),
     attributes: Object.entries(attrs).map(([name, value]) => ({ name, value })),
     children,
+    // Mirrors the textContent getter's composition (own text first, then
+    // children) — the visible-text walker reads childNodes, distinguishing
+    // text nodes (nodeType 3) from element children (nodeType 1).
+    childNodes: [...(text ? [{ nodeType: 3, data: text }] : []), ...children],
     parentElement: null as Element | null,
     getAttribute(n: string) {
       const f = this.attributes.find((a) => a.name === n);
@@ -323,8 +328,61 @@ function tStableGroupClass() {
   // would pass identically with `!cls` deleted and prove nothing.
 }
 
+function tTextSkipsNonVisibleTags() {
+  console.log('text anchors skip script/style text (visible text only):');
+  // A module script whose SOURCE contains the label (the react-test
+  // fixture's `const INITIAL = ['alpha', …, 'delta']` — live-caught: the
+  // script element contains-matched text:"delta" and turned a single-match
+  // anchor into a multi-match, which the relative-reorder guard refuses),
+  // plus a style rule and an exact-text script. None of them is visible
+  // text; only the real item may match.
+  const scriptEl = el('script', {}, { text: "const INITIAL = ['alpha', 'beta', 'gamma', 'delta'];" });
+  const exactScript = el('script', {}, { text: 'delta' });
+  const styleEl = el('style', {}, { text: '.delta { color: red }' });
+  const item = el('div', { class: 'item' }, { text: 'delta ✦' });
+  const doc = makeDoc([scriptEl, exactScript, styleEl, item]);
+
+  const contains = resolveAll({ primary: { kind: 'text', value: 'delta', match: 'contains' } }, doc);
+  check('contains: script/style excluded, item alone matches',
+    contains.length === 1 && contains[0] === item, `matched ${contains.length}`);
+
+  const exact = resolveAll({ primary: { kind: 'text', value: 'delta' } }, doc);
+  check('exact: a script whose whole source equals the value still does not match',
+    exact.length === 0, `matched ${exact.length}`);
+
+  // The engine-poisons-its-own-anchor case (live-caught on the PR smoke):
+  // the tier-1 sheet lives in <head> and embeds rule tokens named after the
+  // rule id ("…-reorder-delta-first-…"). <head>'s native textContent
+  // concatenates its style/script descendants, and head has no VISIBLE
+  // matching descendant to lose the deepest-filter to — so from the first
+  // stamp onward, head itself became a second match and the single-match
+  // guard refused every later restamp. Matching must use visible text
+  // (script/style subtrees skipped at every level), not element-level
+  // exclusion over native textContent.
+  const sheetEl = el('style', {}, { text: '[data-shim-css~="shim-x-reorder-delta-first-reorder-0"] { order: 0 !important; }' });
+  const titleEl = el('title', {}, { text: 'Shim React Test' });
+  const headEl = el('head', {}, { children: [titleEl, sheetEl] });
+  const bodyItem = el('div', { class: 'item' }, { text: 'delta-538 ✦' });
+  const bodyEl = el('body', {}, { children: [bodyItem] });
+  const doc2 = makeDoc([headEl, bodyEl]);
+  const viaHead = resolveAll({ primary: { kind: 'text', value: 'delta', match: 'contains' } }, doc2);
+  check('ancestor matching only via a style/script descendant is not an anchor',
+    viaHead.length === 1 && viaHead[0] === bodyItem, `matched ${viaHead.length}`);
+
+  // Flip side: visible text must still be judged correctly when a script
+  // sits INSIDE the anchor — exact match on the visible label, code text
+  // ignored (pre-fix, textContent included the code and exact NEVER matched).
+  const inlineScript = el('script', {}, { text: 'analytics("save")' });
+  const btn = el('button', {}, { text: 'Save', children: [inlineScript] });
+  const doc3 = makeDoc([btn]);
+  const exactVisible = resolveAll({ primary: { kind: 'text', value: 'Save' } }, doc3);
+  check('exact matches the visible label even with an embedded script',
+    exactVisible.length === 1 && exactVisible[0] === btn, `matched ${exactVisible.length}`);
+}
+
 tUniquenessRanking();
 tTextCaseInsensitive();
+tTextSkipsNonVisibleTags();
 tWrongElementDropped();
 tGeneratedClassFilter();
 tLeafTextRung();

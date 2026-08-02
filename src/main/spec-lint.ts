@@ -21,17 +21,22 @@
 // it's read through the real patch-engine types.
 
 import type { Spec, Rule, Mutation, AnchorSpec } from '../patch-engine/types';
+import { RESHAPE_ALIGN, RESHAPE_JUSTIFY } from '../patch-engine/layout-kinds';
 
 const BUILTIN_KINDS = new Set([
   'hide', 'restyle', 'script', 'remove', 'replace-root', 'mount-route', 'redirect',
+  'reorder', 'reshape',
 ]);
 const RULE_KEYS = new Set(['id', 'anchor', 'mutations', 'handlers']);
 const ANCHOR_KEYS = new Set(['primary', 'fallbacks', 'iframe', 'witness']);
 // Union across kinds: properties (restyle), handler/mount (script,
 // replace-root, mount-route), pattern/title (mount-route), from/to/exceptPaths
-// (redirect).
+// (redirect), position/before/after (reorder), layout/direction/columns/rows/
+// gap/wrap/align/justify (reshape).
 const MUTATION_KEYS = new Set([
   'kind', 'properties', 'handler', 'mount', 'pattern', 'title', 'from', 'to', 'exceptPaths',
+  'position', 'before', 'after',
+  'layout', 'direction', 'columns', 'rows', 'gap', 'wrap', 'align', 'justify',
 ]);
 
 // Anchor-quality lint (§8): the model drifts toward positional CSS
@@ -58,21 +63,113 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+// Shared positional/generated-class checks — used both for rule primaries
+// (lintPrimaryAnchor) and for a reorder mutation's relative before/after
+// target (lintReorderTarget). `extraNote` lets a caller append
+// location-specific guidance (e.g. "this target has no fallback ladder").
+function pushPositionalWarning(
+  rid: string,
+  value: string,
+  warnings: string[],
+  subject: string,
+  extraNote: string,
+): void {
+  if (!POSITIONAL_RE.test(value)) return;
+  warnings.push(
+    `rule "${rid}": ${subject} "${value}" is positional — it breaks when the site reorders or `
+    + 'inserts siblings, which happens on most deploys. Anchor on WHY this element is the target instead: '
+    + `a data-* attribute, aria role/label, or its text.${extraNote}`,
+  );
+}
+
+function pushGeneratedClassWarning(
+  rid: string,
+  value: string,
+  warnings: string[],
+  subject: string,
+  extraNote: string,
+): void {
+  if (!GENERATED_CLASS_RE.test(value)) return;
+  warnings.push(
+    `rule "${rid}": ${subject} "${value}" uses a build-generated class name — these are rewritten `
+    + `on every deploy. Prefer a data-* attribute, aria role/label, text, or a human-named class.${extraNote}`,
+  );
+}
+
 function lintPrimaryAnchor(rid: string, primary: AnchorSpec | undefined, warnings: string[]): void {
   if (!primary || primary.kind !== 'css' || typeof primary.value !== 'string') return;
   const { value } = primary;
-  if (POSITIONAL_RE.test(value)) {
-    warnings.push(
-      `rule "${rid}": primary anchor "${value}" is positional — it breaks when the site reorders or `
-      + 'inserts siblings, which happens on most deploys. Anchor on WHY this element is the target instead: '
-      + 'a data-* attribute, aria role/label, or its text. Positional CSS is acceptable only as the last fallback.',
-    );
+  pushPositionalWarning(rid, value, warnings, 'primary anchor', ' Positional CSS is acceptable only as the last fallback.');
+  pushGeneratedClassWarning(rid, value, warnings, 'primary anchor', '');
+}
+
+// A reorder mutation's before/after target has NO fallback ladder and NO
+// witness — it's a single css/data-attr/aria/text spec resolved fresh every
+// scan, with nothing to fall back to and nothing to verify it against. A
+// brittle selector here is worse than a brittle primary anchor: it fails
+// silently (a downgraded rule-status note, §6/§8) with no self-heal path.
+function lintReorderTarget(rid: string, key: 'before' | 'after', target: unknown, warnings: string[]): void {
+  if (!isRecord(target) || target.kind !== 'css' || typeof target.value !== 'string') return;
+  const { value } = target;
+  const extraNote = ` This reorder ${key} target has no fallback ladder or witness recovery — a stale selector fails silently on the next deploy.`;
+  pushPositionalWarning(rid, value, warnings, `reorder ${key} target`, extraNote);
+  pushGeneratedClassWarning(rid, value, warnings, `reorder ${key} target`, extraNote);
+}
+
+const REORDER_POSITIONS = new Set(['first', 'last']);
+const RESHAPE_FIELDS = ['layout', 'direction', 'columns', 'rows', 'gap', 'wrap', 'align', 'justify'] as const;
+
+// Malformed layout-kind payloads compile to nothing (layout-kinds.ts returns
+// null / drops the field) — the same silent no-op class as an unknown kind,
+// so they reject the emit as errors rather than warn.
+function lintLayoutMutation(rid: string, mut: Mutation, errors: string[], warnings: string[]): void {
+  if (mut.kind === 'reorder') {
+    const modes = [mut.position !== undefined, mut.before !== undefined, mut.after !== undefined]
+      .filter(Boolean).length;
+    if (modes !== 1) {
+      errors.push(`rule "${rid}": reorder needs exactly one of "position", "before", "after" (got ${modes}).`);
+    }
+    if (mut.position !== undefined && typeof mut.position !== 'number'
+      && !REORDER_POSITIONS.has(mut.position)) {
+      errors.push(`rule "${rid}": reorder position must be "first", "last", or a number (CSS order sort key).`);
+    }
+    for (const key of ['before', 'after'] as const) {
+      const t = mut[key];
+      if (t !== undefined && (!isRecord(t) || typeof t.kind !== 'string')) {
+        errors.push(`rule "${rid}": reorder ${key} must be an anchor spec ({ "kind": ..., "value": ... }).`);
+      } else if (t !== undefined) {
+        lintReorderTarget(rid, key, t, warnings);
+      }
+    }
   }
-  if (GENERATED_CLASS_RE.test(value)) {
-    warnings.push(
-      `rule "${rid}": primary anchor "${value}" uses a build-generated class name — these are rewritten `
-      + 'on every deploy. Prefer a data-* attribute, aria role/label, text, or a human-named class.',
-    );
+  if (mut.kind === 'reshape') {
+    if (!RESHAPE_FIELDS.some((f) => mut[f] !== undefined)) {
+      errors.push(`rule "${rid}": reshape needs at least one of ${RESHAPE_FIELDS.join(', ')}.`);
+    }
+    if (mut.layout !== undefined && mut.layout !== 'flex' && mut.layout !== 'grid') {
+      errors.push(`rule "${rid}": reshape layout must be "flex" or "grid".`);
+    }
+    if (mut.direction !== undefined && mut.direction !== 'row' && mut.direction !== 'column') {
+      errors.push(`rule "${rid}": reshape direction must be "row" or "column" (flex only).`);
+    }
+    for (const key of ['columns', 'rows'] as const) {
+      const v = mut[key];
+      if (v !== undefined && typeof v !== 'number' && typeof v !== 'string') {
+        errors.push(`rule "${rid}": reshape ${key} must be a number (equal tracks) or a template string.`);
+      }
+    }
+    if (mut.gap !== undefined && typeof mut.gap !== 'string') {
+      errors.push(`rule "${rid}": reshape gap must be a CSS length string.`);
+    }
+    if (mut.wrap !== undefined && typeof mut.wrap !== 'boolean') {
+      errors.push(`rule "${rid}": reshape wrap must be a boolean.`);
+    }
+    if (mut.align !== undefined && (typeof mut.align !== 'string' || !RESHAPE_ALIGN.has(mut.align))) {
+      errors.push(`rule "${rid}": reshape align must be one of ${[...RESHAPE_ALIGN].join(', ')}.`);
+    }
+    if (mut.justify !== undefined && (typeof mut.justify !== 'string' || !RESHAPE_JUSTIFY.has(mut.justify))) {
+      errors.push(`rule "${rid}": reshape justify must be one of ${[...RESHAPE_JUSTIFY].join(', ')}.`);
+    }
   }
 }
 
@@ -119,6 +216,20 @@ function lintSpec(spec: unknown): LintResult {
 
     // Same base-preserving iteration as rules above (throw on truthy non-array).
     const mutationsList = (rule.mutations || []) as unknown[];
+
+    // At most one reorder mutation per rule (per-RULE check, not per-mutation):
+    // two reorder mutations on the same anchor stamp conflicting order values
+    // — the second silently wins or is ignored depending on sheet insertion
+    // order, with no lint signal otherwise.
+    const reorderCount = mutationsList
+      .filter((m) => isRecord(m) && m.kind === 'reorder').length;
+    if (reorderCount > 1) {
+      errors.push(
+        `rule "${rid}": at most one reorder mutation per rule — multiple order stamps on the same `
+        + 'elements conflict silently; use a single reorder (or separate rules with position sort keys).',
+      );
+    }
+
     for (const mutValue of mutationsList) {
       if (!isRecord(mutValue)) continue;
       const mut = mutValue as unknown as Mutation;
@@ -142,6 +253,7 @@ function lintSpec(spec: unknown): LintResult {
           );
         }
       }
+      lintLayoutMutation(rid, mut, errors, warnings);
     }
 
     // api.ai without the 'ai' permission declared (§19): the call would

@@ -67,6 +67,17 @@ export interface Mutation {
   from?: string;                        // redirect
   to?: string;                          // redirect
   exceptPaths?: string[];               // redirect
+  position?: 'first' | 'last' | number;  // reorder
+  before?: AnchorSpec;                   // reorder (relative)
+  after?: AnchorSpec;                    // reorder (relative)
+  layout?: 'flex' | 'grid';              // reshape
+  direction?: 'row' | 'column';          // reshape
+  columns?: number | string;             // reshape
+  rows?: number | string;                // reshape
+  gap?: string;                          // reshape
+  wrap?: boolean;                        // reshape
+  align?: string;                        // reshape
+  justify?: string;                      // reshape
 }
 
 export interface Rule {

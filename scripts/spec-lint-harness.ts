@@ -97,6 +97,59 @@ res = lintSpec({
 });
 check('handler without api.ai is silent', res.warnings.length === 0, JSON.stringify(res.warnings));
 
+console.log('reorder/reshape — valid payloads pass');
+res = lintSpec({ rules: [
+  { id: 'r1', anchor: { primary: { kind: 'css', value: '.x' } }, mutations: [{ kind: 'reorder', position: 'first' }] },
+  { id: 'r2', anchor: { primary: { kind: 'css', value: '.x' } }, mutations: [{ kind: 'reorder', position: 2 }] },
+  { id: 'r3', anchor: { primary: { kind: 'css', value: '.x' } }, mutations: [{ kind: 'reorder', before: { kind: 'text', value: 'Now Playing' } }] },
+  { id: 'r4', anchor: { primary: { kind: 'css', value: '.x' } }, mutations: [{ kind: 'reshape', layout: 'grid', columns: 3, gap: '1rem' }] },
+  { id: 'r5', anchor: { primary: { kind: 'css', value: '.x' } }, mutations: [{ kind: 'reshape', columns: '240px 1fr' }] },
+] });
+check('valid layout kinds: no errors', res.errors.length === 0, JSON.stringify(res.errors));
+check('valid layout kinds: no warnings', res.warnings.length === 0, JSON.stringify(res.warnings));
+
+console.log('reorder/reshape — malformed payloads error');
+res = lintSpec({ rules: [{ id: 'a', mutations: [{ kind: 'reorder' }] }] });
+check('reorder with no mode → error', res.errors.length === 1 && /exactly one/.test(res.errors[0] || ''));
+res = lintSpec({ rules: [{ id: 'a', mutations: [{ kind: 'reorder', position: 'first', before: { kind: 'css', value: '.x' } }] }] });
+check('reorder with two modes → error', res.errors.length === 1 && /exactly one/.test(res.errors[0] || ''));
+res = lintSpec({ rules: [{ id: 'a', mutations: [{ kind: 'reorder', position: 'top' }] }] });
+check('bad position enum → error', res.errors.length === 1 && /first.*last.*number/.test(res.errors[0] || ''));
+res = lintSpec({ rules: [{ id: 'a', mutations: [{ kind: 'reorder', before: 'the sidebar' }] }] });
+check('before not an anchor spec → error', res.errors.length === 1 && /anchor spec/.test(res.errors[0] || ''));
+res = lintSpec({ rules: [{ id: 'a', mutations: [{ kind: 'reshape' }] }] });
+check('reshape with no fields → error', res.errors.length === 1 && /at least one/.test(res.errors[0] || ''));
+res = lintSpec({ rules: [{ id: 'a', mutations: [{ kind: 'reshape', layout: 'table' }] }] });
+check('bad layout enum → error', res.errors.length === 1 && /"flex" or "grid"/.test(res.errors[0] || ''));
+res = lintSpec({ rules: [{ id: 'a', mutations: [{ kind: 'reshape', layout: 'flex', justify: 'middle' }] }] });
+check('bad justify enum → error', res.errors.length === 1 && /justify/.test(res.errors[0] || ''));
+res = lintSpec({ rules: [{ id: 'a', mutations: [{ kind: 'reshape', columns: true }] }] });
+check('bad columns type → error', res.errors.length === 1 && /columns/.test(res.errors[0] || ''));
+
+console.log('reorder — at most one reorder mutation per rule');
+res = lintSpec({
+  rules: [{
+    id: 'r',
+    mutations: [
+      { kind: 'reorder', position: 'first' },
+      { kind: 'reorder', before: { kind: 'css', value: '.x' } },
+    ],
+  }],
+});
+// Each mutation individually satisfies the exactly-one-of-mode check, so the
+// only error should be the new per-rule "at most one reorder" check.
+check('two reorder mutations on one rule → exactly 1 error', res.errors.length === 1 && /at most one reorder/.test(res.errors[0] || ''), JSON.stringify(res.errors));
+
+console.log('reorder — before/after target anchor-quality lint');
+res = lintSpec({
+  rules: [{
+    id: 'r',
+    mutations: [{ kind: 'reorder', before: { kind: 'css', value: '.item:nth-child(3)' } }],
+  }],
+});
+check('positional reorder target warns', res.warnings.some((w) => /positional/.test(w)), JSON.stringify(res.warnings));
+check('positional reorder target is NOT an error', res.errors.length === 0, JSON.stringify(res.errors));
+
 console.log('assertNoSpecErrors');
 let threw = false;
 try { assertNoSpecErrors({ rules: [{ id: 'a', mutations: [{ kind: 'fake' }] }] }); } catch (_) { threw = true; }

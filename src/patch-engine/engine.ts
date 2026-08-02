@@ -1,5 +1,8 @@
 import vm from 'vm';
 import * as anchors from './anchors';
+import {
+  compileReorderCss, compileReshapeCss, desiredSequence, reorderNote, reshapeNote, REORDER_SIBLING_CAP,
+} from './layout-kinds';
 import * as witnessMod from './witness';
 import * as componentId from './component-id';
 import { applyStrategy } from './strategies';
@@ -511,6 +514,30 @@ function dispatchMutation(
     return Promise.resolve([]);
   }
 
+  // Tier-1 layout kinds (§6): compile via layout-kinds.ts, ride the same
+  // token machinery as hide/restyle. Relative reorder (before/after)
+  // compiles to null here — applyRule's restamp path owns it (a whole-
+  // sibling ordering can't be expressed as one anchor rule).
+  if (mut.kind === 'reorder') {
+    const body = compileReorderCss(mut);
+    if (body) {
+      const token = `shim-${spec.id}-${rule.id}-reorder`;
+      injectTier1Rule(token, body, cssPriorityOf(spec));
+      tagElement(el, token);
+    }
+    return Promise.resolve([]);
+  }
+
+  if (mut.kind === 'reshape') {
+    const body = compileReshapeCss(mut);
+    if (body) {
+      const token = `shim-${spec.id}-${rule.id}-reshape`;
+      injectTier1Rule(token, body, cssPriorityOf(spec));
+      tagElement(el, token);
+    }
+    return Promise.resolve([]);
+  }
+
   // Tier 3 — delete the anchor outright. Hostile to reconcilers by design:
   // the engine's scan loop catches re-rendered nodes and re-removes them.
   // Irreversible by nature — toggle-off can't restore a deleted node; the
@@ -631,10 +658,45 @@ function applyRule(
   // Inspector surfaces this so users can spot "rule still works, but the
   // primary I wrote is now wrong."
   let lastMatchedSource: string | null = null;
+  // Apply-time precondition notes for the layout kinds (§6): computed-style
+  // checks whose failure means the compiled CSS silently does nothing
+  // (reorder under a block parent, grid templates on a flex container).
+  // Joined into the rule-status `note` so the authoring loop sees them
+  // mid-turn and self-corrects. Diagnostics only — never behavior changes.
+  const hasLayoutKind = (rule.mutations || []).some((m) => m.kind === 'reorder' || m.kind === 'reshape');
+  // Assigned by the relative-reorder restamp path (`restampRelativeReorder`,
+  // defined below) every scan pass — never null-initialized-and-forgotten,
+  // so this genuinely needs `let`.
+  let relativeReorderNote: string | null = null;
+  const layoutNote = (el: Element | undefined): string | null => {
+    const notes: string[] = [];
+    if (el && hasLayoutKind) {
+      const win = el.ownerDocument.defaultView;
+      if (win) {
+        for (const mut of rule.mutations || []) {
+          if (mut.kind === 'reorder') {
+            const parent = el.parentElement;
+            const n = reorderNote(parent ? win.getComputedStyle(parent).display : null);
+            if (n) notes.push(n);
+          } else if (mut.kind === 'reshape') {
+            const n = reshapeNote(mut, win.getComputedStyle(el).display);
+            if (n) notes.push(n);
+          }
+        }
+      }
+    }
+    if (relativeReorderNote) notes.push(relativeReorderNote);
+    return notes.length ? notes.join('; ') : null;
+  };
+  let lastReportedNote: string | null = null;
   const reportStatusIfChanged = () => {
-    if (state.size === lastReportedCount && lastMatchedSource === lastReportedSource) return;
+    const first: Element | undefined = state.size ? state.keys().next().value : undefined;
+    const note = layoutNote(first);
+    if (state.size === lastReportedCount && lastMatchedSource === lastReportedSource
+      && note === lastReportedNote) return;
     lastReportedCount = state.size;
     lastReportedSource = lastMatchedSource;
+    lastReportedNote = note;
     if (typeof api.reportEvent !== 'function') return;
     // Measured box of the first matched anchor (viewport CSS px, post-apply —
     // tier-1 stamps land synchronously in mountOn, and mountOn's .finally
@@ -645,12 +707,9 @@ function applyRule(
     // screenshot. Zero matches → no box; multi-match → first element only
     // (representative, and the common visual-tuning case is single-target).
     let box: { x: number; y: number; w: number; h: number } | undefined;
-    if (state.size) {
-      const first = state.keys().next().value;
-      if (first) {
-        const r = first.getBoundingClientRect();
-        box = { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
-      }
+    if (first) {
+      const r = first.getBoundingClientRect();
+      box = { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
     }
     api.reportEvent('rule-status', {
       specId: spec.id,
@@ -658,8 +717,84 @@ function applyRule(
       matched: state.size,
       matchedVia: lastMatchedSource,
       ...(box ? { box } : {}),
+      ...(note ? { note } : {}),
     });
   };
+
+  // Relative reorder (§6): "immediately before/after Y" is a whole-sibling
+  // ordering, not a single-element style — CSS `order` is a sort key across
+  // ALL siblings (default 0), so the engine stamps EVERY child of the shared
+  // parent with an explicit order matching the desired sequence. DOM (source)
+  // order is stable under CSS order, so recomputing from it is idempotent;
+  // scan() calls this every pass, folding in new siblings after re-renders.
+  // Stamping proceeds even when the parent isn't flex/grid yet — harmless
+  // (order is inert elsewhere), and a same-shim reshape on the parent makes
+  // the stamps live the moment it applies. layoutNote carries the warning.
+  const relativeMut = (rule.mutations || []).find(
+    (m) => m.kind === 'reorder' && (m.before !== undefined || m.after !== undefined),
+  );
+  const relativeBase = `shim-${spec.id}-${rule.id}-reorder`;
+  const relativeTokens = new Set<string>();
+  const stripStaleIndexTokens = (child: Element, keep: string): void => {
+    const attr = child.getAttribute('data-shim-css') || '';
+    for (const t of attr.split(/\s+/)) {
+      if (t && t !== keep && t.startsWith(`${relativeBase}-`)) stripToken(child, t);
+    }
+  };
+  const restampRelativeReorder = (resolved: Element[]): void => {
+    if (!relativeMut) return;
+    relativeReorderNote = null;
+    if (resolved.length === 0) return; // no-match reporting covers this
+    if (resolved.length > 1) {
+      relativeReorderNote = `reorder: before/after needs a single-match anchor (matched ${resolved.length}) — narrow the anchor or use position`;
+      return;
+    }
+    const el: Element | undefined = resolved[0];
+    const targetSpec = relativeMut.before ?? relativeMut.after;
+    if (!el || !targetSpec) return;
+    const mode: 'before' | 'after' = relativeMut.before ? 'before' : 'after';
+    const targets = anchors.resolveAll({ primary: targetSpec }, document);
+    if (targets.length !== 1) {
+      relativeReorderNote = targets.length === 0
+        ? 'reorder: before/after target not found on this page'
+        : `reorder: before/after target matched ${targets.length} elements — needs exactly 1`;
+      return;
+    }
+    const target = targets[0];
+    const parent = el.parentElement;
+    if (!parent || !target || target.parentElement !== parent) {
+      relativeReorderNote = 'reorder: target is not a sibling of the anchor — before/after only reorders within one container';
+      return;
+    }
+    if (target === el) {
+      relativeReorderNote = 'reorder: before/after target resolves to the anchor itself — pick a different sibling';
+      return;
+    }
+    const children = Array.from(parent.children);
+    if (children.length > REORDER_SIBLING_CAP) {
+      relativeReorderNote = `reorder: container has ${children.length} children (cap ${REORDER_SIBLING_CAP}) — likely a virtualized list; use position or a different container`;
+      return;
+    }
+    const seq = desiredSequence(children, el, target, mode);
+    if (!seq) return;
+    seq.forEach((child, i) => {
+      const token = `${relativeBase}-${i}`;
+      stripStaleIndexTokens(child, token);
+      tagElement(child, token);
+      if (!relativeTokens.has(token)) {
+        injectTier1Rule(token, `order: ${i} !important;`, cssPriorityOf(spec));
+        relativeTokens.add(token);
+      }
+    });
+  };
+  // Note on observer feedback: stamping writes `data-shim-css` attributes,
+  // and the rule's MutationObserver (below) watches `childList`/`subtree`
+  // only (not attributes) — so restamping cannot re-trigger scans (no
+  // loop). A sibling REMOVED later leaves its index rule in the sheet
+  // unmatched — harmless, cleaned at teardown. Likewise, if the ANCHOR
+  // migrates to a different parent, the old container's children keep
+  // their stamps until rule teardown (accepted — cleaned by the teardown
+  // sweep, not re-derived per-scan).
 
   async function mountOn(el: Element): Promise<void> {
     const outputs: HTMLElement[] = [];
@@ -816,6 +951,7 @@ function applyRule(
       });
     }
 
+    restampRelativeReorder(nodes);
     reportStatusIfChanged();
   };
 
@@ -1205,7 +1341,7 @@ function applyRule(
     for (const [anchor, entry] of state) {
       teardownEntry(entry);
       for (const mut of rule.mutations || []) {
-        if (mut.kind === 'hide' || mut.kind === 'restyle') {
+        if (mut.kind === 'hide' || mut.kind === 'restyle' || mut.kind === 'reorder' || mut.kind === 'reshape') {
           stripToken(anchor, `shim-${spec.id}-${rule.id}-${mut.kind}`);
         } else if (mut.kind === 'replace-root') {
           stripReplaceRootToken(anchor, `shim-${spec.id}-${rule.id}-replace-root`);
@@ -1214,12 +1350,21 @@ function applyRule(
     }
     state.clear();
     for (const mut of rule.mutations || []) {
-      if (mut.kind === 'hide' || mut.kind === 'restyle') {
+      if (mut.kind === 'hide' || mut.kind === 'restyle' || mut.kind === 'reorder' || mut.kind === 'reshape') {
         removeTier1Rule(`shim-${spec.id}-${rule.id}-${mut.kind}`);
       } else if (mut.kind === 'replace-root') {
         removeReplaceRootRule(`shim-${spec.id}-${rule.id}-replace-root`);
       }
     }
+    // Relative-reorder index tokens: rules keyed per sibling index, stamped
+    // on elements that aren't this rule's anchors — swept independently.
+    for (const token of relativeTokens) {
+      removeTier1Rule(token);
+      for (const el of Array.from(document.querySelectorAll(`[data-shim-css~="${token}"]`))) {
+        stripToken(el, token);
+      }
+    }
+    relativeTokens.clear();
   };
 }
 
