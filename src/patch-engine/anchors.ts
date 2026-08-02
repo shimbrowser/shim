@@ -453,6 +453,79 @@ function stableClassesOf(el: AnchorElement): string[] {
   return raw.trim().split(/\s+/).filter((c) => c && !looksGeneratedClass(c));
 }
 
+// Bare CSS-property-value class names used 1:1 as atomic/utility classes
+// (Tailwind and similar systems: `class="flex items-center w-full"` — the
+// class literally IS the display mode or a spacing value, not a name for
+// what the element MEANS). `looksGeneratedClass` above deliberately leaves
+// these alone — a real BEM/component class stays a useful (if weaker)
+// anchor even shared broadly, and single-element authoring just loses the
+// uniqueness ranking on a shared utility, which is harmless.
+//
+// This narrower check exists for exactly one caller: CLAUDE.md §16's "hide
+// all like this" commits a MULTI-match anchor on purpose, with no witness
+// and no pre-commit confirm — so a bare layout utility that also matches
+// everything OTHER developers styled with the same class (`.flex` on a
+// utility-CSS site can be most of the page) is not "all like this," it's
+// "most of the page," and must not be committable.
+//
+// Two DIFFERENT confidence levels, not one flat denylist:
+//
+// - Bare keywords (`flex`, `hidden`, `relative`, …) are display/position
+//   VALUES, not names — no real component is ever just called "flex" or
+//   "hidden." These are rejected UNCONDITIONALLY, regardless of match count.
+// - `prefix-value` pairs (`w-full`, `top-bar`, `order-summary`, …) are a
+//   shape, not a vocabulary — `top`/`left`/`order`/`content`/`text`/`grid`/
+//   `border`/`font` are all common English words that also show up as the
+//   first half of a perfectly semantic class name (`.top-bar`, `.left-nav`,
+//   `.order-summary`, `.content-wrapper`, `.grid-container`). Rejecting
+//   those outright would silently degrade a correct "hide all like this"
+//   down to "hide only this" — safe, but the user asked for all of them and
+//   silently got one, with no explanation (the exact failure class this
+//   whole feature exists to remove). So a `prefix-value` shape is rejected
+//   only when the candidate is ALSO broad — a real `.top-bar` matches a
+//   handful of times on a page (one header), while a class actually used as
+//   a utility matches everywhere. `UTILITY_PREFIX_MATCH_THRESHOLD` is
+//   chosen well below the absolute `GROUP_ANCHOR_MAX_MATCHES` cap
+//   (src/main/shim-this.ts, 500) precisely so this catches the utility case
+//   long before the absolute cap would. NOTE: these two numbers live in two
+//   different files with no compile-time link between them — there is
+//   nothing that fails to build if one changes without the other. The
+//   invariant ("prefix threshold well below the absolute cap") is enforced
+//   only by this comment and the harness fixtures in
+//   scripts/anchor-synthesis-harness.ts / scripts/shim-this-harness.ts; keep
+//   them ordered by hand.
+//
+// Both are deliberately biased toward "reject" over "silently commit
+// something too broad" — a false rejection here just falls through to a
+// safer anchor (src/main/shim-this.ts's `pickHideAnchor` degrade path), so
+// erring toward "reject" (on the keyword side) costs nothing, and gating
+// the prefix side on breadth is what keeps that bias from misfiring on
+// genuinely narrow semantic names. Accepted gap: this is NOT an exhaustive
+// Tailwind class dictionary — an unlisted BROAD utility outside both shapes
+// (`truncate`, `uppercase`, `sr-only`, `container`) isn't caught by name at
+// all; `GROUP_ANCHOR_MAX_MATCHES` is the backstop for those.
+const UTILITY_CLASS_KEYWORDS = new Set([
+  'flex', 'grid', 'block', 'inline', 'contents', 'table', 'hidden',
+  'relative', 'absolute', 'fixed', 'sticky', 'static',
+]);
+const UTILITY_CLASS_PATTERN =
+  /^(inline-(flex|grid|block)|flow-root|(w|h|min-w|min-h|max-w|max-h|p|px|py|pt|pb|pl|pr|m|mx|my|mt|mb|ml|mr|gap|gap-x|gap-y|top|left|right|bottom|inset|z|text|bg|border|rounded|items|justify|content|self|space-x|space-y|flex|grid|col|row|order|basis|grow|shrink|aspect|overflow|whitespace|break|cursor|font|leading|tracking|opacity|shadow|ring|outline|divide|translate|rotate|skew|scale|duration|ease|delay|transition|animate)-[\w.%/-]+)$/;
+const UTILITY_PREFIX_MATCH_THRESHOLD = 20;
+
+// Public predicate for "is this ONE class name a meaningful, committable
+// group anchor at this match count." `cls` is a single class token (no
+// leading `.`, no compound selectors); callers resolving a
+// `{kind:'css', value:'.foo'}` candidate strip the leading `.` themselves.
+// `matchCount` is the live count for THIS candidate (threaded through
+// rather than a module-level global, since this is meant to be called once
+// per candidate with that candidate's own count).
+function isStableGroupClass(cls: string, matchCount: number): boolean {
+  if (!cls || looksGeneratedClass(cls)) return false;
+  if (UTILITY_CLASS_KEYWORDS.has(cls)) return false;
+  if (UTILITY_CLASS_PATTERN.test(cls) && matchCount > UTILITY_PREFIX_MATCH_THRESHOLD) return false;
+  return true;
+}
+
 // Nearest ancestor (within 5 levels) carrying an id or a site data-*
 // attribute — a stable scope to hang a descendant selector off.
 function stableAncestorSelector(el: AnchorElement): string | null {
@@ -588,4 +661,44 @@ function witnessRecover(w: Witness | null | undefined, root: ScanRoot | Document
   return witnessRecoverDetail(w, root).el;
 }
 
-export { resolveAll, resolveAllWithSource, suggestAnchorFor, suggestAnchorLadder, witnessRecover, witnessRecoverDetail };
+// `positionalPath` is exported alongside the ladder for one specific
+// consumer: page-preload's computeAnchorLadder (CLAUDE.md §16) appends a
+// positional rung itself when `suggestAnchorLadder`'s own LADDER_MAX cap
+// sliced it away (an element with ≥4 stronger-but-crowd-matching rungs would
+// otherwise have NO unique candidate at all for "hide only this" — the exact
+// deflect-to-compose failure the ladder exists to prevent). This does not
+// change suggestAnchorLadder's own behavior or its existing callers
+// (auto-rebase's promote/recover paths) — it's a separate, opt-in escape
+// hatch for a caller that already has the ranked ladder and just needs the
+// one rung the cap dropped. NOTE: `positionalPath` caps at 3 ancestor levels
+// and produces an UNROOTED descendant-chain selector (e.g.
+// `ul > li:nth-of-type(7) > button`) — it is NOT guaranteed unique (it can
+// match elsewhere on the page, and resolves to 0 inside a shadow root). The
+// caller measures its live match count same as every other rung; this is an
+// escape hatch that usually helps, not a guarantee.
+//
+// `shouldAppendPositional` is the pure decision half of that same fix,
+// exported so it's independently harness-testable without a DOM: given a
+// ladder already annotated with live match counts, does it need a
+// synthesized positional rung appended? True exactly when nothing in it
+// resolved to exactly one element. `computeAnchorLadder` (page-preload.ts,
+// no bare-node harness — needs a live DOM) calls this before deciding
+// whether to synthesize + annotate the extra rung; pinning the decision here
+// means a harness catches the append being accidentally removed even though
+// the DOM-dependent synthesis itself can't be exercised outside a browser.
+function shouldAppendPositional(annotatedLadder: Array<{ matches?: number }>): boolean {
+  return !annotatedLadder.some((s) => s.matches === 1);
+}
+
+// `looksGeneratedClass` is also exported for one caller outside this file:
+// `selectGroupAnchor` (src/main/shim-this.ts, CLAUDE.md §16) runs it against
+// a `data-attr` candidate's ATTRIBUTE NAME (minus the `data-` prefix), not a
+// class — a scoped-style attribute like Vue's `data-v-7ba5bd90` is exactly
+// the same "generated identifier" shape a hashed class is, and without this
+// check `data-attr` candidates bypassed every name-quality filter entirely
+// (they never went through `isStableGroupClass`, which only ever looked at
+// `css`-kind class candidates).
+export {
+  resolveAll, resolveAllWithSource, suggestAnchorFor, suggestAnchorLadder, positionalPath,
+  shouldAppendPositional, isStableGroupClass, looksGeneratedClass, witnessRecover, witnessRecoverDetail,
+};

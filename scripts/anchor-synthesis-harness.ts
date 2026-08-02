@@ -20,7 +20,7 @@
 //   - suggestAnchorFor back-compat: head of the ladder, kind-ordered when the
 //     scope can't verify (stub roots without querySelectorAll)
 
-import { suggestAnchorFor, suggestAnchorLadder, resolveAll } from '../src/patch-engine/anchors';
+import { suggestAnchorFor, suggestAnchorLadder, resolveAll, shouldAppendPositional, isStableGroupClass } from '../src/patch-engine/anchors';
 import { must } from '../src/shared/assert';
 
 let failures = 0;
@@ -269,6 +269,60 @@ function tTextCaseInsensitive() {
     resolveAll({ primary: { kind: 'text', value: 'Reset Password?' } }, doc).length === 0, '');
 }
 
+function tShouldAppendPositional() {
+  console.log('shouldAppendPositional (pure decision — page-preload computeAnchorLadder, CLAUDE.md §16):');
+  // The review-fixed bug this pins: an element with >=4 stronger-but-still-
+  // crowd-matching rungs has its positional rung sliced off by
+  // suggestAnchorLadder's LADDER_MAX cap, leaving nothing unique. If a
+  // future refactor removes the append this decision gates, this check
+  // fails — it doesn't depend on computeAnchorLadder itself (DOM-only, no
+  // bare-node harness), just the same annotated-ladder shape it produces.
+  check('an all-crowd-matching (capped) ladder needs a positional rung appended',
+    shouldAppendPositional([
+      { matches: 30 }, { matches: 30 }, { matches: 30 }, { matches: 30 },
+    ]) === true, '');
+  check('a ladder with any unique rung needs nothing appended',
+    shouldAppendPositional([{ matches: 30 }, { matches: 1 }, { matches: 30 }]) === false, '');
+  check('an empty ladder needs a positional rung appended',
+    shouldAppendPositional([]) === true, '');
+  check('an unmeasured rung (matches undefined) does not count as unique',
+    shouldAppendPositional([{ matches: undefined }, { matches: 30 }]) === true, '');
+}
+
+function tStableGroupClass() {
+  console.log('isStableGroupClass (CLAUDE.md §16 "hide all like this" — class-quality guard, review Important 1 + round 3):');
+  // Semantic / human-named classes survive at any plausible count — same
+  // names the generated-class filter already lets through for the ladder.
+  check('a semantic class is stable', isStableGroupClass('sitestr', 30) === true, '');
+  check('a BEM class is stable', isStableGroupClass('track__title', 30) === true, '');
+  check('a hyphenated human class is stable', isStableGroupClass('sidebar-cta', 30) === true, '');
+  // Bare layout/display utility KEYWORDS are rejected UNCONDITIONALLY,
+  // regardless of match count — "flex" is never a real component name, at
+  // any breadth.
+  check('"flex" is rejected at a narrow count too (bare keyword, unconditional)', isStableGroupClass('flex', 3) === false, '');
+  check('"hidden" is rejected (bare layout utility)', isStableGroupClass('hidden', 30) === false, '');
+  check('"relative" is rejected (bare layout utility)', isStableGroupClass('relative', 30) === false, '');
+  // Prefix-value utility SHAPES are only rejected when the candidate is
+  // also broad (review round 3) — `top`/`order`/`content`/etc. are common
+  // words in real semantic class names (`.top-bar`, `.order-summary`), so a
+  // narrow match count reads as a real component, not a utility class.
+  check('"w-full" at a wide count is rejected (genuinely a utility)', isStableGroupClass('w-full', 300) === false, '');
+  check('"top-bar" at a narrow count is STABLE (a real header class, not a utility)', isStableGroupClass('top-bar', 4) === true, '');
+  check('"order-summary" at a narrow count is STABLE', isStableGroupClass('order-summary', 5) === true, '');
+  check('"content-wrapper" at a narrow count is STABLE', isStableGroupClass('content-wrapper', 2) === true, '');
+  check('"items-center" at a wide count is rejected (genuinely a utility)', isStableGroupClass('items-center', 300) === false, '');
+  check('"text-sm" at a wide count is rejected (genuinely a utility)', isStableGroupClass('text-sm', 300) === false, '');
+  // Generated/hashed classes — already excluded by looksGeneratedClass;
+  // isStableGroupClass must inherit that, not just add utilities on top,
+  // regardless of count.
+  check('a css-in-js hash is rejected (generated) at any count', isStableGroupClass('css-1a2b3c', 2) === false, '');
+  // No dedicated empty-string check here (review Minor 2): isStableGroupClass's
+  // own `!cls` guard is unreachable dead code today — `looksGeneratedClass('')`
+  // already returns true (the ident regex `^[A-Za-z_][\w-]*$` fails to match
+  // an empty string), so a check asserting `isStableGroupClass('', n) === false`
+  // would pass identically with `!cls` deleted and prove nothing.
+}
+
 tUniquenessRanking();
 tTextCaseInsensitive();
 tWrongElementDropped();
@@ -277,6 +331,8 @@ tLeafTextRung();
 tAncestorScoping();
 tPositionalTail();
 tBackCompat();
+tShouldAppendPositional();
+tStableGroupClass();
 
 if (failures) {
   console.error(`\n${failures} check(s) FAILED`);
