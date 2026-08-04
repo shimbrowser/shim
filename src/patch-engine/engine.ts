@@ -102,6 +102,70 @@ interface RuleMountEntry {
   cleanups: Array<() => void>;
 }
 
+// --- Own-DOM guard ----------------------------------------------------------
+//
+// Nothing stops a rule's anchor selector from matching DOM the engine itself
+// created. `hide`/`restyle`/`reshape`/`reorder` outputs are the resolved
+// SITE anchor restamped in place (never a new node), so they're never at
+// risk — but a `script`/`replace-root` handler's OUTPUT is new DOM, and an
+// `inline`-strategy output carries no marker attribute at all (only
+// `replace-root` outputs get `data-shim-mounted`; portal/overlay park inside
+// `[data-shim="portal-root"]`, shadow wraps in `[data-shim="shadow-host"]`).
+// If a handler's injected output happens to match its own rule's anchor
+// selector, the next scan mounts it too: dispatch → insert → new match →
+// dispatch, unbounded.
+//
+// `mountedOutputRoots` is a MODULE-level registry (not per-applyRule-call):
+// every `engine.run` instance for every patch on the page shares it, so one
+// shim's handler output is never mistaken for another shim's anchor target
+// either. `mountOn` adds each mount's outputs after recording them in
+// `state`; `teardownEntry` removes exactly those entries' outputs — no
+// leaks across toggle/self-heal cycles, no cross-rule interference.
+//
+// Accepted residual: this only registers OUTPUT A HANDLER RETURNED (the
+// `mountOn`/`state` bookkeeping path). A handler that opts out of
+// self-healing by returning nothing (CLAUDE.md §6, "empty return = mounted
+// once") but still appends DOM by hand — `el.appendChild(...)` without
+// returning it — produces DOM this registry never learns about, so if that
+// DOM happens to match the rule's own anchor selector the loop this guard
+// exists to prevent can still occur. Not closable without either requiring
+// a return value (a real API change) or diffing the DOM tree the handler
+// touched, which is out of scope here.
+const mountedOutputRoots = new Set<Node>();
+
+// The selector side of the guard: an anchor candidate already living inside
+// engine-owned DOM is never a legitimate target, regardless of the
+// module-level registry. Deliberately narrow — `data-shim-css` and
+// `data-shim-replace-root` are stamped ON SITE ELEMENTS (tier-1 targets and
+// replace-root anchors, respectively) and must NOT make an element
+// "shim-owned"; only markers on DOM the engine itself CREATED belong here.
+const OWN_DOM_SELECTOR = '[data-shim-mounted],[data-shim="portal-root"],[data-shim="shadow-host"],[data-shim="route-host"]';
+
+// Pure predicate: true when `el` is inside DOM the engine mounted — either
+// because it (or an ancestor) carries one of the engine's own-DOM markers,
+// or because it's contained by a registered mounted-output root (the
+// `inline`-strategy case, which carries no marker at all). Exported for the
+// bare-node harness; both parameters are feature-detected duck types (real
+// DOM Elements/Nodes satisfy them trivially) rather than the DOM lib types,
+// so a minimal test stub without a full Element/Node implementation still
+// type-checks — same trade-off `anchors.ts`'s `AnchorElement` makes.
+function isShimOwnedElement(
+  el: { closest?: (sel: string) => unknown },
+  // Method-signature syntax (not an arrow-typed property) so TS checks
+  // `contains`'s parameter bivariantly: a real DOM `Node.contains(other:
+  // Node | null)` satisfies this even though `unknown` is wider than
+  // `Node | null` — an arrow-property type would fail that under
+  // `strictFunctionTypes`. The harness's duck-typed stubs (`contains(n:
+  // unknown)`) satisfy it either way.
+  roots: Iterable<{ contains?(n: unknown): boolean }>,
+): boolean {
+  if (typeof el.closest === 'function' && el.closest(OWN_DOM_SELECTOR)) return true;
+  for (const root of roots) {
+    if (typeof root.contains === 'function' && root.contains(el)) return true;
+  }
+  return false;
+}
+
 // routeRule's single mounted-route record — see mountRoute/unmountRoute.
 interface MountedRoute {
   outputs: HTMLElement[];
@@ -832,13 +896,20 @@ function applyRule(
       if (cleanup) cleanups.push(cleanup);
     }
     state.set(el, { outputs, cleanups });
+    // Register with the module-level own-DOM registry (see above) so no
+    // rule's anchor resolution — this rule's or any other patch's — can
+    // ever re-match this mount's output and re-dispatch onto it.
+    for (const o of outputs) mountedOutputRoots.add(o);
   }
 
   function teardownEntry(entry: RuleMountEntry) {
     for (const fn of entry.cleanups) {
       try { fn(); } catch (err) { console.error('[shim] cleanup failed', err); }
     }
-    for (const node of entry.outputs) node.remove();
+    for (const node of entry.outputs) {
+      mountedOutputRoots.delete(node);
+      node.remove();
+    }
   }
 
   const scan = () => {
@@ -857,8 +928,18 @@ function applyRule(
     // applyRule, so `rule.anchor` is always present here for a well-formed
     // spec. The shared `Rule` type keeps it optional to also describe those
     // anchor-less rule shapes.
-    const { nodes, source, witnessRejected, rejectedSample } =
+    const { nodes: resolvedNodes, source, witnessRejected, rejectedSample } =
       anchors.resolveAllWithSource(rule.anchor as Anchor);
+    // Own-DOM guard (see above): drop any candidate that's inside DOM the
+    // engine itself mounted before anything downstream sees it — witness
+    // capture, the mount loop, tier-1 stamping (`hide`/`restyle` go through
+    // the same `nodes` list, so a shim styling its own output would need a
+    // handler, not an anchor), relative-reorder restamping. Deliberately
+    // NOT folded into `anchors.resolveAllWithSource` itself: witness/
+    // no-match semantics read raw resolution counts, and an all-owned
+    // resolution correctly falls through to the existing no-match path here
+    // (0 nodes after filter) rather than needing a distinct signal.
+    const nodes = resolvedNodes.filter((el) => !isShimOwnedElement(el, mountedOutputRoots));
     // Track which spec carried the rule this scan. When state.size goes
     // to 0 (no match), we keep the last source for context — the inspector
     // can still show "previously via fallback:0" if useful, though today
@@ -1202,7 +1283,17 @@ function applyRule(
         // `matched`/`ladderHead` are the "first element" idiom: the length
         // checks above/below guarantee they're present, but the guard keeps
         // the access honest rather than asserting it.
-        const [matched] = Array.isArray(matches) && matches.length === 1 ? matches : [];
+        const [rawMatch] = Array.isArray(matches) && matches.length === 1 ? matches : [];
+        // Own-DOM guard (see near the top of this file): a unique
+        // component-identity match is exactly what a handler's own mounted
+        // output can produce after a deploy kills the real selector — the
+        // fiber tree still reports the captured component name, just now on
+        // DOM the engine itself created. Treat a shim-owned match as no
+        // match at all so the arm falls through (to witnessRecover, then
+        // quarantine) instead of committing a rebased anchor that points at
+        // shim DOM, which the own-DOM scan filter would then treat as a
+        // permanent no-match on every subsequent scan.
+        const matched = rawMatch && !isShimOwnedElement(rawMatch, mountedOutputRoots) ? rawMatch : null;
         const ladder = matched ? anchors.suggestAnchorLadder(matched) : [];
         const [ladderHead] = ladder;
         if (matched && ladderHead) {
@@ -1226,14 +1317,22 @@ function applyRule(
         }
         recoveryNotes.push(!Array.isArray(matches) || matches.length === 0
           ? 'component-id: no match'
-          : `component-id: ${matches.length} matches (not unique)`);
+          : rawMatch && !matched
+            ? 'component-id: unique match is shim-created DOM'
+            : `component-id: ${matches.length} matches (not unique)`);
       }
       if (canRebase && hasWitness) {
         const rec = anchors.witnessRecoverDetail(rule.anchor?.witness, document);
-        const found = rec.el;
+        const rawFound = rec.el;
+        // Same own-DOM guard as the component-identity arm above: the
+        // witness shape-scan walks every live element of the anchor's tag,
+        // which includes anything the engine mounted. A shape match there
+        // is never a legitimate recovery target.
+        const found = rawFound && !isShimOwnedElement(rawFound, mountedOutputRoots) ? rawFound : null;
         const ladder = found ? anchors.suggestAnchorLadder(found) : [];
         const [ladderHead] = ladder;
         if (rec.reason) recoveryNotes.push(`witness-scan: ${rec.reason}`);
+        else if (rawFound && !found) recoveryNotes.push('witness-scan: match is shim-created DOM');
         if (found && ladderHead) {
           emitRebase({
             strategy: 'recover',
@@ -1780,4 +1879,4 @@ function run(patch: PatchBundle, api: ShimApiBase): PatchControl {
 
 // firstGreaterIndex exported for scripts/css-priority-harness.js (the cross-
 // shim ordering policy); not used elsewhere at runtime.
-export { run, firstGreaterIndex };
+export { run, firstGreaterIndex, isShimOwnedElement };
