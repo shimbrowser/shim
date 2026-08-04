@@ -150,6 +150,27 @@ res = lintSpec({
 check('positional reorder target warns', res.warnings.some((w) => /positional/.test(w)), JSON.stringify(res.warnings));
 check('positional reorder target is NOT an error', res.errors.length === 0, JSON.stringify(res.errors));
 
+console.log('inject lint (§6): payload-shape errors, static-only enforcement');
+function tInjectLint(): void {
+  const mk = (mut: Record<string, unknown>) => lintSpec({
+    id: 's', match: { hosts: ['x.test'] },
+    rules: [{ id: 'r', anchor: { primary: { kind: 'css', value: '.a' } }, mutations: [mut] }],
+  });
+  check('valid inject-element clean', mk({ kind: 'inject-element', element: { tag: 'span', text: 'hi' } }).errors.length === 0);
+  check('missing element errors', mk({ kind: 'inject-element' }).errors.length > 0);
+  check('html on inject-element errors', mk({ kind: 'inject-element', html: '<b>x</b>' }).errors.length > 0);
+  check('on* attr is an emit error', mk({ kind: 'inject-element', element: { tag: 'a', attrs: { onclick: 'x()' } } }).errors.length > 0);
+  check('bad placement errors', mk({ kind: 'inject-element', element: { tag: 'span' }, placement: 'inside' }).errors.length > 0);
+  check('valid inject-html clean', mk({ kind: 'inject-html', html: '<span>ok</span>' }).errors.length === 0);
+  check('missing html errors', mk({ kind: 'inject-html' }).errors.length > 0);
+  check('element on inject-html errors', mk({ kind: 'inject-html', element: { tag: 'span' } }).errors.length > 0);
+  check('over-cap html errors', mk({ kind: 'inject-html', html: 'x'.repeat(40000) }).errors.length > 0);
+  const w = mk({ kind: 'inject-html', html: '<a onclick="x()">y</a>' });
+  check('active html warns (not errors)', w.errors.length === 0 && w.warnings.some((s) => s.includes('stripped')), JSON.stringify(w.warnings));
+  check('unknown mutation field still warns', mk({ kind: 'inject-element', element: { tag: 'span' }, bogusField: 1 }).warnings.length > 0);
+}
+tInjectLint();
+
 console.log('assertNoSpecErrors');
 let threw = false;
 try { assertNoSpecErrors({ rules: [{ id: 'a', mutations: [{ kind: 'fake' }] }] }); } catch (_) { threw = true; }

@@ -54,7 +54,19 @@ export interface MountSpec {
   align?: 'above' | 'below';
 }
 
-// A single mutation. `kind` is the 7 builtins (CLAUDE.md §6) plus rare
+// Declarative node tree for the Tier-2 `inject-element` kind (CLAUDE.md §6).
+// The ROOT must carry `tag`; children may be text-only ({ text } → bare text
+// node). A node with both `text` and `children` puts the text first. Lives
+// here (not inject-kinds.ts) so Mutation can reference it without a cycle.
+export interface InjectNode {
+  tag?: string;
+  text?: string;
+  attrs?: Record<string, string>;
+  style?: Record<string, string>;
+  children?: InjectNode[];
+}
+
+// A single mutation. `kind` is the builtins (CLAUDE.md §6) plus rare
 // per-patch declarative kinds, so it stays `string`; the engine narrows on it.
 // The named optional fields are every field a builtin reads.
 export interface Mutation {
@@ -78,6 +90,9 @@ export interface Mutation {
   wrap?: boolean;                        // reshape
   align?: string;                        // reshape
   justify?: string;                      // reshape
+  element?: InjectNode;                  // inject-element
+  html?: string;                         // inject-html
+  placement?: 'before' | 'after' | 'prepend' | 'append'; // inject-* (default "after")
 }
 
 export interface Rule {

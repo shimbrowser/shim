@@ -22,21 +22,26 @@
 
 import type { Spec, Rule, Mutation, AnchorSpec } from '../patch-engine/types';
 import { RESHAPE_ALIGN, RESHAPE_JUSTIFY } from '../patch-engine/layout-kinds';
+import {
+  validateInjectTree, scanHtmlForActiveContent, INJECT_PLACEMENTS, INJECT_HTML_MAX_CHARS,
+} from '../patch-engine/inject-kinds';
 
 const BUILTIN_KINDS = new Set([
   'hide', 'restyle', 'script', 'remove', 'replace-root', 'mount-route', 'redirect',
-  'reorder', 'reshape',
+  'reorder', 'reshape', 'inject-element', 'inject-html',
 ]);
 const RULE_KEYS = new Set(['id', 'anchor', 'mutations', 'handlers']);
 const ANCHOR_KEYS = new Set(['primary', 'fallbacks', 'iframe', 'witness']);
 // Union across kinds: properties (restyle), handler/mount (script,
 // replace-root, mount-route), pattern/title (mount-route), from/to/exceptPaths
 // (redirect), position/before/after (reorder), layout/direction/columns/rows/
-// gap/wrap/align/justify (reshape).
+// gap/wrap/align/justify (reshape), element/html/placement (inject-element,
+// inject-html).
 const MUTATION_KEYS = new Set([
   'kind', 'properties', 'handler', 'mount', 'pattern', 'title', 'from', 'to', 'exceptPaths',
   'position', 'before', 'after',
   'layout', 'direction', 'columns', 'rows', 'gap', 'wrap', 'align', 'justify',
+  'element', 'html', 'placement',
 ]);
 
 // Anchor-quality lint (§8): the model drifts toward positional CSS
@@ -208,6 +213,42 @@ function lintLayoutMutation(rid: string, mut: Mutation, errors: string[], warnin
   }
 }
 
+// Inject kinds (§6): payload-shape problems are ERRORS (a malformed tree is
+// a silent no-op otherwise); strippable content in inject-html is a WARNING
+// (the runtime strip is the belt — the model should hear it before apply).
+// inject-element's tree is inspectable, so active content there is an ERROR
+// at emit rather than a runtime strip.
+function lintInjectMutation(rid: string, mut: Mutation, errors: string[], warnings: string[]): void {
+  if (mut.kind !== 'inject-element' && mut.kind !== 'inject-html') return;
+  if (mut.placement !== undefined && !INJECT_PLACEMENTS.has(mut.placement)) {
+    errors.push(`rule "${rid}": placement "${String(mut.placement)}" — must be one of before, after, prepend, append`);
+  }
+  if (mut.kind === 'inject-element') {
+    if (mut.html !== undefined) {
+      errors.push(`rule "${rid}": inject-element takes "element", not "html" (use inject-html for raw markup)`);
+    }
+    if (mut.element === undefined) {
+      errors.push(`rule "${rid}": inject-element requires an "element" node tree`);
+      return;
+    }
+    for (const p of validateInjectTree(mut.element)) errors.push(`rule "${rid}": ${p}`);
+    return;
+  }
+  if (mut.element !== undefined) {
+    errors.push(`rule "${rid}": inject-html takes "html", not "element" (use inject-element for a node tree)`);
+  }
+  if (typeof mut.html !== 'string' || !mut.html.trim()) {
+    errors.push(`rule "${rid}": inject-html requires an "html" string`);
+    return;
+  }
+  if (mut.html.length > INJECT_HTML_MAX_CHARS) {
+    errors.push(`rule "${rid}": inject-html is ${mut.html.length} chars (max ${INJECT_HTML_MAX_CHARS}) — that much markup belongs in a script handler or replace-root`);
+  }
+  for (const found of scanHtmlForActiveContent(mut.html)) {
+    warnings.push(`rule "${rid}": ${found} — it will be stripped at apply time; inject kinds are static-only, use a script handler for behavior`);
+  }
+}
+
 function lintSpec(spec: unknown): LintResult {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -289,6 +330,7 @@ function lintSpec(spec: unknown): LintResult {
         }
       }
       lintLayoutMutation(rid, mut, errors, warnings);
+      lintInjectMutation(rid, mut, errors, warnings);
     }
 
     // api.ai without the 'ai' permission declared (§19): the call would

@@ -21,6 +21,7 @@
 
 import * as witness from './witness';
 import { errMessage } from '../shared/error';
+import { isEngineInjected } from './inject-kinds';
 import type { Anchor, AnchorSpec, Witness } from './types';
 
 // A DOM-shaped element sufficient for anchor synthesis (suggestAnchorLadder
@@ -670,6 +671,12 @@ function witnessRecoverDetail(w: Witness | null | undefined, root: ScanRoot | Do
   const strong: StrongMatch[] = [];
   for (const [i, el] of Array.from(candidates).entries()) {
     if (i >= 5000) break;
+    // Engine-injected nodes (and their subtrees) are never recovery targets:
+    // without this, a shim's own injected output can satisfy the witness
+    // it's sitting next to and get silently re-anchored onto the engine's
+    // own DOM (CLAUDE.md §6/§12). Skip BEFORE scoring so an injected node
+    // can't count toward the ambiguity/uniqueness decisions below either.
+    if (isEngineInjected(el)) continue;
     const verdict = witness.matchWitness(w, el);
     if (verdict.pass && verdict.score >= RECOVER_MIN_SCORE) {
       strong.push({ el, score: verdict.score });

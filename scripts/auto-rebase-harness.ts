@@ -114,6 +114,29 @@ function tWitnessRecover() {
   check('detail: ambiguity reason counts disjoint strong', d3.el === null && /ambiguous — 2 disjoint/.test(String(d3.reason)), d3.reason);
   const d5 = witnessRecoverDetail(null, root1);
   check('detail: no witness → explicit reason', d5.el === null && /no witness/.test(String(d5.reason)), d5.reason);
+
+  // Engine-injected candidates (CLAUDE.md §6/§12 back door) must never be
+  // recovery targets — an injected node that happens to satisfy the witness
+  // (tag/attrs/text-stem/parent/child-shape) would otherwise silently
+  // re-anchor the rule onto the engine's own output.
+  //
+  // Two witness-satisfying elements, one stamped `data-shim-injected`:
+  // recovery must pick the clean one and must NOT treat the injected one as
+  // a second strong match (i.e. no "ambiguous — 2 disjoint" reason).
+  const cleanTwin = el('button', { 'data-testid': 'favorite' }, { text: 'Favorite' });
+  const injectedTwin = el('button', { 'data-testid': 'favorite', 'data-shim-injected': 'tok1' }, { text: 'Favorite' });
+  const root5 = makeRoot({ button: [injectedTwin, cleanTwin] });
+  check('picks the clean element over an injected witness-satisfying twin', witnessRecover(w, root5) === cleanTwin, '');
+  const d6 = witnessRecoverDetail(w, root5);
+  check('does not report ambiguity from the injected twin', d6.el === cleanTwin && d6.reason === null, JSON.stringify(d6));
+
+  // The ONLY witness-satisfying element is engine-injected → recovery
+  // refuses outright rather than re-anchoring onto engine output.
+  const onlyInjected = el('button', { 'data-testid': 'favorite', 'data-shim-injected': 'tok2' }, { text: 'Favorite' });
+  const root6 = makeRoot({ button: [noise1, onlyInjected] });
+  check('refuses when the only witness-satisfying element is engine-injected', witnessRecover(w, root6) === null, '');
+  const d7 = witnessRecoverDetail(w, root6);
+  check('detail: injected-only miss reads as an ordinary no-match, not a mis-attach', d7.el === null && /0 of \d+ <button>/.test(String(d7.reason)), d7.reason);
 }
 
 tSuggestRanking();

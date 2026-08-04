@@ -3,6 +3,7 @@ import * as anchors from './anchors';
 import {
   compileReorderCss, compileReshapeCss, desiredSequence, reorderNote, reshapeNote, REORDER_SIBLING_CAP,
 } from './layout-kinds';
+import { buildElement, parseInjectHtml, resolvePlacement } from './inject-kinds';
 import * as witnessMod from './witness';
 import * as componentId from './component-id';
 import { applyStrategy } from './strategies';
@@ -139,7 +140,12 @@ const mountedOutputRoots = new Set<Node>();
 // `data-shim-replace-root` are stamped ON SITE ELEMENTS (tier-1 targets and
 // replace-root anchors, respectively) and must NOT make an element
 // "shim-owned"; only markers on DOM the engine itself CREATED belong here.
-const OWN_DOM_SELECTOR = '[data-shim-mounted],[data-shim="portal-root"],[data-shim="shadow-host"],[data-shim="route-host"]';
+// `data-shim-injected` (inject-element / inject-html roots) is a marker on
+// engine-CREATED nodes, so it belongs here — unlike script outputs, inject
+// outputs always carry it, giving marker coverage even where the registry
+// arm can't reach (a node detached and reattached outside the engine's
+// bookkeeping).
+const OWN_DOM_SELECTOR = '[data-shim-mounted],[data-shim="portal-root"],[data-shim="shadow-host"],[data-shim="route-host"],[data-shim-injected]';
 
 // Pure predicate: true when `el` is inside DOM the engine mounted — either
 // because it (or an ancestor) carries one of the engine's own-DOM markers,
@@ -326,6 +332,12 @@ function cssBodyFromProps(props?: Record<string, string>): string {
 // occupy the space). Same token-per-rule discipline so teardown can pull
 // just this rule's CSS out of the sheet.
 const replaceRootRuleNodes = new Map<string, Text>();
+
+// Apply-time strip feedback for inject-html (§6): when the strip pass
+// removed active content, the fact rides the rule-status `note` field so the
+// authoring loop tells the model its onclick/script never shipped. Keyed
+// spec/rule; set at mount, cleared at rule teardown.
+const injectStripNotes = new Map<string, string>();
 function ensureReplaceRootSheet(): HTMLStyleElement {
   let sheet = document.querySelector('style[data-shim="replace-root"]') as HTMLStyleElement | null;
   if (!sheet) {
@@ -602,6 +614,43 @@ function dispatchMutation(
     return Promise.resolve([]);
   }
 
+  // Tier-2 declarative injection (§6): build static DOM from the payload,
+  // insert per `placement`, and RETURN the nodes — the script-output path
+  // (self-healing, per-anchor dedupe, teardown, emit feedback) does the rest.
+  if (mut.kind === 'inject-element') {
+    return safe(`inject-element ${rule.id}`, null, () => {
+      if (!mut.element) return [];
+      const pos = resolvePlacement(el, mut.placement);
+      if (!pos) return [];
+      const node = buildElement(mut.element, document);
+      node.setAttribute('data-shim-injected', `shim-${spec.id}-${rule.id}-inject`);
+      pos.parent.insertBefore(node, pos.before);
+      return [node];
+    });
+  }
+
+  if (mut.kind === 'inject-html') {
+    return safe(`inject-html ${rule.id}`, null, () => {
+      if (typeof mut.html !== 'string') return [];
+      const pos = resolvePlacement(el, mut.placement);
+      if (!pos) return [];
+      const { nodes, stripped } = parseInjectHtml(mut.html, document);
+      const noteKey = `${spec.id}/${rule.id}`;
+      if (stripped > 0) {
+        injectStripNotes.set(noteKey,
+          `inject-html stripped ${stripped} active item(s) (scripts / on* handlers / javascript: URLs) — `
+          + 'inject kinds are static-only; use a script handler for behavior');
+      } else {
+        injectStripNotes.delete(noteKey);
+      }
+      for (const node of nodes) {
+        node.setAttribute('data-shim-injected', `shim-${spec.id}-${rule.id}-inject`);
+        pos.parent.insertBefore(node, pos.before);
+      }
+      return nodes;
+    });
+  }
+
   // Tier 3 — delete the anchor outright. Hostile to reconcilers by design:
   // the engine's scan loop catches re-rendered nodes and re-removes them.
   // Irreversible by nature — toggle-off can't restore a deleted node; the
@@ -750,6 +799,8 @@ function applyRule(
       }
     }
     if (relativeReorderNote) notes.push(relativeReorderNote);
+    const stripNote = injectStripNotes.get(`${spec.id}/${rule.id}`);
+    if (stripNote) notes.push(stripNote);
     return notes.length ? notes.join('; ') : null;
   };
   let lastReportedNote: string | null = null;
@@ -939,6 +990,11 @@ function applyRule(
     // no-match semantics read raw resolution counts, and an all-owned
     // resolution correctly falls through to the existing no-match path here
     // (0 nodes after filter) rather than needing a distinct signal.
+    // Inject-kind outputs are covered twice: they're registered in
+    // `mountedOutputRoots` like any returned output, and their
+    // `data-shim-injected` stamp is an own-DOM marker (OWN_DOM_SELECTOR) —
+    // so the guard holds even for a detached-and-reattached injected node
+    // the registry no longer tracks.
     const nodes = resolvedNodes.filter((el) => !isShimOwnedElement(el, mountedOutputRoots));
     // Track which spec carried the rule this scan. When state.size goes
     // to 0 (no match), we keep the last source for context — the inspector
@@ -950,9 +1006,9 @@ function applyRule(
     // can tell quarantine ("selector found something that isn't the
     // thing") apart from plain no-match ("selector found nothing").
     lastWitnessRejection = witnessRejected ? (rejectedSample || { detail: [] }) : null;
-    // Snapshot resolution for the settle-delayed rebase reconciler. `nodes`
-    // has exactly one element in this branch, so the destructured head is
-    // always present — the `?? null` only guards the length !== 1 case.
+    // Snapshot resolution for the settle-delayed rebase reconciler. Unlike
+    // the raw resolve above, `nodes` here is already filtered — a single
+    // engine-injected match reads as zero, not one.
     const [singleNode] = nodes;
     lastResolvedEl = nodes.length === 1 ? (singleNode ?? null) : null;
 
@@ -1464,6 +1520,7 @@ function applyRule(
       }
     }
     relativeTokens.clear();
+    injectStripNotes.delete(`${spec.id}/${rule.id}`);
   };
 }
 
