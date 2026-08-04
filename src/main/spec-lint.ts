@@ -48,6 +48,41 @@ const MUTATION_KEYS = new Set([
 const POSITIONAL_RE = /:(?:nth-child|nth-of-type|nth-last-child|nth-last-of-type|first-child|last-child|first-of-type|last-of-type|only-child|only-of-type)\b/i;
 const GENERATED_CLASS_RE = /\.(?:css|jss|jsx|sc|svelte|emotion|chakra)-[A-Za-z0-9_-]+|\.[\w-]*[0-9a-f]{6,}/i;
 
+// Loop-hazard scan (freeze prevention): a handler that creates a
+// MutationObserver AND writes DOM can observe its own writes and re-queue
+// itself forever — a hard tab freeze (microtasks run before paint). The
+// safe pattern always has ≥2 `.disconnect(` calls: the mutate-guard inside
+// the callback plus the api.cleanup teardown. Heuristic (comments/strings
+// can trip it) — warning, not error, same posture as the api.ai scan.
+const OBSERVER_RE = /new\s+(?:window\.)?MutationObserver\b/;
+const DOM_WRITE_RE = /\b(appendChild|insertBefore|removeChild|replaceChildren|insertAdjacentHTML|insertAdjacentElement|replaceWith|prepend|append|setAttribute)\s*\(|\.remove\s*\(\s*\)|\binnerHTML\s*=|\btextContent\s*=/;
+const DISCONNECT_RE = /\.disconnect\s*\(/g;
+
+// Single source of truth for the observer-loop heuristic itself — both the
+// in-spec scan below (rule.handlers, rule-scoped) and the pre-import
+// inspector (src/main/shim-inspect.ts, handler-scoped: `exportToShim` strips
+// `rule.handlers` into a top-level `handlers` map, so a canonically exported
+// `.shim` file has no rule.handlers left for the rule-scoped scan below to
+// find) call this rather than each carrying its own copy of the regex logic.
+// Returns the warning text (no rule context — callers that have a rule id
+// prepend their own `rule "<id>": ` prefix) or null when the pattern looks
+// safe. Heuristic, not proof: counting total `.disconnect(` occurrences in
+// the source is blind to WHICH observer a given disconnect call belongs to,
+// so two independently guard-less observers whose only disconnects are two
+// unrelated `api.cleanup` teardown registrations read as "≥2 disconnects,
+// looks safe" and stay silent even though both loop forever — an accepted
+// false-negative, pinned (not fixed) in scripts/spec-lint-harness.ts.
+function observerLoopWarning(handlerName: string, src: string): string | null {
+  if (!OBSERVER_RE.test(src) || !DOM_WRITE_RE.test(src)) return null;
+  const disconnects = (src.match(DISCONNECT_RE) || []).length;
+  if (disconnects >= 2) return null;
+  return `handler "${handlerName}" creates a MutationObserver and also writes DOM — if the observer `
+    + 'watches DOM the handler mutates, it re-triggers itself in an infinite microtask loop and freezes the page. '
+    + 'Either anchor the repeated element itself (the engine dispatches the handler once per matched element and '
+    + 'auto-dispatches new ones — no observer needed), or disconnect() before mutating and re-observe() after, '
+    + 'plus register observer.disconnect via api.cleanup.';
+}
+
 interface LintResult {
   errors: string[];
   warnings: string[];
@@ -275,6 +310,17 @@ function lintSpec(spec: unknown): LintResult {
         }
       }
     }
+
+    if (isRecord(rule.handlers)) {
+      for (const [name, src] of Object.entries(rule.handlers)) {
+        if (typeof src !== 'string') continue;
+        const warning = observerLoopWarning(name, src);
+        if (warning) {
+          warnings.push(`rule "${rid}": ${warning}`);
+          break;
+        }
+      }
+    }
   }
   return { errors, warnings };
 }
@@ -294,4 +340,4 @@ function assertNoSpecErrors(spec: unknown): void {
   throw err;
 }
 
-export { lintSpec, assertNoSpecErrors, BUILTIN_KINDS };
+export { lintSpec, assertNoSpecErrors, BUILTIN_KINDS, observerLoopWarning };

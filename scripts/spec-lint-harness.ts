@@ -7,7 +7,7 @@
 // Unknown KINDS are errors (reject the emit); unknown FIELDS are warnings
 // (surfaced to the model + chat). Bare node — no db, no Electron.
 
-import { lintSpec, assertNoSpecErrors } from '../src/main/spec-lint';
+import { lintSpec, assertNoSpecErrors, observerLoopWarning } from '../src/main/spec-lint';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string) {
@@ -157,6 +157,103 @@ check('throws on unknown kind', threw);
 threw = false;
 try { assertNoSpecErrors({ rules: [{ id: 'a', bogusField: 1, mutations: [{ kind: 'hide' }] }] }); } catch (_) { threw = true; }
 check('does NOT throw on warning-only spec', !threw);
+
+console.log('observer-loop heuristic (freeze prevention)');
+const LOOP_HANDLER = `function decorate({ anchor, api }) {
+  function decorateAll() {
+    anchor.querySelectorAll('tr').forEach(function (row) {
+      row.querySelectorAll('[data-x]').forEach(function (el) { el.remove(); });
+      row.insertBefore(document.createElement('span'), row.firstChild);
+    });
+  }
+  decorateAll();
+  var observer = new MutationObserver(function () { decorateAll(); });
+  observer.observe(anchor, { childList: true, subtree: true });
+  api.cleanup(function () { observer.disconnect(); });
+}`;
+const SAFE_HANDLER = `function decorate({ anchor, api }) {
+  var opts = { childList: true, subtree: true };
+  var observer = new MutationObserver(function () {
+    observer.disconnect();
+    anchor.appendChild(document.createElement('span'));
+    observer.observe(anchor, opts);
+  });
+  observer.observe(anchor, opts);
+  api.cleanup(function () { observer.disconnect(); });
+}`;
+const scriptRule = (src: string) => ({
+  rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.row' } }, mutations: [{ kind: 'script', handler: 'decorate' }], handlers: { decorate: src } }],
+});
+res = lintSpec(scriptRule(LOOP_HANDLER));
+check('observer + DOM writes + 1 disconnect warns', res.warnings.some((w) => /MutationObserver/.test(w) && /disconnect/i.test(w)), JSON.stringify(res.warnings));
+check('…as a warning, not an error', res.errors.length === 0);
+res = lintSpec(scriptRule(SAFE_HANDLER));
+check('disconnect-while-mutating pattern (2 disconnects) is silent', res.warnings.length === 0, JSON.stringify(res.warnings));
+res = lintSpec(scriptRule('function decorate({ anchor }) { var o = new MutationObserver(function () { console.log("hi"); }); o.observe(anchor, { childList: true }); }'));
+check('observer without DOM writes is silent', res.warnings.length === 0, JSON.stringify(res.warnings));
+res = lintSpec(scriptRule('function decorate({ anchor }) { anchor.appendChild(document.createElement("b")); return anchor.lastChild; }'));
+check('DOM writes without observer is silent', res.warnings.length === 0, JSON.stringify(res.warnings));
+
+console.log('observer-loop heuristic — widened regexes (§ finding 2/3)');
+res = lintSpec(scriptRule(`function decorate({ anchor }) {
+  var o = new MutationObserver(function () { anchor.setAttribute('data-x', String(Date.now())); });
+  o.observe(anchor, { attributes: true });
+}`));
+check('setAttribute-based loop now warns', res.warnings.some((w) => /MutationObserver/.test(w)), JSON.stringify(res.warnings));
+res = lintSpec(scriptRule(`function decorate({ anchor }) {
+  var o = new MutationObserver(function () { anchor.textContent = String(Date.now()); });
+  o.observe(anchor, { childList: true, characterData: true, subtree: true });
+}`));
+check('textContent-assignment loop warns', res.warnings.some((w) => /MutationObserver/.test(w)), JSON.stringify(res.warnings));
+res = lintSpec(scriptRule(`function decorate({ anchor }) {
+  var o = new MutationObserver(function () { anchor.replaceWith(document.createElement('div')); });
+  o.observe(anchor.parentNode, { childList: true });
+}`));
+check('replaceWith-based loop warns', res.warnings.some((w) => /MutationObserver/.test(w)), JSON.stringify(res.warnings));
+res = lintSpec(scriptRule(`function decorate({ anchor }) {
+  var o = new MutationObserver(function () { anchor.insertAdjacentElement('beforeend', document.createElement('span')); });
+  o.observe(anchor, { childList: true, subtree: true });
+}`));
+check('insertAdjacentElement-based loop warns', res.warnings.some((w) => /MutationObserver/.test(w)), JSON.stringify(res.warnings));
+res = lintSpec(scriptRule(`function decorate({ anchor }) {
+  var o = new window.MutationObserver(function () { anchor.appendChild(document.createElement('span')); });
+  o.observe(anchor, { childList: true, subtree: true });
+}`));
+check('window.MutationObserver form is detected', res.warnings.some((w) => /MutationObserver/.test(w)), JSON.stringify(res.warnings));
+
+console.log('observer-loop heuristic — accepted limit: two guard-less observers, 2 unrelated cleanup disconnects');
+// Neither observer disconnects-before-mutating; the ONLY two `.disconnect(`
+// calls in the source are the api.cleanup teardown registrations, one per
+// observer. The heuristic counts disconnect() occurrences in the whole
+// source text, not which observer each belongs to — so 2 total reads as
+// "the safe disconnect/re-observe pattern" and stays silent, even though
+// BOTH observers loop indefinitely (obsB's attribute write is the more
+// obviously self-triggering one). This is a documented heuristic limit, not
+// a bug to fix here — pinning it so a future regex tweak that accidentally
+// "fixes" it is a deliberate choice, not a surprise.
+const TWO_UNGUARDED_OBSERVERS = `function decorate({ anchor, api }) {
+  var obsA = new MutationObserver(function () { anchor.appendChild(document.createElement('span')); });
+  obsA.observe(anchor, { childList: true, subtree: true });
+  api.cleanup(function () { obsA.disconnect(); });
+
+  var obsB = new MutationObserver(function () { anchor.setAttribute('data-x', '1'); });
+  obsB.observe(anchor, { attributes: true });
+  api.cleanup(function () { obsB.disconnect(); });
+}`;
+res = lintSpec(scriptRule(TWO_UNGUARDED_OBSERVERS));
+check(
+  'two guard-less observers w/ 2 unrelated cleanup disconnects: silent (accepted false negative)',
+  res.warnings.length === 0,
+  JSON.stringify(res.warnings),
+);
+
+console.log('observerLoopWarning — exported helper (single source of truth)');
+check('flags a guard-less observer+write, no rule prefix', (() => {
+  const w = observerLoopWarning('decorate', LOOP_HANDLER);
+  return w !== null && /^handler "decorate"/.test(w) && !/^rule /.test(w);
+})());
+check('null on the safe disconnect/re-observe pattern', observerLoopWarning('decorate', SAFE_HANDLER) === null);
+check('null on plain code', observerLoopWarning('h', 'function h() { return 1; }') === null);
 
 console.log('');
 if (failures) { console.error(`✗ ${failures} check(s) failed`); process.exit(1); }
