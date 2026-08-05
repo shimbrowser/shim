@@ -127,7 +127,7 @@ export function detectTransformForm(src: string, tryCompile: CompileProbe): Dete
 }
 
 // Last-two-labels registrable domain — same imprecision as
-// `deploy-id.ts`'s `sameRegistrableDomain` and `redirect-net`'s trust gate
+// `deploy-id.ts`'s `sameRegistrableDomain`
 // (no Public Suffix List; `a.co.uk` and `b.co.uk` read as the same site).
 // Computed main-side (once, per host) so the in-page scope check
 // (`hostInScope`, below) is a cheap string-suffix comparison with no PSL
