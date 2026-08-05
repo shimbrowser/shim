@@ -20,15 +20,29 @@
 // narrows defensively; once a piece of data has been confirmed record-shaped
 // it's read through the real patch-engine types.
 
+import * as vm from 'vm';
 import type { Spec, Rule, Mutation, AnchorSpec } from '../patch-engine/types';
 import { RESHAPE_ALIGN, RESHAPE_JUSTIFY } from '../patch-engine/layout-kinds';
 import {
   validateInjectTree, scanHtmlForActiveContent, INJECT_PLACEMENTS, INJECT_HTML_MAX_CHARS,
 } from '../patch-engine/inject-kinds';
+import { validateRewriteMutation, detectTransformForm } from '../patch-engine/rewrite-response';
+import type { CompileProbe } from '../patch-engine/rewrite-response';
+
+// vm.Script-backed compile probe for `detectTransformForm` — main-process
+// counterpart to rewrite-install.ts's identical-shaped probe (Node/Electron-
+// only, so it can't live in the pure patch-engine module). Both feed the
+// ONE shared `detectTransformForm` algorithm rather than each hand-rolling
+// their own expr-vs-module detection.
+const vmCompileProbe: CompileProbe = (code) => {
+  try { new vm.Script(code); return { ok: true }; } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+};
 
 const BUILTIN_KINDS = new Set([
   'hide', 'restyle', 'script', 'remove', 'replace-root', 'mount-route', 'redirect',
-  'reorder', 'reshape', 'inject-element', 'inject-html',
+  'reorder', 'reshape', 'inject-element', 'inject-html', 'rewrite-response',
 ]);
 const RULE_KEYS = new Set(['id', 'anchor', 'mutations', 'handlers']);
 const ANCHOR_KEYS = new Set(['primary', 'fallbacks', 'iframe', 'witness']);
@@ -36,12 +50,13 @@ const ANCHOR_KEYS = new Set(['primary', 'fallbacks', 'iframe', 'witness']);
 // replace-root, mount-route), pattern/title (mount-route), from/to/exceptPaths
 // (redirect), position/before/after (reorder), layout/direction/columns/rows/
 // gap/wrap/align/justify (reshape), element/html/placement (inject-element,
-// inject-html).
+// inject-html), endpoint/transform (rewrite-response).
 const MUTATION_KEYS = new Set([
   'kind', 'properties', 'handler', 'mount', 'pattern', 'title', 'from', 'to', 'exceptPaths',
   'position', 'before', 'after',
   'layout', 'direction', 'columns', 'rows', 'gap', 'wrap', 'align', 'justify',
   'element', 'html', 'placement',
+  'endpoint', 'transform',
 ]);
 
 // Anchor-quality lint (§8): the model drifts toward positional CSS
@@ -96,8 +111,11 @@ interface LintResult {
 // `mutations` is a reserved bag field for per-patch declarative kinds (§6) —
 // not part of the canonical `Spec` shape (registry.ts's bagForUserPatch
 // always passes it undefined for user patches today), so it's typed as a
-// spec-lint-local extension rather than added to the shared type.
-type LintableSpec = Spec & { mutations?: Record<string, unknown> };
+// spec-lint-local extension rather than added to the shared type. `handlers`
+// is the import-carried top-level handler map (shims.ts's `SpecWithHandlers`
+// — populated when a `.shim` import hasn't folded handlers back onto
+// individual rules yet); same rationale for staying a local extension.
+type LintableSpec = Spec & { mutations?: Record<string, unknown>; handlers?: Record<string, unknown> };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -249,6 +267,88 @@ function lintInjectMutation(rid: string, mut: Mutation, errors: string[], warnin
   }
 }
 
+// Transform-source heuristics (design doc "Transform contract"): the
+// transform runs in the page's MAIN world, not the isolated world `script`
+// handlers get — `api.*` doesn't exist there, and there's nothing to await
+// (sync is enforced by there being no event loop hook for it), and DOM access
+// is meaningless outside a page context the transform never touches. Source-
+// text heuristics, same posture as the api.ai / observer-loop scans below
+// (comments/strings can false-positive) — warnings, not errors, since a
+// runtime miss here just means the original body ships untouched (never a
+// broken page, per the design doc's throw/undefined contract).
+const REWRITE_API_RE = /\bapi\s*\./;
+const REWRITE_ASYNC_RE = /\basync\b|\bawait\b/;
+const REWRITE_DOM_RE = /\b(?:document|window)\s*\./;
+
+// rewrite-response (§6, docs/2026-08-04-rewrite-response-design.md). Payload
+// shape errors delegate to `validateRewriteMutation` (src/patch-engine/
+// rewrite-response.ts) rather than re-deriving them here — one source of
+// truth for what a valid endpoint/transform payload looks like, shared with
+// the runtime table builder (`collectRewriteEntries`).
+//
+// The transform-name BINDING check lives here, and only here. It does NOT
+// mirror `shims.ts`'s `assertHandlersBound` (which would be the obvious
+// "existing binding authority" to defer to) because that function is
+// hard-coded to `kind === 'script'` — it doesn't even cover `replace-root` /
+// `mount-route`, which share the exact same `.handler` field, let alone a new
+// kind's `.transform` field. Rather than bolt a second, differently-shaped
+// check onto a commit-time-only function outside spec-lint's own file (and
+// risk drifting from it), spec-lint is the sole authority for whether a
+// `transform` name resolves — there is nowhere else `transform` binding is
+// (or should be) checked.
+function lintRewriteMutation(
+  rid: string,
+  mut: Mutation,
+  rule: { handlers?: Record<string, unknown> },
+  errors: string[],
+  warnings: string[],
+): void {
+  if (mut.kind !== 'rewrite-response') return;
+  // `endpoint`/`transform` aren't on the shared `Mutation` type (they're
+  // narrow to this one kind) — read them off the raw record, same dynamic-
+  // boundary posture `validateRewriteMutation` itself takes.
+  const raw = mut as unknown as Record<string, unknown>;
+
+  const { errors: rewriteErrors } = validateRewriteMutation(raw);
+  for (const e of rewriteErrors) errors.push(`rule "${rid}": ${e}`);
+
+  const transformName = typeof raw.transform === 'string' ? raw.transform : undefined;
+  if (!transformName) return; // validateRewriteMutation already flagged the missing/malformed name
+
+  const source = rule.handlers && typeof rule.handlers[transformName] === 'string'
+    ? (rule.handlers[transformName] as string)
+    : undefined;
+  if (source === undefined) {
+    errors.push(
+      `rule "${rid}": transform "${transformName}" is not bound — it must be a key in this rule's `
+      + '"handlers" or the patch-level handler set. Emit the handler source alongside the rule.',
+    );
+    return;
+  }
+
+  // Syntax-check the bound source itself (Fix 1a, CLAUDE.md §6): a malformed
+  // transform (e.g. a missing brace) used to pass lint/commit untouched,
+  // then poison rewrite-install.ts's ONE shared generated script at
+  // install time — one bad rule's syntax error killed every rewrite rule
+  // on the host. Rejecting it here, at emit/commit/import (every path runs
+  // `assertNoSpecErrors`), closes that at the source.
+  const syntax = detectTransformForm(source, vmCompileProbe);
+  if (syntax.form === null) {
+    errors.push(`rule "${rid}": transform "${transformName}" does not parse as JavaScript: ${syntax.error}`);
+    return;
+  }
+
+  if (REWRITE_API_RE.test(source)) {
+    warnings.push(`rule "${rid}": transform "${transformName}" — transform runs in the page's main world — api.* does not exist there.`);
+  }
+  if (REWRITE_ASYNC_RE.test(source)) {
+    warnings.push(`rule "${rid}": transform "${transformName}" — transform must be synchronous — async transforms are not supported.`);
+  }
+  if (REWRITE_DOM_RE.test(source)) {
+    warnings.push(`rule "${rid}": transform "${transformName}" — transform should be a pure data function — DOM access is a script-handler job.`);
+  }
+}
+
 function lintSpec(spec: unknown): LintResult {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -293,6 +393,20 @@ function lintSpec(spec: unknown): LintResult {
     // Same base-preserving iteration as rules above (throw on truthy non-array).
     const mutationsList = (rule.mutations || []) as unknown[];
 
+    // The "patch-level handler set" a rewrite-response transform may resolve
+    // through, alongside this rule's own `handlers` — merged once per rule
+    // (not per mutation) since it's the same scope for every mutation in the
+    // rule. `s.handlers` is the import-carried top-level map (LintableSpec);
+    // rule.handlers wins on key collision, matching shims.ts's own
+    // baseSources → ruleSources merge order for the analogous script-handler
+    // lookup.
+    const handlerScope: { handlers: Record<string, unknown> } = {
+      handlers: {
+        ...(s && isRecord(s.handlers) ? s.handlers : {}),
+        ...(isRecord(rule.handlers) ? rule.handlers : {}),
+      },
+    };
+
     // At most one reorder mutation per rule (per-RULE check, not per-mutation):
     // two reorder mutations on the same anchor stamp conflicting order values
     // — the second silently wins or is ignored depending on sheet insertion
@@ -331,6 +445,7 @@ function lintSpec(spec: unknown): LintResult {
       }
       lintLayoutMutation(rid, mut, errors, warnings);
       lintInjectMutation(rid, mut, errors, warnings);
+      lintRewriteMutation(rid, mut, handlerScope, errors, warnings);
     }
 
     // api.ai without the 'ai' permission declared (§19): the call would

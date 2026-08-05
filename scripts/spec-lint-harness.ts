@@ -171,6 +171,114 @@ function tInjectLint(): void {
 }
 tInjectLint();
 
+console.log('rewrite-response lint (§6, docs/2026-08-04-rewrite-response-design.md)');
+function tRewriteLint(): void {
+  const VALID_MUT = { kind: 'rewrite-response', endpoint: { method: 'GET', path: '/list/tracks' }, transform: 'filterHeard' };
+  const CLEAN_SRC = 'function filterHeard(json, ctx) { json.tracks = json.tracks.filter(function (t) { return !t.heard; }); return json; }';
+  const mk = (mut: Record<string, unknown>, ruleHandlers?: Record<string, string>) => lintSpec({
+    id: 's', match: { hosts: ['x.test'] },
+    rules: [{ id: 'r', mutations: [mut], handlers: ruleHandlers }],
+  });
+
+  const clean = mk(VALID_MUT, { filterHeard: CLEAN_SRC });
+  check('valid rewrite mutation: no errors', clean.errors.length === 0, JSON.stringify(clean.errors));
+  check('valid rewrite mutation: no warnings', clean.warnings.length === 0, JSON.stringify(clean.warnings));
+
+  const missingEndpoint = mk({ kind: 'rewrite-response', transform: 'filterHeard' }, { filterHeard: CLEAN_SRC });
+  check('missing endpoint → error', missingEndpoint.errors.length > 0, JSON.stringify(missingEndpoint.errors));
+
+  const badPath = mk({ kind: 'rewrite-response', endpoint: { path: '/' }, transform: 'filterHeard' }, { filterHeard: CLEAN_SRC });
+  check('bad path → error', badPath.errors.some((e) => /does not parse/.test(e)), JSON.stringify(badPath.errors));
+
+  const missingTransform = mk({ kind: 'rewrite-response', endpoint: { path: '/list/tracks' } }, { filterHeard: CLEAN_SRC });
+  check('missing transform → error', missingTransform.errors.some((e) => /transform/.test(e)), JSON.stringify(missingTransform.errors));
+
+  const unboundTransform = mk(VALID_MUT, {});
+  check('unbound transform name → error', unboundTransform.errors.some((e) => /not bound/.test(e)), JSON.stringify(unboundTransform.errors));
+  const unboundTransformNoHandlers = mk(VALID_MUT);
+  check('unbound transform name (no handlers field at all) → error', unboundTransformNoHandlers.errors.some((e) => /not bound/.test(e)), JSON.stringify(unboundTransformNoHandlers.errors));
+
+  const patchLevelBound = lintSpec({
+    id: 's', match: { hosts: ['x.test'] },
+    handlers: { filterHeard: CLEAN_SRC },
+    rules: [{ id: 'r', mutations: [VALID_MUT] }],
+  });
+  check(
+    'transform bound via the patch-level handler set (not rule.handlers): no errors',
+    patchLevelBound.errors.length === 0,
+    JSON.stringify(patchLevelBound.errors),
+  );
+
+  const apiSrc = mk(VALID_MUT, { filterHeard: 'function filterHeard(json) { var x = api.storage.get("x"); return json; }' });
+  check(
+    'transform source referencing api. → warning',
+    apiSrc.warnings.some((w) => /transform runs in the page's main world — api\.\* does not exist there/.test(w)),
+    JSON.stringify(apiSrc.warnings),
+  );
+  check('…as a warning, not an error', apiSrc.errors.length === 0);
+
+  const asyncSrc = mk(VALID_MUT, { filterHeard: 'async function filterHeard(json) { await Promise.resolve(); return json; }' });
+  check(
+    'transform source with async/await → warning',
+    asyncSrc.warnings.some((w) => /transform must be synchronous — async transforms are not supported/.test(w)),
+    JSON.stringify(asyncSrc.warnings),
+  );
+
+  const domSrc = mk(VALID_MUT, { filterHeard: 'function filterHeard(json) { document.title = "x"; return json; }' });
+  check(
+    'transform source touching document. → warning',
+    domSrc.warnings.some((w) => /transform should be a pure data function — DOM access is a script-handler job/.test(w)),
+    JSON.stringify(domSrc.warnings),
+  );
+  const windowSrc = mk(VALID_MUT, { filterHeard: 'function filterHeard(json) { window.foo = 1; return json; }' });
+  check(
+    'transform source touching window. → warning',
+    windowSrc.warnings.some((w) => /DOM access is a script-handler job/.test(w)),
+    JSON.stringify(windowSrc.warnings),
+  );
+
+  const bogusField = mk({ ...VALID_MUT, bogusField: 1 }, { filterHeard: CLEAN_SRC });
+  check('unknown extra field on the mutation still warns', bogusField.warnings.some((w) => /bogusField/.test(w)), JSON.stringify(bogusField.warnings));
+
+  // Fix 1a: syntax-check the bound transform source itself. A malformed
+  // source (missing brace) previously passed lint/commit untouched, then
+  // poisoned rewrite-install.ts's ONE shared generated wrapper script at
+  // install time — one bad rule's syntax error killed every rewrite rule on
+  // the host. Deliberately fails BOTH the expr probe (`(` + src + `)`) AND
+  // the module probe (src as bare statements) — missing the final closing
+  // brace for `filterHeard`'s own body.
+  const MALFORMED_SRC = 'function filterHeard(json, ctx) { json.tracks = json.tracks.filter(function (t) { return !t.heard; });';
+  const malformed = mk(VALID_MUT, { filterHeard: MALFORMED_SRC });
+  check(
+    'malformed transform source (fails both expr and module form) → error',
+    malformed.errors.some((e) => /does not parse as JavaScript/.test(e)),
+    JSON.stringify(malformed.errors),
+  );
+  check(
+    'malformed transform error names the rule and the transform',
+    malformed.errors.some((e) => /rule "r"/.test(e) && /"filterHeard"/.test(e)),
+    JSON.stringify(malformed.errors),
+  );
+
+  // Valid MODULE-form source (an imported/exported shim's convention —
+  // shims.ts's export path wraps as `module.exports = <source>;\n`, TRAILING
+  // SEMICOLON included) must not trip the syntax check. The semicolon is
+  // load-bearing for detection: WITHOUT it, `module.exports = fn` also
+  // parses as a valid parenthesized ASSIGNMENT EXPRESSION (`module` being
+  // undeclared doesn't matter to a syntax-only probe), so the expr probe
+  // would wrongly claim it first — matching the real wrapped-export shape
+  // here is what actually exercises the module branch.
+  const MODULE_SRC = 'module.exports = function filterHeard(json, ctx) { json.tracks = json.tracks.filter(function (t) { return !t.heard; }); return json; };';
+  const validModule = mk(VALID_MUT, { filterHeard: MODULE_SRC });
+  check(
+    'valid MODULE-form transform source: no syntax error',
+    !validModule.errors.some((e) => /does not parse as JavaScript/.test(e)),
+    JSON.stringify(validModule.errors),
+  );
+  check('valid MODULE-form transform source: no errors at all', validModule.errors.length === 0, JSON.stringify(validModule.errors));
+}
+tRewriteLint();
+
 console.log('assertNoSpecErrors');
 let threw = false;
 try { assertNoSpecErrors({ rules: [{ id: 'a', mutations: [{ kind: 'fake' }] }] }); } catch (_) { threw = true; }

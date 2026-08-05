@@ -123,4 +123,5 @@ function matchPath(pattern: string, pathname: string): { params: Record<string, 
   return matcher(pattern)(pathname);
 }
 
-export { matcher, matchPath, normalizePath };
+export { matcher, matchPath, normalizePath, compile };
+export type { Token };

@@ -1835,12 +1835,11 @@ function setupRule(rule: Rule, spec: RuntimeSpec, api: ShimApiBase, mutations: M
   if ((rule.mutations || []).some((m) => m.kind === 'mount-route')) {
     return routeRule(rule, spec, api, handlers);
   }
-  // `redirect` rules are a network-layer concern handled entirely in main
-  // (src/main/redirect-net.js rewrites the navigation before this page ever
-  // loads). They have no DOM anchor, so running them down the normal anchored
-  // path would emit a spurious `rule-no-match`. No-op here — same shape as
-  // routeRule's teardown contract (a teardown fn the caller can call).
-  if ((rule.mutations || []).some((m) => m.kind === 'redirect')) {
+  // `redirect` and `rewrite-response` rules are network/data-layer concerns
+  // handled outside the anchored DOM path (redirect in main, rewrite in the
+  // main-world wrapper installed by page-preload). No DOM anchor — running
+  // them down the anchored path would emit a spurious `rule-no-match`.
+  if ((rule.mutations || []).some((m) => m.kind === 'redirect' || m.kind === 'rewrite-response')) {
     return () => {};
   }
   return applyRule(rule, spec, api, mutations, handlers);
