@@ -8,8 +8,9 @@ import * as witnessMod from './witness';
 import * as componentId from './component-id';
 import { applyStrategy } from './strategies';
 import * as routeMatch from './route-match';
+import { routeTransition } from './route-transition';
 import type { Spec, Rule, Mutation, Anchor, AnchorSpec } from './types';
-import type { ShimApiBase, ShimApi } from '../preload/shim-api-types';
+import type { ShimApiBase, ShimApi, RouteMatch, RouteMountApi } from '../preload/shim-api-types';
 import { errMessage } from '../shared/error';
 
 // --- Local runtime/engine-only type extensions -----------------------------
@@ -56,11 +57,11 @@ interface ScriptHandlerArgs {
   api: ShimApi;
 }
 interface RouteHandlerArgs {
-  match: { path: string; params: Record<string, string | undefined> };
+  match: RouteMatch;
   mutation: Mutation;
   rule: Rule;
   spec: Spec;
-  api: ShimApi;
+  api: RouteMountApi;
 }
 type PatchHandler = (args: ScriptHandlerArgs | RouteHandlerArgs) => unknown;
 type HandlerMap = Record<string, PatchHandler>;
@@ -1667,15 +1668,34 @@ function routeRule(rule: Rule, spec: Spec, api: ShimApiBase, handlers: HandlerMa
   // current path doesn't match.
   let mounted: MountedRoute | null = null;
 
+  // Handlers opt into in-place inner-route updates by registering onRouteChange
+  // callbacks (§6 nested sub-routes): each is called on a same-route path change
+  // with the new match, keeping the shell mounted. A callback may return a
+  // teardown fn — run before its NEXT call and on final unmount (per-inner-view
+  // cleanup). No callback registered → a param change remounts, exactly as before.
+  const routeChangeCbs: Array<(match: RouteMatch) => void | (() => void)> = [];
+  const routeChangeTeardowns = new Map<(match: RouteMatch) => void | (() => void), () => void>();
+
   // A `const` arrow (not a hoisted `function` declaration): TS's narrowing
   // of `mut` from the guard above doesn't survive into a hoisted function
   // body (it could in principle run before the narrowing check), but does
   // survive into a `const`-bound closure defined after it — which this
   // always is.
   const mountRoute = (m: { params: Record<string, string | undefined> }) => {
+    // A prior mount attempt on this rule may have registered onRouteChange
+    // callbacks and then thrown before `mounted` was ever set — in that case
+    // unmountRoute() never ran (it early-returns when !mounted) and the
+    // registry would otherwise leak into this mount. Reset unconditionally;
+    // on the normal remount path unmountRoute already cleared it, so this is
+    // a no-op there.
+    routeChangeCbs.length = 0;
+    routeChangeTeardowns.clear();
     const cleanups: Array<() => void> = [];
-    const mountApi: ShimApi = Object.assign(Object.create(api) as ShimApiBase, {
+    const mountApi: RouteMountApi = Object.assign(Object.create(api) as ShimApiBase, {
       cleanup(fn: () => void) { if (typeof fn === 'function') cleanups.push(fn); },
+      onRouteChange(cb: (match: RouteMatch) => void | (() => void)) {
+        if (typeof cb === 'function') routeChangeCbs.push(cb);
+      },
     });
     let outputs: Node[];
     try {
@@ -1726,12 +1746,44 @@ function routeRule(rule: Rule, spec: Spec, api: ShimApiBase, handlers: HandlerMa
     reportStatus(1);
   };
 
+  // In-place inner navigation: the shell stays mounted, each onRouteChange
+  // callback is re-run with the new match. A const arrow (not hoisted fn) so
+  // `mut`'s narrowing survives, same reason mountRoute is one. Never scrolls or
+  // re-applies mut.title — the handler owns inner scroll/title (§6).
+  const updateRoute = (m: { params: Record<string, string | undefined> }) => {
+    if (!mounted) return;
+    const here = routeMatch.normalizePath(location.pathname);
+    const nextMatch: RouteMatch = { path: here, params: m.params };
+    for (const cb of routeChangeCbs) {
+      const prev = routeChangeTeardowns.get(cb);
+      if (prev) {
+        routeChangeTeardowns.delete(cb);
+        try { prev(); } catch (err) { console.error('[shim] route onRouteChange teardown failed', err); }
+      }
+      try {
+        const t = cb(nextMatch);
+        if (typeof t === 'function') routeChangeTeardowns.set(cb, t);
+      } catch (err) {
+        console.error('[shim] route onRouteChange callback failed', err);
+        reportHandlerError(err);
+      }
+    }
+    mounted.path = here;
+  };
+
   function unmountRoute() {
     if (!mounted) return;
     // Captured once so the narrowed (non-null) type survives the cleanup
     // calls below — TS conservatively widens a re-checked `let` back to
     // `MountedRoute | null` across an intervening function call.
     const entry = mounted;
+    // Per-inner-view teardowns (onRouteChange) run before the shell cleanups,
+    // then the registry is cleared so a later remount starts fresh.
+    for (const t of routeChangeTeardowns.values()) {
+      try { t(); } catch (err) { console.error('[shim] route onRouteChange teardown failed', err); }
+    }
+    routeChangeTeardowns.clear();
+    routeChangeCbs.length = 0;
     for (const fn of entry.cleanups) {
       try { fn(); } catch (err) { console.error('[shim] route cleanup failed', err); }
     }
@@ -1752,9 +1804,11 @@ function routeRule(rule: Rule, spec: Spec, api: ShimApiBase, handlers: HandlerMa
   function evaluate() {
     const here = routeMatch.normalizePath(location.pathname);
     const m = match(here);
-    if (m && !mounted) mountRoute(m);
-    else if (m && mounted && mounted.path !== here) { unmountRoute(); mountRoute(m); }
-    else if (!m && mounted) unmountRoute();
+    const decision = routeTransition(mounted ? mounted.path : null, here, !!m, routeChangeCbs.length > 0);
+    if (decision === 'mount') { if (mounted) unmountRoute(); if (m) mountRoute(m); } // remount when already mounted
+    else if (decision === 'unmount') unmountRoute();
+    else if (decision === 'update') { if (m) updateRoute(m); }
+    // 'noop' → nothing
   }
 
   function onClick(e: MouseEvent) {
