@@ -9,6 +9,7 @@ import * as componentId from './component-id';
 import { applyStrategy } from './strategies';
 import * as routeMatch from './route-match';
 import { routeTransition } from './route-transition';
+import { createRouteScrollStore } from './route-scroll';
 import type { Spec, Rule, Mutation, Anchor, AnchorSpec } from './types';
 import type { ShimApiBase, ShimApi, RouteMatch, RouteMountApi } from '../preload/shim-api-types';
 import { errMessage } from '../shared/error';
@@ -1602,6 +1603,62 @@ function bridgeRule(rule: Rule, spec: Spec, api: ShimApiBase): () => void {
   };
 }
 
+// --- virtual-route scroll restoration (§6) -------------------------------
+// Page-global: window scroll + history are shared across all route rules, so a
+// single store + one ref-counted scroll listener serve them all. We never touch
+// history.scrollRestoration (that would change the HOST site's own scroll
+// behavior); we only save/restore for entries a route is mounted on, and the
+// listener is active only while a route is mounted, so site-only history entries
+// are never stamped with a key.
+const routeScroll = createRouteScrollStore();
+let routeScrollRefs = 0;
+let routeScrollFrame = 0;
+
+// Resolve (and, if newly minted, attach via replaceState) the scroll key for
+// the CURRENT history entry. Only ever called while a route is mounted.
+function currentRouteScrollKey(): string {
+  const { key, attach } = routeScroll.resolveKey(history.state);
+  if (attach) {
+    try { history.replaceState(attach.state, ''); } catch { /* detached */ }
+  }
+  return key;
+}
+
+function recordRouteScroll(): void {
+  try { routeScroll.record(currentRouteScrollKey(), window.scrollY); } catch { /* detached */ }
+}
+
+function onRouteScroll(): void {
+  if (routeScrollFrame) return; // coalesce a scroll storm to one record per frame
+  routeScrollFrame = requestAnimationFrame(() => { routeScrollFrame = 0; recordRouteScroll(); });
+}
+
+function attachRouteScroll(): void {
+  if (routeScrollRefs++ === 0) window.addEventListener('scroll', onRouteScroll, { passive: true });
+}
+
+function detachRouteScroll(): void {
+  if (--routeScrollRefs <= 0) {
+    routeScrollRefs = 0;
+    window.removeEventListener('scroll', onRouteScroll);
+    if (routeScrollFrame) { cancelAnimationFrame(routeScrollFrame); routeScrollFrame = 0; }
+  }
+}
+
+// Apply the current entry's saved scroll (or top), on a rAF so the DOM has
+// settled. restoreOnly=true (in-place update) applies ONLY for an entry we've
+// already saved — so a FORWARD in-place nav to a fresh entry leaves the shell's
+// scroll untouched (preserving #275's no-scroll-on-update contract). mount uses
+// restoreOnly=false: fresh entry → target 0 → top; seen entry → restore.
+function applyRouteScroll(restoreOnly: boolean): void {
+  const key = currentRouteScrollKey();
+  if (restoreOnly && !routeScroll.has(key)) return;
+  const target = routeScroll.targetFor(key);
+  requestAnimationFrame(() => {
+    try { window.scrollTo(0, target); } catch { /* jsdom / detached */ }
+  });
+}
+
 // A rule carrying a `mount-route` mutation registers a virtual route: a URL
 // path pattern (`/budgets`, `/budgets/:id`) plus a handler that renders the
 // page for matching navigations. Two entry paths converge here:
@@ -1740,9 +1797,11 @@ function routeRule(rule: Rule, spec: Spec, api: ShimApiBase, handlers: HandlerMa
     // document.title themselves are unwound by the same restore).
     const prevTitle = document.title;
     if (typeof mut.title === 'string') document.title = mut.title;
-    // Match real-navigation behavior: a fresh route view starts at the top.
-    try { window.scrollTo(0, 0); } catch { /* jsdom / detached */ }
+    // Match real-navigation behavior: a fresh route view starts at the top; a
+    // back/forward return to a previously-scrolled route restores its position.
+    applyRouteScroll(false);
     mounted = { outputs: [host], cleanups, path: routeMatch.normalizePath(location.pathname), prevTitle };
+    attachRouteScroll();
     reportStatus(1);
   };
 
@@ -1769,6 +1828,9 @@ function routeRule(rule: Rule, spec: Spec, api: ShimApiBase, handlers: HandlerMa
       }
     }
     mounted.path = here;
+    // Restore scroll on a BACK/FORWARD return to a seen entry; a forward
+    // in-place nav (fresh entry) stays scroll-neutral (§6 #275 contract).
+    applyRouteScroll(true);
   };
 
   function unmountRoute() {
@@ -1792,6 +1854,7 @@ function routeRule(rule: Rule, spec: Spec, api: ShimApiBase, handlers: HandlerMa
     removeReplaceRootRule(token);
     removeRouteEnvRule(token);
     document.title = entry.prevTitle;
+    detachRouteScroll();
     mounted = null;
     reportStatus(0);
   }
@@ -1838,6 +1901,7 @@ function routeRule(rule: Rule, spec: Spec, api: ShimApiBase, handlers: HandlerMa
     if (!match(routeMatch.normalizePath(url.pathname))) return; // not one of our routes
     e.preventDefault();
     if (url.href !== location.href) {
+      if (mounted) recordRouteScroll(); // save the outgoing route entry's scroll before we leave it
       history.pushState({}, '', url.pathname + url.search + url.hash);
     }
     evaluate();
