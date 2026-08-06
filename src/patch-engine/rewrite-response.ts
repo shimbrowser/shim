@@ -367,7 +367,13 @@ export function collectRewriteEntries(bags: RewriteBag[]): RewriteEntry[] {
 //     the `script` handler compile pattern, just inlined as source text
 //     instead of run through Node's `vm` module (there is no `vm` in the
 //     page's main world).
-function transformLiteral(src: string, form: TransformForm): string {
+//
+// Exported: `intercept.ts` (the define-trap/module-interception mutation
+// kind) consumes this too, for the exact same handler-source-to-literal
+// splice (a `wrap` handler is bound the same way a `transform` handler is) —
+// this stays the one source of truth for that rule rather than a second
+// hand-copied implementation drifting from it.
+export function transformLiteral(src: string, form: TransformForm): string {
   // The expr splice still provides a `module` shell: a semicolon-less CJS
   // source (`module.exports = fn` with no trailing `;`) parses as a valid
   // ASSIGNMENT EXPRESSION, so the dual-form probe classifies it 'expr' — and

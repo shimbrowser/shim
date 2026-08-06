@@ -28,6 +28,7 @@ import {
 } from '../patch-engine/inject-kinds';
 import { validateRewriteMutation, detectTransformForm } from '../patch-engine/rewrite-response';
 import type { CompileProbe } from '../patch-engine/rewrite-response';
+import { validateInterceptMutation } from '../patch-engine/intercept';
 
 // vm.Script-backed compile probe for `detectTransformForm` — main-process
 // counterpart to rewrite-install.ts's identical-shaped probe (Node/Electron-
@@ -42,21 +43,26 @@ const vmCompileProbe: CompileProbe = (code) => {
 
 const BUILTIN_KINDS = new Set([
   'hide', 'restyle', 'script', 'remove', 'replace-root', 'mount-route', 'redirect',
-  'reorder', 'reshape', 'inject-element', 'inject-html', 'rewrite-response',
+  'reorder', 'reshape', 'inject-element', 'inject-html', 'rewrite-response', 'intercept',
 ]);
 const RULE_KEYS = new Set(['id', 'anchor', 'mutations', 'handlers']);
 const ANCHOR_KEYS = new Set(['primary', 'fallbacks', 'iframe', 'witness']);
 // Union across kinds: properties (restyle), handler/mount (script,
 // replace-root, mount-route), pattern/title (mount-route), from/to/exceptPaths
 // (redirect), position/before/after (reorder), layout/direction/columns/rows/
-// gap/wrap/align/justify (reshape), element/html/placement (inject-element,
-// inject-html), endpoint/transform (rewrite-response).
+// gap/wrap/align/justify (reshape — note "wrap" here is reshape's flex-wrap
+// boolean, a DIFFERENT field from intercept's wrap handler name below; same
+// key name, two kinds, no collision since MUTATION_KEYS is just an allowlist
+// of field NAMES, not a per-kind schema), element/html/placement
+// (inject-element, inject-html), endpoint/transform (rewrite-response),
+// module/symbol/wrap (intercept).
 const MUTATION_KEYS = new Set([
   'kind', 'properties', 'handler', 'mount', 'pattern', 'title', 'from', 'to', 'exceptPaths',
   'position', 'before', 'after',
   'layout', 'direction', 'columns', 'rows', 'gap', 'wrap', 'align', 'justify',
   'element', 'html', 'placement',
   'endpoint', 'transform',
+  'module', 'symbol',
 ]);
 
 // Anchor-quality lint (§8): the model drifts toward positional CSS
@@ -267,18 +273,28 @@ function lintInjectMutation(rid: string, mut: Mutation, errors: string[], warnin
   }
 }
 
-// Transform-source heuristics (design doc "Transform contract"): the
-// transform runs in the page's MAIN world, not the isolated world `script`
-// handlers get — `api.*` doesn't exist there, and there's nothing to await
-// (sync is enforced by there being no event loop hook for it), and DOM access
-// is meaningless outside a page context the transform never touches. Source-
-// text heuristics, same posture as the api.ai / observer-loop scans below
-// (comments/strings can false-positive) — warnings, not errors, since a
-// runtime miss here just means the original body ships untouched (never a
-// broken page, per the design doc's throw/undefined contract).
-const REWRITE_API_RE = /\bapi\s*\./;
+// Main-world source heuristics, shared across the two kinds whose handler-
+// like code runs in the page's MAIN world rather than the isolated world
+// every other handler kind gets: a rewrite-response `transform` and an
+// intercept `wrap`. `api.*` doesn't exist in that world for either kind, so
+// MAIN_WORLD_API_RE backs a warning in both `lintRewriteMutation` and
+// `lintInterceptMutation` below. MAIN_WORLD_DOM_RE stays REWRITE-ONLY: a
+// rewrite transform is meant to be a pure data function (DOM access there is
+// meaningless — the transform never touches a page context, and DOM work
+// belongs in a `script` handler), but an intercept wrap runs legitimately IN
+// that same main world by design, so touching `document`/`window` from one
+// isn't the same smell. REWRITE_ASYNC_RE is also rewrite-only — a rewrite
+// transform must be synchronous (nothing awaits it), but a wrap's replacement
+// function may legitimately be async (it's just a function the page calls;
+// the page decides whether to await its result). Source-text heuristics, same
+// posture as the api.ai / observer-loop scans below (comments/strings can
+// false-positive) — warnings, not errors, since a runtime miss here either
+// ships the original body untouched (rewrite) or throws at wrap-apply time,
+// which the intercept infra already catches and falls back from (never a
+// broken page either way).
+const MAIN_WORLD_API_RE = /\bapi\s*\./;
 const REWRITE_ASYNC_RE = /\basync\b|\bawait\b/;
-const REWRITE_DOM_RE = /\b(?:document|window)\s*\./;
+const MAIN_WORLD_DOM_RE = /\b(?:document|window)\s*\./;
 
 // rewrite-response (§6, docs/2026-08-04-rewrite-response-design.md). Payload
 // shape errors delegate to `validateRewriteMutation` (src/patch-engine/
@@ -338,14 +354,78 @@ function lintRewriteMutation(
     return;
   }
 
-  if (REWRITE_API_RE.test(source)) {
+  if (MAIN_WORLD_API_RE.test(source)) {
     warnings.push(`rule "${rid}": transform "${transformName}" — transform runs in the page's main world — api.* does not exist there.`);
   }
   if (REWRITE_ASYNC_RE.test(source)) {
     warnings.push(`rule "${rid}": transform "${transformName}" — transform must be synchronous — async transforms are not supported.`);
   }
-  if (REWRITE_DOM_RE.test(source)) {
+  if (MAIN_WORLD_DOM_RE.test(source)) {
     warnings.push(`rule "${rid}": transform "${transformName}" — transform should be a pure data function — DOM access is a script-handler job.`);
+  }
+}
+
+// intercept (§6, docs/2026-08-04-intercept-design.md). Structural copy of
+// `lintRewriteMutation` immediately above — same three jobs, same order:
+// delegate payload shape to `validateInterceptMutation` (src/patch-engine/
+// intercept.ts, the one source of truth shared with the runtime table
+// builder `collectInterceptEntries`), resolve+bind the handler name (here
+// `wrap` instead of `transform`) against inline `rule.handlers` then the
+// spec-level handler set — the SAME resolution order
+// `collectInterceptEntries` uses, and the same "spec-lint is the sole
+// binding authority" rationale as `lintRewriteMutation`'s comment above (no
+// other function checks whether a `wrap` name resolves) — then syntax-check
+// the bound source so one bad wrap can't poison intercept-install.ts's
+// shared generated wrapper script for every other intercept rule on the
+// host, the same Fix-1a rationale `lintRewriteMutation` documents.
+//
+// One deliberate asymmetry from `lintRewriteMutation`: no `REWRITE_ASYNC_RE`
+// check here. A rewrite transform is a synchronous pure function by
+// contract; a wrap's REPLACEMENT function is just a function the page ends
+// up calling in the original's place, and the page may legitimately expect
+// (or not care) whether it returns a promise — flagging async as wrong would
+// be flagging a valid pattern.
+function lintInterceptMutation(
+  rid: string,
+  mut: Mutation,
+  rule: { handlers?: Record<string, unknown> },
+  errors: string[],
+  warnings: string[],
+): void {
+  if (mut.kind !== 'intercept') return;
+  // `module`/`symbol`/`wrap` aren't on the shared `Mutation` type (narrow to
+  // this one kind) — read them off the raw record, same dynamic-boundary
+  // posture `lintRewriteMutation` takes for `endpoint`/`transform`.
+  const raw = mut as unknown as Record<string, unknown>;
+
+  const { errors: interceptErrors } = validateInterceptMutation(raw);
+  for (const e of interceptErrors) errors.push(`rule "${rid}": ${e}`);
+
+  const wrapName = typeof raw.wrap === 'string' ? raw.wrap : undefined;
+  // No wrap name: either an expose-only mutation (module-level, api.modules.
+  // invoke gate — nothing to bind or syntax-check) or `validateInterceptMutation`
+  // already flagged a malformed `wrap` field above. Either way, done.
+  if (!wrapName) return;
+
+  const source = rule.handlers && typeof rule.handlers[wrapName] === 'string'
+    ? (rule.handlers[wrapName] as string)
+    : undefined;
+  if (source === undefined) {
+    errors.push(
+      `rule "${rid}": wrap "${wrapName}" is not bound — it must be a key in this rule's `
+      + '"handlers" or the patch-level handler set. Emit the handler source alongside the rule.',
+    );
+    return;
+  }
+
+  const syntax = detectTransformForm(source, vmCompileProbe);
+  if (syntax.form === null) {
+    errors.push(`rule "${rid}": wrap "${wrapName}" does not parse as JavaScript: ${syntax.error}`);
+    return;
+  }
+
+  if (MAIN_WORLD_API_RE.test(source)) {
+    warnings.push(`rule "${rid}": wrap "${wrapName}" — the wrap runs in the page's main world, where api.* and the isolated world don't exist.`);
   }
 }
 
@@ -446,6 +526,7 @@ function lintSpec(spec: unknown): LintResult {
       lintLayoutMutation(rid, mut, errors, warnings);
       lintInjectMutation(rid, mut, errors, warnings);
       lintRewriteMutation(rid, mut, handlerScope, errors, warnings);
+      lintInterceptMutation(rid, mut, handlerScope, errors, warnings);
     }
 
     // api.ai without the 'ai' permission declared (§19): the call would

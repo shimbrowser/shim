@@ -1835,11 +1835,14 @@ function setupRule(rule: Rule, spec: RuntimeSpec, api: ShimApiBase, mutations: M
   if ((rule.mutations || []).some((m) => m.kind === 'mount-route')) {
     return routeRule(rule, spec, api, handlers);
   }
-  // `redirect` and `rewrite-response` rules are network/data-layer concerns
-  // handled outside the anchored DOM path (redirect in main, rewrite in the
-  // main-world wrapper installed by page-preload). No DOM anchor — running
-  // them down the anchored path would emit a spurious `rule-no-match`.
-  if ((rule.mutations || []).some((m) => m.kind === 'redirect' || m.kind === 'rewrite-response')) {
+  // `redirect`, `rewrite-response`, and `intercept` rules are network/module-
+  // layer concerns handled outside the anchored DOM path (redirect in main,
+  // rewrite in the main-world response wrapper, intercept in the main-world
+  // define-trap wrapper — all installed by page-preload). intercept has no
+  // DOM anchor at all: it's a module-boundary concern handled by the
+  // main-world wrapper page-preload installs. Running any of these down the
+  // anchored path would emit a spurious `rule-no-match`.
+  if ((rule.mutations || []).some((m) => m.kind === 'redirect' || m.kind === 'rewrite-response' || m.kind === 'intercept')) {
     return () => {};
   }
   return applyRule(rule, spec, api, mutations, handlers);

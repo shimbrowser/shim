@@ -279,6 +279,73 @@ function tRewriteLint(): void {
 }
 tRewriteLint();
 
+console.log('intercept lint (§6, docs/2026-08-04-intercept-design.md)');
+function tInterceptLint(): void {
+  const mk = (mut: Record<string, unknown>, ruleHandlers?: Record<string, string>) => lintSpec({
+    id: 's', match: { hosts: ['x.test'] },
+    rules: [{ id: 'r', mutations: [mut], handlers: ruleHandlers }],
+  });
+
+  const VALID_MUT = { kind: 'intercept', module: { loader: 'amd', id: 'player' }, symbol: 'playTrack', wrap: 'w' };
+  const CLEAN_WRAP = 'function w(original, ctx) { return function () { return original.apply(this, arguments); }; }';
+
+  const clean = mk(VALID_MUT, { w: CLEAN_WRAP });
+  check('valid intercept mutation: no errors', clean.errors.length === 0, JSON.stringify(clean.errors));
+  check('valid intercept mutation: no warnings', clean.warnings.length === 0, JSON.stringify(clean.warnings));
+
+  // Payload validation delegates to validateInterceptMutation — one source of
+  // truth shared with the runtime table builder (collectInterceptEntries).
+  const badLoader = mk({ kind: 'intercept', module: { loader: 'webpack', id: 'x' }, symbol: 's', wrap: 'w' }, { w: CLEAN_WRAP });
+  check('intercept unknown loader is an error', badLoader.errors.some((e) => e.includes('loader')), JSON.stringify(badLoader.errors));
+
+  const symbolNoWrap = mk({ kind: 'intercept', module: { loader: 'amd', id: 'player' }, symbol: 'playTrack' });
+  check('intercept symbol without wrap is an error', symbolNoWrap.errors.some((e) => e.includes('symbol')), JSON.stringify(symbolNoWrap.errors));
+
+  const unboundWrap = mk({ kind: 'intercept', module: { loader: 'amd', id: 'player' }, symbol: 'playTrack', wrap: 'nope' });
+  check('intercept unbound wrap is an error', unboundWrap.errors.some((e) => e.includes('nope')), JSON.stringify(unboundWrap.errors));
+
+  const unparsable = mk(VALID_MUT, { w: 'function w(original { BROKEN' });
+  check(
+    'intercept unparsable wrap source is an error',
+    unparsable.errors.some((e) => /does not parse as JavaScript/.test(e)),
+    JSON.stringify(unparsable.errors),
+  );
+
+  const apiReach = mk(VALID_MUT, { w: 'function w(o) { return function () { api.storage.set("k", 1); return o.apply(this, arguments); }; }' });
+  check('intercept wrap touching api.* warns', apiReach.warnings.some((w) => w.includes('api.')), JSON.stringify(apiReach.warnings));
+  check('…as a warning, not an error', apiReach.errors.length === 0);
+
+  const exposeOnly = mk({ kind: 'intercept', module: { loader: 'amd', id: 'player' } });
+  check('intercept expose-only is clean', exposeOnly.errors.length === 0, JSON.stringify(exposeOnly.errors));
+
+  // Deliberate asymmetry from rewrite-response's transform lint: a wrap's
+  // REPLACEMENT function may legitimately be async (the page just calls it —
+  // whether it returns a promise is the page's business), so async/await in
+  // a wrap source must NOT trip the "must be synchronous" warning the
+  // rewrite-response transform lint carries.
+  const asyncWrap = mk(VALID_MUT, { w: 'function w(o) { return async function () { return await o.apply(this, arguments); }; }' });
+  check(
+    'intercept wrap with async/await does not warn (unlike rewrite-response transforms)',
+    !asyncWrap.warnings.some((w) => /synchronous/.test(w)),
+    JSON.stringify(asyncWrap.warnings),
+  );
+
+  const bogusField = mk({ ...VALID_MUT, bogusField: 1 }, { w: CLEAN_WRAP });
+  check('unknown extra field on the mutation still warns', bogusField.warnings.some((w) => /bogusField/.test(w)), JSON.stringify(bogusField.warnings));
+
+  const patchLevelBound = lintSpec({
+    id: 's', match: { hosts: ['x.test'] },
+    handlers: { w: CLEAN_WRAP },
+    rules: [{ id: 'r', mutations: [VALID_MUT] }],
+  });
+  check(
+    'wrap bound via the patch-level handler set (not rule.handlers): no errors',
+    patchLevelBound.errors.length === 0,
+    JSON.stringify(patchLevelBound.errors),
+  );
+}
+tInterceptLint();
+
 console.log('assertNoSpecErrors');
 let threw = false;
 try { assertNoSpecErrors({ rules: [{ id: 'a', mutations: [{ kind: 'fake' }] }] }); } catch (_) { threw = true; }
