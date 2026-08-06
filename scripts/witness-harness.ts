@@ -251,12 +251,82 @@ function tRecoverChain() {
   check('disjoint twins still decline (no guessing)', anchors.witnessRecover(w, root2) === null, '');
 }
 
+// Volatile-text leniency. The live loop this pins (soundeo, 2026-08-06): a
+// rule anchored the player bar's track-title link — the element's text IS the
+// currently playing track, so the witness stem went stale on every track
+// change. The selector kept resolving the right element uniquely, the stem
+// mismatch alone vetoed it → quarantine → auto-reanchor on every app launch,
+// and each repair baked in the NEW track title — a loop by construction.
+// Leniency is opt-in per call: a stem-only mismatch passes when every other
+// present signal matches. The anchors ladder enables it ONLY for a non-text
+// rung that resolved exactly one element; text-kind rungs, multi-match rungs,
+// and every recovery scan stay strict (there the text discriminates).
+function tVolatileTextLenient() {
+  console.log('volatile-text leniency (matchWitness opts):');
+  const playing = el('a', {}, { text: 'Ev, Nova Blue - Weekend Cinderella (Extended Mix)', parent: el('div') });
+  const w = buildWitness(playing)!;
+  const nextTrack = el('a', {}, { text: 'Fred again.., LATIN MAFIA - Piensas En Mi (Original Mix)', parent: el('div') });
+
+  const strict = matchWitness(w, nextTrack);
+  check('strict still rejects wholesale text change', !strict.pass, JSON.stringify(strict));
+  const lenient = matchWitness(w, nextTrack, { lenientText: true });
+  check('lenientText passes a stem-only mismatch', lenient.pass, JSON.stringify(lenient));
+  check('lenient verdict names the tolerated drift', lenient.detail.some((d) => /text drifted/.test(d)), JSON.stringify(lenient.detail));
+
+  // Leniency only forgives the stem — any other mismatching signal still fails.
+  const withAttr = el('a', { 'data-testid': 'player-title' }, { text: 'Track A', parent: el('div') });
+  const wa = buildWitness(withAttr)!;
+  const wrongAttr = el('a', { 'data-testid': 'promo-link' }, { text: 'Track B', parent: el('div') });
+  check('lenientText does not rescue an attr mismatch', !matchWitness(wa, wrongAttr, { lenientText: true }).pass, JSON.stringify(matchWitness(wa, wrongAttr, { lenientText: true })));
+
+  const swapped = el('span', {}, { text: 'Track B', parent: el('div') });
+  check('tag swap still hard-fails under leniency', !matchWitness(w, swapped, { lenientText: true }).pass, '');
+
+  // A matching stem takes the normal path — no drift note.
+  const sameish = el('a', {}, { text: 'Ev, Nova Blue - Weekend Cinderella (Extended Mix) [playing]', parent: el('div') });
+  const okv = matchWitness(w, sameish, { lenientText: true });
+  check('matching stem passes without the drift note', okv.pass && !okv.detail.some((d) => /text drifted/.test(d)), JSON.stringify(okv));
+}
+
+function tLadderVolatileText() {
+  console.log('ladder leniency (gated on kind + uniqueness):');
+  const captured = el('a', {}, { text: 'Ev, Nova Blue - Weekend Cinderella', parent: el('div') });
+  const w = buildWitness(captured)!;
+  const live = el('a', {}, { text: 'Fred again.., LATIN MAFIA - Piensas En Mi', parent: el('div') });
+
+  // The player-bar case end to end: unique css rung + text-only drift → applies.
+  const cssAnchor: Anchor = { primary: { kind: 'css', value: 'section.player a.title' }, witness: w };
+  const r1 = anchors.resolveAllWithSource(cssAnchor, makeRoot({ 'section.player a.title': [live] }));
+  check('unique css rung survives text-only drift', r1.source === 'primary' && r1.nodes[0] === live, JSON.stringify({ source: r1.source, rejected: r1.witnessRejected }));
+
+  // Same drift, but the rung resolves TWO candidates — strict, both rejected.
+  const live2 = el('a', {}, { text: 'Some Other Link Entirely', parent: el('div') });
+  const r2 = anchors.resolveAllWithSource(cssAnchor, makeRoot({ 'section.player a.title': [live, live2] }));
+  check('multi-match rung stays strict on text drift', r2.nodes.length === 0 && r2.witnessRejected === true, JSON.stringify({ n: r2.nodes.length, rejected: r2.witnessRejected }));
+
+  // text-kind rung: the text IS the identity — drift stays a rejection even
+  // when the scan resolves exactly one element. The text scan's visible-text
+  // walk reads childNodes (nodeType-3 data), which el() stubs don't carry —
+  // graft one text node on for this scenario only.
+  const liveWalkable = live as unknown as { childNodes: Array<{ nodeType: number; data: string }> };
+  liveWalkable.childNodes = [{ nodeType: 3, data: 'Fred again.., LATIN MAFIA - Piensas En Mi' }];
+  const textAnchor: Anchor = { primary: { kind: 'text', value: 'fred again.., latin mafia - piensas en mi', match: 'contains' }, witness: w };
+  const textRoot = {
+    querySelectorAll: (): Element[] => [],
+    getElementsByTagName: (tag: string): Element[] => (tag === '*' ? [live] : []),
+  } as unknown as Document;
+  const r3 = anchors.resolveAllWithSource(textAnchor, textRoot);
+  check('text-kind rung stays strict on text drift', r3.nodes.length === 0 && r3.witnessRejected === true, JSON.stringify({ n: r3.nodes.length, rejected: r3.witnessRejected }));
+}
+
 tBuild();
 tMatchTolerance();
 tMatchRejection();
 tStemVolatility();
 tRecoverChain();
 tLadder();
+tVolatileTextLenient();
+tLadderVolatileText();
 
 if (failures) {
   console.error(`\n${failures} check(s) FAILED`);

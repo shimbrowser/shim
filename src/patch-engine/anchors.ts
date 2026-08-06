@@ -125,9 +125,19 @@ function resolveAllWithSource(anchor: Anchor, root: Document | Element = documen
     const found = resolveOne(spec, root);
     if (found.length === 0) return null;
     if (!w) return { nodes: found, source, witnessRejected: false };
+    // Volatile-text leniency (witness.ts MatchWitnessOptions): when a
+    // NON-text rung resolves exactly one element, the selector itself
+    // carries the identity claim and the element's text is content, not
+    // identity — a stem-only witness mismatch is tolerated. Live-caught:
+    // a player-bar title rule whose text IS the currently playing track
+    // quarantined into an LLM re-anchor loop on every app launch. text-kind
+    // rungs stay strict (their text IS the identity), as do multi-match
+    // rungs (the stem discriminates candidates) and the recovery scans
+    // below (they call matchWitness without opts).
+    const lenientText = spec.kind !== 'text' && found.length === 1;
     const passing: Element[] = [];
     for (const el of found) {
-      const verdict = witness.matchWitness(w, el);
+      const verdict = witness.matchWitness(w, el, { lenientText });
       if (verdict.pass) {
         passing.push(el);
       } else if (!rejectedSample || verdict.score > rejectedSample.score) {

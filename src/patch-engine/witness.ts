@@ -138,7 +138,24 @@ function buildWitness(el: Element, opts: { component?: ComponentDescriptor } = {
 // a newer witness must not quarantine healthy rules over a shape it
 // can't read.
 //
-function matchWitness(witness: Witness | null | undefined, el: Element | null | undefined) {
+// opts.lenientText — treat the element's text as CONTENT, not identity: a
+// stem-only mismatch passes when every OTHER present signal matches. This
+// exists for elements whose text IS live data (a player bar's now-playing
+// track title, a headline, a cart total) — digit-stripping (above) covers the
+// numeric flavor of that problem, but wholesale text-as-content defeats the
+// stem entirely, and each stale-stem quarantine triggered an LLM re-anchor
+// that baked the NEW text into a fresh witness — a repair loop by
+// construction (live-caught: soundeo's player title, one auto-reanchor per
+// app launch). The CALLER decides when text is disposable: the anchors
+// ladder passes lenientText only for a non-text-kind rung that resolved
+// exactly one element (the selector carries the identity claim there);
+// text-kind rungs, multi-match narrowing, and the recovery scans stay
+// strict — for them the text is the identity or the discriminator.
+interface MatchWitnessOptions {
+  lenientText?: boolean;
+}
+
+function matchWitness(witness: Witness | null | undefined, el: Element | null | undefined, opts: MatchWitnessOptions = {}) {
   if (!witness || witness.v !== WITNESS_VERSION) {
     return { pass: true, score: 1, detail: ['witness missing or unknown version — skipped'] };
   }
@@ -172,6 +189,7 @@ function matchWitness(witness: Witness | null | undefined, el: Element | null | 
   // both sides makes the generations compatible. A stem that normalizes to
   // empty was ALL volatile content (a bare count) — no stable identity signal,
   // so it contributes nothing rather than penalizing the candidate.
+  let stemMissed = false;
   const expectedStem = witness.textStem ? normalizeStemText(witness.textStem) : '';
   if (expectedStem) {
     total += WEIGHTS.textStem;
@@ -190,6 +208,7 @@ function matchWitness(witness: Witness | null | undefined, el: Element | null | 
     if (stem && (shared === Math.min(stem.length, expectedStem.length) || shared >= STEM_SHARED_PREFIX_MIN)) {
       matched += WEIGHTS.textStem;
     } else {
+      stemMissed = true;
       detail.push(`text: expected "${expectedStem}…", saw "${stem ? stem + '…' : '(empty)'}"`);
     }
   }
@@ -231,7 +250,22 @@ function matchWitness(witness: Witness | null | undefined, el: Element | null | 
   if (total === 0) return { pass: true, score: 1, detail: [] };
 
   const score = matched / total;
-  return { pass: score >= PASS_THRESHOLD, score, detail };
+  if (score >= PASS_THRESHOLD) return { pass: true, score, detail };
+
+  // Lenient-text rescue (see MatchWitnessOptions): the stem was the ONLY
+  // miss — every other present signal matched in full — and the witness has
+  // at least one non-stem soft signal (a stem-only witness would reduce the
+  // test to the tag gate alone, which is too weak to rescue). The mismatch
+  // detail stays for observability; the drift note marks the tolerance so
+  // diagnostics distinguish "accepted despite drift" from a clean pass.
+  if (opts.lenientText && stemMissed
+    && matched === total - WEIGHTS.textStem
+    && total > WEIGHTS.textStem) {
+    detail.push('text drifted — tolerated as volatile content (all other signals matched)');
+    return { pass: true, score, detail };
+  }
+
+  return { pass: false, score, detail };
 }
 
 export { buildWitness, matchWitness, WITNESS_VERSION };
