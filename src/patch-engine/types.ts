@@ -117,6 +117,9 @@ export interface Spec {
   settings?: unknown[];
   permissions?: string[];
   autoRepair?: boolean;
+  // A distilled, human-readable statement of what this shim is for (Spec A).
+  // Optional + back-compat: absent = today's behavior. Travels on export.
+  intent?: string;
   bundleHash?: string;
   priority?: number;
   __cssPriority?: number;
