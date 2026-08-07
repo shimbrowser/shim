@@ -86,6 +86,14 @@ interface PatchBundle {
 interface PatchControl {
   applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string): void;
   removeExtraRule(ruleKey: string): boolean;
+  // Preview twin-conflict guard (live-caught: a committed replace-root rule
+  // and its own update-rule PREVIEW each hide everything except their own
+  // mounted output — two rules, two tokens, both mounts hidden, blank page;
+  // the quieter sibling is a committed script rule + its preview double-
+  // mounting a widget). While a preview for rule X is live, the preload
+  // suppresses the committed X and restores it when the preview is removed.
+  suppressRule(ruleId: string): boolean;
+  restoreRule(ruleId: string): void;
   teardownAll(): void;
 }
 
@@ -1997,12 +2005,16 @@ function run(patch: PatchBundle, api: ShimApiBase): PatchControl {
   // Track teardowns for each rule in spec.rules so the whole patch can be
   // torn down live (sidebar toggle-off). Extra rules (previews + forwarded)
   // have their own lifecycle via extraTeardowns below.
-  const ruleTeardowns: Array<() => void> = [];
+  // Keyed by rule id so suppressRule/restoreRule can address one spec rule;
+  // rules without an id (never emitted by authoring, but the type allows it)
+  // key by index and are simply not suppressible.
+  const ruleTeardowns = new Map<string, () => void>();
+  const suppressedRuleIds = new Set<string>();
   let tornDown = false;
   api.onReady(() => {
     if (tornDown) return;
-    for (const rule of spec.rules || []) {
-      ruleTeardowns.push(setupRule(rule, spec, api, mutations, handlers));
+    for (const [i, rule] of (spec.rules || []).entries()) {
+      ruleTeardowns.set(rule.id || `__idx_${i}`, setupRule(rule, spec, api, mutations, handlers));
     }
   });
 
@@ -2034,6 +2046,31 @@ function run(patch: PatchBundle, api: ShimApiBase): PatchControl {
       extraTeardowns.delete(ruleKey);
       return true;
     },
+    // See the PatchControl doc comment: tear down ONE spec-declared rule
+    // while its preview twin is live, and bring it back afterwards. restore
+    // is a strict no-op unless the id was suppressed by suppressRule on
+    // THIS control instance — a commit re-boots the patch into a fresh
+    // control, so a stale restore from the old preview teardown can't
+    // double-apply anything there.
+    suppressRule(ruleId: string) {
+      if (tornDown || !ruleId) return false;
+      const teardown = ruleTeardowns.get(ruleId);
+      if (!teardown) return false;
+      try { teardown(); } catch (err) { console.error('[shim] rule suppress failed', err); }
+      ruleTeardowns.delete(ruleId);
+      suppressedRuleIds.add(ruleId);
+      return true;
+    },
+    restoreRule(ruleId: string) {
+      if (tornDown || !suppressedRuleIds.has(ruleId)) return;
+      suppressedRuleIds.delete(ruleId);
+      const rule = (spec.rules || []).find((r) => r.id === ruleId);
+      if (!rule) return;
+      api.onReady(() => {
+        if (tornDown || suppressedRuleIds.has(ruleId)) return;
+        ruleTeardowns.set(ruleId, setupRule(rule, spec, api, mutations, handlers));
+      });
+    },
     // Tears down every rule this patch mounted (observers, mounted outputs,
     // Tier-1 CSS tokens). Leaves injected stylesheets (`mutation-<kind>` /
     // `patch-<id>`) in place — they're idempotent and may be shared with
@@ -2042,10 +2079,11 @@ function run(patch: PatchBundle, api: ShimApiBase): PatchControl {
     // until navigation.
     teardownAll() {
       tornDown = true;
-      for (const fn of ruleTeardowns) {
+      for (const fn of ruleTeardowns.values()) {
         try { fn(); } catch (err) { console.error('[shim] rule teardown failed', err); }
       }
-      ruleTeardowns.length = 0;
+      ruleTeardowns.clear();
+      suppressedRuleIds.clear();
       for (const fn of extraTeardowns.values()) {
         try { fn(); } catch (err) { console.error('[shim] extra teardown failed', err); }
       }
