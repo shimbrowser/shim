@@ -120,6 +120,11 @@ export interface Spec {
   // A distilled, human-readable statement of what this shim is for (Spec A).
   // Optional + back-compat: absent = today's behavior. Travels on export.
   intent?: string;
+  // Global shims v2 (design 2026-08-08): marks this spec as a shared
+  // identity with per-host rule implementations (src/main/host-impls.ts).
+  // Optional + back-compat: absent = a normal, single-host shim — `true`
+  // is the sole discriminator, never inferred from other fields.
+  global?: boolean;
   bundleHash?: string;
   priority?: number;
   __cssPriority?: number;
