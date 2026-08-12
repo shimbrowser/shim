@@ -125,6 +125,20 @@ export interface Spec {
   // Optional + back-compat: absent = a normal, single-host shim — `true`
   // is the sole discriminator, never inferred from other fields.
   global?: boolean;
+  // Auto mode (design 2026-08-10): a per-host impl promoted to be the
+  // shim's shared DEFAULT, applied on every host (the "runs everywhere"
+  // opt-in). Optional + back-compat: absent = today's behavior — no
+  // default, every host starts dormant until adopted (§22).
+  default?: { rules: Rule[]; handlers?: Record<string, string> };
+  // Auto mode: the shared code-space — name → function source, injected
+  // into every host impl as `api.shared`. Optional + back-compat: absent =
+  // today's behavior, no shared handler namespace.
+  sharedHandlers?: Record<string, string>;
+  // Auto mode: per-shim toggle to headlessly auto-adopt each new domain
+  // (global-shim-only). Optional + back-compat: absent = today's
+  // behavior — adoption stays manual (§22's "learn this site" prompt).
+  // `true` is the sole discriminator, never inferred from other fields.
+  autoMode?: boolean;
   bundleHash?: string;
   priority?: number;
   __cssPriority?: number;
