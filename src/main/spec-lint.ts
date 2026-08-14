@@ -74,6 +74,21 @@ const MUTATION_KEYS = new Set([
 const POSITIONAL_RE = /:(?:nth-child|nth-of-type|nth-last-child|nth-last-of-type|first-child|last-child|first-of-type|last-of-type|only-child|only-of-type)\b/i;
 const GENERATED_CLASS_RE = /\.(?:css|jss|jsx|sc|svelte|emotion|chakra)-[A-Za-z0-9_-]+|\.[\w-]*[0-9a-f]{6,}/i;
 
+// Media-hide lint (belt for the engine's apply-time note): a hide/remove on the
+// main <video>/<audio> element blanks the whole player — audio keeps playing,
+// picture goes blank. Live-caught: a ".video-stream" hide meant for Shorts nuked
+// YouTube's main player. Matches a `video`/`audio` TYPE selector (NOT a
+// `.video-*` utility class — those are legitimately hidden all the time) or a
+// well-known player class. The robust check is the runtime rule-status note,
+// which knows the actually-matched element; this warns statically for the
+// obvious cases the selector text already reveals.
+// A `video`/`audio` TYPE selector (boundary-guarded so `.video-card` etc. are
+// NOT matched), OR a known player CLASS token. The class alternatives require a
+// leading dot AND a token boundary (`(?![\w-])`) so `.video-stream-thumbnail`,
+// `.video-js-poster`, `[data-id="video-stream-preview"]` — which contain but
+// don't SELECT the player class — don't draw a false warning.
+const MEDIA_SELECTOR_RE = /(?:^|[\s>+~,(])(?:video|audio)(?=$|[\s>+~,.:#[)])|\.(?:video-stream|html5-main-video|html5-video|vjs-tech|jw-video|video-js)(?![\w-])/i;
+
 // Loop-hazard scan (freeze prevention): a handler that creates a
 // MutationObserver AND writes DOM can observe its own writes and re-queue
 // itself forever — a hard tab freeze (microtasks run before paint). The
@@ -178,6 +193,34 @@ function lintReorderTarget(rid: string, key: 'before' | 'after', target: unknown
   const extraNote = ` This reorder ${key} target has no fallback ladder or witness recovery — a stale selector fails silently on the next deploy.`;
   pushPositionalWarning(rid, value, warnings, `reorder ${key} target`, extraNote);
   pushGeneratedClassWarning(rid, value, warnings, `reorder ${key} target`, extraNote);
+}
+
+// A hide/remove rule whose CSS anchor (primary OR any fallback) targets the main
+// media element blanks the whole player — audio keeps playing, picture goes
+// blank. WARNING, not error (the robust check is the engine's apply-time
+// rule-status note, which knows the actually-matched element; this is the
+// static belt for the selectors that reveal the mistake in their text).
+function lintMediaHideRule(rid: string, rule: Rule, mutationsList: unknown[], warnings: string[]): void {
+  const hidesOrRemoves = mutationsList.some(
+    (m) => isRecord(m) && (m.kind === 'hide' || m.kind === 'remove'),
+  );
+  if (!hidesOrRemoves || !isRecord(rule.anchor)) return;
+  const { anchor } = rule;
+  const specs: unknown[] = [
+    anchor.primary,
+    ...(Array.isArray(anchor.fallbacks) ? anchor.fallbacks : []),
+  ];
+  for (const spec of specs) {
+    if (!isRecord(spec) || spec.kind !== 'css' || typeof spec.value !== 'string') continue;
+    if (!MEDIA_SELECTOR_RE.test(spec.value)) continue;
+    warnings.push(
+      `rule "${rid}": hide/remove anchor "${spec.value}" targets a media element `
+      + '(<video>/<audio> or a main-player class) — this blanks the whole player (audio may keep '
+      + 'playing, picture goes blank). If you meant to hide an overlay, control, or thumbnail, '
+      + 'anchor on that specific element instead.',
+    );
+    return; // one warning per rule is enough
+  }
 }
 
 const REORDER_POSITIONS = new Set(['first', 'last']);
@@ -472,6 +515,8 @@ function lintSpec(spec: unknown): LintResult {
 
     // Same base-preserving iteration as rules above (throw on truthy non-array).
     const mutationsList = (rule.mutations || []) as unknown[];
+
+    lintMediaHideRule(rid, rule, mutationsList, warnings);
 
     // The "patch-level handler set" a rewrite-response transform may resolve
     // through, alongside this rule's own `handlers` — merged once per rule

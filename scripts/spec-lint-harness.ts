@@ -80,6 +80,39 @@ check('positional FALLBACK does not warn (legit ladder tail)', res.warnings.leng
 res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: 'main .track-row' } }, mutations: [{ kind: 'hide' }] }] });
 check('human-named class primary does not warn', res.warnings.length === 0, JSON.stringify(res.warnings));
 
+console.log('media-hide warnings (hide/remove targeting <video>/<audio> or a player class)');
+res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.video-stream' } }, mutations: [{ kind: 'hide' }] }] });
+check('hide on .video-stream (the YouTube incident) warns', res.warnings.some((w) => /media element/.test(w)), JSON.stringify(res.warnings));
+
+res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: 'video' } }, mutations: [{ kind: 'hide' }] }] });
+check('hide on a bare video type selector warns', res.warnings.some((w) => /media element/.test(w)), JSON.stringify(res.warnings));
+
+res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.player-wrap > video' } }, mutations: [{ kind: 'remove' }] }] });
+check('remove on a descendant video type selector warns', res.warnings.some((w) => /media element/.test(w)), JSON.stringify(res.warnings));
+
+res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.foo' }, fallbacks: [{ kind: 'css', value: '.html5-main-video' }] }, mutations: [{ kind: 'hide' }] }] });
+check('media selector in a FALLBACK warns', res.warnings.some((w) => /media element/.test(w)), JSON.stringify(res.warnings));
+
+res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.video-card' } }, mutations: [{ kind: 'hide' }] }] });
+check('hide on .video-card (a utility class, not the player) does NOT warn', !res.warnings.some((w) => /media element/.test(w)), JSON.stringify(res.warnings));
+
+// Player-class alternatives are token-bounded: a class that CONTAINS a player
+// class name but isn't it must not draw a false warning (Codex #316 feedback).
+for (const sel of ['.video-stream-thumbnail', '.video-js-poster', '.html5-video-preview', '[data-id="video-stream-preview"]']) {
+  res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: sel } }, mutations: [{ kind: 'hide' }] }] });
+  check(`hide on "${sel}" (contains but does not select a player class) does NOT warn`,
+    !res.warnings.some((w) => /media element/.test(w)), JSON.stringify(res.warnings));
+}
+// ...but the real player classes still warn as tokens.
+for (const sel of ['.video-stream', '.player > .html5-main-video', '.video-js']) {
+  res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: sel } }, mutations: [{ kind: 'hide' }] }] });
+  check(`hide on the real player class "${sel}" still warns`,
+    res.warnings.some((w) => /media element/.test(w)), JSON.stringify(res.warnings));
+}
+
+res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.video-stream' } }, mutations: [{ kind: 'restyle', properties: { opacity: '0.5' } }] }] });
+check('restyle on .video-stream does NOT warn (only hide/remove blank the player)', !res.warnings.some((w) => /media element/.test(w)), JSON.stringify(res.warnings));
+
 console.log('api.ai without the "ai" permission declared (§19)');
 const AI_HANDLER = 'async function tag({ anchor, api }) { const r = await api.ai.complete({ prompt: "x" }); }';
 res = lintSpec({

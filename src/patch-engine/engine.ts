@@ -787,6 +787,13 @@ function applyRule(
   // Joined into the rule-status `note` so the authoring loop sees them
   // mid-turn and self-corrects. Diagnostics only — never behavior changes.
   const hasLayoutKind = (rule.mutations || []).some((m) => m.kind === 'reorder' || m.kind === 'reshape');
+  // A hide/remove rule whose matched element IS or CONTAINS the main media
+  // element (<video>/<audio>), or blankets most of the viewport, silently
+  // blanks the player — audio keeps playing, picture goes white. Live-caught:
+  // a ".video-stream" hide meant for Shorts nuked YouTube's own player, and
+  // nothing warned. Rides the rule-status `note` into authoring feedback (§16)
+  // so the model self-corrects mid-turn; never changes runtime behavior.
+  const hasHideOrRemoveKind = (rule.mutations || []).some((m) => m.kind === 'hide' || m.kind === 'remove');
   // Assigned by the relative-reorder restamp path (`restampRelativeReorder`,
   // defined below) every scan pass — never null-initialized-and-forgotten,
   // so this genuinely needs `let`.
@@ -813,10 +820,65 @@ function applyRule(
     if (stripNote) notes.push(stripNote);
     return notes.length ? notes.join('; ') : null;
   };
+  // Media / large-cover guard (see hasHideOrRemoveKind above). Pure reads,
+  // fully guarded — never throws. Rides the rule-status event as `mediaHide`
+  // so main can persist a durable, browsing-time "hiding the video player"
+  // warning (§14); the human `note` below is derived from the same verdict.
+  //
+  // Two detectors, because the two signals have different physics:
+  //  - MEDIA is layout-independent (matches/querySelector), so it's checked
+  //    LIVE across EVERY matched element on each report. A selector resolving
+  //    [harmless, <video>] still warns (not just the first match), and it
+  //    self-clears the instant the media element leaves the matched set.
+  //  - COVER can only be read BEFORE `hide` stamps display:none — post-apply
+  //    getBoundingClientRect() is 0x0 and `remove` has detached the node, so a
+  //    large-container hide is invisible to a post-apply measurement. It's
+  //    captured once at MOUNT time (noteLargeCoverAtMount, called before
+  //    mountOn) into `sawLargeCover`, which is sticky: a hidden container stays
+  //    hidden until teardown/re-apply builds a fresh closure. Accepted residual:
+  //    a container removed from the DOM without a re-commit keeps the cover
+  //    warning until the next reload — a hidden thing doesn't un-hide itself.
+  const MEDIA_COVER_FRACTION = 0.55;
+  const isMediaEl = (el: Element): boolean => {
+    try {
+      return (typeof el.matches === 'function' && el.matches('video, audio'))
+        || (typeof el.querySelector === 'function' && el.querySelector('video, audio') !== null);
+    } catch { return false; }
+  };
+  let sawLargeCover = false;
+  const noteLargeCoverAtMount = (el: Element): void => {
+    if (!hasHideOrRemoveKind || sawLargeCover || isMediaEl(el)) return;
+    try {
+      const win = el.ownerDocument?.defaultView;
+      const r = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null;
+      if (win && r && win.innerWidth > 0 && win.innerHeight > 0
+        && (r.width * r.height) / (win.innerWidth * win.innerHeight) >= MEDIA_COVER_FRACTION) {
+        sawLargeCover = true;
+      }
+    } catch { /* box / viewport read failed — no cover verdict */ }
+  };
+  const mediaHideKind = (): 'media' | 'cover' | null => {
+    if (!hasHideOrRemoveKind) return null;
+    for (const el of state.keys()) { if (isMediaEl(el)) return 'media'; }
+    return sawLargeCover ? 'cover' : null;
+  };
+  const mediaHideNote = (kind: 'media' | 'cover' | null): string | null => {
+    if (kind === 'media') {
+      return 'this hide/remove targets the main media element (<video>/<audio>) — it blanks the '
+        + 'player while audio may keep playing; if you meant something else, use a more specific anchor';
+    }
+    if (kind === 'cover') {
+      return 'this hide/remove covers most of the viewport — if you meant to hide a specific '
+        + 'region, anchor on it instead of a full-page container';
+    }
+    return null;
+  };
   let lastReportedNote: string | null = null;
   const reportStatusIfChanged = () => {
     const first: Element | undefined = state.size ? state.keys().next().value : undefined;
-    const note = layoutNote(first);
+    const mediaHide = mediaHideKind();
+    const note = [layoutNote(first), mediaHideNote(mediaHide)]
+      .filter((n): n is string => Boolean(n)).join('; ') || null;
     if (state.size === lastReportedCount && lastMatchedSource === lastReportedSource
       && note === lastReportedNote) return;
     lastReportedCount = state.size;
@@ -843,6 +905,11 @@ function applyRule(
       matchedVia: lastMatchedSource,
       ...(box ? { box } : {}),
       ...(note ? { note } : {}),
+      // Structured twin of the media half of `note` — main persists it as a
+      // durable browsing-time "hiding the video player" warning (§14). Absent
+      // when the matched element is neither media nor a viewport-blanketing
+      // cover; its ABSENCE on a later rule-status self-clears any prior row.
+      ...(mediaHide ? { mediaHide } : {}),
     });
   };
 
@@ -1089,6 +1156,9 @@ function applyRule(
         state.delete(el);
       }
       inFlight.add(el);
+      // Measure viewport coverage BEFORE mountOn stamps display:none / detaches
+      // the node — post-apply the box is 0x0 (see mediaHideKind's comment).
+      noteLargeCoverAtMount(el);
       mountOn(el).finally(() => {
         inFlight.delete(el);
         // mountOn updates state.size as it inserts. Re-report so the
