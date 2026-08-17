@@ -11,8 +11,8 @@
 // turns that into a "scroll it into view" error) rather than a degenerate
 // capturePage call.
 
-import { computeCropRect, CROP_PAD, CROP_MIN } from '../src/main/view-crop';
-import type { CropMeasurement } from '../src/main/view-crop';
+import { computeCropRect, CROP_PAD, CROP_MIN } from '../src/main/authoring/view-crop';
+import type { CropMeasurement } from '../src/main/authoring/view-crop';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string): void {

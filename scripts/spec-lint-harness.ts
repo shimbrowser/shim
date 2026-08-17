@@ -7,7 +7,7 @@
 // Unknown KINDS are errors (reject the emit); unknown FIELDS are warnings
 // (surfaced to the model + chat). Bare node — no db, no Electron.
 
-import { lintSpec, assertNoSpecErrors, observerLoopWarning } from '../src/main/spec-lint';
+import { lintSpec, assertNoSpecErrors, observerLoopWarning } from '../src/main/authoring/spec-lint';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string) {

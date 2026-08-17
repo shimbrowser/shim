@@ -21,14 +21,14 @@
 // it's read through the real patch-engine types.
 
 import * as vm from 'vm';
-import type { Spec, Rule, Mutation, AnchorSpec } from '../patch-engine/types';
-import { RESHAPE_ALIGN, RESHAPE_JUSTIFY } from '../patch-engine/layout-kinds';
+import type { Spec, Rule, Mutation, AnchorSpec } from '../../patch-engine/types';
+import { RESHAPE_ALIGN, RESHAPE_JUSTIFY } from '../../patch-engine/layout-kinds';
 import {
   validateInjectTree, scanHtmlForActiveContent, INJECT_PLACEMENTS, INJECT_HTML_MAX_CHARS,
-} from '../patch-engine/inject-kinds';
-import { validateRewriteMutation, detectTransformForm } from '../patch-engine/rewrite-response';
-import type { CompileProbe } from '../patch-engine/rewrite-response';
-import { validateInterceptMutation } from '../patch-engine/intercept';
+} from '../../patch-engine/inject-kinds';
+import { validateRewriteMutation, detectTransformForm } from '../../patch-engine/rewrite-response';
+import type { CompileProbe } from '../../patch-engine/rewrite-response';
+import { validateInterceptMutation } from '../../patch-engine/intercept';
 
 // vm.Script-backed compile probe for `detectTransformForm` — main-process
 // counterpart to rewrite-install.ts's identical-shaped probe (Node/Electron-
