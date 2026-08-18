@@ -1,7 +1,12 @@
 // Pure helpers for a shim's `intent` — its distilled statement of purpose.
 // No db / Electron imports: safe to import from bare-node harnesses.
 
-export const MAX_INTENT_CHARS = 600;
+// A distilled statement of purpose is a short paragraph, but 600 chars cut real
+// intents mid-sentence (e.g. the clickbait-rewriter's) and baked a visible
+// "[truncated]" marker into stored data. 2000 comfortably fits a genuine intent
+// while staying a trivial per-turn context cost (it leads every authoring /
+// re-anchor turn); the marker is now only a backstop for pathological lengths.
+export const MAX_INTENT_CHARS = 2000;
 const TRUNCATION_MARKER = '… [truncated]';
 
 // Coerce an authored intent value into a stored form. Free prose, so this
