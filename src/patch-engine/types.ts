@@ -115,6 +115,11 @@ export interface Spec {
   // runtime-stamped `__cssPriority` below.
   css?: string;
   settings?: unknown[];
+  // Per-shim SQLite storage declaration (shim-db foundation §4). Loose
+  // boundary like `settings` above: validated main-side
+  // (src/main/shim-db/schema.ts's validateStorageDecl), opaque to the
+  // engine — never read at runtime, only at commit/rebase time.
+  storage?: unknown;
   permissions?: string[];
   autoRepair?: boolean;
   // A distilled, human-readable statement of what this shim is for (Spec A).
