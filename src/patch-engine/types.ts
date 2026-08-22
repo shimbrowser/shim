@@ -147,4 +147,6 @@ export interface Spec {
   bundleHash?: string;
   priority?: number;
   __cssPriority?: number;
+  /** Marks the single canonical per-host shim that the element picker appends hides to. */
+  elementHides?: boolean;
 }
