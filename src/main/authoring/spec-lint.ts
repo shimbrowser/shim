@@ -46,6 +46,15 @@ const BUILTIN_KINDS = new Set([
   'reorder', 'reshape', 'inject-element', 'inject-html', 'rewrite-response', 'intercept',
 ]);
 const RULE_KEYS = new Set(['id', 'anchor', 'mutations', 'handlers']);
+// Mirrors shim-db/connections.ts's DB_ENGINES (shim-db remote-transport §1).
+// A local copy, not an import: this file stays a pure, dependency-free leaf
+// like the rest of its allowlists (keep in sync when a real engine is added —
+// same "mirror the spec format" contract the header comment describes).
+// Redundant with connections.ts's own validateConnectionsDecl (which commit
+// also runs, and which throws with the identical bad-engine wording) — this
+// is deliberately cheap, same-turn feedback so the model sees the rejection
+// before the commit round-trip.
+const CONNECTION_ENGINES = new Set(['postgres', 'mysql', 'mariadb', 'mssql', 'sqlite-remote']);
 const ANCHOR_KEYS = new Set(['primary', 'fallbacks', 'iframe', 'witness']);
 // Union across kinds: properties (restyle), handler/mount (script,
 // replace-root, mount-route), pattern/title (mount-route), from/to/exceptPaths
@@ -339,6 +348,16 @@ const MAIN_WORLD_API_RE = /\bapi\s*\./;
 const REWRITE_ASYNC_RE = /\basync\b|\bawait\b/;
 const MAIN_WORLD_DOM_RE = /\b(?:document|window)\s*\./;
 
+// `api.db.connection("<name>")` string scan (shim-db remote-transport §1),
+// same source-text-heuristic posture as the api.ai scan below (comments/
+// strings can false-positive — a warning, not an error). Captures the
+// literal connection name so it can be checked against the spec's declared
+// connections; a call with a non-literal argument (a variable, a template
+// expression) isn't matched at all — this is a heuristic over the common
+// authored shape, not a real parse, same accepted-gap posture the api.ai scan
+// takes.
+const API_DB_CONNECTION_RE = /\bapi\s*\.\s*db\s*\.\s*connection\s*\(\s*(['"])((?:(?!\1).)*)\1\s*\)/g;
+
 // rewrite-response (§6, docs/2026-08-04-rewrite-response-design.md). Payload
 // shape errors delegate to `validateRewriteMutation` (src/patch-engine/
 // rewrite-response.ts) rather than re-deriving them here — one source of
@@ -486,6 +505,28 @@ function lintSpec(spec: unknown): LintResult {
     ? new Set(Object.keys(s.mutations))
     : new Set<string>();
 
+  // Declared remote connections (shim-db remote-transport §1). Spec-level,
+  // not per-rule — computed once, same as declaredKinds above.
+  //   - engine-enum ERROR: cheap same-turn feedback for an unknown engine,
+  //     redundant with (but earlier than) commit's validateConnectionsDecl.
+  //     Only fires when `engine` is actually a string that isn't a known
+  //     engine — a missing/wrong-typed engine is left to the full validator's
+  //     complete problem list rather than duplicated here.
+  //   - declaredConnectionNames feeds the api.db.connection(...) scan inside
+  //     the rule loop below.
+  const declaredConnectionNames = new Set<string>();
+  if (s && Array.isArray(s.connections)) {
+    s.connections.forEach((c, i) => {
+      if (!isRecord(c)) return;
+      if (typeof c.name === 'string') declaredConnectionNames.add(c.name);
+      if (typeof c.engine === 'string' && !CONNECTION_ENGINES.has(c.engine)) {
+        errors.push(
+          `connections[${i}]: unknown engine "${c.engine}". Must be one of ${[...CONNECTION_ENGINES].join('|')}.`,
+        );
+      }
+    });
+  }
+
   // Preserve base semantics exactly: iterate spec.rules directly (a truthy
   // non-array — e.g. a hallucinated `"rules": {}` — makes for...of throw, which
   // rejects the emit, the intended anti-hallucination behavior); undefined → [].
@@ -589,6 +630,30 @@ function lintSpec(spec: unknown): LintResult {
               + 'Emit a set-permissions op with ["ai"].',
             );
             break;
+          }
+        }
+      }
+    }
+
+    // api.db.connection("x") referencing an undeclared connection name (shim-
+    // db remote-transport §1): the call would resolve { ok: false, error:
+    // "not-declared" } at runtime, so the shim ships broken against a name
+    // that's either a typo or a connection the model forgot to declare. A
+    // WARNING, not an error — same heuristic-source-scan posture as the
+    // api.ai check above (comments/strings can false-positive).
+    if (isRecord(rule.handlers)) {
+      for (const [name, src] of Object.entries(rule.handlers)) {
+        if (typeof src !== 'string') continue;
+        API_DB_CONNECTION_RE.lastIndex = 0;
+        let match: RegExpExecArray | null;
+        while ((match = API_DB_CONNECTION_RE.exec(src)) !== null) {
+          const connName = match[2] ?? '';
+          if (connName && !declaredConnectionNames.has(connName)) {
+            warnings.push(
+              `rule "${rid}": handler "${name}" calls api.db.connection("${connName}") but "${connName}" is not `
+              + 'declared in spec.connections — the call will resolve { ok: false, error: "not-declared" } until '
+              + 'it is. Emit a set-connections op adding it, or fix the name if this was a typo.',
+            );
           }
         }
       }

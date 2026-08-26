@@ -120,6 +120,12 @@ export interface Spec {
   // (src/main/shim-db/schema.ts's validateStorageDecl), opaque to the
   // engine — never read at runtime, only at commit/rebase time.
   storage?: unknown;
+  // Remote database connection declarations (shim-db remote-transport §1).
+  // Same loose boundary as `storage` above: validated main-side
+  // (src/main/shim-db/connections.ts's validateConnectionsDecl), opaque to
+  // the engine. Never carries a connection URL — that's main-only custody in
+  // `shim_settings` (connections.ts), never on the spec.
+  connections?: unknown;
   permissions?: string[];
   autoRepair?: boolean;
   // A distilled, human-readable statement of what this shim is for (Spec A).

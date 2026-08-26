@@ -484,6 +484,48 @@ check('flags a guard-less observer+write, no rule prefix', (() => {
 check('null on the safe disconnect/re-observe pattern', observerLoopWarning('decorate', SAFE_HANDLER) === null);
 check('null on plain code', observerLoopWarning('h', 'function h() { return 1; }') === null);
 
+console.log('spec.connections — engine-enum ERROR (shim-db remote-transport §8, cheap same-turn feedback)');
+res = lintSpec({ connections: [{ name: 'warehouse', engine: 'oracle' }], rules: [] });
+check('unknown engine flagged as error', res.errors.length === 1 && /connections\[0\]/.test(res.errors[0] || '') && /oracle/.test(res.errors[0] || ''), JSON.stringify(res.errors));
+check('error names the supported engines', /postgres.*mysql.*mariadb.*mssql.*sqlite-remote/.test(res.errors[0] || ''), JSON.stringify(res.errors));
+res = lintSpec({ connections: [{ name: 'warehouse', engine: 'postgres' }], rules: [] });
+check('known engine: no error', res.errors.length === 0, JSON.stringify(res.errors));
+check('known engine: no warnings either', res.warnings.length === 0, JSON.stringify(res.warnings));
+res = lintSpec({ connections: [{ name: 'a', engine: 'postgres' }, { name: 'b', engine: 'not-a-real-engine' }], rules: [] });
+check('one bad engine among several: exactly 1 error, names the right index', res.errors.length === 1 && /connections\[1\]/.test(res.errors[0] || ''), JSON.stringify(res.errors));
+
+console.log('spec.connections — malformed engine (missing/non-string) is left to the full validator, not duplicated here');
+res = lintSpec({ connections: [{ name: 'warehouse' }], rules: [] });
+check('missing engine: lintSpec itself raises no engine-enum error', res.errors.length === 0, JSON.stringify(res.errors));
+res = lintSpec({ connections: [{ name: 'warehouse', engine: 42 }], rules: [] });
+check('non-string engine: lintSpec itself raises no engine-enum error', res.errors.length === 0, JSON.stringify(res.errors));
+
+console.log('api.db.connection("x") referencing an undeclared connection → warning');
+const DB_CONN_HANDLER = "async function tag({ anchor, api }) { const r = await api.db.connection('nope').query('SELECT 1'); }";
+res = lintSpec({
+  rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.row' } }, mutations: [{ kind: 'script', handler: 'tag' }], handlers: { tag: DB_CONN_HANDLER } }],
+});
+check('undeclared connection name warns', res.warnings.some((w) => /api\.db\.connection\("nope"\)/.test(w) && /not.*declared/.test(w)), JSON.stringify(res.warnings));
+check('…as a warning, not an error', res.errors.length === 0, JSON.stringify(res.errors));
+
+res = lintSpec({
+  connections: [{ name: 'nope', engine: 'postgres' }],
+  rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.row' } }, mutations: [{ kind: 'script', handler: 'tag' }], handlers: { tag: DB_CONN_HANDLER } }],
+});
+check('DECLARED connection name is silent', res.warnings.length === 0, JSON.stringify(res.warnings));
+
+const DB_CONN_DOUBLE_QUOTED = 'function tag({ api }) { api.db.connection("warehouse").run("DELETE FROM x"); }';
+res = lintSpec({
+  connections: [{ name: 'warehouse', engine: 'mysql' }],
+  rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.row' } }, mutations: [{ kind: 'script', handler: 'tag' }], handlers: { tag: DB_CONN_DOUBLE_QUOTED } }],
+});
+check('double-quoted form, declared: silent', res.warnings.length === 0, JSON.stringify(res.warnings));
+
+res = lintSpec({
+  rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.row' } }, mutations: [{ kind: 'script', handler: 'tag' }], handlers: { tag: 'function tag() { /* no db connection here */ }' } }],
+});
+check('handler without api.db.connection is silent', res.warnings.length === 0, JSON.stringify(res.warnings));
+
 console.log('');
 if (failures) { console.error(`✗ ${failures} check(s) failed`); process.exit(1); }
 console.log('✓ all spec-lint checks passed');
