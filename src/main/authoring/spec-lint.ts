@@ -54,7 +54,7 @@ const RULE_KEYS = new Set(['id', 'anchor', 'mutations', 'handlers']);
 // also runs, and which throws with the identical bad-engine wording) — this
 // is deliberately cheap, same-turn feedback so the model sees the rejection
 // before the commit round-trip.
-const CONNECTION_ENGINES = new Set(['postgres', 'mysql', 'mariadb', 'mssql', 'sqlite-remote']);
+const CONNECTION_ENGINES = new Set(['postgres', 'mysql', 'mariadb', 'mssql', 'sqlite-remote', 'supabase']);
 const ANCHOR_KEYS = new Set(['primary', 'fallbacks', 'iframe', 'witness']);
 // Union across kinds: properties (restyle), handler/mount (script,
 // replace-root, mount-route), pattern/title (mount-route), from/to/exceptPaths
@@ -523,6 +523,30 @@ function lintSpec(spec: unknown): LintResult {
         errors.push(
           `connections[${i}]: unknown engine "${c.engine}". Must be one of ${[...CONNECTION_ENGINES].join('|')}.`,
         );
+      }
+      // supabase-with-no-nested-tables WARNING, not an error: unlike the SQL
+      // engines, a supabase connection with no `storage.tables` is a
+      // legitimate shape — it's exactly what pointing at an existing
+      // Supabase project through the paste door looks like (there is
+      // nothing to provision; declarative-additive migrations never apply
+      // to it, design/shim-db.md's supabase section). But it's worth
+      // flagging: with no declared tables the connection has no
+      // declared-table allowlist (B.1a) — every table on the project is
+      // reachable through it, not just the ones the shim's own schema
+      // names. Fires only for a real `engine === "supabase"` row; a missing/
+      // wrong-typed engine already gets its own feedback elsewhere.
+      if (c.engine === 'supabase') {
+        const storage = isRecord(c.storage) ? c.storage : null;
+        const tables = storage && Array.isArray(storage.tables) ? storage.tables : [];
+        if (tables.length === 0) {
+          const label = typeof c.name === 'string' ? c.name : `[${i}]`;
+          warnings.push(
+            `connections[${i}]: supabase connection "${label}" declares no nested storage.tables. `
+            + 'That is only correct when pointing at an existing Supabase project via the paste door — '
+            + "there's nothing to provision. Without a declared table set, the declared-table allowlist "
+            + 'stays inactive and every table on the project is reachable, not just the ones this shim uses.',
+          );
+        }
       }
     });
   }

@@ -500,6 +500,40 @@ check('missing engine: lintSpec itself raises no engine-enum error', res.errors.
 res = lintSpec({ connections: [{ name: 'warehouse', engine: 42 }], rules: [] });
 check('non-string engine: lintSpec itself raises no engine-enum error', res.errors.length === 0, JSON.stringify(res.errors));
 
+console.log('spec.connections — supabase with no nested storage.tables → WARNING, not an error (task-5)');
+res = lintSpec({ connections: [{ name: 'proj', engine: 'supabase' }], rules: [] });
+check('no declared tables: a warning fires', res.warnings.length === 1, JSON.stringify(res.warnings));
+check('…never an error (this shape is legitimate)', res.errors.length === 0, JSON.stringify(res.errors));
+check('…names the connection index', /connections\[0\]/.test(res.warnings[0] || ''), JSON.stringify(res.warnings));
+check('…names the connection by name', /"proj"/.test(res.warnings[0] || ''), JSON.stringify(res.warnings));
+check('…mentions the paste door / existing project', /paste door/i.test(res.warnings[0] || ''), JSON.stringify(res.warnings));
+check('…mentions the declared-table allowlist staying inactive', /allowlist/i.test(res.warnings[0] || ''), JSON.stringify(res.warnings));
+
+res = lintSpec({ connections: [{ name: 'proj', engine: 'supabase', storage: { tables: [] } }], rules: [] });
+check('empty tables array: same warning fires', res.warnings.length === 1, JSON.stringify(res.warnings));
+
+res = lintSpec({
+  connections: [{
+    name: 'proj',
+    engine: 'supabase',
+    storage: { tables: [{ name: 'notes', columns: [{ name: 'id', type: 'integer', primaryKey: true }] }] },
+  }],
+  rules: [],
+});
+check('declared ≥1 table: silent', res.warnings.length === 0, JSON.stringify(res.warnings));
+
+res = lintSpec({ connections: [{ name: 'wh', engine: 'postgres' }], rules: [] });
+check('non-supabase engine with no storage: silent (the warning is supabase-only)', res.warnings.length === 0, JSON.stringify(res.warnings));
+
+res = lintSpec({
+  connections: [
+    { name: 'a', engine: 'supabase' },
+    { name: 'b', engine: 'not-a-real-engine' },
+  ],
+  rules: [],
+});
+check('bad-engine ERROR and supabase-no-tables WARNING coexist independently', res.errors.length === 1 && res.warnings.length === 1, JSON.stringify({ errors: res.errors, warnings: res.warnings }));
+
 console.log('api.db.connection("x") referencing an undeclared connection → warning');
 const DB_CONN_HANDLER = "async function tag({ anchor, api }) { const r = await api.db.connection('nope').query('SELECT 1'); }";
 res = lintSpec({
