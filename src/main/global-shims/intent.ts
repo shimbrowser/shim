@@ -1,5 +1,7 @@
 // Pure helpers for a shim's `intent` — its distilled statement of purpose.
-// No db / Electron imports: safe to import from bare-node harnesses.
+// No db / Electron imports (type-only): safe to import from bare-node harnesses.
+
+import type { Spec } from '../../patch-engine/types';
 
 // A distilled statement of purpose is a short paragraph, but 600 chars cut real
 // intents mid-sentence (e.g. the clickbait-rewriter's) and baked a visible
@@ -32,4 +34,17 @@ export function normalizeIntent(raw: unknown): string | undefined {
 export function formatIntentBlock(intent: string | undefined): string {
   if (!intent) return '';
   return `# Intent (what this shim is for)\n${intent}`;
+}
+
+// Gate for the manual "refresh intent" action (the Haiku distillation, run
+// on-demand from the settings panel). Mirrors the auto-fill gate in
+// authoring/commit.ts: refreshable iff the shim is NON-global and has ≥1 rule.
+// A global shim's shared spec has no rules to distill — its intent is preserved
+// shared identity, not derived — so refresh would clobber it with nothing;
+// `global` is checked by strict equality (a malformed `global: "yes"` reads
+// non-global, matching isGlobalSpec). A rule-less shim has nothing to distill.
+export function canRefreshIntent(spec: Spec | undefined): boolean {
+  if (!spec) return false;
+  if (spec.global === true) return false;
+  return Array.isArray(spec.rules) && spec.rules.length > 0;
 }
