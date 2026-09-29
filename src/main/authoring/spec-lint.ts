@@ -491,7 +491,114 @@ function lintInterceptMutation(
   }
 }
 
-function lintSpec(spec: unknown): LintResult {
+// Handler names are authored rule-local but stored and shipped by NAME alone
+// (patch_files, the `.shim` file's `handlers` map, a promoted global impl):
+// shims.extractHandlers flattens every rule's handlers into one map, so two
+// rules defining the same name with DIFFERENT source leave only the later
+// rule's source in it. The running shim hides this — the engine prefers a
+// rule's own inline source — but export strips rule-local handlers, so the
+// exported file runs the later rule's code for both. Identical source under
+// one name loses nothing and is allowed.
+//
+// A name-keyed map held beside the rules is a definition too, and the one that
+// WINS over a rule's own when stored: a rule redefining one of its names runs
+// its inline source here and the map's source after an export. Two such maps
+// exist — the spec-level `handlers` (extractHandlers) and the sources a caller
+// holds outside the spec, a `.shim` file's top-level `handlers` (import writes
+// it to patch_files as-is).
+function lintHandlerNameCollisions(
+  rulesList: unknown[],
+  specHandlers: unknown,
+  carriedHandlers: unknown,
+  errors: string[],
+): void {
+  interface Definition { where: string; ruleId: string | null; module: string; refFields: string[] }
+  const definitions = new Map<string, Definition[]>();
+  const define = (name: string, def: Definition) => {
+    const seen = definitions.get(name);
+    if (seen) seen.push(def);
+    else definitions.set(name, [def]);
+  };
+  for (const ruleValue of rulesList) {
+    if (!isRecord(ruleValue) || !isRecord(ruleValue.handlers)) continue;
+    const rid = typeof ruleValue.id === 'string' && ruleValue.id ? ruleValue.id : '(unnamed)';
+    for (const [name, src] of Object.entries(ruleValue.handlers)) {
+      if (typeof src !== 'string') continue;
+      define(name, {
+        where: `rule "${rid}"`,
+        ruleId: rid,
+        // A rule-local handler is a bare function expression; this is the
+        // module form extractHandlers stores it in.
+        module: canonicalModule(`module.exports = ${src};\n`),
+        refFields: handlerRefFields(ruleValue.mutations, name),
+      });
+    }
+  }
+  const maps: Array<[unknown, string]> = [
+    [specHandlers, 'the spec-level "handlers" map'],
+    [carriedHandlers, 'the file\'s "handlers" map'],
+  ];
+  for (const [map, where] of maps) {
+    if (!isRecord(map)) continue;
+    for (const [name, src] of Object.entries(map)) {
+      if (typeof src !== 'string') continue;
+      // Already in module form.
+      define(name, { where, ruleId: null, module: canonicalModule(src), refFields: [] });
+    }
+  }
+  for (const [name, defs] of definitions) {
+    const [first] = defs;
+    if (!first || defs.every((d) => d.module === first.module)) continue;
+    const places = defs.map((d) => d.where).join(', ');
+    // Name the field that actually holds the reference: telling the model to
+    // set "handler" on a rewrite-response or intercept mutation would add an
+    // ignored field and leave the real reference pointing at the old name.
+    const used = [...new Set(defs.flatMap((d) => d.refFields))];
+    const fields = (used.length ? used : [...HANDLER_REF_FIELDS]).map((f) => `"${f}"`).join(' / ');
+    const exampleRule = defs.find((d) => d.ruleId !== null)?.ruleId ?? 'a';
+    errors.push(
+      `handler "${name}" is defined with different source in ${places}. `
+      + 'A shim keeps ONE source per handler name, so only one of these would survive an export. '
+      + `Give each rule's handler its own name (e.g. "${name}" → "${name}${toPascalCase(exampleRule)}") and update the mutation field that names it (${fields}) to match — `
+      + 'or, if they are meant to share one handler, make the source identical.',
+    );
+  }
+}
+
+// Two module sources that differ only in surrounding whitespace or trailing
+// semicolons store the same handler.
+function canonicalModule(moduleSource: string): string {
+  return moduleSource.trim().replace(/[;\s]+$/, '');
+}
+
+// The mutation fields that reference a handler by name: `handler` (script,
+// replace-root, mount-route), `transform` (rewrite-response), `wrap`
+// (intercept).
+const HANDLER_REF_FIELDS = ['handler', 'transform', 'wrap'] as const;
+
+// Which of those fields, on this rule's mutations, name `handlerName`.
+function handlerRefFields(mutations: unknown, handlerName: string): string[] {
+  if (!Array.isArray(mutations)) return [];
+  const found = new Set<string>();
+  for (const mut of mutations) {
+    if (!isRecord(mut)) continue;
+    for (const field of HANDLER_REF_FIELDS) {
+      if (mut[field] === handlerName) found.add(field);
+    }
+  }
+  return [...found];
+}
+
+function toPascalCase(value: string): string {
+  const word = value.replace(/[^A-Za-z0-9]+/g, ' ').trim().split(' ').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join('');
+  return word || 'A';
+}
+
+// `carriedHandlers`: handler sources the caller holds OUTSIDE the spec (a
+// `.shim` file's top-level `handlers` map) — same role as
+// shims.assertHandlersBound's extraDefinedSources. Read by the handler-name
+// collision check only; every other check sees exactly what it always has.
+function lintSpec(spec: unknown, carriedHandlers?: unknown): LintResult {
   const errors: string[] = [];
   const warnings: string[] = [];
 
@@ -694,14 +801,15 @@ function lintSpec(spec: unknown): LintResult {
       }
     }
   }
+  lintHandlerNameCollisions(rulesList, s ? s.handlers : undefined, carriedHandlers, errors);
   return { errors, warnings };
 }
 
 // Throw on lint ERRORS (unknown kinds / malformed mutations) — same contract
 // as shims.assertHandlersBound, so a bad emit rejects with a clear message in
 // the same authoring turn. Warnings don't throw; callers surface them.
-function assertNoSpecErrors(spec: unknown): void {
-  const { errors } = lintSpec(spec);
+function assertNoSpecErrors(spec: unknown, carriedHandlers?: unknown): void {
+  const { errors } = lintSpec(spec, carriedHandlers);
   if (errors.length === 0) return;
   const err = new Error(`spec uses unsupported constructs: ${errors.join('; ')}`) as Error & {
     code: string;
