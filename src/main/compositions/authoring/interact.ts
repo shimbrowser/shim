@@ -97,6 +97,19 @@ export interface InteractReport {
   note?: string;
 }
 
+// The calls a batch reports: trace entries after `cursor` made by one of the
+// turn's own documents (the trace is composition-wide; another tab of the
+// composition may be calling meanwhile).
+export function turnCallsSince(
+  entries: ReadonlyArray<{ loadId?: number; method: string; host: string; pathTemplate: string; operationName: string | null; status: number; ok: boolean }>,
+  cursor: number,
+  isTurnLoad: (loadId: number) => boolean,
+): string[] {
+  return entries.slice(cursor)
+    .filter((e) => e.loadId !== undefined && isTurnLoad(e.loadId))
+    .map((e) => `${e.method} ${e.host}${e.pathTemplate}${e.operationName ? ` (${e.operationName})` : ''} → ${e.status}${e.ok ? '' : ' (failed)'}`);
+}
+
 export function parseInteractInput(input: unknown): { actions: InteractAction[]; settleMs: number } | { error: string } {
   const rec = typeof input === 'object' && input !== null ? input as Record<string, unknown> : {};
   const raw = rec.actions;
