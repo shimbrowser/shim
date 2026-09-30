@@ -23,13 +23,15 @@ export const DEFAULT_SETTLE_MS = 300;
 export const MAX_SETTLE_MS = 3000;
 
 // Keys `press` accepts, with the CDP key-event fields each needs.
-export const KEYS: Readonly<Record<string, { code: string; keyCode: number; text?: string }>> = {
+// `key` is the DOM KeyboardEvent.key value when it differs from the action
+// name (a real spacebar sends " ", not "Space").
+export const KEYS: Readonly<Record<string, { code: string; keyCode: number; text?: string; key?: string }>> = {
   Enter: { code: 'Enter', keyCode: 13, text: '\r' },
   Escape: { code: 'Escape', keyCode: 27 },
   Tab: { code: 'Tab', keyCode: 9 },
   Backspace: { code: 'Backspace', keyCode: 8 },
   Delete: { code: 'Delete', keyCode: 46 },
-  Space: { code: 'Space', keyCode: 32, text: ' ' },
+  Space: { code: 'Space', keyCode: 32, text: ' ', key: ' ' },
   ArrowUp: { code: 'ArrowUp', keyCode: 38 },
   ArrowDown: { code: 'ArrowDown', keyCode: 40 },
   ArrowLeft: { code: 'ArrowLeft', keyCode: 37 },
@@ -180,11 +182,12 @@ function keyCommands(key: string): CdpCommand[] {
   if (!k) return [];
   // A key that types a character goes down as 'keyDown' with its text (so
   // Enter submits a form); the rest as 'rawKeyDown'.
-  const down: Record<string, unknown> = { type: k.text ? 'keyDown' : 'rawKeyDown', key, code: k.code, windowsVirtualKeyCode: k.keyCode };
+  const domKey = k.key ?? key;
+  const down: Record<string, unknown> = { type: k.text ? 'keyDown' : 'rawKeyDown', key: domKey, code: k.code, windowsVirtualKeyCode: k.keyCode };
   if (k.text) down.text = k.text;
   return [
     { method: 'Input.dispatchKeyEvent', params: down },
-    { method: 'Input.dispatchKeyEvent', params: { type: 'keyUp', key, code: k.code, windowsVirtualKeyCode: k.keyCode } },
+    { method: 'Input.dispatchKeyEvent', params: { type: 'keyUp', key: domKey, code: k.code, windowsVirtualKeyCode: k.keyCode } },
   ];
 }
 
