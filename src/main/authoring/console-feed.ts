@@ -24,6 +24,7 @@ export interface ConsoleFeed {
   push(e: { level: string; message: string; source: string; ts: number }): void;
   drainSinceEmit(): ConsoleEntry[];   // errors+warnings since last drain; clears the list
   ring(): ConsoleEntry[];             // last RING_CAP entries, all levels, oldest→newest
+  clear(): void;                      // drops every entry (ring and since-emit)
 }
 
 // Same virtual-URL shape page-preload.ts's PATCH_HANDLER_URL_RE matches
@@ -70,6 +71,10 @@ export function createConsoleFeed(): ConsoleFeed {
     },
     ring() {
       return ringBuf.slice();
+    },
+    clear() {
+      ringBuf.length = 0;
+      sinceEmit = [];
     },
   };
 }

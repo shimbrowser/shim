@@ -21,6 +21,7 @@
 // it's read through the real patch-engine types.
 
 import * as vm from 'vm';
+import { referencesApiAi, apiDbConnectionNames } from './capability-refs';
 import type { Spec, Rule, Mutation, AnchorSpec } from '../../patch-engine/types';
 import { RESHAPE_ALIGN, RESHAPE_JUSTIFY } from '../../patch-engine/layout-kinds';
 import {
@@ -348,15 +349,9 @@ const MAIN_WORLD_API_RE = /\bapi\s*\./;
 const REWRITE_ASYNC_RE = /\basync\b|\bawait\b/;
 const MAIN_WORLD_DOM_RE = /\b(?:document|window)\s*\./;
 
-// `api.db.connection("<name>")` string scan (shim-db remote-transport §1),
-// same source-text-heuristic posture as the api.ai scan below (comments/
-// strings can false-positive — a warning, not an error). Captures the
-// literal connection name so it can be checked against the spec's declared
-// connections; a call with a non-literal argument (a variable, a template
-// expression) isn't matched at all — this is a heuristic over the common
-// authored shape, not a real parse, same accepted-gap posture the api.ai scan
-// takes.
-const API_DB_CONNECTION_RE = /\bapi\s*\.\s*db\s*\.\s*connection\s*\(\s*(['"])((?:(?!\1).)*)\1\s*\)/g;
+// `api.db.connection("<name>")` and `api.ai` scans live in
+// capability-refs.ts (shared with the composition emit lint) — same
+// source-text-heuristic posture, warnings only.
 
 // rewrite-response (§6, docs/2026-08-04-rewrite-response-design.md). Payload
 // shape errors delegate to `validateRewriteMutation` (src/patch-engine/
@@ -647,7 +642,7 @@ function lintSpec(spec: unknown): LintResult {
       const declared: string[] = s && Array.isArray(s.permissions) ? s.permissions : [];
       if (!declared.includes('ai')) {
         for (const [name, src] of Object.entries(rule.handlers)) {
-          if (typeof src === 'string' && /\bapi\s*\.\s*ai\b/.test(src)) {
+          if (typeof src === 'string' && referencesApiAi(src)) {
             warnings.push(
               `rule "${rid}": handler "${name}" calls api.ai but the spec does not declare the "ai" permission — `
               + 'every api.ai call will return { ok: false } until it is declared AND the user grants it. '
@@ -668,11 +663,8 @@ function lintSpec(spec: unknown): LintResult {
     if (isRecord(rule.handlers)) {
       for (const [name, src] of Object.entries(rule.handlers)) {
         if (typeof src !== 'string') continue;
-        API_DB_CONNECTION_RE.lastIndex = 0;
-        let match: RegExpExecArray | null;
-        while ((match = API_DB_CONNECTION_RE.exec(src)) !== null) {
-          const connName = match[2] ?? '';
-          if (connName && !declaredConnectionNames.has(connName)) {
+        for (const connName of apiDbConnectionNames(src)) {
+          if (!declaredConnectionNames.has(connName)) {
             warnings.push(
               `rule "${rid}": handler "${name}" calls api.db.connection("${connName}") but "${connName}" is not `
               + 'declared in spec.connections — the call will resolve { ok: false, error: "not-declared" } until '
