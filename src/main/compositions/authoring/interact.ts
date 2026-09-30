@@ -45,7 +45,7 @@ export type InteractAction =
 // What locating a selector found (the isolated world's answer).
 export type LocateResult =
   | { error: string }
-  | { count: number; x?: number; y?: number; visible?: boolean; covered?: string | null; disabled?: boolean; tag?: string };
+  | { count: number; x?: number; y?: number; visible?: boolean; covered?: string | null; disabled?: boolean; tag?: string; editable?: boolean };
 
 // One CDP command (Input.dispatchMouseEvent / dispatchKeyEvent / insertText).
 export interface CdpCommand { method: string; params: Record<string, unknown> }
@@ -61,8 +61,11 @@ export interface InteractDeps {
   // Sets a <select>'s value and fires input + change (a native popup can't
   // be driven by synthetic mouse input).
   selectValue(selector: string, value: string): Promise<{ ok: true } | { error: string }>;
-  // Sends trusted input; throws when the input channel is unavailable.
-  dispatch(commands: CdpCommand[]): Promise<void>;
+  // Sends trusted input, calling `stillPinned` before EACH command and
+  // stopping (false) the moment it answers false — a mousedown or focus
+  // handler can navigate mid-action. Throws when the input channel is
+  // unavailable.
+  dispatch(commands: CdpCommand[], stillPinned: () => boolean): Promise<boolean>;
   wait(ms: number): Promise<void>;
   // DOM change counting in the current document, from the batch's start.
   startObserving(): Promise<void>;
@@ -195,14 +198,16 @@ function selectAllCommands(mac: boolean): CdpCommand[] {
   ];
 }
 
-// Why a located target can't take input, or null when it can.
-function targetProblem(loc: LocateResult, selector: string): string | null {
+// Why a located target can't take input, or null when it can. Typing needs a
+// field a user could type into.
+function targetProblem(loc: LocateResult, selector: string, typing = false): string | null {
   if ('error' in loc) return loc.error;
   if (loc.count === 0) return `no element matches ${selector}`;
   if (loc.count > 1) return `${loc.count} elements match ${selector} — make the selector unique`;
   if (loc.visible !== true || typeof loc.x !== 'number' || typeof loc.y !== 'number') return `${selector} is not visible`;
   if (loc.disabled === true) return `${selector} is disabled`;
   if (loc.covered) return `${selector} is covered by ${loc.covered} — close or scroll it out of the way first`;
+  if (typing && loc.editable !== true) return `${selector} is not a field you can type into (a ${loc.tag ?? 'element'} that is not an enabled, writable text input, textarea or contenteditable)`;
   return null;
 }
 
@@ -244,12 +249,12 @@ export async function runInteract(input: unknown, deps: InteractDeps): Promise<I
         steps.push({ action: label, ok: true, trusted: false });
       } else if ('press' in action) {
         if (!stillPinned()) { fail('the page changed before the action ran'); break; }
-        await deps.dispatch(keyCommands(action.press));
+        if (!(await deps.dispatch(keyCommands(action.press), stillPinned))) { fail('the page changed during the action'); break; }
         steps.push({ action: label, ok: true });
       } else {
         const selector = 'click' in action ? action.click : action.type;
         const loc = await deps.locate(selector);
-        const problem = targetProblem(loc, selector);
+        const problem = targetProblem(loc, selector, 'type' in action);
         if (problem || 'error' in loc) { fail(problem ?? 'unavailable'); break; }
         if (!stillPinned()) { fail('the page changed before the action ran'); break; }
         const commands = clickCommands(loc.x as number, loc.y as number);
@@ -257,7 +262,7 @@ export async function runInteract(input: unknown, deps: InteractDeps): Promise<I
           if (action.clear) commands.push(...selectAllCommands(deps.mac), ...keyCommands('Backspace'));
           if (action.text) commands.push({ method: 'Input.insertText', params: { text: action.text } });
         }
-        await deps.dispatch(commands);
+        if (!(await deps.dispatch(commands, stillPinned))) { fail('the page changed during the action — the rest of its input was not sent'); break; }
         steps.push({ action: label, ok: true });
       }
     } catch {
