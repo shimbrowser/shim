@@ -12,8 +12,8 @@
 //     session's life. Anything that preempts the lease — a sidebar turn, a
 //     delete — ends the session (reason 'preempted'), and the preempter is
 //     granted the lease only once the session has torn down and released.
-//   - One FIFO queue per session. Previews, tool calls and commits run one
-//     at a time, in arrival order.
+//   - One FIFO queue per session. Checkouts, previews, tool calls and
+//     commits run one at a time, in arrival order.
 //   - Revisions. The checkout is revision 0; every preview that applies
 //     gets the next number. A commit names the revision it commits: anything
 //     but the latest applied revision answers 'stale-revision', the revision
@@ -109,6 +109,10 @@ export type BackendPreview =
   | { applied: true; evidence: unknown }
   | { applied: false; evidence: unknown };
 
+export type BackendCheckout =
+  | { ok: true; files: unknown }
+  | { ok: false; error: string; detail?: string };
+
 export type BackendCommit =
   | { ok: true; versionId: VersionId }
   | { ok: false; error: string; detail?: string };
@@ -129,6 +133,10 @@ export interface SessionBackend<H = unknown> {
   // Sets up exactly what an internal turn sets up (the kind's "begin"),
   // under the already-held lease. A throw fails open() with 'begin-failed'.
   begin(args: BeginArgs): Promise<H>;
+  // The session's working copy as files (design D10), as of the latest
+  // applied revision. Optional: a kind without one answers
+  // 'checkout-unavailable'.
+  checkout?(handle: H, signal: AbortSignal): Promise<BackendCheckout>;
   preview(handle: H, input: unknown, signal: AbortSignal): Promise<BackendPreview>;
   call(handle: H, name: string, input: unknown, signal: AbortSignal): Promise<unknown>;
   // Must check `signal` before its (atomic) commit transaction and never
@@ -155,6 +163,7 @@ export interface SessionInfo {
 }
 
 export type OpenResult = { ok: true; sessionId: string } | SessionError;
+export type CheckoutResult = { ok: true; revision: number; files: unknown } | SessionError;
 export type PreviewResult = { ok: true; applied: boolean; revision: number; evidence: unknown } | SessionError;
 export type CallResult = { ok: true; result: unknown } | SessionError;
 export type CommitResult = { ok: true; versionId: VersionId; revision: number } | SessionError;
@@ -190,6 +199,7 @@ export interface SessionRegistryOptions {
 
 export interface SessionRegistry {
   open(req: OpenRequest): Promise<OpenResult>;
+  checkout(sessionId: string): Promise<CheckoutResult>;
   preview(sessionId: string, input: unknown): Promise<PreviewResult>;
   call(sessionId: string, name: string, input: unknown): Promise<CallResult>;
   commit(sessionId: string, req: CommitRequest): Promise<CommitResult>;
@@ -202,7 +212,7 @@ export interface SessionRegistry {
 
 // --- internals --------------------------------------------------------------
 
-type OpResult = PreviewResult | CallResult | CommitResult;
+type OpResult = CheckoutResult | PreviewResult | CallResult | CommitResult;
 
 interface QueuedOp {
   run(signal: AbortSignal): Promise<OpResult>;
@@ -492,6 +502,19 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
     return { ok: true, sessionId };
   }
 
+  // Queued like any op, so the files it answers are exactly the revision it
+  // names — never a preview's half-applied state.
+  async function checkout(sessionId: string): Promise<CheckoutResult> {
+    const s = liveSession(sessionId);
+    if ('ok' in s) return s;
+    return enqueue<CheckoutResult>(s, false, async (signal) => {
+      if (!s.backend.checkout) return { ok: false, error: 'checkout-unavailable', detail: `checking out a ${s.info.kind} session is not available in this build` };
+      const out = await s.backend.checkout(s.handle, signal);
+      if (!out.ok) return { ok: false, error: out.error, ...(out.detail !== undefined ? { detail: out.detail } : {}) };
+      return { ok: true, revision: s.info.revision, files: out.files };
+    });
+  }
+
   async function preview(sessionId: string, input: unknown): Promise<PreviewResult> {
     const s = liveSession(sessionId);
     if ('ok' in s) return s;
@@ -557,6 +580,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
 
   return {
     open,
+    checkout,
     preview,
     call,
     commit,
