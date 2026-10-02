@@ -149,6 +149,12 @@ async function main(): Promise<void> {
   let previewBody: unknown = null;
   let commitAttempts = 0;
   const { deps, sent } = rig(async (req) => {
+    if (req.path === '/tabs') {
+      return ok({ windows: [{ windowId: 1, focused: true, tabs: [
+        { webContentsId: 3, tabId: 1, url: 'https://example.com/', title: 'Example', active: true, kind: 'site' },
+        { webContentsId: null, tabId: 2, url: 'https://gone.example/', title: 'Gone', active: false, kind: 'site' },
+      ] }] });
+    }
     if (req.path === '/sessions' && req.method === 'POST') return ok({ sessionId: 'sess-1' });
     if (req.path === '/sessions/sess-1/checkout') return ok({ revision: 0, files: encodeWorkingCopy(CHECKOUT_FILES) });
     if (req.path === '/sessions/sess-1/preview') {
@@ -169,6 +175,13 @@ async function main(): Promise<void> {
     return refuse(404, 'not-found');
   });
   const client = await connect(deps);
+
+  const listed = firstJson(await call(client, 'shim_list_tabs'));
+  const listedTabs = ((listed.windows as Array<Record<string, unknown>> | undefined)?.[0]?.tabs ?? []) as Array<Record<string, unknown>>;
+  check('list_tabs: tabId is the id a session targets (Shim\'s webContentsId), never Shim\'s own tab id',
+    listedTabs.length === 1 && listedTabs[0]?.tabId === 3 && !('webContentsId' in (listedTabs[0] ?? {})) && listedTabs[0]?.url === 'https://example.com/', JSON.stringify(listed));
+  check('list_tabs: a tab with no live page is left out', !listedTabs.some((t) => t.url === 'https://gone.example/'));
+  sent.length = 0;
 
   const both = await call(client, 'shim_open_session', { tabId: 3, intent: 'x', shimId: 'a', newShimName: 'b' });
   check('naming both shimId and newShimName is refused', both.isError === true && /exactly one/.test(both.content[0]?.text ?? ''));
