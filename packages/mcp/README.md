@@ -42,7 +42,8 @@ Shim's own authoring worker uses, and Shim runs them with the same implementatio
 
 `shim-mcp --headless` (or `SHIM_MCP_MODE=headless`) needs no Shim browser: each session
 opens its own Chromium through Playwright (an optional peer dependency: `npm install
-playwright && npx playwright install chromium`) and works on a `.shim` file instead of a
+playwright && npx playwright install chromium` in your project — the plugin looks there,
+or set `SHIM_PLAYWRIGHT_DIR`) and works on a `.shim` file instead of a
 shim in Shim's library. `--visible` (or `SHIM_HEADLESS_VISIBLE=1`) shows the window.
 
 - `shim_open_session { url, intent, shimFile | newShimName, dir }`: the page to open, and
@@ -86,6 +87,7 @@ claude --plugin-dir packages/mcp
 | `MAX_MCP_OUTPUT_TOKENS` | The tool-result budget results are fitted to (default 25000). |
 | `SHIM_MCP_MODE` | `headless` runs headless mode (same as `--headless`). |
 | `SHIM_HEADLESS_VISIBLE` | `1` shows headless mode's Chromium windows (same as `--visible`). |
+| `SHIM_PLAYWRIGHT_DIR` | A folder whose `node_modules` has Playwright, searched first (then the server's own install, the working directory and `CLAUDE_PROJECT_DIR`). |
 
 ## Build
 

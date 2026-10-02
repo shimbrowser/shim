@@ -11,13 +11,18 @@
 //   - memoryStorage keeps the browser's api.storage semantics, per shim and
 //     origin;
 //   - load failures map to Chromium's net error codes;
-//   - the engine bundle the driver injects is the built page bundle.
+//   - the engine bundle the driver injects is the built page bundle;
+//   - Playwright is found from the caller's install (SHIM_PLAYWRIGHT_DIR,
+//     the working directory, CLAUDE_PROJECT_DIR), not only beside the bundle.
 //
 // The driver itself runs against a real Chromium in
 // playwright-conformance-harness.ts (its own CI job).
 //
 //   node out/packages/mcp/test/headless-host-harness.js
 
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import vm from 'vm';
 import { BUILTIN_KINDS } from '@shimbrowser/core/spec-lint';
 import { coveredCapabilities } from '@shimbrowser/core/page-host-conformance';
@@ -25,7 +30,7 @@ import {
   HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER, memoryStorage, netErrorCode, readEngineBundle,
 } from '../src/playwright-page-host';
 import { pageRuntimeSource } from '../src/headless-page-runtime';
-import { PLAYWRIGHT_MISSING } from '../src/playwright-launch';
+import { PLAYWRIGHT_MISSING, loadPlaywright, playwrightSearchDirs, type RequireFrom } from '../src/playwright-launch';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string): void {
@@ -112,6 +117,37 @@ async function main(): Promise<void> {
 
   console.log('launch');
   check('a missing Playwright install has an actionable message', /npm install playwright/.test(PLAYWRIGHT_MISSING) && /playwright install chromium/.test(PLAYWRIGHT_MISSING));
+
+  console.log('finding Playwright');
+  {
+    const dirs = playwrightSearchDirs({ SHIM_PLAYWRIGHT_DIR: '/pw', CLAUDE_PROJECT_DIR: '/proj' }, '/cwd');
+    check('the search order is explicit dir, own resolution, cwd, project dir', JSON.stringify(dirs) === '["/pw",null,"/cwd","/proj"]', JSON.stringify(dirs));
+    check('duplicates are searched once', JSON.stringify(playwrightSearchDirs({ CLAUDE_PROJECT_DIR: '/cwd/' }, '/cwd')) === '[null,"/cwd"]');
+    // The plugin case: the bundle's own require can't see the project.
+    const tried: Array<string | null> = [];
+    const fake: RequireFrom = (dir) => (id) => {
+      tried.push(dir);
+      if (dir === '/proj' && id === 'playwright') return { chromium: 'from-project' };
+      throw new Error(`Cannot find module '${id}'`);
+    };
+    const found = loadPlaywright({ env: { CLAUDE_PROJECT_DIR: '/proj' }, cwd: '/cwd', requireFrom: fake }) as unknown as { chromium: string };
+    check('an install only the project has is found', found.chromium === 'from-project' && JSON.stringify(tried) === '[null,"/cwd","/proj"]', JSON.stringify(tried));
+    let missing = '';
+    try { loadPlaywright({ env: {}, cwd: '/cwd', requireFrom: fake }); } catch (e) { missing = e instanceof Error ? e.message : String(e); }
+    check('nowhere at all is PLAYWRIGHT_MISSING', missing === PLAYWRIGHT_MISSING);
+    // The real resolver, from a folder outside this repo.
+    const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-pw-'));
+    try {
+      const pkg = path.join(proj, 'node_modules', 'playwright');
+      fs.mkdirSync(pkg, { recursive: true });
+      fs.writeFileSync(path.join(pkg, 'package.json'), '{"name":"playwright","main":"index.js"}');
+      fs.writeFileSync(path.join(pkg, 'index.js'), 'module.exports = { stub: true };');
+      const real = loadPlaywright({ env: { SHIM_PLAYWRIGHT_DIR: proj }, cwd: proj }) as unknown as { stub?: boolean };
+      check('SHIM_PLAYWRIGHT_DIR resolves from that folder\'s node_modules', real.stub === true);
+    } finally {
+      fs.rmSync(proj, { recursive: true, force: true });
+    }
+  }
 
   if (failures) {
     console.error(`\n✗ headless-host: ${failures} check(s) failed`);
