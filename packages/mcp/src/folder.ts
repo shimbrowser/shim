@@ -13,7 +13,10 @@
 //     scatter files through it. It replaces shim.json and handlers/*.js and
 //     removes handler files the checkout no longer has; anything else in the
 //     folder is left alone (and a preview then reports it as unknown).
-//   - Every path written is checked against the folder root.
+//   - Every path written is checked against the folder root, and no
+//     existing file or folder below the root on the way to it may be a
+//     symlink (a crafted or stale folder could otherwise redirect a write
+//     or a removal outside it).
 
 import * as fs from 'fs';
 import * as path from 'path';
@@ -84,6 +87,28 @@ function resolveInside(root: string, rel: string): string {
   return abs;
 }
 
+// Every existing component of `abs` below `root` (and `abs` itself) must be
+// a real file or folder: a symlink there would carry a write or a removal
+// out of the folder that resolveInside only proved lexically. The root is
+// the agent's own choice and may itself sit behind a symlink (/tmp on macOS).
+function refuseSymlinksBelow(root: string, abs: string): void {
+  const rel = path.relative(root, abs);
+  if (!rel) return;
+  let current = root;
+  for (const part of rel.split(path.sep)) {
+    current = path.join(current, part);
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(current);
+    } catch {
+      return; // Doesn't exist yet: nothing below it can either.
+    }
+    if (st.isSymbolicLink()) {
+      throw new FolderError('unsafe-path', `${path.relative(root, current) || current} is a symlink — check out into a folder without links`);
+    }
+  }
+}
+
 function visibleEntries(dir: string): string[] {
   try {
     return fs.readdirSync(dir).filter((n) => !isHidden(n));
@@ -113,9 +138,11 @@ export function writeCheckout(dir: string, files: FolderInput): CheckoutWrite {
   }
   // Validate every path before touching the disk.
   const targets = Object.keys(files).sort().map((rel) => [rel, resolveInside(root, rel)] as const);
+  const handlersDir = path.join(root, HANDLERS_DIR);
+  for (const [, abs] of targets) refuseSymlinksBelow(root, abs);
+  refuseSymlinksBelow(root, handlersDir);
   fs.mkdirSync(root, { recursive: true });
   const removed: string[] = [];
-  const handlersDir = path.join(root, HANDLERS_DIR);
   for (const name of visibleEntries(handlersDir)) {
     const rel = `${HANDLERS_DIR}/${name}`;
     if (!name.endsWith('.js') || rel in files) continue;
