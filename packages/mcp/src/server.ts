@@ -244,7 +244,20 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         current = id;
         const out: Record<string, unknown> = { sessionId: id, ...(typeof opened.artifactId === 'string' ? { shimId: opened.artifactId } : {}) };
         const dir = str(input, 'dir');
-        if (dir) out.checkout = await checkout(id, dir);
+        if (dir) {
+          // The session is open whatever happens to the checkout: a failed
+          // write (a non-empty folder, say) must not read as a failed open,
+          // or the agent opens again and finds its own session holding the
+          // shim (or, for a new shim, makes a second one).
+          try {
+            out.checkout = await checkout(id, dir);
+          } catch (e) {
+            if (e instanceof ToolFailure) out.checkout = { error: e.code, detail: e.detail };
+            else if (e instanceof FolderError) out.checkout = { error: e.code, detail: e.message };
+            else throw e;
+            out.hint = 'The session is open, but the checkout failed: call shim_checkout with an empty folder.';
+          }
+        }
         return [text(out)];
       }
       case 'shim_checkout': {
