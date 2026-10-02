@@ -7,6 +7,10 @@
 //                  shim_commit, shim_end_session
 //   page tools     forwarded as-is to POST /sessions/:id/call — Shim runs
 //                  them with the same implementation its own worker uses
+//   API map tools  forwarded the same way (D13) — Shim asks the user for
+//                  each level of access on its own cards
+//   composition    probe_request, read_calls — forwarded the same way; a
+//   tools          shim session answers them as not offered
 //
 // Two modes, one tool contract (D2): attach (the default) drives the Shim
 // browser over its control endpoint; headless (shim-mcp --headless) drives
@@ -33,10 +37,15 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { encodeWorkingCopy, decodeWorkingCopy, WorkingCopyWireError } from '@shimbrowser/core/working-copy-wire';
 import { isPageToolName } from '@shimbrowser/core/page-tools';
 import * as path from 'path';
+import { isApiMapToolName } from '@shimbrowser/core/api-map-tools';
+import { isCompositionSessionToolName } from '@shimbrowser/core/composition-session-tools';
+import { COMPOSITION_WIRE_LIMITS, SHIM_WIRE_LIMITS } from '@shimbrowser/core/working-copy-wire';
 import { staticTools, isSessionToolName, SERVER_INSTRUCTIONS, HEADLESS_SERVER_INSTRUCTIONS, type SessionToolName } from './contract';
 import { ControlTransportError, type ControlClient, type ControlReply } from './control-client';
 import type { LaunchOutcome } from './launch';
-import { FolderError, readWorkingCopy, writeCheckout } from './folder';
+import {
+  FolderError, readWorkingCopy, readCompositionWorkingCopy, writeCheckout, writeCompositionCheckout, checkoutKind, folderKind, type WorkingCopyKind,
+} from './folder';
 import { toMcpContent, fitToBudget, type McpContent } from './results';
 
 export const SERVER_NAME = 'shim';
@@ -67,6 +76,9 @@ export interface CallToolResult {
 interface SessionState {
   dir: string | null;
   revision: number;
+  // What the session is on; null when this server didn't open it (it is
+  // then read off the checkout or the folder).
+  kind: WorkingCopyKind | null;
   // Headless: the .shim file commits write.
   shimFile?: string;
 }
@@ -99,11 +111,31 @@ const HINTS: Record<string, string> = {
   'commit-denied': 'The user declined the commit in Shim. The session is still open.',
   'commit-timeout': 'Nobody approved the commit in Shim within two minutes. The session is still open.',
   'invalid-target': 'Use a tabId from shim_list_tabs for a tab with a site loaded.',
-  'unknown-artifact': 'Use a shim id from shim_list_tabs, or newShimName to start a new shim.',
+  'target-changed': 'The tab went to another site while the user was deciding; check shim_list_tabs and open the session again.',
+  'unknown-artifact': 'Use a shim id or a compositionId from shim_list_tabs, or newShimName to start a new shim.',
   'requires-shim-browser': 'This needs the Shim browser: it is not available in headless mode. Run shim-mcp without --headless, with Shim running.',
   unsupported: 'Headless mode supports a subset of shim features: remove what is listed, or author this shim in the Shim browser.',
   'page-open-failed': 'Check the url (http or https, reachable from this machine) and try again.',
 };
+
+// What to do about each API map refusal (D13). These come back as a result
+// with ok: false, not a transport error, so the hint rides in the result.
+export const API_MAP_HINTS: Record<string, string> = {
+  'host-not-granted': 'Ask for the site with request_sources; the user answers in Shim.',
+  'no-sources': 'Ask for the sites you need with request_sources first.',
+  'site-names-denied': 'The user declined to share the site list for this session. Ask them which site to use, then request_sources.',
+  'sources-denied': 'The user declined. Do not ask for the same sites again unless they tell you to.',
+  'replay-declined': 'The user declined this replay. Do not retry it unless they ask you to.',
+  'read-only': 'A composition session can only replay GET and HEAD.',
+  'discovery-off': 'Discovery is off in Shim\'s settings; ask the user to turn it on if the shim needs the site\'s API.',
+  'consent-timeout': 'Nobody answered the card in Shim. Ask the user to watch Shim\'s sidebar and try again.',
+};
+
+function withApiMapHint(result: unknown): unknown {
+  if (!isRecord(result) || result.ok !== false || typeof result.error !== 'string') return result;
+  const hint = API_MAP_HINTS[result.error];
+  return hint ? { ...result, hint } : result;
+}
 
 function failureResult(code: string, detail: string): CallToolResult {
   const hint = HINTS[code];
@@ -135,6 +167,28 @@ function replyOrThrow(reply: ControlReply): Record<string, unknown> {
   const code = typeof reply.body.error === 'string' ? reply.body.error : `http-${reply.status}`;
   const detail = typeof reply.body.detail === 'string' ? reply.body.detail : `Shim answered ${reply.status}`;
   throw new ToolFailure(code, detail);
+}
+
+// shim_list_tabs answers each tab's tabId as the id shim_open_session
+// targets: Shim's webContentsId (GET /tabs names it so, beside Shim's own
+// per-window tab number, which no tool takes). The per-window number is left
+// out rather than offered as a second, wrong "tabId".
+export function agentTabs(reply: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(reply.windows)) return reply;
+  return {
+    ...reply,
+    windows: reply.windows.map((w: unknown) => {
+      if (!isRecord(w) || !Array.isArray(w.tabs)) return w;
+      return {
+        ...w,
+        tabs: w.tabs.map((t: unknown) => {
+          if (!isRecord(t)) return t;
+          const { webContentsId, tabId: _perWindow, ...rest } = t;
+          return { tabId: typeof webContentsId === 'number' ? webContentsId : null, ...rest };
+        }),
+      };
+    }),
+  };
 }
 
 export function createShimMcpServer(deps: ShimMcpDeps): Server {
@@ -171,7 +225,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
   function stateOf(id: string): SessionState {
     let s = sessions.get(id);
     if (!s) {
-      s = { dir: null, revision: 0 };
+      s = { dir: null, revision: 0, kind: null };
       sessions.set(id, s);
     }
     return s;
@@ -195,8 +249,10 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       if (e instanceof WorkingCopyWireError) throw new ToolFailure(e.code, e.problems.join('; '));
       throw e;
     }
-    const written = writeCheckout(dir, files);
     const state = stateOf(id);
+    const kind = state.kind ?? checkoutKind(files);
+    state.kind = kind;
+    const written = kind === 'composition' ? writeCompositionCheckout(dir, files) : writeCheckout(dir, files);
     state.dir = written.dir;
     const revision = typeof reply.revision === 'number' ? reply.revision : state.revision;
     state.revision = revision;
@@ -204,8 +260,18 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
   }
 
   async function pageTool(id: string, name: string, input: unknown): Promise<McpContent[]> {
-    const reply = await control('POST', sessionPath(id, 'call'), { name, input: isRecord(input) ? input : {} });
+    // sessionId picks the session here; it is not part of Shim's tool input.
+    const { sessionId: _sessionId, ...toolInput } = isRecord(input) ? input : {};
+    const reply = await control('POST', sessionPath(id, 'call'), { name, input: toolInput });
     return toMcpContent(reply.result);
+  }
+
+  // An API map tool: forwarded like a page tool (sessionId stripped the
+  // same way); a refusal carries its hint.
+  async function apiMapTool(id: string, name: string, input: unknown): Promise<McpContent[]> {
+    const { sessionId: _sessionId, ...toolInput } = isRecord(input) ? input : {};
+    const reply = await control('POST', sessionPath(id, 'call'), { name, input: toolInput });
+    return toMcpContent(withApiMapHint(reply.result));
   }
 
   async function runSessionTool(name: SessionToolName, input: Record<string, unknown>): Promise<McpContent[]> {
@@ -235,16 +301,21 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         return [text({ ok: true, how: outcome.how, detail: outcome.detail, version: outcome.info.appVersion })];
       }
       case 'shim_list_tabs':
-        return [text(await control('GET', '/tabs'))];
+        return [text(agentTabs(await control('GET', '/tabs')))];
       case 'shim_open_session': {
         const intent = typeof input.intent === 'string' ? input.intent : '';
         if (!intent.trim()) throw new ToolFailure('invalid-request', 'intent is required');
         const shimId = str(input, 'shimId');
         const newShimName = str(input, 'newShimName');
+        const compositionId = str(input, 'compositionId');
         const dir = str(input, 'dir');
         const agent = deps.agentName || agentDisplayName(server.getClientVersion()?.name);
+        let kind: WorkingCopyKind;
         let body: Record<string, unknown>;
         if (headless) {
+          if (compositionId !== undefined) {
+            throw new ToolFailure('requires-shim-browser', 'compositions run only in the Shim browser: author them in attach mode');
+          }
           const url = str(input, 'url');
           if (!url) throw new ToolFailure('invalid-request', 'headless mode opens a page by url: pass url (tabId is for the Shim browser)');
           if (shimId !== undefined) {
@@ -257,29 +328,36 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           if (!shimFile) {
             throw new ToolFailure('invalid-request', 'headless mode works on a .shim file: pass shimFile (or newShimName with dir, to create <dir>.shim)');
           }
-          body = { kind: 'shim', target: { url }, agent, intent, shimFile, ...(newShimName !== undefined ? { create: { name: newShimName } } : {}) };
+          kind = 'shim';
+          body = { kind, target: { url }, agent, intent, shimFile, ...(newShimName !== undefined ? { create: { name: newShimName } } : {}) };
         } else {
           const tabId = input.tabId;
-          if (typeof tabId !== 'number' || !Number.isInteger(tabId)) throw new ToolFailure('invalid-request', 'tabId must be a tab id from shim_list_tabs');
-          if ((shimId === undefined) === (newShimName === undefined)) {
-            throw new ToolFailure('invalid-request', 'name exactly one of shimId (an existing shim) or newShimName (a new one)');
+          if (tabId !== undefined && (typeof tabId !== 'number' || !Number.isInteger(tabId))) {
+            throw new ToolFailure('invalid-request', 'tabId must be a tab id from shim_list_tabs');
           }
+          if ([shimId, newShimName, compositionId].filter((v) => v !== undefined).length !== 1) {
+            throw new ToolFailure('invalid-request', 'name exactly one of shimId (an existing shim), newShimName (a new one) or compositionId (a composition)');
+          }
+          kind = compositionId !== undefined ? 'composition' : 'shim';
+          if (kind === 'shim' && tabId === undefined) throw new ToolFailure('invalid-request', 'a shim session needs tabId: a site tab from shim_list_tabs');
           body = {
-            kind: 'shim',
-            target: { webContentsId: tabId },
+            kind,
+            ...(tabId !== undefined ? { target: { webContentsId: tabId } } : {}),
             agent,
             intent,
-            ...(shimId !== undefined ? { artifactId: shimId } : { create: { name: newShimName } }),
+            ...(compositionId !== undefined ? { artifactId: compositionId } : shimId !== undefined ? { artifactId: shimId } : { create: { name: newShimName } }),
           };
         }
         const opened = await control('POST', '/sessions', body);
         const id = typeof opened.sessionId === 'string' ? opened.sessionId : null;
         if (!id) throw new ToolFailure('invalid-reply', 'Shim opened a session but returned no id');
-        sessions.set(id, { dir: null, revision: 0, ...(typeof opened.shimFile === 'string' ? { shimFile: opened.shimFile } : {}) });
+        sessions.set(id, { dir: null, revision: 0, kind, ...(typeof opened.shimFile === 'string' ? { shimFile: opened.shimFile } : {}) });
         current = id;
+        const artifactId = typeof opened.artifactId === 'string' ? opened.artifactId : null;
         const out: Record<string, unknown> = {
           sessionId: id,
-          ...(typeof opened.artifactId === 'string' ? { shimId: opened.artifactId } : {}),
+          kind,
+          ...(artifactId !== null ? (kind === 'composition' ? { compositionId: artifactId } : { shimId: artifactId }) : {}),
           ...(headless ? { mode: 'headless', shimFile: opened.shimFile, url: opened.url } : {}),
           ...(Array.isArray(opened.warnings) ? { warnings: opened.warnings } : {}),
         };
@@ -296,7 +374,8 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         const state = stateOf(id);
         const dir = str(input, 'dir') ?? state.dir;
         if (!dir) throw new ToolFailure('no-working-copy', 'this session has no folder yet: shim_checkout first, or pass dir');
-        const folder = readWorkingCopy(dir);
+        const kind = state.kind ?? folderKind(dir) ?? 'shim';
+        const folder = kind === 'composition' ? readCompositionWorkingCopy(dir, COMPOSITION_WIRE_LIMITS) : readWorkingCopy(dir, SHIM_WIRE_LIMITS);
         const reply = await control('POST', sessionPath(id, 'preview'), { workingCopy: encodeWorkingCopy(folder) });
         if (typeof reply.revision === 'number') state.revision = reply.revision;
         state.dir = dir;
@@ -355,6 +434,8 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       let content: McpContent[];
       if (isSessionToolName(name)) content = await runSessionTool(name, input);
       else if (isPageToolName(name)) content = await pageTool(sessionId(input), name, input);
+      else if (isApiMapToolName(name)) content = await apiMapTool(sessionId(input), name, input);
+      else if (isCompositionSessionToolName(name)) content = await pageTool(sessionId(input), name, input);
       else return failureResult('unknown-tool', `no tool named "${name}"`);
       return { content: fitToBudget(content, deps.maxOutputTokens) };
     } catch (e) {

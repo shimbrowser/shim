@@ -18,6 +18,11 @@ layer that only you see. The site is never modified, and "see original site" alw
 it untouched. The engine that applies shims is
 [`@shimbrowser/core`](../core/README.md).
 
+In the Shim browser the same tools also author **compositions**: small local web apps
+Shim serves at `compose://<mount>`, which read the sites' APIs with your session. A
+composition is a folder of its own files plus a `manifest.json` that declares the hosts it
+reads. Compositions run only in the Shim browser.
+
 > **Status:** pre-release (`0.7.0-dev`). Nothing is published to npm or a plugin
 > marketplace yet; install from a checkout of the repository as described below.
 
@@ -110,7 +115,8 @@ never applied with different behavior.
 
 Tools that need the Shim browser answer `requires-shim-browser` in headless mode:
 `shim_launch`, `shim_list_tabs`, opening a shim from Shim's library, compositions,
-`verify_across_pages` and `interact_page`.
+`verify_across_pages`, `interact_page`, the API map tools, `probe_request` and
+`read_calls`.
 
 ## The loop, tool by tool
 
@@ -143,12 +149,25 @@ Tools that need the Shim browser answer `requires-shim-browser` in headless mode
    instead of committing twice.
 6. **End.** `shim_end_session` discards anything that wasn't committed.
 
+A composition session (attach mode only) opens with `compositionId` instead, and `tabId`
+is optional. It checks out `manifest.json` plus the composition's files, in a flat folder.
+A preview saves the changed files and reloads the composition's page. If the manifest adds
+a host, Shim asks you first. A commit that grants a composition a write to a site waits for
+your approval in Shim. While a session holds a composition, its page's `api.ai` calls are
+refused, so a session never spends your API key.
+
+When the work needs a site's own API, the API map tools (attach mode only) read what Shim
+recorded of it. The agent sees only the sites you grant, and Shim asks you on its own card
+for each level of access.
+
 All tools are registered when the server starts:
 
 | Group | Tools |
 |---|---|
 | Session | `shim_status`, `shim_launch`, `shim_list_tabs`, `shim_open_session`, `shim_checkout`, `shim_preview`, `shim_commit`, `shim_end_session` |
 | Page | `view_page`, `query_page`, `inspect_element`, `evaluate_in_page`, `read_console`, `reload_page`, `verify_across_pages`, `interact_page` (composition sessions only) |
+| API map | `list_discovered_hosts`, `request_sources`, `search_discovered_api`, `inspect_endpoint`, `replay_endpoint` |
+| Composition | `probe_request`, `read_calls` (composition sessions only) |
 
 The page tools are defined in `@shimbrowser/core/page-tools`, the same module Shim's
 built-in authoring uses, and both hosts run them with the same implementation.

@@ -41,6 +41,13 @@ export interface WireLimits {
 /** A shim folder: shim.json plus its handlers, generously bounded. */
 export const SHIM_WIRE_LIMITS: WireLimits = { maxFiles: 500, maxBytes: 8 * 1024 * 1024 };
 
+/**
+ * A composition folder: manifest.json plus at most 200 files and 50MB (the
+ * composition's own bounds, which the host checks exactly), with headroom
+ * for the manifest.
+ */
+export const COMPOSITION_WIRE_LIMITS: WireLimits = { maxFiles: 201, maxBytes: 51 * 1024 * 1024 };
+
 export class WorkingCopyWireError extends Error {
   readonly code = 'malformed-working-copy';
   readonly problems: string[];

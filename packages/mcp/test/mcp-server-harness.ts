@@ -3,8 +3,8 @@
 // the SDK's in-memory transport, and every request the server makes to Shim
 // is recorded and answered by a script.
 //
-// Covers: the static tool list (session tools then the page tools, exactly
-// core's session definitions); shim_status with and without Shim; opening a
+// Covers: the static tool list (session tools, the page tools, then the API
+// map tools — exactly core's session definitions); shim_status with and without Shim; opening a
 // session (the agent name from the MCP client, an existing shim or a new
 // one, refusing both or neither, a checkout into a folder); checkout writes
 // the folder; preview sends the WHOLE folder as a wire working copy (hidden
@@ -12,6 +12,10 @@
 // defaults to the latest revision, carries a commitId, and retries a lost
 // reply once with the SAME id; refusals come back as error results with a
 // hint; page tools forward to /call with images converted to MCP content;
+// API map tools forward the same way and an API map refusal carries its hint;
+// a composition session (open by compositionId with no tab, a flat checkout
+// with its marker, a re-checkout that removes stale files, the composition
+// tools forwarded);
 // a session-ended answer forgets the session; ending a session.
 //
 //   node out/packages/mcp/test/mcp-server-harness.js
@@ -23,6 +27,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { decodeWorkingCopy, encodeWorkingCopy } from '@shimbrowser/core/working-copy-wire';
 import { SESSION_PAGE_TOOLS } from '@shimbrowser/core/page-tools';
+import { SESSION_API_MAP_TOOLS } from '@shimbrowser/core/api-map-tools';
+import { SESSION_COMPOSITION_TOOLS } from '@shimbrowser/core/composition-session-tools';
+import { COMPOSITION_MARKER } from '../src/folder';
 import { createShimMcpServer, agentDisplayName, type ShimMcpDeps } from '../src/server';
 import { SESSION_TOOL_NAMES, SESSION_TOOLS } from '../src/contract';
 import { ControlTransportError, type ControlClient, type ControlReply } from '../src/control-client';
@@ -103,10 +110,28 @@ async function main(): Promise<void> {
     const client = await connect(deps);
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name);
-    check('session tools first, then every page tool', JSON.stringify(names) === JSON.stringify([...SESSION_TOOL_NAMES, ...Object.keys(SESSION_PAGE_TOOLS)]), names.join(','));
+    check('session tools first, then every page tool, the API map tools, then the composition tools',
+      JSON.stringify(names) === JSON.stringify([...SESSION_TOOL_NAMES, ...Object.keys(SESSION_PAGE_TOOLS), ...Object.keys(SESSION_API_MAP_TOOLS), ...Object.keys(SESSION_COMPOSITION_TOOLS)]), names.join(','));
+    const readCalls = tools.find((t) => t.name === 'read_calls');
+    const { sessionId: readCallsSession, ...readCallsCore } = (readCalls?.inputSchema.properties ?? {}) as Record<string, unknown>;
+    check('composition tools are core\'s session definitions', readCalls?.description === SESSION_COMPOSITION_TOOLS.read_calls.description
+      && JSON.stringify(readCallsCore) === JSON.stringify(SESSION_COMPOSITION_TOOLS.read_calls.input_schema.properties));
+    check('every composition tool also takes an optional sessionId', !!readCallsSession && tools.filter((t) => t.name in SESSION_COMPOSITION_TOOLS)
+      .every((t) => 'sessionId' in ((t.inputSchema.properties ?? {}) as Record<string, unknown>) && !(t.inputSchema.required ?? []).includes('sessionId')));
+    const inspect = tools.find((t) => t.name === 'inspect_endpoint');
+    const { sessionId: inspectSession, ...inspectCore } = (inspect?.inputSchema.properties ?? {}) as Record<string, unknown>;
+    check('API map tools are core\'s session definitions', inspect?.description === SESSION_API_MAP_TOOLS.inspect_endpoint.description
+      && JSON.stringify(inspectCore) === JSON.stringify(SESSION_API_MAP_TOOLS.inspect_endpoint.input_schema.properties)
+      && JSON.stringify(inspect?.inputSchema.required) === JSON.stringify(SESSION_API_MAP_TOOLS.inspect_endpoint.input_schema.required));
+    check('every API map tool also takes an optional sessionId', !!inspectSession && tools.filter((t) => t.name in SESSION_API_MAP_TOOLS)
+      .every((t) => 'sessionId' in ((t.inputSchema.properties ?? {}) as Record<string, unknown>) && !(t.inputSchema.required ?? []).includes('sessionId')));
     const view = tools.find((t) => t.name === 'view_page');
+    const viewProps = (view?.inputSchema.properties ?? {}) as Record<string, unknown>;
+    const { sessionId: viewSession, ...viewCore } = viewProps;
     check('page tools are core\'s session definitions', view?.description === SESSION_PAGE_TOOLS.view_page.description
-      && JSON.stringify(view?.inputSchema) === JSON.stringify(SESSION_PAGE_TOOLS.view_page.input_schema));
+      && JSON.stringify(viewCore) === JSON.stringify(SESSION_PAGE_TOOLS.view_page.input_schema.properties));
+    check('every page tool also takes an optional sessionId', !!viewSession && tools.filter((t) => t.name in SESSION_PAGE_TOOLS)
+      .every((t) => 'sessionId' in ((t.inputSchema.properties ?? {}) as Record<string, unknown>) && !(t.inputSchema.required ?? []).includes('sessionId')));
     const open = tools.find((t) => t.name === 'shim_open_session');
     check('session tools carry their schema', JSON.stringify(open?.inputSchema) === JSON.stringify(SESSION_TOOLS.shim_open_session.input_schema));
     check('the server states its instructions', (client.getInstructions() ?? '').includes('shim_preview'));
@@ -140,6 +165,24 @@ async function main(): Promise<void> {
     await client.close();
   }
 
+  console.log('tab ids:');
+  {
+    const { deps, sent } = rig((req) => {
+      if (req.path === '/tabs') return ok({ windows: [{ windowId: 2, tabs: [{ webContentsId: 41, tabId: 3, url: 'https://a.example/' }, { webContentsId: null, tabId: 4, url: 'https://b.example/' }] }] });
+      if (req.path === '/sessions') return ok({ sessionId: 'sess-t' });
+      return refuse(404, 'not-found');
+    });
+    const client = await connect(deps);
+    const listed = firstJson(await call(client, 'shim_list_tabs'));
+    const tabs = ((listed.windows as Array<Record<string, unknown>>)[0]?.tabs ?? []) as Array<Record<string, unknown>>;
+    check('shim_list_tabs answers each tab\'s tabId as the id a session targets (its webContentsId)', tabs[0]?.tabId === 41 && !('webContentsId' in (tabs[0] ?? {}))
+      && tabs[1]?.tabId === null && tabs[0]?.url === 'https://a.example/', JSON.stringify(tabs));
+    await call(client, 'shim_open_session', { tabId: tabs[0]?.tabId, intent: 'x', shimId: 's' });
+    const target = (sent.filter((r) => r.path === '/sessions').pop()?.body as Record<string, unknown> | undefined)?.target;
+    check('…and that tabId is the target shim_open_session sends', JSON.stringify(target) === JSON.stringify({ webContentsId: 41 }), JSON.stringify(target));
+    await client.close();
+  }
+
   console.log('a session, end to end:');
   const dir = path.join(tmpDir(), 'work');
   let previewBody: unknown = null;
@@ -154,6 +197,8 @@ async function main(): Promise<void> {
     if (req.path === '/sessions/sess-1/call') {
       const b = req.body as { name: string; input: Record<string, unknown> };
       if (b.name === 'view_page') return ok({ result: [{ type: 'text', text: `shot ${JSON.stringify(b.input)}` }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG_1x1 } }] });
+      if (b.name === 'inspect_endpoint') return ok({ result: { ok: false, error: 'host-not-granted', detail: 'b.example is not granted' } });
+      if (b.name === 'search_discovered_api') return ok({ result: { ok: true, endpoints: [{ id: 4, host: 'a.example' }] } });
       return ok({ result: JSON.stringify({ candidates: [], name: b.name }) });
     }
     if (req.path === '/sessions/sess-1/commit') {
@@ -206,7 +251,22 @@ async function main(): Promise<void> {
   const page = await call(client, 'query_page', { description: 'promo banner' });
   const callReq = [...sent].reverse().find((s) => s.path === '/sessions/sess-1/call');
   check('a page tool forwards name and input to /call', JSON.stringify(callReq?.body) === JSON.stringify({ name: 'query_page', input: { description: 'promo banner' } }));
+  await call(client, 'inspect_element', { selector: '.banner', sessionId: 'sess-1' });
+  const aimed = [...sent].reverse().find((s) => s.path === '/sessions/sess-1/call');
+  check('a page tool\'s sessionId picks the session and is not forwarded', JSON.stringify(aimed?.body) === JSON.stringify({ name: 'inspect_element', input: { selector: '.banner' } }));
   check('a string result comes back as text', JSON.parse(page.content[0]?.text ?? '{}').name === 'query_page');
+
+  const search = firstJson(await call(client, 'search_discovered_api', { description: 'tracks', host: 'a.example' }));
+  const searchReq = [...sent].reverse().find((s) => s.path === '/sessions/sess-1/call');
+  check('an API map tool forwards name and input to /call', JSON.stringify(searchReq?.body) === JSON.stringify({ name: 'search_discovered_api', input: { description: 'tracks', host: 'a.example' } }));
+  check('its result comes back as JSON text', search.ok === true && Array.isArray(search.endpoints));
+  await call(client, 'search_discovered_api', { description: 'tracks', sessionId: 'sess-1' });
+  const aimedApi = [...sent].reverse().find((s) => s.path === '/sessions/sess-1/call');
+  check('an API map tool\'s sessionId picks the session and is not forwarded', JSON.stringify(aimedApi?.body) === JSON.stringify({ name: 'search_discovered_api', input: { description: 'tracks' } }));
+  const notGranted = await call(client, 'inspect_endpoint', { host: 'b.example', endpointId: 4 });
+  const ng = firstJson(notGranted);
+  check('an API map refusal is a result with its hint, not a transport error', notGranted.isError !== true && ng.error === 'host-not-granted'
+    && typeof ng.hint === 'string' && /request_sources/.test(String(ng.hint)), JSON.stringify(ng));
 
   const committed = firstJson(await call(client, 'shim_commit', { summary: 'Hid the banner.' }));
   const commits = sent.filter((s) => s.path === '/sessions/sess-1/commit').map((s) => s.body as Record<string, unknown>);
@@ -257,6 +317,77 @@ async function main(): Promise<void> {
     const unknown = await call(c3, 'not_a_tool');
     check('an unknown tool is an error result', unknown.isError === true && /unknown-tool/.test(unknown.content[0]?.text ?? ''));
     await c3.close();
+  }
+
+  console.log('a composition session:');
+  {
+    const cdir = path.join(tmpDir(), 'comp');
+    let body: unknown = null;
+    // A composition can hold hidden files of its own (an internal turn may write them).
+    const COMP_FILES: Record<string, string | Uint8Array> = {
+      'manifest.json': '{\n  "format": "composition/1"\n}\n', 'index.html': '<p>hi</p>', 'logo.png': new Uint8Array([137, 80, 78, 71, 255]),
+      '.config.js': 'export default {};', '.well-known/data.json': '{}',
+    };
+    let checkoutFiles = COMP_FILES;
+    const { deps: dc, sent: sc } = rig((req) => {
+      if (req.path === '/sessions') return ok({ sessionId: 'sess-c', artifactId: 'comp-1' });
+      if (req.path === '/sessions/sess-c/checkout') return ok({ revision: 0, files: encodeWorkingCopy(checkoutFiles) });
+      if (req.path === '/sessions/sess-c/preview') { body = req.body; return ok({ applied: true, revision: 1, evidence: { changes: ['write-file app.js'] } }); }
+      if (req.path === '/sessions/sess-c/call') return ok({ result: { scope: 'current', calls: [] } });
+      return refuse(404, 'not-found');
+    });
+    const cc = await connect(dc);
+    const three = await call(cc, 'shim_open_session', { intent: 'x', shimId: 'a', compositionId: 'c' });
+    check('naming a shim and a composition together is refused', three.isError === true && /exactly one/.test(three.content[0]?.text ?? ''));
+    const noTab = await call(cc, 'shim_open_session', { intent: 'x', shimId: 'a' });
+    check('a shim session without tabId is refused', noTab.isError === true && /needs tabId/.test(noTab.content[0]?.text ?? ''));
+    // Headless mode has no compositions: the server refuses before asking its control.
+    const { deps: dh, sent: sh } = rig(() => refuse(500, 'unreached'));
+    const ch = await connect({ ...dh, mode: 'headless' });
+    const headlessComp = await call(ch, 'shim_open_session', { intent: 'x', compositionId: 'comp-1' });
+    check('headless mode refuses a composition session as requires-shim-browser',
+      headlessComp.isError === true && (headlessComp.content[0]?.text ?? '').startsWith('requires-shim-browser') && sh.length === 0, headlessComp.content[0]?.text);
+    fs.mkdirSync(cdir, { recursive: true });
+    fs.writeFileSync(path.join(cdir, 'manifest.json'), '{}');
+    const notOurs = await call(cc, 'shim_open_session', { intent: 'Build a crate view', compositionId: 'comp-1', dir: cdir });
+    check('a folder that merely holds a manifest.json is not a checkout target', notOurs.isError === true && /not-a-working-copy/.test(notOurs.content[0]?.text ?? ''));
+    fs.rmSync(cdir, { recursive: true });
+    const openedC = firstJson(await call(cc, 'shim_open_session', { intent: 'Build a crate view', compositionId: 'comp-1', dir: cdir }));
+    const openC = sc.filter((s) => s.path === '/sessions').pop()?.body as Record<string, unknown> | undefined;
+    check('open sends kind composition, the id, and no target without a tab', openC?.kind === 'composition' && openC.artifactId === 'comp-1' && !('target' in openC), JSON.stringify(openC));
+    check('open answers the composition id', openedC.kind === 'composition' && openedC.compositionId === 'comp-1');
+    check('the checkout writes the files flat, binary intact, with the marker', fs.existsSync(path.join(cdir, 'manifest.json'))
+      && fs.readFileSync(path.join(cdir, 'logo.png')).equals(Buffer.from([137, 80, 78, 71, 255])) && fs.existsSync(path.join(cdir, COMPOSITION_MARKER)));
+    check('the checkout writes the composition\'s hidden files too', fs.readFileSync(path.join(cdir, '.config.js'), 'utf8') === 'export default {};'
+      && fs.existsSync(path.join(cdir, '.well-known', 'data.json')));
+    fs.writeFileSync(path.join(cdir, 'app.js'), 'go();');
+    fs.writeFileSync(path.join(cdir, 'stale.css'), 'x');
+    // Editor and VCS litter, beside and inside a hidden folder the composition has.
+    fs.writeFileSync(path.join(cdir, '.index.html.swp'), 'swap');
+    fs.mkdirSync(path.join(cdir, '.git'));
+    fs.writeFileSync(path.join(cdir, '.git', 'HEAD'), 'ref');
+    fs.writeFileSync(path.join(cdir, '.well-known', '.DS_Store'), 'x');
+    const pc = firstJson(await call(cc, 'shim_preview'));
+    const sentFolder = decodeWorkingCopy((body as { workingCopy?: unknown } | null)?.workingCopy, { maxFiles: 300, maxBytes: 60 * 1024 * 1024 });
+    check('preview sends the folder without the marker', pc.revision === 1 && 'app.js' in sentFolder && !(COMPOSITION_MARKER in sentFolder), JSON.stringify(Object.keys(sentFolder)));
+    check('preview sends the hidden files the checkout wrote, and no other hidden file', sentFolder['.config.js'] === 'export default {};'
+      && '.well-known/data.json' in sentFolder && !('.index.html.swp' in sentFolder) && !('.git/HEAD' in sentFolder) && !('.well-known/.DS_Store' in sentFolder),
+    JSON.stringify(Object.keys(sentFolder)));
+    checkoutFiles = { ...COMP_FILES };
+    delete checkoutFiles['.config.js'];
+    const again = firstJson(await call(cc, 'shim_checkout', { dir: cdir }));
+    const removed = Array.isArray(again.removed) ? (again.removed as string[]).slice().sort() : [];
+    check('a re-checkout removes what the composition no longer has, hidden files it wrote included', JSON.stringify(removed) === JSON.stringify(['.config.js', 'app.js', 'stale.css'])
+      && !fs.existsSync(path.join(cdir, 'app.js')) && !fs.existsSync(path.join(cdir, '.config.js')) && fs.existsSync(path.join(cdir, '.git', 'HEAD')), JSON.stringify(again));
+    checkoutFiles = { ...COMP_FILES, [COMPOSITION_MARKER]: 'mine' };
+    const clash = await call(cc, 'shim_checkout', { dir: cdir });
+    check('a composition holding a file named like the marker is refused, the folder untouched', clash.isError === true
+      && /unsafe-path/.test(clash.content[0]?.text ?? '') && fs.existsSync(path.join(cdir, 'index.html'))
+      && fs.readFileSync(path.join(cdir, COMPOSITION_MARKER), 'utf8').includes('shim-composition-checkout/1'), clash.content[0]?.text);
+    const rc = firstJson(await call(cc, 'read_calls', {}));
+    const rcReq = sc.filter((s) => s.path === '/sessions/sess-c/call').pop();
+    check('a composition tool forwards to /call', JSON.stringify(rcReq?.body) === JSON.stringify({ name: 'read_calls', input: {} }) && rc.scope === 'current');
+    await cc.close();
   }
 
   console.log('agent names:');

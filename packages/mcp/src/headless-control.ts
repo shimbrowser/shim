@@ -21,8 +21,9 @@
 //   - The artifact is a `.shim` file the session loads (if it exists) and
 //     commits to, not a row in Shim's library. Its path is the lease key, so
 //     two sessions can't hold one file.
-//   - Compositions, Shim's tabs, the shim library and the browser-only page
-//     tools answer `requires-shim-browser`.
+//   - Compositions, Shim's tabs, the shim library, the API map, the
+//     composition session tools and the browser-only page tools answer
+//     `requires-shim-browser`.
 
 import * as fs from 'fs';
 import * as path from 'path';
@@ -30,6 +31,8 @@ import { createSessionRegistry, LEASE_TIMEOUT, type SessionLease, type SessionLe
 import { unpackShim, ShimFolderError, type ShimFile } from '@shimbrowser/core/shim-folder';
 import { preflightSpec } from '@shimbrowser/core/capability-preflight';
 import type { Spec } from '@shimbrowser/core/types';
+import { isApiMapToolName } from '@shimbrowser/core/api-map-tools';
+import { isCompositionSessionToolName } from '@shimbrowser/core/composition-session-tools';
 import type { ControlClient, ControlInfo, ControlReply } from './control-client';
 import type { HeadlessStorage } from './playwright-page-host';
 import { HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER } from './playwright-page-host';
@@ -158,6 +161,15 @@ export function loadShimFile(file: string): { ok: true; source: Omit<HeadlessShi
 
 export function defaultStorageFile(shimFile: string): string {
   return `${shimFile}.storage.json`;
+}
+
+// The API map is what the Shim browser recorded of a site's API (D13), and
+// probe_request / read_calls run against a composition: neither exists in a
+// fresh headless Chromium.
+function browserOnlySessionTool(name: string): string | undefined {
+  if (isApiMapToolName(name)) return `${name} reads the API map the Shim browser records; headless mode has none. Author in the Shim browser to use a site's API.`;
+  if (isCompositionSessionToolName(name)) return `${name} works on a composition, and compositions run only in the Shim browser.`;
+  return undefined;
 }
 
 export function createHeadlessControl(options: HeadlessControlOptions): HeadlessControl {
@@ -302,7 +314,7 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
       case 'call': {
         if (m !== 'POST') return refuse('method-not-allowed');
         if (!isRecord(body) || typeof body.name !== 'string' || body.name === '') return refuse('invalid-request', 'name is required');
-        const browserOnly = BROWSER_ONLY_PAGE_TOOLS[body.name];
+        const browserOnly = BROWSER_ONLY_PAGE_TOOLS[body.name] ?? browserOnlySessionTool(body.name);
         if (browserOnly !== undefined) {
           // Still a session call: an unknown or ended session answers that first.
           if (!sessions.get(id)) return reply({ ...(await sessions.call(id, body.name, {})) });

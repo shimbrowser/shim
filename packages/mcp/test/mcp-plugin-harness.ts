@@ -15,6 +15,7 @@ import * as path from 'path';
 import { BUILTIN_KINDS } from '@shimbrowser/core/spec-lint';
 import { packShim } from '@shimbrowser/core/shim-folder';
 import { staticTools } from '../src/contract';
+import { AI_UNAVAILABLE_USER_MESSAGE } from '@shimbrowser/core/composition-session-tools';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string): void {
@@ -86,10 +87,19 @@ for (const member of ['api.cleanup', 'api.storage', 'api.db', 'api.settings', 'a
 check('makes visual verification a duty', /Visual intents require visual verification/.test(skill) && /view_page \{ selector \}/.test(skill));
 check('says previews act on the real site', /Your previews act on the real site/.test(skill));
 check('tells the agent to report partial verification as unverified', /verification: partial/.test(skill) && /unverified/.test(skill));
-for (const internal of ['emit_shim_delta', 'edit-handler', 'read_handler', 'propose_tasks', '# Handler source']) {
+for (const internal of ['emit_shim_delta', 'emit_composition_delta', 'edit-handler', 'read_handler', 'propose_tasks', 'propose_sources', '# Handler source']) {
   check(`no internal-loop vocabulary: ${internal}`, !skill.includes(internal));
 }
 check('never asks the agent to write witnesses', !/"witness"\s*:/.test(skill));
+
+console.log('the composition half:');
+check('documents the composition manifest', skill.includes('"format": "composition/1"') && /`hosts\[\]`/.test(skill) && /`mint`/.test(skill));
+check('documents the flat folder and its bounds', /Flat\./.test(skill) && /200 files and 50 MB/.test(skill));
+for (const member of ['api.fetch(host, path', 'api.storage.get', 'api.settings.get', 'api.db.connection', '/_media/']) {
+  check(`documents window.api's ${member}`, skill.includes(member));
+}
+check('tells the agent to pass the api.ai sentence on once, verbatim', skill.includes(`> ${AI_UNAVAILABLE_USER_MESSAGE}`)
+  && /ai-unavailable-in-external-session/.test(skill) && /Don't repeat it/.test(skill));
 
 console.log('the worked example:');
 const specBlock = /`shim\.json`:\n\n```json\n([\s\S]*?)\n```/.exec(skill)?.[1];

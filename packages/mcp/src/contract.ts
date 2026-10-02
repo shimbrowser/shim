@@ -2,9 +2,13 @@
 // offers, registered once at startup — nothing depends on a mid-session
 // tools/list_changed. The session tools are defined here; the page tools'
 // one definition is @shimbrowser/core/page-tools, the same module Shim's own
-// workers take theirs from.
+// workers take theirs from, the API map tools' is
+// @shimbrowser/core/api-map-tools (D13), and the composition-only tools' is
+// @shimbrowser/core/composition-session-tools.
 
 import { SESSION_PAGE_TOOLS, PAGE_TOOL_NAMES, type ToolDefinition } from '@shimbrowser/core/page-tools';
+import { SESSION_API_MAP_TOOLS, API_MAP_TOOL_NAMES } from '@shimbrowser/core/api-map-tools';
+import { SESSION_COMPOSITION_TOOLS, COMPOSITION_SESSION_TOOL_NAMES } from '@shimbrowser/core/composition-session-tools';
 
 export const SESSION_TOOL_NAMES = [
   'shim_status',
@@ -47,27 +51,31 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
     name: 'shim_list_tabs',
     description:
       "List the Shim browser's open tabs per window: each tab's tabId (what shim_open_session targets), url, " +
-      'title, whether it is the active tab, and for a site tab the shims that run on its host (id and name).',
+      'title, whether it is the active tab, and for a site tab the shims that run on its host (id and name), for ' +
+      'a composition tab its compositionId. Also lists every composition (id, name, mount).',
     input_schema: { type: 'object', properties: {} },
   },
   shim_open_session: {
     name: 'shim_open_session',
     description:
-      "Open an authoring session on one shim against one of Shim's site tabs. The user is asked in Shim to " +
-      'allow it (up to two minutes); this call waits for the answer. Name an existing shim with shimId, or ' +
-      'start a new one on the tab\'s site with newShimName. Pass dir to check the shim out into that folder ' +
-      'right away (same as shim_checkout). While the session is open the shim is yours alone; Shim ends it ' +
-      'after 10 idle minutes, or when the user stops it or starts their own turn on that shim. ' +
+      'Open an authoring session on one shim (against one of Shim\'s site tabs) or one composition. The user is ' +
+      'asked in Shim to allow it (up to two minutes); this call waits for the answer. Name an existing shim with ' +
+      'shimId, start a new one on the tab\'s site with newShimName, or name a composition with compositionId (its ' +
+      'page opens in Shim as the preview; tabId is optional). Pass dir to check the work out into that folder ' +
+      'right away (same as shim_checkout). While the session is open the shim or composition is yours alone; Shim ' +
+      'ends it after 10 idle minutes, or when the user stops it or starts their own turn on it. ' +
       'In headless mode (no Shim browser; shim_status reports mode "headless") pass url instead of tabId: the ' +
       'session opens that page in its own Chromium, with no logins, and works on the .shim file shimFile ' +
-      '(loaded when it exists; with newShimName, created by your first commit — default <dir>.shim).',
+      '(loaded when it exists; with newShimName, created by your first commit — default <dir>.shim). Headless ' +
+      'mode has no compositions.',
     input_schema: {
       type: 'object',
       properties: {
-        tabId: { type: 'number', description: 'The target tab, as shim_list_tabs reports it. Required with the Shim browser.' },
-        intent: { type: 'string', description: 'What you set out to do, in a sentence or two. Shown to the user on the card in Shim and recorded in the shim\'s chat when you commit.' },
+        tabId: { type: 'number', description: 'The target tab, as shim_list_tabs reports it. Required for a shim in the Shim browser; optional for a composition (the window its preview opens in).' },
+        intent: { type: 'string', description: 'What you set out to do, in a sentence or two. Shown to the user on the card in Shim and recorded in the chat when you commit.' },
         shimId: { type: 'string', description: 'An existing shim to work on (shim_list_tabs lists the ones on each tab\'s host).' },
         newShimName: { type: 'string', description: 'Instead of shimId: create a new shim with this name on the tab\'s site. It is kept only if you commit.' },
+        compositionId: { type: 'string', description: 'Instead of a shim: the composition to work on (shim_list_tabs lists them).' },
         dir: { type: 'string', description: 'Optional absolute folder to check the working copy out into once the session opens.' },
         url: { type: 'string', description: 'Headless mode only, instead of tabId: the http(s) page to open.' },
         shimFile: { type: 'string', description: 'Headless mode only, instead of shimId: the absolute path of the .shim file to work on. Commits write it.' },
@@ -78,9 +86,10 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
   shim_checkout: {
     name: 'shim_checkout',
     description:
-      "Write the session's working copy into a folder: shim.json (the spec, handlers referenced by name) and " +
-      'handlers/<name>.js (one handler per file, `module.exports = function …`). The folder must be empty or ' +
-      'an earlier checkout. Edit those files, then shim_preview.',
+      "Write the session's working copy into a folder. A shim: shim.json (the spec, handlers referenced by name) " +
+      'and handlers/<name>.js (one handler per file, `module.exports = function …`). A composition: manifest.json ' +
+      'and every file of the composition, flat. The folder must be empty or an earlier checkout of the same kind. ' +
+      'Edit those files, then shim_preview.',
     input_schema: {
       type: 'object',
       properties: {
@@ -93,12 +102,14 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
   shim_preview: {
     name: 'shim_preview',
     description:
-      'Send the whole working-copy folder to Shim: it is linted, diffed against the session\'s working state, ' +
-      'and applied to the live page at once. Returns the new revision and the evidence: per rule the match ' +
-      'count and the matched element\'s measured box, handler errors with stacks, no-match and quarantine ' +
-      'signals, lint errors and warnings, console errors since the previous preview. Nothing is saved until ' +
-      'shim_commit. A clean preview proves the rules attached, not that the result looks right: for a visual ' +
-      'change, pass screenshot (or call view_page) and judge it before committing.',
+      'Send the whole working-copy folder to Shim: it is validated, diffed against the session\'s working state, ' +
+      'and applied at once. A shim applies to the live page; the evidence is per rule the match count and the ' +
+      'matched element\'s measured box, handler errors with stacks, no-match and quarantine signals, lint errors ' +
+      'and warnings, console errors since the previous preview. A composition\'s files are saved and its page ' +
+      'reloads; the evidence is what changed, lint warnings, and console errors and warnings since the previous ' +
+      'preview (a manifest adding a host asks the user in Shim first, and this call waits). Returns the new ' +
+      'revision. Nothing is kept until shim_commit. A clean preview proves the work applied, not that it looks ' +
+      'right: for a visual change, pass screenshot (or call view_page) and judge it before committing.',
     input_schema: {
       type: 'object',
       properties: {
@@ -112,15 +123,16 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
   shim_commit: {
     name: 'shim_commit',
     description:
-      'Save the previewed work as a new version of the shim. Commits exactly the revision named (default: the ' +
-      'latest preview); if a newer preview applied since, the answer is stale-revision. When the work declares ' +
-      'something sensitive (a redirect target, a remote database connection) the user approves it in Shim ' +
-      'first, and this call waits. A retry with the same commitId returns the first result, never a second ' +
-      'commit. The session stays open: keep previewing and commit again.',
+      'Save the previewed work as a new version of the shim or composition. Commits exactly the revision named ' +
+      '(default: the latest preview); if a newer preview applied since, the answer is stale-revision. When the ' +
+      'work declares something sensitive (a shim\'s redirect target, a composition\'s write to a site, a remote ' +
+      'database connection) the user approves it in Shim first, and this call waits. A retry with the same ' +
+      'commitId returns the first result, never a second commit. The session stays open: keep previewing and ' +
+      'commit again.',
     input_schema: {
       type: 'object',
       properties: {
-        summary: { type: 'string', description: 'What changed and why, in a few sentences. Recorded in the shim\'s chat as your reply to the session\'s intent.' },
+        summary: { type: 'string', description: 'What changed and why, in a few sentences. Recorded in the chat as your reply to the session\'s intent.' },
         revision: { type: 'number', description: 'The revision to commit, as shim_preview returned it. Defaults to the latest preview.' },
         commitId: { type: 'string', description: 'Your id for this commit, for a safe retry. Generated when omitted.' },
         sessionId: SESSION_ID,
@@ -131,17 +143,31 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
   shim_end_session: {
     name: 'shim_end_session',
     description:
-      'End the session. Anything previewed but not committed is discarded and the page returns to the shim as ' +
-      'committed. Note that actions your previews or evaluate_in_page took on the site are not undone.',
+      'End the session. Anything previewed but not committed is discarded: the page returns to the shim as ' +
+      'committed, or the composition\'s files to its last commit. Note that actions your previews or ' +
+      'evaluate_in_page took on a site are not undone.',
     input_schema: { type: 'object', properties: { sessionId: SESSION_ID } },
   },
 };
 
-/** Every tool, in registration order: session tools, then page tools. */
+// A page, API map or composition tool as this server registers it: core's
+// session definition, plus the optional sessionId every session tool takes —
+// so an agent holding two sessions can aim it at either. The server strips it
+// before the call reaches Shim (whose tools never see it).
+function withSessionId(tool: ToolDefinition): ToolDefinition {
+  return {
+    ...tool,
+    input_schema: { ...tool.input_schema, properties: { ...tool.input_schema.properties, sessionId: SESSION_ID } },
+  };
+}
+
+/** Every tool, in registration order: session tools, page tools, the API map tools, then the composition-only tools. */
 export function staticTools(): ToolDefinition[] {
   return [
     ...SESSION_TOOL_NAMES.map((n) => SESSION_TOOLS[n]),
-    ...PAGE_TOOL_NAMES.map((n) => SESSION_PAGE_TOOLS[n]),
+    ...PAGE_TOOL_NAMES.map((n) => withSessionId(SESSION_PAGE_TOOLS[n])),
+    ...API_MAP_TOOL_NAMES.map((n) => withSessionId(SESSION_API_MAP_TOOLS[n])),
+    ...COMPOSITION_SESSION_TOOL_NAMES.map((n) => withSessionId(SESSION_COMPOSITION_TOOLS[n])),
   ];
 }
 
@@ -150,13 +176,18 @@ export function isSessionToolName(name: string): name is SessionToolName {
 }
 
 export const SERVER_INSTRUCTIONS =
-  'Shim is a browser that applies user-authored modifications ("shims") to live websites. These tools author ' +
-  'shims against the running Shim browser: shim_status / shim_launch, shim_list_tabs, shim_open_session on a ' +
-  'site tab (the user allows it in Shim), shim_checkout into a folder, edit shim.json and handlers/*.js, ' +
-  'shim_preview to apply the folder to the live page and read the evidence, the page tools (view_page, ' +
-  'query_page, inspect_element, …) to look, then shim_commit with a summary, and shim_end_session. For a ' +
-  'visual change, verify with a screenshot before committing. The shim-authoring skill documents the spec ' +
-  'format, every mutation kind, anchors and the runtime api.';
+  'Shim is a browser that applies user-authored modifications ("shims") to live websites, and serves ' +
+  '"compositions": small local web apps that read sites\' APIs with the user\'s session. These tools author ' +
+  'both against the running Shim browser: shim_status / shim_launch, shim_list_tabs, shim_open_session on a ' +
+  'site tab (a shim) or a composition (the user allows it in Shim), shim_checkout into a folder, edit the ' +
+  'files (shim.json and handlers/*.js; or manifest.json and the composition\'s files), shim_preview to apply ' +
+  'the folder and read the evidence, the page tools (view_page, query_page, inspect_element, interact_page ' +
+  'for a composition, …) to look, then shim_commit with a summary, and shim_end_session. For a visual change, ' +
+  'verify with a screenshot before committing. When the work needs a site\'s own API, the API map tools ' +
+  '(list_discovered_hosts, request_sources, search_discovered_api, inspect_endpoint, replay_endpoint) read ' +
+  'what Shim recorded of it, per site the user grants; a composition session also has probe_request and ' +
+  'read_calls. The shim-authoring skill documents both formats, every mutation kind, anchors, the runtime ' +
+  'api and window.api.';
 
 export const HEADLESS_SERVER_INSTRUCTIONS =
   'Shim applies user-authored modifications ("shims") to live websites. This server runs in HEADLESS mode: no ' +
@@ -166,5 +197,5 @@ export const HEADLESS_SERVER_INSTRUCTIONS =
   '(view_page, query_page, inspect_element, …) to look, then shim_commit (it writes the .shim file) and ' +
   'shim_end_session. Headless supports a subset of shim features: a preview that declares anything else answers ' +
   '"unsupported" and applies nothing, and a rule reported verification "partial" is unverified — tell the user. ' +
-  'Tools that need the Shim browser answer requires-shim-browser. The shim-authoring skill documents the spec ' +
-  'format, every mutation kind, anchors and the runtime api.';
+  'Compositions, the API map tools and other tools that need the Shim browser answer requires-shim-browser. ' +
+  'The shim-authoring skill documents the spec format, every mutation kind, anchors and the runtime api.';

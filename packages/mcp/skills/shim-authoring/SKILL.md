@@ -1,6 +1,6 @@
 ---
 name: shim-authoring
-description: How to author Shim shims — modifications to a live website, applied by the Shim browser — from Claude Code through the shim MCP tools. Use whenever the user asks to change, hide, restyle, add to or rebuild part of a website in Shim, or to work on an existing shim. Covers the session loop (open, check out, edit the folder, preview, verify, commit), the shim folder format, every mutation kind, anchors, the runtime api handlers get, and the evidence each preview returns.
+description: How to author Shim shims — modifications to a live website, applied by the Shim browser — and Shim compositions — small local web apps over the user's sites — from Claude Code through the shim MCP tools. Use whenever the user asks to change, hide, restyle, add to or rebuild part of a website in Shim, to work on an existing shim, or to build or change a composition. Covers the session loop (open, check out, edit the folder, preview, verify, commit), the shim folder format, every mutation kind, anchors, the runtime api handlers get, the composition manifest, folder and window.api, and the evidence each preview returns.
 ---
 
 # Authoring Shim shims
@@ -15,6 +15,11 @@ across the site's own re-renders and deploys.
 You author a shim by editing it **as a folder** while Shim applies every saved state of the
 folder to the real page, in the user's logged-in tab. The loop is the product: change the
 files, preview, look at what actually happened, fix, and commit only what you verified.
+
+Shim also serves **compositions**: whole pages you write from scratch, which read the
+user's sites through `window.api`. They use the same session loop with a different folder;
+section 9 covers what differs. Section 10 covers headless mode, which runs without the Shim
+browser.
 
 ## 1. The session loop
 
@@ -215,11 +220,51 @@ All of them act on the session's tab.
   visited routes, never a crawl. Use it after a clean preview when the target recurs across
   views ("on every post"). Report honestly: matched → verified there; your rule no-match
   → it does not apply there (likely different markup); unvisited page-types → unverified.
-- `interact_page` is for composition sessions; a shim session answers that it isn't
-  offered.
+- `interact_page` is for composition sessions (section 9); a shim session answers that it
+  isn't offered. So are `probe_request` and `read_calls`.
 
-The API-map tools (the site's recorded API), storage and database inspection are not
-available to sessions in this build.
+### The site's own API: the API map tools
+
+When the user has Discovery on, Shim records the *shape* of the requests a site's own
+pages make — endpoints, query and response schemas, one-line summaries — into a local API
+map. When a shim needs the site's data (a column the list doesn't show, a count, a
+"favorite" action), read the map instead of guessing URLs. Access is the user's to give,
+in two levels, each on a card in Shim (the call waits for the answer):
+
+- **`list_discovered_hosts`** — the *names* of the sites with a recorded map, and which this
+  session may already read. The first call in a session asks the user to share the list;
+  it reveals nothing about any site. Use it when you need to suggest a source; skip it
+  when you already know the site (usually the tab's own host).
+- **`request_sources { hosts, why }`** — asks for the named sites' content (up to 10 per
+  call). Granted sites last for the session; the user can revoke one at any time from
+  Shim, and every later call for it answers `host-not-granted`. The answer lists what was
+  granted and which of those have no recorded map yet (`noApiMap`).
+
+Then, for a granted site only — every call names its `host`:
+
+- **`search_discovered_api { description, host? }`** — natural-language search over the
+  granted sites' endpoints ("track details", "add to favorites"): up to 10 ranked
+  candidates with their `id`, method, path template, summary and sample count. Breadth
+  only.
+- **`inspect_endpoint { host, endpointId | template, method? }`** — the endpoint's
+  inferred query and response schemas (and a GraphQL endpoint's introspected schema).
+  **Schema only** — captured bodies never leave Shim. Read it before writing a handler
+  that calls the endpoint, and take field names from it, never from the summary.
+- **`replay_endpoint { host, endpointId | template, method?, body? }`** — calls the
+  endpoint now, signed in as the user, and answers its status, an item count and whether
+  the response still matches the recorded shape — never the body. GET and HEAD run at
+  once; any other method asks the user first (once per site, method and path) and sends
+  the body last observed from the site unless you pass `body`. It acts on the real site:
+  only replay a write when the shim's job is that write. In a composition session only
+  GET and HEAD replay (`read-only`).
+
+An endpoint id belongs to its site: naming it under another host answers `not-found`.
+Refusals come back as `{ ok: false, error, hint }` — `host-not-granted`, `no-sources`,
+`sources-denied`, `site-names-denied`, `replay-declined`, `consent-timeout`,
+`discovery-off`. Don't re-ask for what the user declined. In the handler, call the
+endpoint with the page's `fetch(url, { credentials: 'include' })` (section 7).
+
+Storage and database inspection are not available to sessions in this build.
 
 ## 5. Mutation kinds
 
@@ -533,7 +578,187 @@ per item in `api.storage`, fetch lazily for what the user interacts with, and ba
 - When the ask is ambiguous ("make this look better"), propose one concrete change and ask
   whether they want something different.
 
-## 9. Headless mode
+## 9. Compositions
+
+A **composition** is a small local web app Shim serves at `compose://<mount>`: your own
+HTML, CSS and JavaScript, which reads the user's sites through `window.api` with their
+signed-in session — a dashboard over two music stores, a budget view over a bank's
+transactions. There is no host page to anchor to: you write the whole page. Everything
+above about the session loop, previews, evidence honesty and visual verification holds;
+this section is what differs.
+
+### The session
+
+1. **Pick the composition.** `shim_list_tabs` lists every composition (`compositions[]`:
+   `id`, `name`, `mount`) and gives an open composition tab its `compositionId`. Creating a
+   new composition isn't a session action: ask the user to create one in Shim first, then
+   open a session on it.
+2. **Open.** `shim_open_session { compositionId, intent, dir }` — `tabId` is optional (the
+   window the preview opens in). The user allows it in Shim; the composition's page opens
+   there as your preview.
+3. **Check out** (with `dir`, or `shim_checkout { dir }`): `manifest.json` plus every file of
+   the composition, flat. Use an empty folder.
+4. **Edit, then `shim_preview`.** Shim validates the folder, saves the changed files onto the
+   composition and reloads its page. If the manifest adds a host (or changes a host's
+   `mint`), the user is asked in Shim first and the preview waits; allowed, the page can
+   read that host at once.
+5. **Look.** `view_page`, `query_page`, `inspect_element`, `interact_page`, `read_console`,
+   `read_calls` (below).
+6. **Commit** with `shim_commit { summary }`: a version of the composition, with your intent
+   and summary in its chat. When the work declares a **write** to a site (an endpoint
+   whose method changes data) or a new remote database connection, the user approves it
+   on a card in Shim first.
+7. **End.** `shim_end_session`: anything previewed after the last commit is rolled back.
+
+### The folder
+
+```
+manifest.json     the composition/1 manifest
+index.html        the entry (the manifest names it)
+app.js            any other files, all at the top level
+style.css
+```
+
+- **Flat.** Top-level files only: a file in a subfolder is refused. Reference files with
+  relative URLs (`<script src="app.js">`).
+- **Bounds.** At most 200 files and 50 MB together, 10 MB per file.
+- **Text files are yours to write** (HTML, CSS, JS, JSON, SVG, text). A binary asset the
+  composition already holds (an image, a font) is checked out too: leave it byte for byte
+  as it is — a session can't add, change or remove one. Draw icons in SVG; show a site's
+  images through the media route (below).
+- Hidden files (`.git`, editor files, the `.shim-composition` marker) are ignored, except
+  the composition's own hidden files that the checkout wrote (a `.well-known/…` file, say):
+  those are part of it, so edit or delete them like any other file. A new hidden file is
+  never sent.
+
+### The manifest
+
+```json
+{
+  "format": "composition/1",
+  "name": "Crate digger",
+  "entry": "index.html",
+  "hosts": [
+    {
+      "host": "api.example-music.com",
+      "endpoints": [
+        { "method": "GET", "path": "/v1/tracks" },
+        { "method": "POST", "path": "/v1/playlists/{id}/tracks" }
+      ]
+    }
+  ],
+  "permissions": ["ai"],
+  "settings": [{ "key": "minBpm", "label": "Lowest tempo", "type": "number", "default": 120 }]
+}
+```
+
+- **`hosts[]`** — every site the page calls. `host` is a canonical lowercase hostname (no
+  port, no IP address). The page can reach a host only when the manifest declares it **and**
+  the user granted it (the preview's card).
+- **`endpoints[]`** — the operations the page makes on that host: `{ method, path }`, with
+  `kind` and `operationName` for a GraphQL / JSON-RPC operation. **Declare every write**
+  (a method that changes data): the commit asks the user to approve each new one, and an
+  undeclared write is refused at runtime. `access: "read"` marks a REST POST that only
+  searches; the user confirms it the first time it runs.
+- **`mint`** — when a host wants a token rather than the session's cookies: `{ "url", ... }`
+  with how to read the token (`tokenPath`, a dot-path into a JSON response, or `token`
+  `{ after, chars, length? }`, the text right after a literal prefix, optionally in a page
+  the mint page links to via `follow` `{ urlAfter, urlHost }`) and where to send it
+  (`header`, with an optional `scheme` such as `"Bearer"`, or `query`). Design one with
+  `probe_request` (the page or script the token is in).
+- **`settings`**, **`permissions`**, **`storage`**, **`connections`** — the same
+  declarations a shim makes (section 7): settings fields (`text | secret | number | boolean
+  | select`), `"permissions": ["ai"]`, local tables, remote databases.
+- The mount (`compose://<mount>`) is not in the manifest: the user chooses it.
+
+### `window.api`
+
+Page code reaches everything outside its own files through `window.api` (`api` below).
+Nothing throws: every call resolves `{ ok: false, error }` on a refusal — render it.
+
+- **`api.fetch(host, path, opts?)`** — `opts`: `method`, `headers`, `body`. Resolves
+  `{ ok, status, text, error? }` (`JSON.parse(res.text)`). It is the page's only network:
+  `fetch`, `XMLHttpRequest` and WebSockets don't exist, and the CSP blocks scripts, styles
+  and images from any other origin — ship every asset as a file. Requests go out with the
+  user's session cookies (or the host's minted token); a redirect is followed only on the
+  same host, over https, for GET / HEAD.
+- **Site media** — audio, video and images from a declared, granted host load through the
+  composition's own origin: `<img src="/_media/<host>/<path>">`
+  (`<audio src="/_media/media.example.com/preview/1.mp3">`). A direct https URL is blocked.
+- **`api.storage.get / set / delete / list`** — a key/value store private to the
+  composition (JSON values; `get` is `null` when unset). Use it instead of `localStorage`.
+- **`api.settings.get(key)` / `getAll()`** — the user's values for the declared fields;
+  handle an unset one with a "configure me" state. Never copy a setting into
+  `localStorage` or cookies.
+- **`api.ai.complete({ prompt | messages, system?, model?, maxTokens? })`** — a model call on
+  the user's own key, with `"permissions": ["ai"]` declared and granted. Resolves
+  `{ ok: true, text }` or `{ ok: false, error }`.
+- **`api.db.query(sql, params?)` / `api.db.run(sql, params?)`** — the composition's own
+  SQLite database (`storage` tables), and **`api.db.connection(name)`** — a declared
+  remote database the user connects in Shim's settings (section 7).
+- The page can't navigate away from its own `compose://` origin: a real click on an
+  http(s) link opens a new tab; scripted navigation and `window.open` elsewhere are
+  blocked.
+
+### While you build it
+
+Shim holds the composition for your session exactly as for its own build:
+
+- **Writes are refused**: `api.storage.set / delete`, `api.db.run`, and any write through
+  `api.fetch` answer `authoring-read-only`. Tables you declare are created only when you
+  commit. Verify everything up to the save; say plainly that the save itself could not be
+  exercised.
+- **Secret settings read `null`**, so the preview shows your unset-value path.
+- **`api.ai` is refused**: every call resolves
+  `{ ok: false, error: "ai-unavailable-in-external-session" }` — Shim never spends the
+  user's key for your session. Make sure the page renders that failure. The preview
+  evidence (or the next tool result) carries an `aiUnavailable` note when the page called
+  it. **The first time, tell the user once, in these words:**
+
+  > Shim can't use your Claude Code subscription, so AI features in this page won't run while Claude Code builds it. Open the composition in Shim (with an API key set) to see them work.
+
+  Don't repeat it.
+
+### The evidence
+
+A composition preview answers `{ revision, applied, evidence }`:
+
+| Field | What it says |
+|---|---|
+| `changes` | what the folder changed: `write-file app.js`, `delete-file old.css`, `set-manifest` |
+| `changed[]`, `noop[]` | the files written, and those already identical |
+| `warnings[]` | lint: an `api.fetch` to an undeclared host, `api.ai` without the permission, a dropped host or changed mint |
+| `notes[]` | the user's answers (a host allowed), declined hosts |
+| `console` | errors and warnings the page logged since the previous preview |
+| `aiUnavailable` | the page called `api.ai` (above) |
+| `pageAway` | the preview tab left the composition: nothing was written — `reload_page`, then preview again |
+
+A refused preview answers `applied: false` with `error` and `problems`:
+`invalid-working-copy` (the manifest, the entry, a subfolder, a binary file, the bounds),
+`reach-denied` / `reach-timeout` (the host card), `malformed-working-copy`.
+
+### The tools
+
+- The page tools act on the composition's preview. `evaluate_in_page` runs in an isolated
+  world over its DOM (the page's own globals and `window.api` are not visible).
+  `verify_across_pages { paths }` loads each of the composition's HTML pages and reports
+  load failures and console errors.
+- **`interact_page { actions }`** — click, type, select or press in the preview with real
+  input (up to 10 actions). Use it to exercise behavior, then check the result with
+  `query_page` / `inspect_element` and `view_page`.
+- **`read_calls { all?, limit? }`** — the requests the page made through `api.fetch`:
+  method, host, path template, status — never a body. By default only calls from
+  documents running your latest code. **A data feature is verified when its call is here
+  with a 2xx status** and the page shows the result (a DOM check plus a screenshot); a
+  call that failed, or none at all, means it isn't working yet.
+- **`probe_request { host, path }`** — one GET of your own through the composition's real
+  fetch path to a declared, granted host, answering the status and up to 20,000 characters
+  of the body. For designing a mint or checking a live response shape; it is never
+  evidence that the page works.
+- The API map tools (section 4) work the same, except `replay_endpoint` runs GET and HEAD
+  only (`read-only`).
+
+## 10. Headless mode
 
 When the server runs as `shim-mcp --headless`, there is no Shim browser: `shim_status`
 reports `mode: "headless"`, and each session opens its own Chromium page (a fresh profile,
@@ -543,7 +768,8 @@ no logins, never Shim's). The loop is the same, with three differences:
   the `.shim` file `shimFile`: an existing one is loaded and its rules run on the page at
   once; with `newShimName` a new shim starts there (default `<dir>.shim`). There are no
   tabs and no shim library, so `shim_list_tabs`, `shim_launch` and `shimId` answer
-  `requires-shim-browser`, and so do `verify_across_pages` and `interact_page`.
+  `requires-shim-browser`, and so do `verify_across_pages`, compositions (section 9) and
+  their tools, and the API map tools (section 4).
 - **`shim_commit` writes the file**: a new version, with its history and what the session
   verified. `api.storage` lives in `<shimFile>.storage.json`. Hand the `.shim` file to the
   user; they import it into Shim.
