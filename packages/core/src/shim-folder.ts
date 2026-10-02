@@ -26,7 +26,7 @@
 
 import type { Spec, Rule, Anchor, Witness } from './types';
 import { sha256Hex } from './sha256';
-import { expressionToModule } from './handler-source';
+import { moduleForExpression } from './handler-source';
 import { lintSpec, canonicalModule, HANDLER_REF_FIELDS } from './spec-lint';
 
 export const SHIM_JSON = 'shim.json';
@@ -192,7 +192,7 @@ export function checkoutShim(input: { spec: Spec; handlers?: Record<string, stri
   }
   for (const rule of spec.rules || []) {
     for (const [name, source] of Object.entries(rule.handlers || {})) {
-      if (typeof source === 'string') modules[name] = expressionToModule(source);
+      if (typeof source === 'string') modules[name] = moduleForExpression(source);
     }
   }
   checkHandlerNames(Object.keys(modules), problems);
@@ -254,7 +254,7 @@ export function unpackShim(fileContent: string | unknown): FolderFiles {
     if (isRecord(ruleValue.handlers)) {
       for (const [name, source] of Object.entries(ruleValue.handlers)) {
         if (typeof source !== 'string') problems.push(`rule "${id}": handlers["${name}"] is not a source string`);
-        else defineModule(modules, name, expressionToModule(source), `rule "${id}"`, problems);
+        else defineModule(modules, name, moduleForExpression(source), `rule "${id}"`, problems);
       }
     }
     const anchor = ruleValue.anchor;

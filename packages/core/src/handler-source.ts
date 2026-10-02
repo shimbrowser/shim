@@ -28,6 +28,11 @@ function exactWrappedExpression(moduleSource: string): string | null {
 
 // `module.exports = <expr>;` — the exact form expressionToModule writes, with
 // the whitespace and trailing semicolon a hand edit might change.
+// The IIFE moduleToExpression wraps a module in: runs it in its own
+// `(module, exports)` scope and evaluates to its `module.exports`.
+const MODULE_IIFE_PREFIX = '(function () {\nvar module = { exports: {} };\n(function (module, exports) {\n';
+const MODULE_IIFE_SUFFIX = '\n})(module, module.exports);\nreturn module.exports;\n})()';
+
 const WRAPPED_EXPRESSION_RE = /^\s*module\.exports\s*=\s*([\s\S]*?)\s*;?\s*$/;
 
 /**
@@ -43,13 +48,22 @@ const WRAPPED_EXPRESSION_RE = /^\s*module\.exports\s*=\s*([\s\S]*?)\s*;?\s*$/;
 export function moduleToExpression(moduleSource: string): string {
   const inner = exactWrappedExpression(moduleSource) ?? WRAPPED_EXPRESSION_RE.exec(moduleSource)?.[1];
   if (inner && syntaxProbe(`(${inner}\n)`).ok) return inner;
-  return '(function () {\n'
-    + 'var module = { exports: {} };\n'
-    + '(function (module, exports) {\n'
-    + `${moduleSource}\n`
-    + '})(module, module.exports);\n'
-    + 'return module.exports;\n'
-    + '})()';
+  return `${MODULE_IIFE_PREFIX}${moduleSource}${MODULE_IIFE_SUFFIX}`;
+}
+
+/**
+ * The module a rule-local expression stands for — moduleToExpression's
+ * inverse. An expression moduleToExpression wrapped as an IIFE gives back the
+ * module it wrapped, byte for byte (so a checkout shows an agent the file it
+ * wrote, not the wrapper); any other expression is expressionToModule's
+ * `module.exports = <expr>;`. Both readings run the same code.
+ */
+export function moduleForExpression(expression: string): string {
+  if (expression.startsWith(MODULE_IIFE_PREFIX) && expression.endsWith(MODULE_IIFE_SUFFIX)
+    && expression.length >= MODULE_IIFE_PREFIX.length + MODULE_IIFE_SUFFIX.length) {
+    return expression.slice(MODULE_IIFE_PREFIX.length, expression.length - MODULE_IIFE_SUFFIX.length);
+  }
+  return expressionToModule(expression);
 }
 
 // Collapse the spec's handler sources into a flat { name: moduleSource }

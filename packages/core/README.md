@@ -16,6 +16,15 @@ package and is split into its own public repo at launch.
   engine as one browser-platform script that defines the global `ShimCore`. The build
   fails if anything in it imports a Node builtin.
 
+- **Authoring pieces.** Not in the page bundle; import them by subpath:
+  - `@shimbrowser/core/spec-lint`: the spec linter (`lintSpec`, `assertNoSpecErrors`).
+  - `@shimbrowser/core/spec-delta`: `applyDelta` and the `DeltaOp` type.
+  - `@shimbrowser/core/shim-folder`: the working-copy folder (`shim.json`,
+    `handlers/<name>.js`, the tool-managed `.shim-state.json`). Exports `checkoutShim`,
+    `unpackShim` and `packShim`.
+  - `@shimbrowser/core/working-copy-diff`: `diffWorkingCopy`, which turns an edited
+    folder into the `DeltaOp`s that reproduce it.
+
 ```sh
 npm run build -w @shimbrowser/core      # dist/: CJS, .d.ts, page bundle
 npm run typecheck -w @shimbrowser/core  # src/ with DOM types only, no Node types

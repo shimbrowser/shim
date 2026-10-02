@@ -14,7 +14,7 @@ import {
   ShimFolderError, SHIM_JSON, SHIM_STATE_FILE,
 } from '../src/shim-folder';
 import type { FolderInput, ShimState, ShimFolderErrorCode } from '../src/shim-folder';
-import { moduleToExpression, expressionToModule } from '../src/handler-source';
+import { moduleToExpression, expressionToModule, moduleForExpression } from '../src/handler-source';
 import type { Spec, Rule, Anchor, Witness } from '../src/types';
 
 let failures = 0;
@@ -174,6 +174,8 @@ const evaluated: unknown = vm.runInNewContext(`(${iife})`);
 check('…that evaluates to the module\'s export', typeof evaluated === 'function');
 const assigned: unknown = vm.runInNewContext(`var module = { exports: {} }; ${expressionToModule(iife)} module.exports`);
 check('…and survives the module wrap the browser compiles', typeof assigned === 'function');
+check('moduleForExpression undoes the IIFE byte for byte', moduleForExpression(iife) === ROUTE_MODULE);
+check('…and wraps any other expression', moduleForExpression(expr) === expressionToModule(expr));
 check('module.exports = a; extra(); is not a bare expression', moduleToExpression('module.exports = a;\nextra();\n').startsWith('(function () {'));
 
 console.log('malformed folders');
