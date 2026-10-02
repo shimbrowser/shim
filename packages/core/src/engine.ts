@@ -180,6 +180,10 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
       let effectiveSpec: RuntimeSpec = specIdOverride ? { ...spec, id: specIdOverride } : spec;
       if (deploy) effectiveSpec = { ...effectiveSpec, bundleHash: deploy.bundleHash, __bundleHashFn: deploy.current };
       api.onReady(() => {
+        // Setup waits for the document. A control torn down meanwhile (a host
+        // letting go of the page, a patch removed mid-load) must not mount it:
+        // nothing would be left to undo it.
+        if (tornDown) return;
         if (ruleKey) {
           const prev = extraTeardowns.get(ruleKey);
           if (prev) {
