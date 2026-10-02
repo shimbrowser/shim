@@ -94,4 +94,25 @@ function computeDeployId(
   return hashUrls([...httpScripts, ...styleUrls.filter(isHttp)]);
 }
 
-export { computeDeployId, sameRegistrableDomain };
+// The deploy identity of a live document: computeDeployId over its
+// `<script src>` and stylesheet links. Every host gates rebase on this one
+// collection (the Shim browser's page-preload and a headless driver's page
+// runtime), so the two can't disagree about what a deploy is. Null on any
+// failure — the gate then reads "no deploy detected".
+function deployIdForDocument(doc: Document): string | null {
+  try {
+    const scriptUrls: string[] = [];
+    for (const s of doc.querySelectorAll<HTMLScriptElement>('script[src]')) {
+      if (s.src) scriptUrls.push(s.src);
+    }
+    const styleUrls: string[] = [];
+    for (const l of doc.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"][href]')) {
+      if (l.href) styleUrls.push(l.href);
+    }
+    return computeDeployId({ scriptUrls, styleUrls, pageHost: doc.location ? doc.location.hostname : '' });
+  } catch (_) {
+    return null;
+  }
+}
+
+export { computeDeployId, deployIdForDocument, sameRegistrableDomain };

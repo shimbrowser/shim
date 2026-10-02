@@ -35,6 +35,13 @@ interface PatchBundle {
   bundleHash?: string | (() => string | null);
 }
 
+// An extra rule's deploy gate: the baseline it was committed under and the
+// page's current deploy identity (computed lazily, at reconcile time).
+interface ExtraRuleDeploy {
+  bundleHash: string;
+  current: () => string | null;
+}
+
 // The control object run() returns to page-preload — lets the sidebar /
 // cross-frame bridge apply live-preview or forwarded rules and tear the whole
 // patch down.
@@ -42,7 +49,11 @@ interface PatchControl {
   // `ruleHandlers` is the rule's own `rule.handlers` already compiled by the
   // host (preview and forwarded rules carry handler source inline). The rule
   // itself stays plain JSON — bridgeRule forwards it to child frames as-is.
-  applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string, ruleHandlers?: HandlerMap): void;
+  // `deploy` puts the extra rule behind the deploy gate (§12): `bundleHash` is
+  // the baseline it was committed under, `current` the page's deploy identity
+  // getter. Without it the rule never sees a deploy (the control's own spec
+  // carries no baseline). PageHost previews of a committed rule pass it.
+  applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string, ruleHandlers?: HandlerMap, deploy?: ExtraRuleDeploy): void;
   removeExtraRule(ruleKey: string): boolean;
   // Preview twin-conflict guard (live-caught: a committed replace-root rule and
   // its own update-rule PREVIEW each hide everything except their own mounted
@@ -165,8 +176,9 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
   const extraTeardowns = new Map<string, () => void>();
 
   return {
-    applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string, extraRuleHandlers?: HandlerMap) {
-      const effectiveSpec: RuntimeSpec = specIdOverride ? { ...spec, id: specIdOverride } : spec;
+    applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string, extraRuleHandlers?: HandlerMap, deploy?: ExtraRuleDeploy) {
+      let effectiveSpec: RuntimeSpec = specIdOverride ? { ...spec, id: specIdOverride } : spec;
+      if (deploy) effectiveSpec = { ...effectiveSpec, bundleHash: deploy.bundleHash, __bundleHashFn: deploy.current };
       api.onReady(() => {
         if (ruleKey) {
           const prev = extraTeardowns.get(ruleKey);
