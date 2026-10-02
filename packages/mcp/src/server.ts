@@ -189,7 +189,9 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
   }
 
   async function pageTool(id: string, name: string, input: unknown): Promise<McpContent[]> {
-    const reply = await control('POST', sessionPath(id, 'call'), { name, input: isRecord(input) ? input : {} });
+    // sessionId picks the session here; it is not part of Shim's tool input.
+    const { sessionId: _sessionId, ...toolInput } = isRecord(input) ? input : {};
+    const reply = await control('POST', sessionPath(id, 'call'), { name, input: toolInput });
     return toMcpContent(reply.result);
   }
 
