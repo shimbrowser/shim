@@ -116,7 +116,7 @@ export interface PlaywrightPageHostOptions {
 
 /** A PageHost over a Playwright page, plus the one thing only a driver needs: letting go of the page. */
 export interface PlaywrightPageHost extends PageHost {
-  /** Stop driving the page: unsubscribe, detach the CDP session. Leaves the page open. */
+  /** Stop driving the page: remove every preview, unsubscribe, detach the CDP session. Leaves the page open. */
   detach(): Promise<void>;
 }
 
@@ -561,9 +561,19 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
       detached = true;
       runtimeListeners.clear();
       consoleListeners.clear();
-      setWorld(null);
+      // Let queued preview work settle first (a step still waiting for the
+      // world gives up now), then tear down every preview the runtime holds:
+      // the page stays open, and a caller reusing it gets it back unmodified.
       for (const w of worldWaiters) w(null);
       worldWaiters = [];
+      await queue;
+      if (worldContextId !== null && !page.isClosed()) {
+        await cdp.send('Runtime.evaluate', {
+          expression: `(() => { const c = globalThis[${JSON.stringify(RUNTIME_GLOBAL)}]; if (c) for (const k of c.previewKeys()) c.remove(k); })()`,
+          contextId: worldContextId,
+        }).catch(() => undefined);
+      }
+      setWorld(null);
       await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: scriptId }).catch(() => undefined);
       await cdp.detach().catch(() => undefined);
     },
