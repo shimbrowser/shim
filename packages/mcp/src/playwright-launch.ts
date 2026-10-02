@@ -129,15 +129,6 @@ export async function openHeadlessPage(options: HeadlessLaunchOptions = {}): Pro
  * a headless session (and `shim preview`) opens: a new Chromium each time,
  * never a persistent profile (invariant 10).
  */
-export async function openLoadedHeadlessPage(url: string, options: Omit<HeadlessLaunchOptions, 'url'> = {}): Promise<HeadlessPage> {
-  const opened = await openHeadlessPage(options);
-  const loaded = opened.host.waitForLoad({ timeoutMs: 30_000 });
-  opened.host.reload(url);
-  const outcome = await loaded;
-  if (outcome.kind !== 'finished') {
-    await opened.close();
-    const why = outcome.kind === 'failed' ? outcome.description : outcome.kind;
-    throw new Error(`${url} did not load (${why})`);
-  }
-  return opened;
+export function openLoadedHeadlessPage(url: string, options: Omit<HeadlessLaunchOptions, 'url'> = {}): Promise<HeadlessPage> {
+  return openHeadlessPage({ ...options, url });
 }
