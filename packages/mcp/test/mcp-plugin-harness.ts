@@ -58,7 +58,8 @@ check('the package ships the plugin, its config, the skills and the bundle',
 check('the bin is the bundle', (pkg.bin as Rec)['shim-mcp'] === `./${built}`);
 
 console.log('the guide:');
-const skill = read('skills/shim-authoring/SKILL.md');
+// Normalized: a Windows checkout (core.autocrlf) has CRLF line endings.
+const skill = read('skills/shim-authoring/SKILL.md').replace(/\r\n/g, '\n');
 const fm = /^---\n([\s\S]*?)\n---\n/.exec(skill);
 const front = fm?.[1] ?? '';
 const name = /^name:\s*(.+)$/m.exec(front)?.[1]?.trim();
