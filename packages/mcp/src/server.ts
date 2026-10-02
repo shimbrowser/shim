@@ -115,6 +115,25 @@ export function agentDisplayName(clientName: string | undefined): string {
   return clientName.slice(0, 200);
 }
 
+// GET /tabs names each tab twice: Shim's own tab id, and the webContentsId
+// a session's target needs. The agent is told one id, `tabId`, and passes it
+// to shim_open_session as the target — so it must be the webContentsId. A
+// tab whose page is gone (no webContentsId) can't be targeted and is left out.
+export function agentTabs(body: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(body.windows)) return body;
+  const windows = (body.windows as unknown[]).map((w) => {
+    if (!isRecord(w) || !Array.isArray(w.tabs)) return w;
+    const tabs = (w.tabs as unknown[]).flatMap((t) => {
+      if (!isRecord(t)) return [];
+      const { webContentsId, tabId: _shimTabId, ...rest } = t;
+      return typeof webContentsId === 'number' ? [{ tabId: webContentsId, ...rest }] : [];
+    });
+    return { ...w, tabs };
+  });
+  const { ok: _ok, ...rest } = body;
+  return { ...rest, windows };
+}
+
 function replyOrThrow(reply: ControlReply): Record<string, unknown> {
   if (reply.body.ok === true) return reply.body;
   const code = typeof reply.body.error === 'string' ? reply.body.error : `http-${reply.status}`;
@@ -218,7 +237,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         return [text({ ok: true, how: outcome.how, detail: outcome.detail, version: outcome.info.appVersion })];
       }
       case 'shim_list_tabs':
-        return [text(await control('GET', '/tabs'))];
+        return [text(agentTabs(await control('GET', '/tabs')))];
       case 'shim_open_session': {
         const tabId = input.tabId;
         if (typeof tabId !== 'number' || !Number.isInteger(tabId)) throw new ToolFailure('invalid-request', 'tabId must be a tab id from shim_list_tabs');
