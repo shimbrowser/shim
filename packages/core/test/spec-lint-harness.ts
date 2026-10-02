@@ -1,13 +1,13 @@
-// Diagnostic harness for the spec linter (src/main/spec-lint.js) — the guard
+// Diagnostic harness for the spec linter (packages/core/src/spec-lint.ts) — the guard
 // that turns hallucinated engine features (a fabricated `cspRelax` directive,
 // an invented mutation kind) from silent no-ops into loud feedback.
 //
-//   node scripts/spec-lint-harness.js
+//   node out/packages/core/test/spec-lint-harness.js
 //
 // Unknown KINDS are errors (reject the emit); unknown FIELDS are warnings
 // (surfaced to the model + chat). Bare node — no db, no Electron.
 
-import { lintSpec, assertNoSpecErrors, observerLoopWarning } from '../src/main/authoring/spec-lint';
+import { lintSpec, assertNoSpecErrors, observerLoopWarning } from '../src/spec-lint';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string) {

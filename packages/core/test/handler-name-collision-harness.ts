@@ -1,4 +1,4 @@
-// Harness for the handler-name collision lint (src/main/authoring/spec-lint.ts).
+// Harness for the handler-name collision lint (packages/core/src/spec-lint.ts).
 //
 // Handlers are authored rule-local (`rule.handlers`), but everything that
 // stores or ships them is keyed by NAME alone: patch_files, the `.shim`
@@ -9,12 +9,12 @@
 // export strips rule-local handlers — the exported file runs the later rule's
 // code for both rules. The lint rejects the collision where it is authored.
 //
-//   node scripts/handler-name-collision-harness.js
+//   node out/packages/core/test/handler-name-collision-harness.js
 //
 // Bare node — no db, no Electron.
 
-import { lintSpec, assertNoSpecErrors } from '../src/main/authoring/spec-lint';
-import { extractHandlers } from '../src/main/shims/internal';
+import { lintSpec, assertNoSpecErrors } from '../src/spec-lint';
+import { extractHandlers } from '../src/handler-source';
 
 let failures = 0;
 function check(label: string, cond: unknown, detail?: string) {

@@ -1,7 +1,8 @@
-// src/main/authoring/capability-refs.ts — source-text scans for capability
+// capability-refs — source-text scans for capability
 // calls in authored code, shared by shim spec-lint (rule handlers) and the
 // composition emit lint (composition script files) so both warn on exactly
-// the same shapes.
+// the same shapes. In @shimbrowser/core with spec-lint; the browser's
+// composition lint imports it from here.
 //
 // Heuristics, not parses: a match inside a comment or string literal is a
 // false positive, and a call with a non-literal argument (a variable, a

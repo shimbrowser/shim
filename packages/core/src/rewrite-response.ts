@@ -90,10 +90,11 @@ export interface CompileAttempt {
 
 // A source-parsing probe, INJECTED by the caller: this module stays
 // vm/Node-free (bare-node testable with zero Electron process), so the
-// actual `new vm.Script(...)` call lives in each real caller instead —
-// spec-lint.ts (authoring/commit-time syntax check) and rewrite-install.ts
-// (document-start install-time filter) each supply their own tiny
-// vm-backed implementation of this callback. That keeps the real
+// actual parse lives with each real caller instead — spec-lint.ts
+// (authoring/commit-time syntax check) passes core's Node-free
+// `syntaxProbe` (syntax-probe.ts) and the browser's rewrite-install.ts
+// (document-start install-time filter) its own vm.Script-backed one; the two
+// give identical diagnostics (syntax-probe-harness). That keeps the real
 // expr-then-module DETECTION ALGORITHM (`detectTransformForm` itself) in
 // exactly one place shared by both, rather than reimplemented per caller.
 export type CompileProbe = (code: string) => CompileAttempt;

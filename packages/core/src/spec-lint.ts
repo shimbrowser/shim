@@ -20,27 +20,22 @@
 // narrows defensively; once a piece of data has been confirmed record-shaped
 // it's read through the real @shimbrowser/core types.
 
-import * as vm from 'vm';
+//
+// Lives in @shimbrowser/core (shim-core design D5: spec-lint is public) so the
+// Shim browser, the MCP server and a headless host all lint with one copy.
+// Node-free like the rest of core: the transform / wrap syntax check uses
+// `syntaxProbe` (syntax-probe.ts), which gives vm.Script's diagnostics
+// without `vm`.
+
 import { referencesApiAi, apiDbConnectionNames } from './capability-refs';
-import type { Spec, Rule, Mutation, AnchorSpec } from '@shimbrowser/core/types';
-import { RESHAPE_ALIGN, RESHAPE_JUSTIFY } from '@shimbrowser/core/layout-kinds';
+import type { Spec, Rule, Mutation, AnchorSpec } from './types';
+import { RESHAPE_ALIGN, RESHAPE_JUSTIFY } from './layout-kinds';
 import {
   validateInjectTree, scanHtmlForActiveContent, INJECT_PLACEMENTS, INJECT_HTML_MAX_CHARS,
-} from '@shimbrowser/core/inject-kinds';
-import { validateRewriteMutation, detectTransformForm } from '@shimbrowser/core/rewrite-response';
-import type { CompileProbe } from '@shimbrowser/core/rewrite-response';
-import { validateInterceptMutation } from '@shimbrowser/core/intercept';
-
-// vm.Script-backed compile probe for `detectTransformForm` — main-process
-// counterpart to rewrite-install.ts's identical-shaped probe (Node/Electron-
-// only, so it can't live in the pure @shimbrowser/core module). Both feed the
-// ONE shared `detectTransformForm` algorithm rather than each hand-rolling
-// their own expr-vs-module detection.
-const vmCompileProbe: CompileProbe = (code) => {
-  try { new vm.Script(code); return { ok: true }; } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
-};
+} from './inject-kinds';
+import { validateRewriteMutation, detectTransformForm } from './rewrite-response';
+import { validateInterceptMutation } from './intercept';
+import { syntaxProbe } from './syntax-probe';
 
 const BUILTIN_KINDS = new Set([
   'hide', 'restyle', 'script', 'remove', 'replace-root', 'mount-route', 'redirect',
@@ -111,7 +106,7 @@ const DISCONNECT_RE = /\.disconnect\s*\(/g;
 
 // Single source of truth for the observer-loop heuristic itself — both the
 // in-spec scan below (rule.handlers, rule-scoped) and the pre-import
-// inspector (src/main/shim-inspect.ts, handler-scoped: `exportToShim` strips
+// inspector (src/main/capabilities/inspect.ts, handler-scoped: `exportToShim` strips
 // `rule.handlers` into a top-level `handlers` map, so a canonically exported
 // `.shim` file has no rule.handlers left for the rule-scoped scan below to
 // find) call this rather than each carrying its own copy of the regex logic.
@@ -122,7 +117,7 @@ const DISCONNECT_RE = /\.disconnect\s*\(/g;
 // so two independently guard-less observers whose only disconnects are two
 // unrelated `api.cleanup` teardown registrations read as "≥2 disconnects,
 // looks safe" and stay silent even though both loop forever — an accepted
-// false-negative, pinned (not fixed) in scripts/spec-lint-harness.ts.
+// false-negative, pinned (not fixed) in packages/core/test/spec-lint-harness.ts.
 function observerLoopWarning(handlerName: string, src: string): string | null {
   if (!OBSERVER_RE.test(src) || !DOM_WRITE_RE.test(src)) return null;
   const disconnects = (src.match(DISCONNECT_RE) || []).length;
@@ -134,7 +129,7 @@ function observerLoopWarning(handlerName: string, src: string): string | null {
     + 'plus register observer.disconnect via api.cleanup.';
 }
 
-interface LintResult {
+export interface LintResult {
   errors: string[];
   warnings: string[];
 }
@@ -350,7 +345,7 @@ const REWRITE_ASYNC_RE = /\basync\b|\bawait\b/;
 const MAIN_WORLD_DOM_RE = /\b(?:document|window)\s*\./;
 
 // `api.db.connection("<name>")` and `api.ai` scans live in
-// capability-refs.ts (shared with the composition emit lint) — same
+// capability-refs.ts (shared with the browser's composition emit lint) — same
 // source-text-heuristic posture, warnings only.
 
 // rewrite-response (§6, docs/2026-08-04-rewrite-response-design.md). Payload
@@ -405,7 +400,7 @@ function lintRewriteMutation(
   // install time — one bad rule's syntax error killed every rewrite rule
   // on the host. Rejecting it here, at emit/commit/import (every path runs
   // `assertNoSpecErrors`), closes that at the source.
-  const syntax = detectTransformForm(source, vmCompileProbe);
+  const syntax = detectTransformForm(source, syntaxProbe);
   if (syntax.form === null) {
     errors.push(`rule "${rid}": transform "${transformName}" does not parse as JavaScript: ${syntax.error}`);
     return;
@@ -475,7 +470,7 @@ function lintInterceptMutation(
     return;
   }
 
-  const syntax = detectTransformForm(source, vmCompileProbe);
+  const syntax = detectTransformForm(source, syntaxProbe);
   if (syntax.form === null) {
     errors.push(`rule "${rid}": wrap "${wrapName}" does not parse as JavaScript: ${syntax.error}`);
     return;
