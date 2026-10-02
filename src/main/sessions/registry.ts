@@ -96,6 +96,21 @@ export interface OpenRequest {
   // The artifact was created for this session (after its attach consent):
   // the backend's finish removes it again when nothing was committed.
   created?: boolean;
+  // The scope the human allowed on the attach card (a shim session's host).
+  // begin refuses a target that no longer shows it — the tab can navigate
+  // while open() waits for the lease.
+  scope?: string;
+}
+
+// A begin that refuses for a reason the agent can act on: answered as its
+// own error code rather than 'begin-failed'.
+export class BeginRefusal extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'BeginRefusal';
+    this.code = code;
+  }
 }
 
 export interface BeginArgs {
@@ -106,6 +121,8 @@ export interface BeginArgs {
   intent: string;
   // See OpenRequest.created.
   created: boolean;
+  // See OpenRequest.scope; null when the caller consented to no scope.
+  scope: string | null;
   // The artifact's 'turn' lease, held for the session's life.
   lease: Lease;
   // Aborts when the session ends, for any reason.
@@ -486,11 +503,12 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
     try {
       handle = await backend.begin({
         sessionId, artifactId: req.artifactId, target: req.target, agent: req.agent, intent: req.intent,
-        created: req.created === true, lease, signal: controller.signal,
+        created: req.created === true, scope: req.scope ?? null, lease, signal: controller.signal,
       });
     } catch (e) {
       lease.signal.removeEventListener('abort', onEarlyAbort);
       lease.release();
+      if (e instanceof BeginRefusal) return { ok: false, error: e.code, detail: e.message };
       return { ok: false, error: 'begin-failed', detail: e instanceof Error ? e.message : String(e) };
     }
     lease.signal.removeEventListener('abort', onEarlyAbort);
