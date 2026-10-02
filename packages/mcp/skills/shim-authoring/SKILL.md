@@ -625,7 +625,10 @@ style.css
   composition already holds (an image, a font) is checked out too: leave it byte for byte
   as it is — a session can't add, change or remove one. Draw icons in SVG; show a site's
   images through the media route (below).
-- Hidden files (`.git`, editor files, the `.shim-composition` marker) are ignored.
+- Hidden files (`.git`, editor files, the `.shim-composition` marker) are ignored, except
+  the composition's own hidden files that the checkout wrote (a `.well-known/…` file, say):
+  those are part of it, so edit or delete them like any other file. A new hidden file is
+  never sent.
 
 ### The manifest
 

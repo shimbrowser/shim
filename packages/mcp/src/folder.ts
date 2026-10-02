@@ -9,7 +9,12 @@
 // Rules:
 //   - Hidden entries (any segment starting with ".") are skipped on read:
 //     editors' and VCS litter, and the tool-managed .shim-state.json, which
-//     an attached host ignores anyway.
+//     an attached host ignores anyway. The one exception: a composition may
+//     hold hidden files of its own (an internal turn can write .config.js or
+//     .well-known/x.json). Its checkout lists the hidden paths it wrote in
+//     the marker file, and a composition read takes exactly those back — so
+//     they round-trip instead of reading as deleted, and editor litter still
+//     never reaches Shim.
 //   - A checkout writes only into an empty folder or an earlier checkout (a
 //     folder holding shim.json), so pointing it at a project directory can't
 //     scatter files through it. It replaces shim.json and handlers/*.js and
@@ -48,8 +53,15 @@ function isHidden(name: string): boolean {
   return name.startsWith('.');
 }
 
-/** Every non-hidden file under `dir`, keyed by forward-slashed relative path. */
-export function readWorkingCopy(dir: string, limits: WireLimits = SHIM_WIRE_LIMITS): FolderInput {
+function hasHiddenSegment(rel: string): boolean {
+  return rel.split('/').some(isHidden);
+}
+
+/**
+ * Every non-hidden file under `dir`, keyed by forward-slashed relative path,
+ * plus the hidden-path files `keepHidden` names (a composition checkout's).
+ */
+export function readWorkingCopy(dir: string, limits: WireLimits = SHIM_WIRE_LIMITS, keepHidden: ReadonlySet<string> = new Set()): FolderInput {
   let st: fs.Stats;
   try {
     st = fs.statSync(dir);
@@ -60,15 +72,23 @@ export function readWorkingCopy(dir: string, limits: WireLimits = SHIM_WIRE_LIMI
   const out: FolderInput = {};
   let count = 0;
   let bytes = 0;
-  const walk = (abs: string, rel: string): void => {
+  const keptDirs = new Set<string>();
+  for (const p of keepHidden) {
+    const parts = p.split('/');
+    for (let i = 1; i < parts.length; i += 1) keptDirs.add(parts.slice(0, i).join('/'));
+  }
+  // `hidden`: the folder being walked is (under) a hidden segment, so only
+  // what keepHidden names is read from it.
+  const walk = (abs: string, rel: string, hidden: boolean): void => {
     for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
-      if (isHidden(entry.name)) continue;
       const childAbs = path.join(abs, entry.name);
       const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      const childHidden = hidden || isHidden(entry.name);
       if (entry.isDirectory()) {
-        walk(childAbs, childRel);
+        if (!childHidden || keptDirs.has(childRel)) walk(childAbs, childRel, childHidden);
         continue;
       }
+      if (childHidden && !keepHidden.has(childRel)) continue;
       // Symlinks and other non-files are not part of a working copy.
       if (!entry.isFile()) continue;
       count += 1;
@@ -83,8 +103,27 @@ export function readWorkingCopy(dir: string, limits: WireLimits = SHIM_WIRE_LIMI
       out[childRel] = new Uint8Array(content.buffer, content.byteOffset, content.byteLength);
     }
   };
-  walk(dir, '');
+  walk(dir, '', false);
   return out;
+}
+
+/** The hidden paths a composition checkout in `dir` wrote (its marker's list). */
+export function checkoutHiddenPaths(dir: string): Set<string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(path.join(dir, COMPOSITION_MARKER), 'utf8'));
+  } catch {
+    return new Set();
+  }
+  const list = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as { hidden?: unknown }).hidden : undefined;
+  if (!Array.isArray(list)) return new Set();
+  return new Set(list.filter((p): p is string => typeof p === 'string' && p !== COMPOSITION_MARKER
+    && hasHiddenSegment(p) && workingCopyPathProblem(p) === null));
+}
+
+/** A composition working copy: every visible file plus the hidden files its checkout wrote. */
+export function readCompositionWorkingCopy(dir: string, limits: WireLimits): FolderInput {
+  return readWorkingCopy(dir, limits, checkoutHiddenPaths(dir));
 }
 
 function resolveInside(root: string, rel: string): string {
@@ -168,6 +207,14 @@ function visibleFilesUnder(root: string): string[] {
   return out;
 }
 
+function isRegularFile(abs: string): boolean {
+  try {
+    return fs.lstatSync(abs).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /** Writes a composition checkout (manifest.json + its files) into `dir`. */
 export function writeCompositionCheckout(dir: string, files: FolderInput): CheckoutWrite {
   const root = path.resolve(dir);
@@ -181,12 +228,18 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
     }
   }
   const targets = Object.keys(files).sort().map((rel) => [rel, resolveInside(root, rel)] as const);
+  // The composition's own hidden files (never the marker: the checkout owns that name).
+  const hidden = Object.keys(files).filter((rel) => rel !== COMPOSITION_MARKER && hasHiddenSegment(rel)).sort();
+  const previousHidden = checkoutHiddenPaths(root);
   fs.mkdirSync(root, { recursive: true });
-  // The folder is the composition: what it no longer has goes.
+  // The folder is the composition: what it no longer has goes — visible
+  // files, and hidden ones an earlier checkout wrote.
   const removed: string[] = [];
-  for (const rel of visibleFilesUnder(root)) {
+  for (const rel of [...visibleFilesUnder(root), ...previousHidden]) {
     if (rel in files) continue;
-    fs.unlinkSync(path.join(root, ...rel.split('/')));
+    const abs = resolveInside(root, rel);
+    if (!isRegularFile(abs)) continue;
+    fs.unlinkSync(abs);
     removed.push(rel);
   }
   const written: string[] = [];
@@ -197,7 +250,7 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
     fs.writeFileSync(abs, content);
     written.push(rel);
   }
-  fs.writeFileSync(path.join(root, COMPOSITION_MARKER), `${JSON.stringify({ format: 'shim-composition-checkout/1' })}\n`);
+  fs.writeFileSync(path.join(root, COMPOSITION_MARKER), `${JSON.stringify({ format: 'shim-composition-checkout/1', hidden })}\n`);
   return { dir: root, written, removed };
 }
 

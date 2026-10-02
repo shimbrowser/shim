@@ -305,10 +305,15 @@ async function main(): Promise<void> {
   {
     const cdir = path.join(tmpDir(), 'comp');
     let body: unknown = null;
-    const COMP_FILES = { 'manifest.json': '{\n  "format": "composition/1"\n}\n', 'index.html': '<p>hi</p>', 'logo.png': new Uint8Array([137, 80, 78, 71, 255]) };
+    // A composition can hold hidden files of its own (an internal turn may write them).
+    const COMP_FILES: Record<string, string | Uint8Array> = {
+      'manifest.json': '{\n  "format": "composition/1"\n}\n', 'index.html': '<p>hi</p>', 'logo.png': new Uint8Array([137, 80, 78, 71, 255]),
+      '.config.js': 'export default {};', '.well-known/data.json': '{}',
+    };
+    let checkoutFiles = COMP_FILES;
     const { deps: dc, sent: sc } = rig((req) => {
       if (req.path === '/sessions') return ok({ sessionId: 'sess-c', artifactId: 'comp-1' });
-      if (req.path === '/sessions/sess-c/checkout') return ok({ revision: 0, files: encodeWorkingCopy(COMP_FILES) });
+      if (req.path === '/sessions/sess-c/checkout') return ok({ revision: 0, files: encodeWorkingCopy(checkoutFiles) });
       if (req.path === '/sessions/sess-c/preview') { body = req.body; return ok({ applied: true, revision: 1, evidence: { changes: ['write-file app.js'] } }); }
       if (req.path === '/sessions/sess-c/call') return ok({ result: { scope: 'current', calls: [] } });
       return refuse(404, 'not-found');
@@ -329,13 +334,27 @@ async function main(): Promise<void> {
     check('open answers the composition id', openedC.kind === 'composition' && openedC.compositionId === 'comp-1');
     check('the checkout writes the files flat, binary intact, with the marker', fs.existsSync(path.join(cdir, 'manifest.json'))
       && fs.readFileSync(path.join(cdir, 'logo.png')).equals(Buffer.from([137, 80, 78, 71, 255])) && fs.existsSync(path.join(cdir, COMPOSITION_MARKER)));
+    check('the checkout writes the composition\'s hidden files too', fs.readFileSync(path.join(cdir, '.config.js'), 'utf8') === 'export default {};'
+      && fs.existsSync(path.join(cdir, '.well-known', 'data.json')));
     fs.writeFileSync(path.join(cdir, 'app.js'), 'go();');
     fs.writeFileSync(path.join(cdir, 'stale.css'), 'x');
+    // Editor and VCS litter, beside and inside a hidden folder the composition has.
+    fs.writeFileSync(path.join(cdir, '.index.html.swp'), 'swap');
+    fs.mkdirSync(path.join(cdir, '.git'));
+    fs.writeFileSync(path.join(cdir, '.git', 'HEAD'), 'ref');
+    fs.writeFileSync(path.join(cdir, '.well-known', '.DS_Store'), 'x');
     const pc = firstJson(await call(cc, 'shim_preview'));
     const sentFolder = decodeWorkingCopy((body as { workingCopy?: unknown } | null)?.workingCopy, { maxFiles: 300, maxBytes: 60 * 1024 * 1024 });
     check('preview sends the folder without the marker', pc.revision === 1 && 'app.js' in sentFolder && !(COMPOSITION_MARKER in sentFolder), JSON.stringify(Object.keys(sentFolder)));
+    check('preview sends the hidden files the checkout wrote, and no other hidden file', sentFolder['.config.js'] === 'export default {};'
+      && '.well-known/data.json' in sentFolder && !('.index.html.swp' in sentFolder) && !('.git/HEAD' in sentFolder) && !('.well-known/.DS_Store' in sentFolder),
+    JSON.stringify(Object.keys(sentFolder)));
+    checkoutFiles = { ...COMP_FILES };
+    delete checkoutFiles['.config.js'];
     const again = firstJson(await call(cc, 'shim_checkout', { dir: cdir }));
-    check('a re-checkout removes what the composition no longer has', JSON.stringify(again.removed) === JSON.stringify(['app.js', 'stale.css']) && !fs.existsSync(path.join(cdir, 'app.js')), JSON.stringify(again));
+    const removed = Array.isArray(again.removed) ? (again.removed as string[]).slice().sort() : [];
+    check('a re-checkout removes what the composition no longer has, hidden files it wrote included', JSON.stringify(removed) === JSON.stringify(['.config.js', 'app.js', 'stale.css'])
+      && !fs.existsSync(path.join(cdir, 'app.js')) && !fs.existsSync(path.join(cdir, '.config.js')) && fs.existsSync(path.join(cdir, '.git', 'HEAD')), JSON.stringify(again));
     const rc = firstJson(await call(cc, 'read_calls', {}));
     const rcReq = sc.filter((s) => s.path === '/sessions/sess-c/call').pop();
     check('a composition tool forwards to /call', JSON.stringify(rcReq?.body) === JSON.stringify({ name: 'read_calls', input: {} }) && rc.scope === 'current');

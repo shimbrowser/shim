@@ -37,7 +37,7 @@ import { staticTools, isSessionToolName, SERVER_INSTRUCTIONS, type SessionToolNa
 import { ControlTransportError, type ControlClient, type ControlReply } from './control-client';
 import type { LaunchOutcome } from './launch';
 import {
-  FolderError, readWorkingCopy, writeCheckout, writeCompositionCheckout, checkoutKind, folderKind, type WorkingCopyKind,
+  FolderError, readWorkingCopy, readCompositionWorkingCopy, writeCheckout, writeCompositionCheckout, checkoutKind, folderKind, type WorkingCopyKind,
 } from './folder';
 import { toMcpContent, fitToBudget, type McpContent } from './results';
 
@@ -310,7 +310,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         const dir = str(input, 'dir') ?? state.dir;
         if (!dir) throw new ToolFailure('no-working-copy', 'this session has no folder yet: shim_checkout first, or pass dir');
         const kind = state.kind ?? folderKind(dir) ?? 'shim';
-        const folder = readWorkingCopy(dir, kind === 'composition' ? COMPOSITION_WIRE_LIMITS : SHIM_WIRE_LIMITS);
+        const folder = kind === 'composition' ? readCompositionWorkingCopy(dir, COMPOSITION_WIRE_LIMITS) : readWorkingCopy(dir, SHIM_WIRE_LIMITS);
         const reply = await control('POST', sessionPath(id, 'preview'), { workingCopy: encodeWorkingCopy(folder) });
         if (typeof reply.revision === 'number') state.revision = reply.revision;
         state.dir = dir;
