@@ -78,8 +78,30 @@ for (const engine of ['postgres', 'mysql', 'mariadb', 'mssql', 'sqlite-remote', 
 for (const tool of staticTools()) {
   check(`documents tool ${tool.name}`, skill.includes(`\`${tool.name}`), tool.name);
 }
-for (const member of ['api.cleanup', 'api.storage', 'api.db', 'api.settings', 'api.fetch', 'api.ai.complete', 'api.onRouteChange', 'api.modules.invoke']) {
+// The guide tells the agent that only the api members it names exist, so
+// every concrete member a handler can reach must be named.
+const API_MEMBERS = [
+  'api.origin', 'api.host', 'api.cleanup',
+  'api.storage', 'api.storage.pack', 'api.storage.global', 'api.shared',
+  'api.db', 'api.db.query', 'api.db.run', 'api.db.connection',
+  'api.settings.get(', 'api.settings.getAll(', 'api.fetch(', 'api.ai.complete(',
+  'api.onRouteChange(', 'api.modules.invoke(',
+];
+for (const member of API_MEMBERS) {
   check(`documents ${member}`, skill.includes(member));
+}
+// In the browser repo, every method of the namespaces the browser's ShimApi
+// declares must be in the list above (skipped once the package lives on its own).
+const apiTypes = path.join(ROOT, '..', '..', 'src', 'preload', 'shim-api-types.ts');
+if (fs.existsSync(apiTypes)) {
+  const source = fs.readFileSync(apiTypes, 'utf8').replace(/\r\n/g, '\n');
+  for (const ns of ['settings', 'ai', 'modules', 'db']) {
+    const block = new RegExp(`\\n  ${ns}\\??: \\{\\n([\\s\\S]*?)\\n  \\}`).exec(source)?.[1];
+    check(`ShimApi declares api.${ns}`, block !== undefined);
+    for (const m of (block ?? '').matchAll(/^ {4}(\w+)\??\s*[(:]/gm)) {
+      check(`the guide names api.${ns}.${m[1]}`, API_MEMBERS.some((a) => a.startsWith(`api.${ns}.${m[1]}`)) && skill.includes(`api.${ns}.${m[1]}`));
+    }
+  }
 }
 check('makes visual verification a duty', /Visual intents require visual verification/.test(skill) && /view_page \{ selector \}/.test(skill));
 check('says previews act on the real site', /Your previews act on the real site/.test(skill));

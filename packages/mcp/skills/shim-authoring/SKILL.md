@@ -468,9 +468,19 @@ Handlers get `api`. Every call that can fail resolves `{ ok: false, error }` ins
 throwing — always branch on it and render a usable state.
 
 - **`api.cleanup(fn)`** — teardown for side effects (section 5).
+- **`api.origin`, `api.host`** — the page's origin and host, as strings.
 - **`api.storage`** — per-shim, per-origin key/value: `get(key)` (null when unset),
   `set(key, value)` (any JSON value), `delete(key)`, `list()`. Use it for small state:
   toggles, "played" flags, a cache of per-item data so each item is fetched at most once.
+  - **`api.storage.pack`** — the same four methods over a bucket every shim in the
+    shim's pack shares. Present only while the shim is in a pack, and absent while
+    previewing: guard `api.storage.pack &&` and treat an empty bucket as normal.
+  - **`api.storage.global`** — on a global shim (one shim running on many sites), the
+    same four methods over a store shared across all its sites. Present only on a
+    global shim: guard `api.storage.global &&`.
+- **`api.shared`** — on a global shim that declares shared functions, those functions,
+  called as `api.shared.<name>(…)` (never destructured). Present only then: guard
+  `api.shared &&`.
 - **`api.db`** — the shim's own SQLite database, for data with real shape (many rows to
   filter, sort, count). Declare tables in `storage`:
 
@@ -502,8 +512,9 @@ throwing — always branch on it and render a usable state.
   in `settings`: `[{ "key": "openaiKey", "label": "OpenAI API key", "type": "secret",
   "required": true }]` (types `text | secret | number | boolean | select`; `select` needs
   `options`; optional `help`, `default`). Read with `await api.settings.get('openaiKey')`
-  — `undefined` until the user fills it in, so render "add your key in Settings". Values
-  never travel with the shim; the schema does.
+  — `undefined` until the user fills it in, so render "add your key in Settings" — or all
+  of them at once with `await api.settings.getAll()` (`{ key: value }` for every declared
+  field). Values never travel with the shim; the schema does.
 - **`api.fetch(url, { method, headers, body })`** — a request from Shim's main process,
   outside the page's CSP and CORS: `{ ok, status, url, headers, text, truncated }` (no
   `.json()` — `JSON.parse(res.text)`). Cookie-less: public content only. For the site's own
