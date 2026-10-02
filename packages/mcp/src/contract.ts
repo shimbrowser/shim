@@ -2,9 +2,11 @@
 // offers, registered once at startup — nothing depends on a mid-session
 // tools/list_changed. The session tools are defined here; the page tools'
 // one definition is @shimbrowser/core/page-tools, the same module Shim's own
-// workers take theirs from.
+// workers take theirs from, and the API map tools' is
+// @shimbrowser/core/api-map-tools (D13).
 
 import { SESSION_PAGE_TOOLS, PAGE_TOOL_NAMES, type ToolDefinition } from '@shimbrowser/core/page-tools';
+import { SESSION_API_MAP_TOOLS, API_MAP_TOOL_NAMES } from '@shimbrowser/core/api-map-tools';
 
 export const SESSION_TOOL_NAMES = [
   'shim_status',
@@ -132,11 +134,12 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
   },
 };
 
-/** Every tool, in registration order: session tools, then page tools. */
+/** Every tool, in registration order: session tools, page tools, then the API map tools. */
 export function staticTools(): ToolDefinition[] {
   return [
     ...SESSION_TOOL_NAMES.map((n) => SESSION_TOOLS[n]),
     ...PAGE_TOOL_NAMES.map((n) => SESSION_PAGE_TOOLS[n]),
+    ...API_MAP_TOOL_NAMES.map((n) => SESSION_API_MAP_TOOLS[n]),
   ];
 }
 
@@ -150,5 +153,7 @@ export const SERVER_INSTRUCTIONS =
   'site tab (the user allows it in Shim), shim_checkout into a folder, edit shim.json and handlers/*.js, ' +
   'shim_preview to apply the folder to the live page and read the evidence, the page tools (view_page, ' +
   'query_page, inspect_element, …) to look, then shim_commit with a summary, and shim_end_session. For a ' +
-  'visual change, verify with a screenshot before committing. The shim-authoring skill documents the spec ' +
-  'format, every mutation kind, anchors and the runtime api.';
+  'visual change, verify with a screenshot before committing. When a shim needs a site\'s own API, the API ' +
+  'map tools (list_discovered_hosts, request_sources, search_discovered_api, inspect_endpoint, ' +
+  'replay_endpoint) read what Shim recorded of it, per site the user grants. The shim-authoring skill ' +
+  'documents the spec format, every mutation kind, anchors and the runtime api.';

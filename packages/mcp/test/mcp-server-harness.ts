@@ -3,8 +3,8 @@
 // the SDK's in-memory transport, and every request the server makes to Shim
 // is recorded and answered by a script.
 //
-// Covers: the static tool list (session tools then the page tools, exactly
-// core's session definitions); shim_status with and without Shim; opening a
+// Covers: the static tool list (session tools, the page tools, then the API
+// map tools — exactly core's session definitions); shim_status with and without Shim; opening a
 // session (the agent name from the MCP client, an existing shim or a new
 // one, refusing both or neither, a checkout into a folder); checkout writes
 // the folder; preview sends the WHOLE folder as a wire working copy (hidden
@@ -12,6 +12,7 @@
 // defaults to the latest revision, carries a commitId, and retries a lost
 // reply once with the SAME id; refusals come back as error results with a
 // hint; page tools forward to /call with images converted to MCP content;
+// API map tools forward the same way and an API map refusal carries its hint;
 // a session-ended answer forgets the session; ending a session.
 //
 //   node out/packages/mcp/test/mcp-server-harness.js
@@ -23,6 +24,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { decodeWorkingCopy, encodeWorkingCopy } from '@shimbrowser/core/working-copy-wire';
 import { SESSION_PAGE_TOOLS } from '@shimbrowser/core/page-tools';
+import { SESSION_API_MAP_TOOLS } from '@shimbrowser/core/api-map-tools';
 import { createShimMcpServer, agentDisplayName, type ShimMcpDeps } from '../src/server';
 import { SESSION_TOOL_NAMES, SESSION_TOOLS } from '../src/contract';
 import { ControlTransportError, type ControlClient, type ControlReply } from '../src/control-client';
@@ -103,7 +105,11 @@ async function main(): Promise<void> {
     const client = await connect(deps);
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name);
-    check('session tools first, then every page tool', JSON.stringify(names) === JSON.stringify([...SESSION_TOOL_NAMES, ...Object.keys(SESSION_PAGE_TOOLS)]), names.join(','));
+    check('session tools first, then every page tool, then the API map tools',
+      JSON.stringify(names) === JSON.stringify([...SESSION_TOOL_NAMES, ...Object.keys(SESSION_PAGE_TOOLS), ...Object.keys(SESSION_API_MAP_TOOLS)]), names.join(','));
+    const inspect = tools.find((t) => t.name === 'inspect_endpoint');
+    check('API map tools are core\'s session definitions', inspect?.description === SESSION_API_MAP_TOOLS.inspect_endpoint.description
+      && JSON.stringify(inspect?.inputSchema) === JSON.stringify(SESSION_API_MAP_TOOLS.inspect_endpoint.input_schema));
     const view = tools.find((t) => t.name === 'view_page');
     check('page tools are core\'s session definitions', view?.description === SESSION_PAGE_TOOLS.view_page.description
       && JSON.stringify(view?.inputSchema) === JSON.stringify(SESSION_PAGE_TOOLS.view_page.input_schema));
@@ -154,6 +160,8 @@ async function main(): Promise<void> {
     if (req.path === '/sessions/sess-1/call') {
       const b = req.body as { name: string; input: Record<string, unknown> };
       if (b.name === 'view_page') return ok({ result: [{ type: 'text', text: `shot ${JSON.stringify(b.input)}` }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG_1x1 } }] });
+      if (b.name === 'inspect_endpoint') return ok({ result: { ok: false, error: 'host-not-granted', detail: 'b.example is not granted' } });
+      if (b.name === 'search_discovered_api') return ok({ result: { ok: true, endpoints: [{ id: 4, host: 'a.example' }] } });
       return ok({ result: JSON.stringify({ candidates: [], name: b.name }) });
     }
     if (req.path === '/sessions/sess-1/commit') {
@@ -207,6 +215,15 @@ async function main(): Promise<void> {
   const callReq = [...sent].reverse().find((s) => s.path === '/sessions/sess-1/call');
   check('a page tool forwards name and input to /call', JSON.stringify(callReq?.body) === JSON.stringify({ name: 'query_page', input: { description: 'promo banner' } }));
   check('a string result comes back as text', JSON.parse(page.content[0]?.text ?? '{}').name === 'query_page');
+
+  const search = firstJson(await call(client, 'search_discovered_api', { description: 'tracks', host: 'a.example' }));
+  const searchReq = [...sent].reverse().find((s) => s.path === '/sessions/sess-1/call');
+  check('an API map tool forwards name and input to /call', JSON.stringify(searchReq?.body) === JSON.stringify({ name: 'search_discovered_api', input: { description: 'tracks', host: 'a.example' } }));
+  check('its result comes back as JSON text', search.ok === true && Array.isArray(search.endpoints));
+  const notGranted = await call(client, 'inspect_endpoint', { host: 'b.example', endpointId: 4 });
+  const ng = firstJson(notGranted);
+  check('an API map refusal is a result with its hint, not a transport error', notGranted.isError !== true && ng.error === 'host-not-granted'
+    && typeof ng.hint === 'string' && /request_sources/.test(String(ng.hint)), JSON.stringify(ng));
 
   const committed = firstJson(await call(client, 'shim_commit', { summary: 'Hid the banner.' }));
   const commits = sent.filter((s) => s.path === '/sessions/sess-1/commit').map((s) => s.body as Record<string, unknown>);

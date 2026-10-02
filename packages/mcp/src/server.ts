@@ -7,6 +7,8 @@
 //                  shim_commit, shim_end_session
 //   page tools     forwarded as-is to POST /sessions/:id/call — Shim runs
 //                  them with the same implementation its own worker uses
+//   API map tools  forwarded the same way (D13) — Shim asks the user for
+//                  each level of access on its own cards
 //
 // The server keeps only what a client needs between calls: which sessions it
 // opened, the folder each was checked out into, and the latest revision a
@@ -26,6 +28,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { encodeWorkingCopy, decodeWorkingCopy, WorkingCopyWireError } from '@shimbrowser/core/working-copy-wire';
 import { isPageToolName } from '@shimbrowser/core/page-tools';
+import { isApiMapToolName } from '@shimbrowser/core/api-map-tools';
 import { staticTools, isSessionToolName, SERVER_INSTRUCTIONS, type SessionToolName } from './contract';
 import { ControlTransportError, type ControlClient, type ControlReply } from './control-client';
 import type { LaunchOutcome } from './launch';
@@ -89,6 +92,25 @@ const HINTS: Record<string, string> = {
   'invalid-target': 'Use a tabId from shim_list_tabs for a tab with a site loaded.',
   'unknown-artifact': 'Use a shim id from shim_list_tabs, or newShimName to start a new shim.',
 };
+
+// What to do about each API map refusal (D13). These come back as a result
+// with ok: false, not a transport error, so the hint rides in the result.
+export const API_MAP_HINTS: Record<string, string> = {
+  'host-not-granted': 'Ask for the site with request_sources; the user answers in Shim.',
+  'no-sources': 'Ask for the sites you need with request_sources first.',
+  'site-names-denied': 'The user declined to share the site list for this session. Ask them which site to use, then request_sources.',
+  'sources-denied': 'The user declined. Do not ask for the same sites again unless they tell you to.',
+  'replay-declined': 'The user declined this replay. Do not retry it unless they ask you to.',
+  'read-only': 'A composition session can only replay GET and HEAD.',
+  'discovery-off': 'Discovery is off in Shim\'s settings; ask the user to turn it on if the shim needs the site\'s API.',
+  'consent-timeout': 'Nobody answered the card in Shim. Ask the user to watch Shim\'s sidebar and try again.',
+};
+
+function withApiMapHint(result: unknown): unknown {
+  if (!isRecord(result) || result.ok !== false || typeof result.error !== 'string') return result;
+  const hint = API_MAP_HINTS[result.error];
+  return hint ? { ...result, hint } : result;
+}
 
 function failureResult(code: string, detail: string): CallToolResult {
   const hint = HINTS[code];
@@ -190,6 +212,12 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
   async function pageTool(id: string, name: string, input: unknown): Promise<McpContent[]> {
     const reply = await control('POST', sessionPath(id, 'call'), { name, input: isRecord(input) ? input : {} });
     return toMcpContent(reply.result);
+  }
+
+  // An API map tool: forwarded like a page tool; a refusal carries its hint.
+  async function apiMapTool(id: string, name: string, input: unknown): Promise<McpContent[]> {
+    const reply = await control('POST', sessionPath(id, 'call'), { name, input: isRecord(input) ? input : {} });
+    return toMcpContent(withApiMapHint(reply.result));
   }
 
   async function runSessionTool(name: SessionToolName, input: Record<string, unknown>): Promise<McpContent[]> {
@@ -308,6 +336,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       let content: McpContent[];
       if (isSessionToolName(name)) content = await runSessionTool(name, input);
       else if (isPageToolName(name)) content = await pageTool(sessionId(input), name, input);
+      else if (isApiMapToolName(name)) content = await apiMapTool(sessionId(input), name, input);
       else return failureResult('unknown-tool', `no tool named "${name}"`);
       return { content: fitToBudget(content, deps.maxOutputTokens) };
     } catch (e) {
