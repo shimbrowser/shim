@@ -176,7 +176,7 @@ async function main(): Promise<void> {
     const listed = firstJson(await call(client, 'shim_list_tabs'));
     const tabs = ((listed.windows as Array<Record<string, unknown>>)[0]?.tabs ?? []) as Array<Record<string, unknown>>;
     check('shim_list_tabs answers each tab\'s tabId as the id a session targets (its webContentsId)', tabs[0]?.tabId === 41 && !('webContentsId' in (tabs[0] ?? {}))
-      && tabs[1]?.tabId === null && tabs[0]?.url === 'https://a.example/', JSON.stringify(tabs));
+      && tabs.length === 1 && tabs[0]?.url === 'https://a.example/', JSON.stringify(tabs));
     await call(client, 'shim_open_session', { tabId: tabs[0]?.tabId, intent: 'x', shimId: 's' });
     const target = (sent.filter((r) => r.path === '/sessions').pop()?.body as Record<string, unknown> | undefined)?.target;
     check('…and that tabId is the target shim_open_session sends', JSON.stringify(target) === JSON.stringify({ webContentsId: 41 }), JSON.stringify(target));
@@ -188,6 +188,12 @@ async function main(): Promise<void> {
   let previewBody: unknown = null;
   let commitAttempts = 0;
   const { deps, sent } = rig(async (req) => {
+    if (req.path === '/tabs') {
+      return ok({ windows: [{ windowId: 1, focused: true, tabs: [
+        { webContentsId: 3, tabId: 1, url: 'https://example.com/', title: 'Example', active: true, kind: 'site' },
+        { webContentsId: null, tabId: 2, url: 'https://gone.example/', title: 'Gone', active: false, kind: 'site' },
+      ] }] });
+    }
     if (req.path === '/sessions' && req.method === 'POST') return ok({ sessionId: 'sess-1' });
     if (req.path === '/sessions/sess-1/checkout') return ok({ revision: 0, files: encodeWorkingCopy(CHECKOUT_FILES) });
     if (req.path === '/sessions/sess-1/preview') {
@@ -210,6 +216,13 @@ async function main(): Promise<void> {
     return refuse(404, 'not-found');
   });
   const client = await connect(deps);
+
+  const listed = firstJson(await call(client, 'shim_list_tabs'));
+  const listedTabs = ((listed.windows as Array<Record<string, unknown>> | undefined)?.[0]?.tabs ?? []) as Array<Record<string, unknown>>;
+  check('list_tabs: tabId is the id a session targets (Shim\'s webContentsId), never Shim\'s own tab id',
+    listedTabs.length === 1 && listedTabs[0]?.tabId === 3 && !('webContentsId' in (listedTabs[0] ?? {})) && listedTabs[0]?.url === 'https://example.com/', JSON.stringify(listed));
+  check('list_tabs: a tab with no live page is left out', !listedTabs.some((t) => t.url === 'https://gone.example/'));
+  sent.length = 0;
 
   const both = await call(client, 'shim_open_session', { tabId: 3, intent: 'x', shimId: 'a', newShimName: 'b' });
   check('naming both shimId and newShimName is refused', both.isError === true && /exactly one/.test(both.content[0]?.text ?? ''));
@@ -295,6 +308,7 @@ async function main(): Promise<void> {
     let n = 0;
     const { deps: d3, sent: s3 } = rig((req) => {
       if (req.path === '/sessions') return ok({ sessionId: 'sess-2' });
+      if (req.path.endsWith('/checkout')) return ok({ revision: 0, files: encodeWorkingCopy(CHECKOUT_FILES) });
       if (req.path.endsWith('/commit')) return refuse(409, 'stale-revision', 'latest applied revision is 4');
       if (req.path.endsWith('/call')) { n += 1; return refuse(410, 'session-ended'); }
       return refuse(404, 'not-found');
@@ -314,6 +328,15 @@ async function main(): Promise<void> {
     check('…and the session is forgotten', again.isError === true && /no-session/.test(again.content[0]?.text ?? '') && n === 1);
     const preview = await call(c3, 'shim_preview', { sessionId: 'sess-2' });
     check('preview with no folder says to check out first', preview.isError === true && /no-working-copy/.test(preview.content[0]?.text ?? ''));
+    const occupied = path.join(tmpDir(), 'occupied');
+    fs.mkdirSync(occupied, { recursive: true });
+    fs.writeFileSync(path.join(occupied, 'README.md'), 'mine');
+    const openedBusy = await call(c3, 'shim_open_session', { tabId: 1, intent: 'x', shimId: 's', dir: occupied });
+    const busy = firstJson(openedBusy);
+    const busyCheckout = busy.checkout as Record<string, unknown> | undefined;
+    check('open whose checkout fails still answers the open session', openedBusy.isError !== true && busy.sessionId === 'sess-2'
+      && busyCheckout?.error === 'not-a-working-copy' && /shim_checkout/.test(String(busy.hint)), JSON.stringify(busy));
+    check('…and leaves the folder alone', fs.readdirSync(occupied).join(',') === 'README.md');
     const unknown = await call(c3, 'not_a_tool');
     check('an unknown tool is an error result', unknown.isError === true && /unknown-tool/.test(unknown.content[0]?.text ?? ''));
     await c3.close();
@@ -344,7 +367,10 @@ async function main(): Promise<void> {
     fs.mkdirSync(cdir, { recursive: true });
     fs.writeFileSync(path.join(cdir, 'manifest.json'), '{}');
     const notOurs = await call(cc, 'shim_open_session', { intent: 'Build a crate view', compositionId: 'comp-1', dir: cdir });
-    check('a folder that merely holds a manifest.json is not a checkout target', notOurs.isError === true && /not-a-working-copy/.test(notOurs.content[0]?.text ?? ''));
+    const notOursOut = firstJson(notOurs);
+    check('a folder that merely holds a manifest.json is not a checkout target (the session still opens)', notOurs.isError !== true
+      && (notOursOut.checkout as Record<string, unknown> | undefined)?.error === 'not-a-working-copy'
+      && fs.readdirSync(cdir).join(',') === 'manifest.json', JSON.stringify(notOursOut));
     fs.rmSync(cdir, { recursive: true });
     const openedC = firstJson(await call(cc, 'shim_open_session', { intent: 'Build a crate view', compositionId: 'comp-1', dir: cdir }));
     const openC = sc.filter((s) => s.path === '/sessions').pop()?.body as Record<string, unknown> | undefined;

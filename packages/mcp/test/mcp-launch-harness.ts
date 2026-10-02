@@ -12,7 +12,18 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { attachOrLaunch, launchCommand, pidAlive, CONTROL_ENDPOINT_FLAG, type LaunchCommand, type LaunchDeps, type LaunchExit } from '../src/launch';
-import { discoveryFilePath, readControlInfo, userDataDir, type ControlInfo } from '../src/control-client';
+import { APP_DIR_NAME, discoveryFilePath, readControlInfo, userDataDir, type ControlInfo } from '../src/control-client';
+
+// The Shim app's package.json (the repo root), found from wherever this compiled file runs.
+function appPackageJson(): string {
+  let dir = __dirname;
+  for (let i = 0; i < 8; i += 1) {
+    const candidate = path.join(dir, 'package.json');
+    if (fs.existsSync(candidate) && fs.existsSync(path.join(dir, 'packages', 'mcp'))) return candidate;
+    dir = path.dirname(dir);
+  }
+  throw new Error('the app package.json was not found above ' + __dirname);
+}
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string): void {
@@ -64,10 +75,13 @@ function sim(opts: {
 
 async function main(): Promise<void> {
   console.log('discovery file:');
-  check('macOS userData', userDataDir({ platform: 'darwin', env: {}, homedir: '/Users/j' }) === '/Users/j/Library/Application Support/shim');
-  check('Linux userData honors XDG_CONFIG_HOME', userDataDir({ platform: 'linux', env: { XDG_CONFIG_HOME: '/x' }, homedir: '/h' }) === '/x/shim');
-  check('Linux userData default', userDataDir({ platform: 'linux', env: {}, homedir: '/h' }) === '/h/.config/shim');
-  check('Windows userData under APPDATA', userDataDir({ platform: 'win32', env: { APPDATA: 'C:\\A' }, homedir: 'C:\\h' }).endsWith('shim'));
+  // Electron names userData after productName (before name): pin the folder to the app's.
+  const appPkg = JSON.parse(fs.readFileSync(appPackageJson(), 'utf8')) as { name?: string; productName?: string };
+  check('the userData folder is the app\'s productName', APP_DIR_NAME === (appPkg.productName ?? appPkg.name), `${APP_DIR_NAME} vs ${String(appPkg.productName)}`);
+  check('macOS userData', userDataDir({ platform: 'darwin', env: {}, homedir: '/Users/j' }) === '/Users/j/Library/Application Support/Shim');
+  check('Linux userData honors XDG_CONFIG_HOME', userDataDir({ platform: 'linux', env: { XDG_CONFIG_HOME: '/x' }, homedir: '/h' }) === '/x/Shim');
+  check('Linux userData default (case-sensitive: Shim)', userDataDir({ platform: 'linux', env: {}, homedir: '/h' }) === '/h/.config/Shim');
+  check('Windows userData under APPDATA', userDataDir({ platform: 'win32', env: { APPDATA: 'C:\\A' }, homedir: 'C:\\h' }).endsWith('Shim'));
   check('SHIM_USER_DATA overrides', discoveryFilePath({ platform: 'darwin', env: { SHIM_USER_DATA: '/dev-profile' }, homedir: '/h' }) === path.join('/dev-profile', 'control.json'));
   check('SHIM_CONTROL_FILE overrides everything', discoveryFilePath({ platform: 'darwin', env: { SHIM_CONTROL_FILE: '/c.json', SHIM_USER_DATA: '/d' }, homedir: '/h' }) === '/c.json');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-launch-'));
