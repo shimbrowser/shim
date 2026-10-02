@@ -163,6 +163,9 @@ async function main(): Promise<void> {
     check('undefined stores as null, like the browser', (await a.get(scope, 'u')) === null && 'u' in (await a.list(scope)));
     await a.set(scope, '__proto__', 7);
     check('"__proto__" is a plain key', (await a.get(scope, '__proto__')) === 7 && Object.getPrototypeOf(await a.list(scope)) === Object.prototype);
+    const listed = await a.list(scope);
+    check('…and list answers it as an own key', Object.prototype.hasOwnProperty.call(listed, '__proto__')
+      && JSON.stringify(listed).includes('"__proto__":7'), JSON.stringify(listed));
     check('buckets are per shim and per origin', (await a.get({ patchId: 'q', origin: scope.origin }, 'k')) === null
       && (await a.get({ patchId: 'p', origin: 'https://b.test' }, 'k')) === null);
     check('delete answers whether a key went away', (await a.delete(scope, 'k')) === true && (await a.delete(scope, 'k')) === false);
