@@ -336,6 +336,10 @@ async function main(): Promise<void> {
     check('…and re-applies every live preview', reloaded.reapplied === 5 && host.applied.length === liveBefore + 5, reloaded);
 
     // Commit.
+    host.setUrl('https://elsewhere.test/');
+    const awayCommit = await req(r, 'POST', `/sessions/${id}/commit`, { revision: 1, commitId: 'one', summary: 'Restyled rows; added two rules.' });
+    check('a commit refuses once the page left the site, writing nothing', awayCommit.error === 'page-away' && r.writes.length === 0, awayCommit);
+    host.setUrl(url);
     const c1 = await req(r, 'POST', `/sessions/${id}/commit`, { revision: 1, commitId: 'one', summary: 'Restyled rows; added two rules.' });
     check('the commit answers the new version', c1.ok === true && c1.versionId === 5 && c1.revision === 1, c1);
     const again = await req(r, 'POST', `/sessions/${id}/commit`, { revision: 1, commitId: 'one', summary: 'Restyled rows; added two rules.' });

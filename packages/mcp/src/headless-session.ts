@@ -482,7 +482,13 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
   // --- commit ----------------------------------------------------------------
 
   async function commit(handle: HeadlessHandle, req: { revision: number; summary: string; signal: AbortSignal }): Promise<BackendCommit> {
-    const deployId = await currentDeployId(handle);
+    // The deploy baseline is read from the page, so the page must still be
+    // on the session's site: another host's deploy id would stamp the .shim
+    // with a baseline its rules never match (rebase / quarantine in Shim).
+    // A closed page has no document to read: the last baseline stands.
+    const away = pageAway(handle);
+    if (away && away.error === 'page-away') return { ok: false, error: away.error, detail: away.detail };
+    const deployId = away ? null : await currentDeployId(handle);
     const version = handle.version + 1;
     const bundleHash = deployId ?? handle.bundleHash;
     const spec = clone(handle.working) as Spec & Record<string, unknown>;
