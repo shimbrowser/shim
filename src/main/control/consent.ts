@@ -3,7 +3,7 @@
 // answers in Shim's UI: allow once, allow this host until quit, or deny.
 // Unanswered for two minutes resolves deny.
 //
-// Pure and Electron-free. The card that answers a request lands with B3; it
+// Pure and Electron-free. The sidebar's attach card (ipc/sessions.ts)
 // subscribes through `onChange` and answers through `answer()`, which is
 // reachable only from main — never from the control endpoint or anything an
 // agent can call (invariant 7: every consent decision is made in Shim's UI).
@@ -41,6 +41,9 @@ export interface ConsentSubject {
   // The target page, when there is one.
   url: string | null;
   title: string | null;
+  // The target tab's webContents id, when there is one: the window the card
+  // is brought up in.
+  webContentsId?: number | null;
 }
 
 export interface PendingConsent extends ConsentSubject {
