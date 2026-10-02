@@ -1,0 +1,26 @@
+{
+  // The package's own compile: emits dist/*.d.ts (scripts/build.js) and, via
+  // `npm run typecheck`, checks src/ with NO Node types — the engine runs
+  // anywhere there is a DOM (shim-core design D4), so a Node global or type
+  // creeping in fails here, not only in the boundary lint. The repo-root
+  // tsconfig also covers src/ and test/ under the app's settings.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "strict": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": [],
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"]
+}

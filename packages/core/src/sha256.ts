@@ -7,7 +7,7 @@
 // Stored `spec.bundleHash` values were minted by the Node path, so any drift
 // here would read as a deploy on every shim at once. `TextEncoder` encodes a
 // lone surrogate as U+FFFD (EF BF BD), exactly as Node's utf8 encoding of a
-// string does. scripts/sha256-harness.ts pins the equality across inputs.
+// string does. packages/core/test/sha256-harness.ts pins the equality across inputs.
 
 const K = new Uint32Array([
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,

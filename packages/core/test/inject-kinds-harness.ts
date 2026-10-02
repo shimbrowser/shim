@@ -1,11 +1,11 @@
-// Bare-node harness for src/patch-engine/inject-kinds.ts (CLAUDE.md §6).
+// Bare-node harness for packages/core/src/inject-kinds.ts (CLAUDE.md §6).
 // DOM-free: builder/strip/placement run against minimal structural stubs.
 import {
   INJECT_PLACEMENTS, INJECT_MAX_DEPTH, INJECT_MAX_NODES, INJECT_HTML_MAX_CHARS,
   validateInjectTree, scanHtmlForActiveContent, buildElement, stripActiveContent,
   resolvePlacement, isEngineInjected,
-} from '../src/patch-engine/inject-kinds';
-import type { InjectNode } from '../src/patch-engine/types';
+} from '../src/inject-kinds';
+import type { InjectNode } from '../src/types';
 
 let failures = 0;
 function assert(cond: boolean, label: string): void {

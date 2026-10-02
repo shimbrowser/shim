@@ -18,22 +18,22 @@
 // (possibly malformed/hallucinated) spec JSON, so it can't assume the input
 // already conforms to `Spec`/`Rule`/`Mutation`. It takes `unknown` and
 // narrows defensively; once a piece of data has been confirmed record-shaped
-// it's read through the real patch-engine types.
+// it's read through the real @shimbrowser/core types.
 
 import * as vm from 'vm';
 import { referencesApiAi, apiDbConnectionNames } from './capability-refs';
-import type { Spec, Rule, Mutation, AnchorSpec } from '../../patch-engine/types';
-import { RESHAPE_ALIGN, RESHAPE_JUSTIFY } from '../../patch-engine/layout-kinds';
+import type { Spec, Rule, Mutation, AnchorSpec } from '@shimbrowser/core/types';
+import { RESHAPE_ALIGN, RESHAPE_JUSTIFY } from '@shimbrowser/core/layout-kinds';
 import {
   validateInjectTree, scanHtmlForActiveContent, INJECT_PLACEMENTS, INJECT_HTML_MAX_CHARS,
-} from '../../patch-engine/inject-kinds';
-import { validateRewriteMutation, detectTransformForm } from '../../patch-engine/rewrite-response';
-import type { CompileProbe } from '../../patch-engine/rewrite-response';
-import { validateInterceptMutation } from '../../patch-engine/intercept';
+} from '@shimbrowser/core/inject-kinds';
+import { validateRewriteMutation, detectTransformForm } from '@shimbrowser/core/rewrite-response';
+import type { CompileProbe } from '@shimbrowser/core/rewrite-response';
+import { validateInterceptMutation } from '@shimbrowser/core/intercept';
 
 // vm.Script-backed compile probe for `detectTransformForm` — main-process
 // counterpart to rewrite-install.ts's identical-shaped probe (Node/Electron-
-// only, so it can't live in the pure patch-engine module). Both feed the
+// only, so it can't live in the pure @shimbrowser/core module). Both feed the
 // ONE shared `detectTransformForm` algorithm rather than each hand-rolling
 // their own expr-vs-module detection.
 const vmCompileProbe: CompileProbe = (code) => {
@@ -354,7 +354,7 @@ const MAIN_WORLD_DOM_RE = /\b(?:document|window)\s*\./;
 // source-text-heuristic posture, warnings only.
 
 // rewrite-response (§6, docs/2026-08-04-rewrite-response-design.md). Payload
-// shape errors delegate to `validateRewriteMutation` (src/patch-engine/
+// shape errors delegate to `validateRewriteMutation` (packages/core/src/
 // rewrite-response.ts) rather than re-deriving them here — one source of
 // truth for what a valid endpoint/transform payload looks like, shared with
 // the runtime table builder (`collectRewriteEntries`).
@@ -424,7 +424,7 @@ function lintRewriteMutation(
 
 // intercept (§6, docs/2026-08-04-intercept-design.md). Structural copy of
 // `lintRewriteMutation` immediately above — same three jobs, same order:
-// delegate payload shape to `validateInterceptMutation` (src/patch-engine/
+// delegate payload shape to `validateInterceptMutation` (packages/core/src/
 // intercept.ts, the one source of truth shared with the runtime table
 // builder `collectInterceptEntries`), resolve+bind the handler name (here
 // `wrap` instead of `transform`) against inline `rule.handlers` then the

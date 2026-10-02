@@ -1,13 +1,13 @@
-// Diagnostic harness for the pure route-transition decision (src/patch-engine/
+// Diagnostic harness for the pure route-transition decision (packages/core/src/
 // route-transition.ts — CLAUDE.md §6 nested sub-routes). Bare node, no DOM:
 //
-//   node scripts/route-transition-harness.js
+//   node out/packages/core/test/route-transition-harness.js
 //
 // Pins the full truth table the engine's evaluate() relies on: first mount,
 // leaving the route, redundant re-eval, in-place update when a handler opted in
 // via onRouteChange, and remount (back-compat) when it did not.
 
-import { routeTransition } from '../src/patch-engine/route-transition';
+import { routeTransition } from '../src/route-transition';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string) {

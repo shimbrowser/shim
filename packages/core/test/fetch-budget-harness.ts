@@ -1,6 +1,6 @@
-// Handler-fetch budget harness (src/patch-engine/fetch-budget.ts) — the
+// Handler-fetch budget harness (packages/core/src/fetch-budget.ts) — the
 // token bucket behind the per-frame same-site fetch throttle.
-// Run: node out/scripts/fetch-budget-harness.js
+// Run: node out/packages/core/test/fetch-budget-harness.js
 //
 // Asserts:
 // - a burst up to `burst` passes immediately (delayMs 0, not throttled)
@@ -9,7 +9,7 @@
 // - queued slots don't double-spend the refill stream (a long queue stays
 //   paced at refillPerSec even as time advances)
 // - throttledCount counts only delayed requests
-import { createFetchBudget } from '../src/patch-engine/fetch-budget';
+import { createFetchBudget } from '../src/fetch-budget';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string): void {

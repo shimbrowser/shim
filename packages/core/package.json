@@ -1,0 +1,43 @@
+{
+  "name": "@shimbrowser/core",
+  "version": "0.7.0-dev",
+  "description": "The Shim patch engine: applies declarative patch specs to any page with a DOM.",
+  "license": "Apache-2.0",
+  "author": "Artificial Apps, LLC",
+  "homepage": "https://shimbrowser.com",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "shim-source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./page": "./dist/shim-core.page.js",
+    "./package.json": "./package.json",
+    "./*": {
+      "shim-source": "./src/*.ts",
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "node scripts/build.js",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "typescript": "6.0.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12"
+  }
+}

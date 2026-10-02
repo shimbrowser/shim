@@ -5,7 +5,7 @@
 // the selector shapes synthesis emits (#id, [attr="v"], tag.cls, descendant
 // combos). Run when touching the synthesis/ranking logic:
 //
-//   node scripts/anchor-synthesis-harness.js
+//   node out/packages/core/test/anchor-synthesis-harness.js
 //
 // Covers:
 //   - uniqueness ranking: a unique weaker-kind anchor outranks a strong kind
@@ -20,8 +20,8 @@
 //   - suggestAnchorFor back-compat: head of the ladder, kind-ordered when the
 //     scope can't verify (stub roots without querySelectorAll)
 
-import { suggestAnchorFor, suggestAnchorLadder, resolveAll, shouldAppendPositional, isStableGroupClass } from '../src/patch-engine/anchors';
-import { must } from '../src/shared/assert';
+import { suggestAnchorFor, suggestAnchorLadder, resolveAll, shouldAppendPositional, isStableGroupClass } from '../src/anchors';
+import { must } from '../src/assert';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail: unknown): void {

@@ -1,11 +1,11 @@
-// Diagnostic harness for the engine's own-DOM guard (src/patch-engine/
+// Diagnostic harness for the engine's own-DOM guard (packages/core/src/
 // engine.ts, `isShimOwnedElement` — CLAUDE.md §6). Bare node — no DOM, no
 // Electron: elements are duck-typed stubs shaped like the subset of
 // Element/Node the predicate reads (`closest`, `contains`), the same
 // feature-detect style as `AnchorElement` (anchors.ts:38-51). Run when
 // touching the guard's predicate or its module-level registry wiring:
 //
-//   node scripts/engine-own-dom-harness.js
+//   node out/packages/core/test/engine-own-dom-harness.js
 //
 // What it asserts (the five required stub cases from the task brief):
 //   (a) an element contained by a registered mounted-output root is owned
@@ -40,7 +40,7 @@
 // below exercises the exact predicate call both arms make, named for that
 // call site, so the coverage claim is explicit rather than implied.
 
-import { isShimOwnedElement } from '../src/patch-engine/engine';
+import { isShimOwnedElement } from '../src/engine';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: unknown): void {

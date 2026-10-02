@@ -1,14 +1,14 @@
-// Diagnostic harness for the deploy-identity hash (src/patch-engine/deploy-id.js)
+// Diagnostic harness for the deploy-identity hash (packages/core/src/deploy-id.js)
 // — the §12 auto-rebase gate's ROUTE-STABLE page fingerprint. Bare node. Run
 // when touching the gate's identity logic:
 //
-//   node scripts/deploy-id-harness.js
+//   node out/packages/core/test/deploy-id-harness.js
 //
 // The invariant under test: navigating between routes of a code-split SPA must
 // NOT change the id (lazy chunks / route CSS / third-party tags are noise), but
 // a deploy (content-hashed entry filename rewritten) MUST change it.
 
-import { computeDeployId, sameRegistrableDomain } from '../src/patch-engine/deploy-id';
+import { computeDeployId, sameRegistrableDomain } from '../src/deploy-id';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail: string): void {

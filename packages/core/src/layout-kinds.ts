@@ -4,7 +4,7 @@
 // the shared token machinery), and the precondition evaluators produce
 // diagnostics (`rule-status` note field) when the compiled CSS cannot take
 // effect. DOM walking stays in engine.ts; everything here is bare-node
-// testable (scripts/layout-kinds-harness.js).
+// testable (packages/core/test/layout-kinds-harness.ts).
 import type { Mutation } from './types';
 
 // Relative reorder stamps every child of the shared parent; a virtualized

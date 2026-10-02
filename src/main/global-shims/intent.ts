@@ -1,7 +1,7 @@
 // Pure helpers for a shim's `intent` — its distilled statement of purpose.
 // No db / Electron imports (type-only): safe to import from bare-node harnesses.
 
-import type { Spec } from '../../patch-engine/types';
+import type { Spec } from '@shimbrowser/core/types';
 
 // A distilled statement of purpose is a short paragraph, but 600 chars cut real
 // intents mid-sentence (e.g. the clickbait-rewriter's) and baked a visible

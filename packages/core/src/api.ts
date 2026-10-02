@@ -1,5 +1,5 @@
 // The `api` surface the ENGINE itself depends on — owned by the engine, so
-// src/patch-engine has no type path into any host (the Shim browser's preload,
+// @shimbrowser/core has no type path into any host (the Shim browser's preload,
 // main, shim-db). A host builds an object satisfying `CoreApi` and hands it to
 // `engine.run(patch, api)`; everything else it puts on that object (storage,
 // db, ai, fetch, settings, modules, shared, …) the engine never reads — it only

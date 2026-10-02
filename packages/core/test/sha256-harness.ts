@@ -1,4 +1,4 @@
-// Pins the engine's pure-JS SHA-256 (src/patch-engine/sha256.ts) to Node's
+// Pins the engine's pure-JS SHA-256 (packages/core/src/sha256.ts) to Node's
 // crypto output, byte for byte. Stored `spec.bundleHash` values were minted by
 // `crypto.createHash('sha256').update(s).digest('hex').slice(0, 16)`; if the
 // pure-JS path ever disagrees, every committed shim reads as deployed-over at
@@ -6,8 +6,8 @@
 // Node formula, so a change to how deploy-id joins URLs is caught too.
 
 import crypto from 'crypto';
-import { sha256Hex } from '../src/patch-engine/sha256';
-import { computeDeployId } from '../src/patch-engine/deploy-id';
+import { sha256Hex } from '../src/sha256';
+import { computeDeployId } from '../src/deploy-id';
 
 let failures = 0;
 let passes = 0;

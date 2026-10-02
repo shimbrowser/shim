@@ -4,7 +4,7 @@
 // burst with 503s, and the failed hydrations killed the whole mount).
 //
 // A token bucket, pure and clock-injected so it's bare-node harnessable
-// (scripts/fetch-budget-harness.js): a mount may burst up to `burst`
+// (packages/core/test/fetch-budget-harness.ts): a mount may burst up to `burst`
 // same-site requests immediately; beyond that, requests queue FIFO at
 // `refillPerSec`. The wrapper in page-preload DELAYS rather than rejects —
 // handlers are already fragile against failed fetches (that fragility is

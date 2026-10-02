@@ -18,7 +18,7 @@
 //     hard gate.
 //   - Deterministic + pure. No DOM mutation, no engine state — both
 //     functions work on anything element-shaped, which keeps them
-//     testable in bare node (scripts/witness-harness.js) with stub
+//     testable in bare node (packages/core/test/witness-harness.ts) with stub
 //     objects.
 //   - Versioned. `v: 1` is stamped into every witness so a future shape
 //     change can re-fingerprint old rules instead of mis-scoring them.

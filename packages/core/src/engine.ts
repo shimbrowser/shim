@@ -232,6 +232,6 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
 
 // `firstGreaterIndex` (css-priority-harness) and `isShimOwnedElement`
 // (engine-own-dom-harness) live in ./css-sheets and ./own-dom; re-exported here
-// so those harnesses' `from '../src/patch-engine/engine'` imports — and engine's
+// so those harnesses' engine imports — and engine's
 // public surface — stay unchanged.
 export { run, firstGreaterIndex, isShimOwnedElement };

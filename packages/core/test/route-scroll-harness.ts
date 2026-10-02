@@ -1,13 +1,13 @@
-// Diagnostic harness for the pure virtual-route scroll store (src/patch-engine/
+// Diagnostic harness for the pure virtual-route scroll store (packages/core/src/
 // route-scroll.ts — CLAUDE.md §6). Bare node, no DOM:
 //
-//   node scripts/route-scroll-harness.js
+//   node out/packages/core/test/route-scroll-harness.js
 //
 // Pins key minting (deterministic counter), history.state field preservation,
 // the saved-position map, and the has()/targetFor() distinction that gates
 // updateRoute's restore.
 
-import { createRouteScrollStore, SCROLL_STATE_FIELD } from '../src/patch-engine/route-scroll';
+import { createRouteScrollStore, SCROLL_STATE_FIELD } from '../src/route-scroll';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string) {

@@ -3,7 +3,7 @@
 // handlers, no scripts — behavior belongs in `script` handlers where
 // api.cleanup + self-healing apply. Validation/scan run in main (spec-lint)
 // with no DOM; builder/strip/placement run in the page's isolated world.
-// Everything is bare-node testable (scripts/inject-kinds-harness.js).
+// Everything is bare-node testable (packages/core/test/inject-kinds-harness.ts).
 import type { InjectNode } from './types';
 
 const INJECT_PLACEMENTS = new Set(['before', 'after', 'prepend', 'append']);

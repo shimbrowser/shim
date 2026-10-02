@@ -1,11 +1,11 @@
-// Diagnostic harness for the witness layer (src/patch-engine/witness.js
-// + the witness filtering in src/patch-engine/anchors.js). Bare node —
+// Diagnostic harness for the witness layer (packages/core/src/witness.js
+// + the witness filtering in packages/core/src/anchors.js). Bare node —
 // no Electron, no DOM: elements are stubs shaped like the subset of the
 // Element interface the witness code reads (tagName, attributes,
 // textContent, children, parentElement, getAttribute). Run when touching
 // witness scoring, capture, or ladder fall-through:
 //
-//   node scripts/witness-harness.js
+//   node out/packages/core/test/witness-harness.js
 //
 // What it asserts:
 //   - buildWitness captures stable attrs only (no class, no data-shim-*)
@@ -16,9 +16,9 @@
 //     nothing survives
 //   - unknown witness versions never quarantine
 
-import { buildWitness, matchWitness, WITNESS_VERSION } from '../src/patch-engine/witness';
-import * as anchors from '../src/patch-engine/anchors';
-import type { Anchor, Witness } from '../src/patch-engine/types';
+import { buildWitness, matchWitness, WITNESS_VERSION } from '../src/witness';
+import * as anchors from '../src/anchors';
+import type { Anchor, Witness } from '../src/types';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail: unknown): void {

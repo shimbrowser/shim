@@ -139,7 +139,7 @@ export function registrableDomainOf(host: string): string {
 
 // SELF-CONTAINED — stringified via `.toString()` into the main-world wrapper
 // (buildInfraSrc, below), the same discipline as component-id.ts's
-// `componentScore` (src/patch-engine/component-id.ts:76-87): no references to
+// `componentScore` (packages/core/src/component-id.ts:76-87): no references to
 // anything outside this function body — no module-level helper, no closure
 // variable, nothing but arguments and language builtins. (Modern syntax is
 // fine here, unlike the hand-written STRING helpers such as buildInfraSrc's

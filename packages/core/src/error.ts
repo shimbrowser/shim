@@ -4,7 +4,7 @@
 // any module context (main, preload, renderer preloads) can import it; renderer
 // page scripts (classic <script> tags, no imports) inline the same expression.
 //
-// The engine owns it so src/patch-engine imports nothing outside itself
+// The engine owns it so @shimbrowser/core imports nothing outside itself
 // (shim-core design D4/D5); src/shared/error re-exports it for the rest of the
 // app, so there is still one implementation.
 export function errMessage(e: unknown): string {

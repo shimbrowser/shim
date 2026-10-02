@@ -29,7 +29,7 @@
 // computeBundleHash — a route's symbol dict describes that route's chunk set,
 // so per-route keys are correct there. Two hashes, two jobs.
 //
-// Pure + bare-node testable (scripts/deploy-id-harness.js); the preload only
+// Pure + bare-node testable (packages/core/test/deploy-id-harness.ts); the preload only
 // contributes DOM collection. No Node builtins (design D4): the hash is the
 // pure-JS ./sha256, pinned to Node crypto's output by sha256-harness.
 

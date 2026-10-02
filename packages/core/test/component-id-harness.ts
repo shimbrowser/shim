@@ -1,10 +1,10 @@
-// Diagnostic harness for framework-component-identity (src/patch-engine/
+// Diagnostic harness for framework-component-identity (packages/core/src/
 // component-id.js) and its integration into the witness layer. Bare node — no
 // Electron, no DOM, no React: descriptors are the plain-JSON shape that crosses
 // the world boundary, and the matcher is pure. Run when touching component
 // scoring, the witness component signal, or the main-world helper source:
 //
-//   node scripts/component-id-harness.js
+//   node out/packages/core/test/component-id-harness.js
 //
 // What it asserts:
 //   - componentScore: nearest-name match dominates; prop-key overlap refines;
@@ -18,10 +18,10 @@
 //     helper (componentScore stringified in, no external refs)
 
 import vm from 'vm';
-import * as componentId from '../src/patch-engine/component-id';
-import { buildWitness, matchWitness as _matchWitness } from '../src/patch-engine/witness';
-import { errMessage } from '../src/shared/error';
-import type { ComponentDescriptor, Witness } from '../src/patch-engine/types';
+import * as componentId from '../src/component-id';
+import { buildWitness, matchWitness as _matchWitness } from '../src/witness';
+import { errMessage } from '../src/error';
+import type { ComponentDescriptor, Witness } from '../src/types';
 
 // matchWitness's real signature takes only (witness, el); one assertion below
 // calls it with an extra ignored 3rd arg to prove the JS call site tolerates

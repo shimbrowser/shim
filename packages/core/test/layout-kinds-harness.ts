@@ -1,12 +1,12 @@
-// Pure-logic harness for the Tier-1 layout kinds (src/patch-engine/
+// Pure-logic harness for the Tier-1 layout kinds (packages/core/src/
 // layout-kinds.ts — CLAUDE.md §6 reorder/reshape). Bare node — no DOM.
 //
-//   node out/scripts/layout-kinds-harness.js
+//   node out/packages/core/test/layout-kinds-harness.js
 
 import {
   compileReorderCss, compileReshapeCss, desiredSequence,
   reorderNote, reshapeNote, REORDER_SIBLING_CAP,
-} from '../src/patch-engine/layout-kinds';
+} from '../src/layout-kinds';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string) {

@@ -28,7 +28,7 @@ import type { Anchor, AnchorSpec, Witness } from './types';
 // / suggestAnchorFor and their helpers). Real DOM Elements satisfy this
 // trivially — every member below is always present on a real Element — but
 // it's declared with each member OPTIONAL on purpose: the bare-node
-// harnesses (scripts/anchor-synthesis-harness.ts, scripts/witness-harness.ts)
+// harnesses (packages/core/test/anchor-synthesis-harness.ts, packages/core/test/witness-harness.ts)
 // pass minimal duck-typed test doubles that don't implement the full DOM
 // Element interface (no NamedNodeMap, no HTMLCollection, etc.), and the
 // `el.method && …` / `!el.children || …` feature-detects sprinkled through
@@ -44,7 +44,7 @@ interface AnchorElement {
   textContent?: string | null;
   // `unknown`, not `string | null`: a real Element's getAttribute always
   // returns `string | null`, but the harnesses build their stub elements
-  // through an untyped `attrs` object (scripts/anchor-synthesis-harness.ts),
+  // through an untyped `attrs` object (packages/core/test/anchor-synthesis-harness.ts),
   // which loses string-ness on the way through `Object.entries` and infers
   // as `unknown`. `attrOf` below is the one place that narrows it back down.
   getAttribute?(name: string): unknown;
@@ -555,7 +555,7 @@ function stableClassesOf(el: AnchorElement): string[] {
 //   nothing that fails to build if one changes without the other. The
 //   invariant ("prefix threshold well below the absolute cap") is enforced
 //   only by this comment and the harness fixtures in
-//   scripts/anchor-synthesis-harness.ts / scripts/shim-this-harness.ts; keep
+//   packages/core/test/anchor-synthesis-harness.ts / scripts/shim-this-harness.ts; keep
 //   them ordered by hand.
 //
 // Both are deliberately biased toward "reject" over "silently commit

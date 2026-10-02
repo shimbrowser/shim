@@ -5,13 +5,13 @@
 // the Element interface these functions read. Run when touching the rebase
 // synthesis/recovery logic:
 //
-//   node scripts/auto-rebase-harness.js
+//   node out/packages/core/test/auto-rebase-harness.js
 //
 // Covers:
 //   - suggestAnchorFor ranking (id > site data-* > aria > text > positional),
 //     and that it never anchors to data-shim* engine tokens. This exercises
 //     the LADDER HEAD in unverifiable-scope mode; the full ranked/DOM-verified
-//     ladder is covered by scripts/anchor-synthesis-harness.js
+//     ladder is covered by packages/core/test/anchor-synthesis-harness.js
 //   - witnessRecover: finds the unique strong match, refuses when zero or
 //     when multiple strong candidates exist (ambiguity → no auto-rebase)
 
@@ -19,8 +19,8 @@ import {
   suggestAnchorFor,
   witnessRecover,
   witnessRecoverDetail,
-} from '../src/patch-engine/anchors';
-import { buildWitness } from '../src/patch-engine/witness';
+} from '../src/anchors';
+import { buildWitness } from '../src/witness';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail: unknown): void {
