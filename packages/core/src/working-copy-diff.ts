@@ -53,9 +53,9 @@ const UNCOMPARED_FIELDS = new Set(['rules', 'handlers', 'version', 'bundleHash',
 // One rule's handler modules as the previous state stored them: its own
 // inline source wins, then the stored map.
 function previousModules(rule: Rule, stored: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
+  const out: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const name of referencedHandlerNames(rule)) {
-    const source = stored[name];
+    const source = Object.prototype.hasOwnProperty.call(stored, name) ? stored[name] : undefined;
     if (typeof source === 'string') out[name] = source;
   }
   for (const [name, source] of Object.entries(rule.handlers || {})) {
@@ -70,7 +70,7 @@ function ruleFingerprint(rule: Rule, modules: Record<string, string>): string {
   const { handlers: _handlers, ...rest } = rule;
   const anchor = rest.anchor ? { ...rest.anchor } : undefined;
   if (anchor) delete anchor.witness;
-  const canonical: Record<string, string> = {};
+  const canonical: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const [name, source] of Object.entries(modules)) canonical[name] = canonicalModule(source);
   return stableStringify({ ...rest, anchor, handlers: canonical });
 }
@@ -142,7 +142,7 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
     const before = prevById.get(authored.id);
     const names = new Set(referencedHandlerNames(authored));
     for (const name of Object.keys(before?.handlers || {})) if (name in files) names.add(name);
-    const modules: Record<string, string> = {};
+    const modules: Record<string, string> = Object.create(null) as Record<string, string>;
     for (const name of names) {
       const source = files[name];
       if (source === undefined) continue;

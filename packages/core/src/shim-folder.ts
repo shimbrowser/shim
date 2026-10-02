@@ -100,7 +100,16 @@ const RUNTIME_SPEC_FIELDS = ['priority', '__cssPriority'] as const;
 
 // A handler name is its file name, so it must be a safe one: no separators,
 // no dots (so no `..` and no hidden files), not empty.
-const HANDLER_NAME_RE = /^[A-Za-z0-9_$][A-Za-z0-9_$-]*$/;
+// `__proto__` is excluded: as a key it can't be an own property of the
+// spec's plain `handlers` objects.
+const HANDLER_NAME_RE = /^(?!__proto__$)[A-Za-z0-9_$][A-Za-z0-9_$-]*$/;
+
+// A handler-name → source map with no prototype: a valid handler name can be
+// `constructor`, `toString` or `__proto__`, and on a plain object `name in
+// map` / `map[name]` would find Object.prototype's member instead of a file.
+function handlerMap(): Record<string, string> {
+  return Object.create(null) as Record<string, string>;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -182,11 +191,11 @@ function checkHandlerNames(names: Iterable<string>, problems: string[]): void {
 export function checkoutShim(input: { spec: Spec; handlers?: Record<string, string> }): FolderFiles {
   const { spec } = input;
   const stored = input.handlers || {};
-  const modules: Record<string, string> = {};
+  const modules: Record<string, string> = handlerMap();
   const problems: string[] = [];
   for (const rule of spec.rules || []) {
     for (const name of referencedHandlerNames(rule)) {
-      const stash = stored[name];
+      const stash = Object.prototype.hasOwnProperty.call(stored, name) ? stored[name] : undefined;
       if (!(name in modules) && typeof stash === 'string') modules[name] = stash;
     }
   }
@@ -230,7 +239,7 @@ export function unpackShim(fileContent: string | unknown): FolderFiles {
   // Handler modules: the file's top-level map, then any inline rule source
   // (a non-canonical file) folded in. A name defined twice with different
   // source can't be one file — the same collision spec-lint rejects.
-  const modules: Record<string, string> = {};
+  const modules: Record<string, string> = handlerMap();
   const fileHandlers = parsed.handlers;
   if (fileHandlers !== undefined && !isRecord(fileHandlers)) problems.push('"handlers" is not an object');
   for (const [name, source] of Object.entries(isRecord(fileHandlers) ? fileHandlers : {})) {
@@ -331,7 +340,7 @@ export function readShimFolder(input: FolderInput): ShimFolderContents {
   let sawSpec = false;
   let specText: string | null = null;
   let stateText: string | null = null;
-  const handlers: Record<string, string> = {};
+  const handlers: Record<string, string> = handlerMap();
   for (const [rawPath, content] of Object.entries(input)) {
     const path = normalizePath(rawPath);
     if (path === null) { problems.push(`"${rawPath}" is not a relative path inside the folder`); continue; }
