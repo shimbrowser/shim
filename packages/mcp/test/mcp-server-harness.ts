@@ -105,8 +105,12 @@ async function main(): Promise<void> {
     const names = tools.map((t) => t.name);
     check('session tools first, then every page tool', JSON.stringify(names) === JSON.stringify([...SESSION_TOOL_NAMES, ...Object.keys(SESSION_PAGE_TOOLS)]), names.join(','));
     const view = tools.find((t) => t.name === 'view_page');
+    const viewProps = (view?.inputSchema.properties ?? {}) as Record<string, unknown>;
+    const { sessionId: viewSession, ...viewCore } = viewProps;
     check('page tools are core\'s session definitions', view?.description === SESSION_PAGE_TOOLS.view_page.description
-      && JSON.stringify(view?.inputSchema) === JSON.stringify(SESSION_PAGE_TOOLS.view_page.input_schema));
+      && JSON.stringify(viewCore) === JSON.stringify(SESSION_PAGE_TOOLS.view_page.input_schema.properties));
+    check('every page tool also takes an optional sessionId', !!viewSession && tools.filter((t) => t.name in SESSION_PAGE_TOOLS)
+      .every((t) => 'sessionId' in ((t.inputSchema.properties ?? {}) as Record<string, unknown>) && !(t.inputSchema.required ?? []).includes('sessionId')));
     const open = tools.find((t) => t.name === 'shim_open_session');
     check('session tools carry their schema', JSON.stringify(open?.inputSchema) === JSON.stringify(SESSION_TOOLS.shim_open_session.input_schema));
     check('the server states its instructions', (client.getInstructions() ?? '').includes('shim_preview'));
@@ -206,6 +210,9 @@ async function main(): Promise<void> {
   const page = await call(client, 'query_page', { description: 'promo banner' });
   const callReq = [...sent].reverse().find((s) => s.path === '/sessions/sess-1/call');
   check('a page tool forwards name and input to /call', JSON.stringify(callReq?.body) === JSON.stringify({ name: 'query_page', input: { description: 'promo banner' } }));
+  await call(client, 'inspect_element', { selector: '.banner', sessionId: 'sess-1' });
+  const aimed = [...sent].reverse().find((s) => s.path === '/sessions/sess-1/call');
+  check('a page tool\'s sessionId picks the session and is not forwarded', JSON.stringify(aimed?.body) === JSON.stringify({ name: 'inspect_element', input: { selector: '.banner' } }));
   check('a string result comes back as text', JSON.parse(page.content[0]?.text ?? '{}').name === 'query_page');
 
   const committed = firstJson(await call(client, 'shim_commit', { summary: 'Hid the banner.' }));
