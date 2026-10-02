@@ -1,7 +1,7 @@
 {
   "name": "shim",
   "version": "0.7.0-dev",
-  "description": "Author Shim shims from Claude Code: open a session on a tab in the running Shim browser, edit the shim as a folder, preview it on the live page, verify, commit.",
+  "description": "Change any website from Claude Code: open a session on a tab in the running Shim browser (or a headless Chromium), edit the shim as a folder, preview it on the live page, look at the screenshot, iterate, commit.",
   "author": {
     "name": "Artificial Apps, LLC",
     "url": "https://shimbrowser.com"

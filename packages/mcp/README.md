@@ -1,98 +1,217 @@
 # @shimbrowser/mcp
 
-An MCP server that lets Claude Code (or any MCP client) author Shim shims against the
-running Shim browser: open a session on a site tab, check the shim out into a folder,
-edit it, preview it on the live page, look at the result, commit.
+Change any website from Claude Code. Describe the change you want ("hide the upsell banner",
+"add a notes field to every track", "put the columns I use first"), and Claude writes a
+**shim**, applies it to the live page, takes a screenshot, checks the result and keeps
+iterating until the page looks right. Then it saves the shim.
 
-It talks to Shim over Shim's **control endpoint**: a Unix socket (a named pipe on
-Windows) plus a bearer token, both named in `<userData>/control.json`. The endpoint is
-off by default; turn it on in Shim's Settings, or let `shim_launch` start Shim with it on
-for one run. Every session still waits for you to allow it in Shim's sidebar, and a
-commit that grants something sensitive (a redirect target, a remote database
-connection) waits for your approval there too.
+That loop is the product. This package provides it:
 
-## Tools
+- **an MCP server** (`shim-mcp`) that gives Claude Code the session, preview and page tools;
+- **an authoring guide**, shipped as the `shim-authoring` skill, that teaches Claude the shim
+  format and the loop;
+- **a command line** (`shim`) for packing, linting and previewing shims yourself.
 
-Registered once, at startup:
+A shim is a small, declarative patch: anchors that find elements on a page, plus
+mutations to apply to them (hide, restyle, inject, run a script handler). It runs as a
+layer that only you see. The site is never modified, and "see original site" always shows
+it untouched. The engine that applies shims is
+[`@shimbrowser/core`](../core/README.md).
+
+> **Status:** pre-release (`0.7.0-dev`). Nothing is published to npm or a plugin
+> marketplace yet; install from a checkout of the repository as described below.
+
+## Install as a Claude Code plugin
+
+This package is a Claude Code plugin. It includes `.claude-plugin/plugin.json`,
+`.mcp.json` (which starts the `shim` MCP server) and the `shim-authoring` skill. From a
+checkout:
+
+```sh
+npm ci
+npm run build -w @shimbrowser/mcp     # writes dist/shim-mcp.js and dist/shim.js
+claude --plugin-dir packages/mcp
+```
+
+Then ask Claude for a change, for example: *"On news.example.com, hide the cookie banner
+and make the article text wider."* The skill tells Claude how to open a session, edit the
+shim, preview it and verify the result.
+
+To use headless mode (below), start Claude Code with `SHIM_MCP_MODE=headless` set in its
+environment, and install Chromium for Playwright. In a checkout Playwright is already
+installed, so this is enough:
+
+```sh
+npx playwright install chromium
+SHIM_MCP_MODE=headless claude --plugin-dir packages/mcp
+```
+
+Each bundle is a single file with its dependencies inlined. Playwright is the only
+exception: it is an optional peer dependency, loaded only in headless mode, and must be
+resolvable from the package (`npm install playwright`).
+
+## Two modes: attach and headless
+
+The tools and the loop are the same in both modes. Only the page changes.
+
+| | Attach (default) | Headless |
+|---|---|---|
+| The page | a tab in the running [Shim browser](https://shimbrowser.com), with your logins | a fresh Chromium that Playwright drives (`--visible` shows it) |
+| Who can use it | anyone with Shim | anyone: no Shim needed |
+| What a commit saves | a new version of the shim in Shim's library | the `.shim` file the session names |
+| Consent | Shim asks you to allow each session, and asks again at commit if the work grants something sensitive | none: the agent drives its own browser, with no logins, on a page it named |
+| Features | everything Shim supports | a stated subset (next section) |
+| Start | `shim-mcp` | `shim-mcp --headless`, or `SHIM_MCP_MODE=headless` |
+
+**Attach** talks to Shim over its **control endpoint**: a Unix socket (a named pipe on
+Windows) plus a bearer token, both named in `<userData>/control.json`. The endpoint is off by
+default. Turn it on in Shim's Settings, or let `shim_launch` start Shim with it on for one
+run. Turning it on grants nothing by itself: every session waits until you allow it in
+Shim's sidebar. On a site tab, code the agent previews runs in the page as you, logged in,
+and discarding the session doesn't undo actions it already took. The attach card tells you
+this before you allow the session.
+
+**Headless** never reads the Shim browser's profile. Every session starts a new,
+non-persistent Chromium. The artifact is a `.shim` file. You can import it into Shim later,
+or share it.
+
+## What headless supports
+
+Headless mode supports a stated subset and rejects anything outside it. A rejected shim is
+never applied with different behavior.
+
+| Capability | Shim browser | Headless |
+|---|---|---|
+| `hide`, `restyle`, `reorder`, `reshape` | yes | yes |
+| `script`, `inject-element`, `inject-html`, `remove`, `replace-root` | yes | yes |
+| Mount strategies, self-healing re-mounts | yes | yes |
+| Witness capture and verification, deterministic rebase | yes | yes |
+| `api.storage`, `api.cleanup` | yes | yes (`api.storage` is backed by a file) |
+| `mount-route`, `redirect`, `rewrite-response`, `intercept` | yes | no |
+| Rules targeting an iframe (`anchor.iframe`) | yes | no |
+| `api.db`, `api.ai`, `api.settings`, `api.fetch`, pack / global storage, `api.shared`, `api.modules` | yes | no |
+| Framework component identity | yes | not checked: lowers the rule to `partial` |
+
+- **Declared features are checked before anything runs.** If a preview uses an unsupported
+  mutation kind, `anchor.iframe`, or a `settings` / `permissions` / `storage` /
+  `connections` declaration, nothing is applied. The preview answers `unsupported` with the
+  list.
+- **Undeclared use is caught at runtime.** A handler that calls a member headless doesn't
+  provide gets the answer an unconfigured shim gets in Shim:
+  - `api.fetch` resolves `{ ok: false, error: 'requires-shim-browser' }`.
+  - `api.settings.get` resolves `undefined`.
+  - `api.db` reads as absent.
+
+  The preview lists the call under `unsupportedApi`, and the rule's verification drops to
+  `partial`.
+- **Every rule's evidence carries a verification level.** `full` means every check the rule
+  carries ran on this host, so the rule behaves the same in Shim. `partial` means something
+  went unchecked. Treat a `partial` rule as unverified until you try it in Shim.
+
+Tools that need the Shim browser answer `requires-shim-browser` in headless mode:
+`shim_launch`, `shim_list_tabs`, opening a shim from Shim's library, compositions,
+`verify_across_pages` and `interact_page`.
+
+## The loop, tool by tool
+
+1. **Find a page.**
+   - Attach: `shim_launch` (or `shim_status`), then `shim_list_tabs` for a site tab's
+     `tabId`.
+   - Headless: name a `url`.
+2. **Open a session.**
+   - Attach: `shim_open_session { tabId, intent, shimId | newShimName, dir }`.
+   - Headless: `shim_open_session { url, intent, shimFile | newShimName, dir }`. The file
+     defaults to `<dir>.shim`.
+
+   With `dir`, the shim is checked out into a folder at once: `shim.json` (the spec, with
+   handlers referenced by name) and `handlers/<name>.js`.
+3. **Edit the folder.** `shim_preview` sends the whole folder, which is diffed against the
+   session's working state. The difference is applied to the live page, and the reply is a
+   revision plus **evidence**:
+   - per-rule match counts, measured boxes and verification level;
+   - handler errors with stacks;
+   - rules that matched nothing, and quarantined rules;
+   - lint findings;
+   - new console output.
+
+   Pass `screenshot: true` (and optionally `selector`) to get the page back as an image.
+4. **Look.** `view_page`, `query_page`, `inspect_element`, `evaluate_in_page`,
+   `read_console` and `reload_page` work on the session's page. A clean apply isn't proof
+   that the change worked; the screenshot is.
+5. **Commit.** `shim_commit { summary }` saves the latest preview as a new version. Every
+   commit carries a `commitId`, so a retry after a lost reply returns the first result
+   instead of committing twice.
+6. **End.** `shim_end_session` discards anything that wasn't committed.
+
+All tools are registered when the server starts:
 
 | Group | Tools |
 |---|---|
 | Session | `shim_status`, `shim_launch`, `shim_list_tabs`, `shim_open_session`, `shim_checkout`, `shim_preview`, `shim_commit`, `shim_end_session` |
 | Page | `view_page`, `query_page`, `inspect_element`, `evaluate_in_page`, `read_console`, `reload_page`, `verify_across_pages`, `interact_page` (composition sessions only) |
 
-The page tools' definitions come from `@shimbrowser/core/page-tools`, the same module
-Shim's own authoring worker uses, and Shim runs them with the same implementation.
+The page tools are defined in `@shimbrowser/core/page-tools`, the same module Shim's
+built-in authoring uses, and both hosts run them with the same implementation.
 
-## The loop
+## The `shim` command line
 
-1. `shim_launch` (or `shim_status`), then `shim_list_tabs` for a site tab's `tabId`.
-2. `shim_open_session { tabId, intent, shimId | newShimName, dir }`. Shim asks you to
-   allow it. With `dir`, the shim is checked out at once:
-   `shim.json` (the spec, handlers referenced by name) and `handlers/<name>.js`.
-3. Edit the folder. `shim_preview` sends the **whole folder** to Shim, which diffs it
-   against the session's working state, applies the difference to the live page, and
-   answers with a revision and evidence (per-rule matches and boxes, handler errors,
-   lint, console). Pass `screenshot: true` (optionally `selector`) to get the page back
-   as an image.
-4. `shim_commit { summary }` saves the latest preview as a new version. It carries a
-   `commitId`; a retry after a lost reply returns the first result.
-5. `shim_end_session` discards anything uncommitted.
-
-## Headless mode
-
-`shim-mcp --headless` (or `SHIM_MCP_MODE=headless`) needs no Shim browser: each session
-opens its own Chromium through Playwright (an optional peer dependency: `npm install
-playwright && npx playwright install chromium`) and works on a `.shim` file instead of a
-shim in Shim's library. `--visible` (or `SHIM_HEADLESS_VISIBLE=1`) shows the window.
-
-- `shim_open_session { url, intent, shimFile | newShimName, dir }`: the page to open, and
-  the `.shim` file to load (if it exists) and commit to — for a new shim it defaults to
-  `<dir>.shim`. Every session gets a fresh browser profile; the Shim browser's profile is
-  never read.
-- Previews, the page tools and commits behave as in attach mode; `shim_commit` writes the
-  `.shim` file (a new version, witnesses, the session's history entry). `api.storage`
-  persists to `<shimFile>.storage.json`.
-- Headless supports a stated subset (shim-core design D15): `hide`, `restyle`, `reorder`,
-  `reshape`, `script`, `inject-element`, `inject-html`, `remove`, `replace-root`, with
-  `api.storage` and `api.cleanup`. A preview that declares anything else applies nothing
-  and answers `unsupported` with the list. A handler that uses a member headless lacks
-  gets that member's unconfigured answer (`{ ok: false, error: 'requires-shim-browser' }`,
-  `undefined`, or an absent member) and its rule's evidence says `verification: partial`.
-- `shim_launch`, `shim_list_tabs`, compositions, `verify_across_pages` and
-  `interact_page` answer `requires-shim-browser`.
-
-## Claude Code plugin
-
-This package is also a Claude Code plugin: `.claude-plugin/plugin.json`, `.mcp.json`
-(which starts `dist/shim-mcp.js`) and the `shim-authoring` skill
-(`skills/shim-authoring/SKILL.md`) — the public authoring guide: the session loop, the
-folder format, every mutation kind, anchors, the runtime `api`, and the evidence each
-preview returns. From a checkout:
-
-```sh
-npm run build -w @shimbrowser/mcp
-claude --plugin-dir packages/mcp
 ```
+shim pack <folder> [--out <file.shim>]
+shim unpack <file.shim> [--out <folder>]
+shim lint <folder | file.shim> [--headless] [--json]
+shim preview <folder> --url <url> [--screenshot <file.png>] [--selector <css>]
+             [--full-page] [--visible] [--storage <file.json>] [--json]
+shim launch [--timeout <seconds>] [--json]
+shim mcp [--headless] [--visible]
+```
+
+| Command | What it does |
+|---|---|
+| `pack` | A shim folder to a `.shim` file (default `<folder>.shim`). Witnesses saved by `unpack` come back for every rule whose anchor is unchanged. Refuses a folder with lint errors. |
+| `unpack` | A `.shim` file to a shim folder (default: the file's path without `.shim`). Writes only into an empty folder or an earlier shim folder. `unpack` then `pack` reproduces the file. |
+| `lint` | The checks `pack` and a preview apply, plus lint warnings. `--headless` adds the headless capability check (errors) and a handler source scan (warnings). |
+| `preview` | Applies the folder to `url` in a fresh headless Chromium and prints the evidence. `--screenshot` saves the page after it settles; `--selector` captures one element instead. Nothing is saved; `--storage` names a file to back `api.storage`. |
+| `launch` | Attaches to the running Shim browser, or starts it with its control endpoint on. |
+| `mcp` | Starts the MCP server on stdio, the same server as `shim-mcp`. |
+
+Exit codes: `0` success. `1` the command found a problem: lint errors, a preview that
+applied nothing or reported handler errors / unmatched / quarantined rules, a failed
+screenshot or launch. `2` a usage error, or a file that couldn't be read or written.
+
+`shim.json` holds only what you author. Witnesses (the fingerprints that keep a rule from
+attaching to the wrong element), `version` and `bundleHash` are managed by the tools. `unpack`
+keeps them in `.shim-state.json` beside the folder so a round trip loses nothing. Leave
+that file alone.
 
 ## Environment
 
 | Variable | Effect |
 |---|---|
-| `SHIM_CONTROL_FILE` | The discovery file to read (default `<userData>/control.json`). |
-| `SHIM_USER_DATA` | Shim's userData folder, when it isn't the platform default. |
-| `SHIM_APP` | The Shim app (macOS) or executable that `shim_launch` starts. |
-| `SHIM_DEV_CHECKOUT` | A Shim repo checkout: `shim_launch` runs `npm start` there. |
-| `SHIM_AGENT_NAME` | The name Shim's cards show (default: from the MCP client). |
-| `MAX_MCP_OUTPUT_TOKENS` | The tool-result budget results are fitted to (default 25000). |
 | `SHIM_MCP_MODE` | `headless` runs headless mode (same as `--headless`). |
 | `SHIM_HEADLESS_VISIBLE` | `1` shows headless mode's Chromium windows (same as `--visible`). |
+| `SHIM_CONTROL_FILE` | The discovery file to read (default `<userData>/control.json`). |
+| `SHIM_USER_DATA` | Shim's userData folder, when it isn't the platform default. |
+| `SHIM_APP` | The Shim app (macOS) or executable that `shim_launch` / `shim launch` starts. |
+| `SHIM_DEV_CHECKOUT` | A Shim repository checkout: launching runs `npm start` there. |
+| `SHIM_AGENT_NAME` | The agent name Shim's cards show (default: from the MCP client). |
+| `MAX_MCP_OUTPUT_TOKENS` | The tool-result budget results are fitted to (default 25000). |
 
-## Build
+## Build and test
 
 ```sh
-npm run build -w @shimbrowser/mcp   # dist/shim-mcp.js: one file, dependencies inlined
+npm run build -w @shimbrowser/mcp   # dist/shim-mcp.js and dist/shim.js
+npm test                            # from the repository root: every harness
 ```
 
-The harnesses in `test/` run from the repo root with `npm test`. Not published yet.
+The harnesses that need a real Chromium (`playwright-conformance`,
+`headless-session-e2e`, `shim-cli-e2e`) run in their own CI job:
 
-Licensed under the Apache License 2.0. See [LICENSE](LICENSE).
+```sh
+npx playwright install chromium
+npm run build && node out/packages/mcp/test/shim-cli-e2e-harness.js
+```
+
+## License
+
+Licensed under the Apache License 2.0. Copyright Artificial Apps, LLC. See
+[LICENSE](LICENSE).
