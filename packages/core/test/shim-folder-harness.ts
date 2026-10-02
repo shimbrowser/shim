@@ -164,6 +164,31 @@ check('no state file, no witness, no version / bundleHash / priority',
 check('the working spec is not mutated', working.rules?.[0]?.anchor?.witness !== undefined && working.rules?.[0]?.handlers !== undefined);
 check('the checkout reads back as a folder', readShimFolder(checkout).spec.id === 'w');
 
+console.log('handler names that are Object.prototype keys');
+const protoSpec: Spec = {
+  id: 'p', match: { hosts: ['example.com'] },
+  rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.a' } }, mutations: [{ kind: 'script', handler: 'constructor' }] }],
+};
+const protoCheckout = checkoutShim({ spec: protoSpec, handlers: { constructor: 'module.exports = function constructor() {};\n' } });
+check('a stored handler named constructor is checked out', protoCheckout['handlers/constructor.js'] === 'module.exports = function constructor() {};\n', Object.keys(protoCheckout).join(','));
+const protoRead = readShimFolder(protoCheckout);
+const CTOR: string = 'constructor';
+check('…and reads back as that handler', protoRead.handlers[CTOR] === 'module.exports = function constructor() {};\n');
+let missingProblems: string[] = [];
+try {
+  readShimFolder({ [SHIM_JSON]: JSON.stringify({ ...protoSpec, rules: [{ ...protoSpec.rules?.[0], mutations: [{ kind: 'script', handler: 'toString' }] }] }) });
+} catch (err) {
+  missingProblems = err instanceof ShimFolderError ? err.problems : [String(err)];
+}
+check('a rule naming toString with no file is reported missing', missingProblems.some((p) => p.includes('handlers/toString.js is missing')), missingProblems.join(' | '));
+let protoNameProblems: string[] = [];
+try {
+  readShimFolder({ [SHIM_JSON]: JSON.stringify(protoSpec), 'handlers/__proto__.js': 'module.exports = function x() {};\n' });
+} catch (err) {
+  protoNameProblems = err instanceof ShimFolderError ? err.problems : [String(err)];
+}
+check('__proto__ is not a valid handler name', protoNameProblems.some((p) => p.includes('"__proto__" is not a valid handler name')), protoNameProblems.join(' | '));
+
 console.log('module ↔ expression');
 const expr = 'function h({ anchor }) {\n  return anchor;\n}\n';
 check('expression → module → expression is the identity', moduleToExpression(expressionToModule(expr)) === expr);
