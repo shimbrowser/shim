@@ -87,6 +87,7 @@ const HINTS: Record<string, string> = {
   'commit-denied': 'The user declined the commit in Shim. The session is still open.',
   'commit-timeout': 'Nobody approved the commit in Shim within two minutes. The session is still open.',
   'invalid-target': 'Use a tabId from shim_list_tabs for a tab with a site loaded.',
+  'target-changed': 'The tab went to another site while the user was deciding; check shim_list_tabs and open the session again.',
   'unknown-artifact': 'Use a shim id from shim_list_tabs, or newShimName to start a new shim.',
 };
 
