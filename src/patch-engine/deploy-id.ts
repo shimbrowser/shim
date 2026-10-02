@@ -33,7 +33,7 @@
 // contributes DOM collection. No Node builtins (design D4): the hash is the
 // pure-JS ./sha256, pinned to Node crypto's output by sha256-harness.
 
-import { must } from '../shared/assert';
+import { must } from './assert';
 import { sha256Hex } from './sha256';
 
 // Same last-two-labels semantics as redirect-net's trust gate — no Public

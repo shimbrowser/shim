@@ -27,7 +27,7 @@ import { normalizeOutputs, trimStackForEvent } from './engine-internal';
 import type { HandlerMap } from './engine-internal';
 import type { Rule, Spec } from './types';
 import type { CoreApi, CoreRouteMountApi, HostApiMembers, RouteMatch } from './api';
-import { errMessage } from '../shared/error';
+import { errMessage } from './error';
 
 // routeRule's single mounted-route record — see mountRoute/unmountRoute.
 interface MountedRoute {

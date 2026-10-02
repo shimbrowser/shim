@@ -14,7 +14,7 @@ import { normalizeOutputs, trimStackForEvent } from './engine-internal';
 import type { MutationRegistry, HandlerMap } from './engine-internal';
 import type { Mutation, Rule, Spec } from './types';
 import type { CoreHandlerApi } from './api';
-import { errMessage } from '../shared/error';
+import { errMessage } from './error';
 
 // Apply-time strip feedback for inject-html (§6): when the strip pass removed
 // active content, the fact rides the rule-status `note` field so the authoring

@@ -20,7 +20,7 @@
 // witness-fingerprint shape, fallback ordering, and quarantine reasons.
 
 import * as witness from './witness';
-import { errMessage } from '../shared/error';
+import { errMessage } from './error';
 import { isEngineInjected } from './inject-kinds';
 import type { Anchor, AnchorSpec, Witness } from './types';
 
