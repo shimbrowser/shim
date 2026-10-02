@@ -25,6 +25,12 @@ interface PatchBundle {
   spec: Spec;
   mutations?: MutationRegistry;
   handlers?: HandlerMap;
+  // Each spec rule's own inline handlers (`rule.handlers`, authored as source
+  // strings), already compiled by the host and keyed by the rule object in
+  // `spec.rules`. The engine never compiles source (design D4: no Node, and the
+  // CSP-immune way to compile differs per host). A rule's own handlers win
+  // over the bag's `handlers` on a name collision — see setupRule.
+  ruleHandlers?: ReadonlyMap<Rule, HandlerMap>;
   priority?: number;
   bundleHash?: string | (() => string | null);
 }
@@ -33,7 +39,10 @@ interface PatchBundle {
 // cross-frame bridge apply live-preview or forwarded rules and tear the whole
 // patch down.
 interface PatchControl {
-  applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string): void;
+  // `ruleHandlers` is the rule's own `rule.handlers` already compiled by the
+  // host (preview and forwarded rules carry handler source inline). The rule
+  // itself stays plain JSON — bridgeRule forwards it to child frames as-is.
+  applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string, ruleHandlers?: HandlerMap): void;
   removeExtraRule(ruleKey: string): boolean;
   // Preview twin-conflict guard (live-caught: a committed replace-root rule and
   // its own update-rule PREVIEW each hide everything except their own mounted
@@ -74,8 +83,20 @@ function collectCssForSpec(spec: RuntimeSpec, mutations: MutationRegistry): Arra
 
 // Pick the right setup path for a rule. Route rules and iframe-bridge rules take
 // dedicated lifecycles; everything else is a normal anchored rule.
-function setupRule(rule: Rule, spec: RuntimeSpec, api: CoreApi, mutations: MutationRegistry, handlers: HandlerMap): () => void {
+//
+// `ruleHandlers` are the rule's own inline handlers, host-compiled. They layer
+// over the bag's handlers for this rule only, so two rules defining the same
+// name with different source each run their own (spec-lint's collision note).
+function setupRule(
+  rule: Rule,
+  spec: RuntimeSpec,
+  api: CoreApi,
+  mutations: MutationRegistry,
+  bagHandlers: HandlerMap,
+  ruleHandlers: HandlerMap | undefined,
+): () => void {
   if (rule.anchor?.iframe) return bridgeRule(rule, spec, api);
+  const handlers: HandlerMap = ruleHandlers ? { ...bagHandlers, ...ruleHandlers } : bagHandlers;
   if ((rule.mutations || []).some((m) => m.kind === 'mount-route')) {
     return routeRule(rule, spec, api, handlers);
   }
@@ -93,7 +114,8 @@ function setupRule(rule: Rule, spec: RuntimeSpec, api: CoreApi, mutations: Mutat
 }
 
 function run(patch: PatchBundle, api: CoreApi): PatchControl {
-  const { mutations = {}, handlers = {} } = patch;
+  const { mutations = {}, handlers = {}, ruleHandlers } = patch;
+  const compiledFor = (rule: Rule): HandlerMap | undefined => ruleHandlers?.get(rule);
   // Stamp two runtime-only fields onto the spec so the deep rule-processing path
   // can read them without threading params through every signature. Shallow copy
   // keeps the authored spec untouched; preview/forwarded paths that spread `spec`
@@ -132,7 +154,7 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
   api.onReady(() => {
     if (tornDown) return;
     for (const [i, rule] of (spec.rules || []).entries()) {
-      ruleTeardowns.set(rule.id || `__idx_${i}`, setupRule(rule, spec, api, mutations, handlers));
+      ruleTeardowns.set(rule.id || `__idx_${i}`, setupRule(rule, spec, api, mutations, handlers, compiledFor(rule)));
     }
   });
 
@@ -143,7 +165,7 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
   const extraTeardowns = new Map<string, () => void>();
 
   return {
-    applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string) {
+    applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string, extraRuleHandlers?: HandlerMap) {
       const effectiveSpec: RuntimeSpec = specIdOverride ? { ...spec, id: specIdOverride } : spec;
       api.onReady(() => {
         if (ruleKey) {
@@ -153,7 +175,7 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
             extraTeardowns.delete(ruleKey);
           }
         }
-        const teardown = setupRule(rule, effectiveSpec, api, mutations, handlers);
+        const teardown = setupRule(rule, effectiveSpec, api, mutations, handlers, extraRuleHandlers);
         if (ruleKey) extraTeardowns.set(ruleKey, teardown);
       });
     },
@@ -185,7 +207,7 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
       if (!rule) return;
       api.onReady(() => {
         if (tornDown || suppressedRuleIds.has(ruleId)) return;
-        ruleTeardowns.set(ruleId, setupRule(rule, spec, api, mutations, handlers));
+        ruleTeardowns.set(ruleId, setupRule(rule, spec, api, mutations, handlers, compiledFor(rule)));
       });
     },
     // Tears down every rule this patch mounted (observers, mounted outputs,

@@ -23,7 +23,7 @@ import {
   injectReplaceRootRule, removeReplaceRootRule, injectRouteEnvRule, removeRouteEnvRule,
   tagReplaceRootAnchor, stripReplaceRootToken, tagMountedNode,
 } from './css-sheets';
-import { compileInlineHandlers, normalizeOutputs, trimStackForEvent } from './engine-internal';
+import { normalizeOutputs, trimStackForEvent } from './engine-internal';
 import type { HandlerMap } from './engine-internal';
 import type { Rule, Spec } from './types';
 import type { CoreApi, CoreRouteMountApi, HostApiMembers, RouteMatch } from './api';
@@ -93,11 +93,10 @@ function applyRouteScroll(restoreOnly: boolean): void {
   });
 }
 
+// `handlers` are already-compiled functions for this rule (bag handlers with
+// the rule's own inline handlers on top — setupRule in engine.ts merges them;
+// the host compiles, the engine never does).
 export function routeRule(rule: Rule, spec: Spec, api: CoreApi, handlers: HandlerMap): () => void {
-  const effectiveHandlers: HandlerMap = rule.handlers
-    ? { ...handlers, ...compileInlineHandlers(rule.handlers, spec) }
-    : handlers;
-
   const mut = (rule.mutations || []).find((m) => m.kind === 'mount-route');
   if (!mut || !mut.pattern) {
     console.warn('[shim] mount-route rule missing `pattern`');
@@ -116,7 +115,7 @@ export function routeRule(rule: Rule, spec: Spec, api: CoreApi, handlers: Handle
   };
 
   const handlerName = typeof mut.handler === 'string' ? mut.handler : '';
-  const handlerFn = effectiveHandlers[handlerName];
+  const handlerFn = handlers[handlerName];
   if (!handlerFn) {
     console.warn(`[shim] mount-route: unknown handler "${mut.handler}"`);
     reportHandlerError(new Error(`unknown handler "${mut.handler}" — the rule references a handler name that wasn't compiled with this shim`));

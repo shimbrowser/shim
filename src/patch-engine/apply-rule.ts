@@ -18,7 +18,7 @@ import {
 } from './css-sheets';
 import { desiredSequence, REORDER_SIBLING_CAP } from './layout-kinds';
 import { dispatchMutation, injectStripNotes } from './dispatch-mutation';
-import { compileInlineHandlers, getSymbols } from './engine-internal';
+import { getSymbols } from './engine-internal';
 import type { HandlerMap, MutationRegistry, RuntimeSpec } from './engine-internal';
 import { makeRuleState } from './rule-state';
 import { makeStatusReporter } from './rule-status';
@@ -70,17 +70,11 @@ export function applyRule(
   spec: RuntimeSpec,
   api: CoreApi,
   mutations: MutationRegistry,
+  // Already-compiled functions for THIS rule: the patch's bag handlers with
+  // the rule's own inline handlers layered on top (setupRule in engine.ts does
+  // the merge; the host compiled both — the engine never compiles source).
   handlers: HandlerMap,
 ): () => void {
-  // Rules from the authoring UI preview path carry their handler sources inline
-  // on the rule as strings (the LLM emits them that way). Compile them to
-  // functions once here and merge into the module-level handlers lookup for this
-  // rule's dispatch. On the disk-loaded path this field is absent — handlers
-  // already arrive as real functions via the patch module's handlers/*.js.
-  const effectiveHandlers: HandlerMap = rule.handlers
-    ? { ...handlers, ...compileInlineHandlers(rule.handlers, spec) }
-    : handlers;
-
   // Shared mutable state the scan loop writes and the reporter + reconciler read
   // (state map, matchedSource, resolvedEl, witnessRejection, relativeReorderNote).
   const rs = makeRuleState();
@@ -188,7 +182,7 @@ export function applyRule(
       },
     });
     for (const mut of rule.mutations || []) {
-      const raw = await dispatchMutation(el, mut, rule, spec, mountApi, mutations, effectiveHandlers);
+      const raw = await dispatchMutation(el, mut, rule, spec, mountApi, mutations, handlers);
       // dispatchMutation's contract is the broader `Node[]` (handlers may return
       // any Node); applyStrategy's portal/overlay/shadow machinery needs
       // `.style`/`.offsetHeight` and so is typed against `HTMLElement`

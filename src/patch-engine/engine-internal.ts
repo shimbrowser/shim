@@ -3,7 +3,6 @@
 // rule-status.ts, rule-reconcile.ts). Everything here is either a pure type or
 // a small stateless helper — no rule/patch state lives in this module.
 
-import vm from 'vm';
 import type { Spec, Rule, Mutation } from './types';
 import type { CoreApi, CoreHandlerApi, CoreRouteMountApi, RouteMatch } from './api';
 
@@ -34,8 +33,10 @@ export type MutationRegistry = Record<string, MutationHandlerDef>;
 // Args a compiled handler function is invoked with. Two shapes: `script` /
 // `replace-root` mutations hand the handler the resolved DOM anchor;
 // `mount-route` handlers get the route match instead (routeRule has no DOM
-// anchor to give). A handler is arbitrary vm-eval'd or `require`d source — its
-// RETURN value is the one genuinely dynamic boundary, handled via
+// anchor to give). The engine never compiles source (design D4): the HOST turns
+// handler source into functions — the Shim browser with `vm` in the preload's
+// isolated world, other hosts their own way — and hands the engine functions.
+// A handler's RETURN value is the one genuinely dynamic boundary, handled via
 // normalizeOutputs below (`unknown` in, `Node[]` out).
 export interface ScriptHandlerArgs {
   anchor: Element;
@@ -83,8 +84,8 @@ export function getSymbols(api: CoreApi): Promise<Record<string, string> | null>
 }
 
 // The one genuinely dynamic boundary in the engine: a handler is arbitrary
-// vm-eval'd or `require`d source, so its return value is `unknown` until
-// normalized here. Array outputs are filtered for falsy entries (a handler
+// host-compiled source, so its return value is `unknown` until normalized
+// here. Array outputs are filtered for falsy entries (a handler
 // that conditionally returns nothing for some of several roots); non-array
 // truthy outputs are wrapped as a single-element result.
 export function normalizeOutputs(r: unknown): Node[] {
@@ -101,49 +102,4 @@ export function normalizeOutputs(r: unknown): Node[] {
 export function trimStackForEvent(stack: string): string {
   if (!stack) return '';
   return stack.split('\n').slice(0, 8).join('\n');
-}
-
-// Preview rules arrive with handler source as strings on rule.handlers (the
-// LLM emits them as text). Evaluate each as a function expression so the engine
-// can invoke them like any module-loaded handler. Trust model: these strings
-// originate from the authoring LLM routed through main — per CLAUDE.md §15
-// user-authored patch code is trusted for now; the sandbox work listed there
-// is what replaces this once patches come from other users or a registry.
-//
-// `vm.runInThisContext` (not the dynamic-code-generation alternative) is
-// load-bearing: pages with a strict CSP (reddit, many bank sites) set
-// `script-src` without `'unsafe-eval'`, and V8 enforces that by throwing
-// `EvalError: Code generation from strings disallowed for this context` from
-// the eval/Function path. The preload's Node-equipped isolated world sits
-// outside the page's CSP and `vm` works regardless — same path `compileBag` in
-// the page-preload uses for committed handlers, kept identical here so preview
-// and committed share one trust + capability surface.
-export function compileInlineHandlers(rawHandlers: Record<string, string>, spec: Spec): HandlerMap {
-  const out: HandlerMap = {};
-  const specId = spec?.id || 'inline';
-  for (const [name, source] of Object.entries(rawHandlers)) {
-    if (typeof source === 'function') { out[name] = source; continue; }
-    if (typeof source !== 'string') continue;
-    try {
-      // Tag dynamically-compiled previews with a virtual sourceURL pragma so
-      // DevTools stacktraces — and the page-preload's runtime-error
-      // attribution regex — point at this exact handler. Without it, throws
-      // from a preview would land in `<anonymous>` and the sidebar would never
-      // know which shim caused them.
-      //
-      // Layout matters: the closing `)` of the inner function expression MUST
-      // come BEFORE the `//# sourceURL=...` line. `//` starts a single-line
-      // comment that runs to the next newline; if the pragma sat between
-      // `${source}` and `)`, the comment would eat the paren and the function
-      // expression never closes.
-      const sourceURL = `shim://patches/${specId}/handlers/${name}.js`;
-      out[name] = vm.runInThisContext(
-        `(${source})\n//# sourceURL=${sourceURL}\n`,
-        { filename: sourceURL },
-      );
-    } catch (err) {
-      console.error(`[shim] failed to compile inline handler "${name}"`, err);
-    }
-  }
-  return out;
 }
