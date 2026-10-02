@@ -37,7 +37,7 @@ import type {
 import { decodeWorkingCopy, encodeWorkingCopy } from '@shimbrowser/core/working-copy-wire';
 import type { FolderInput } from '@shimbrowser/core/shim-folder';
 import { fileStorage, HEADLESS_STORAGE_FORMAT } from '../src/file-storage';
-import { createHeadlessControl, type HeadlessControl } from '../src/headless-control';
+import { createHeadlessControl, hostPatternMatches, type HeadlessControl } from '../src/headless-control';
 import { HEADLESS_CAPABILITIES, type HeadlessStorage } from '../src/playwright-page-host';
 import { cliMode } from '../src/cli';
 
@@ -108,10 +108,12 @@ interface Rig {
   storages: HeadlessStorage[];
   writes: string[];
   failOpen: boolean;
+  // Where opening a url lands (a redirect); the url itself by default.
+  redirect: (url: string) => string;
 }
 
 function rig(): Rig {
-  const r: Rig = { control: null as unknown as HeadlessControl, hosts: [], storages: [], writes: [], failOpen: false };
+  const r: Rig = { control: null as unknown as HeadlessControl, hosts: [], storages: [], writes: [], failOpen: false, redirect: (u) => u };
   let ids = 0;
   r.control = createHeadlessControl({
     version: 'test',
@@ -119,7 +121,7 @@ function rig(): Rig {
     newId: () => `sess${++ids}`,
     async openPage(url, storage) {
       if (r.failOpen) throw new Error('net::ERR_CONNECTION_REFUSED');
-      const host = fakeHost(url);
+      const host = fakeHost(r.redirect(url));
       r.hosts.push(host);
       r.storages.push(storage);
       return { host, close: async () => { host.closed = true; } };
@@ -389,6 +391,37 @@ async function main(): Promise<void> {
     check('nothing is written until a commit', !fs.existsSync(shimFile));
     await req(r, 'DELETE', `/sessions/${String(opened.sessionId)}`);
     check('ending without a commit writes nothing', !fs.existsSync(shimFile));
+  }
+
+  console.log('a redirect on open');
+  {
+    const r = rig();
+    r.redirect = (u) => u.replace('://site.test/', '://www.site.test/');
+    const shimFile = path.join(tmp, 'redirected.shim');
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile, create: { name: 'Redirected' } });
+    check('a new shim opens on the page it landed on', opened.ok === true && opened.url === 'https://www.site.test/tracks' && opened.warnings === undefined, opened);
+    const co = decodeWorkingCopy((await req(r, 'GET', `/sessions/${String(opened.sessionId)}/checkout`)).files);
+    const s = co['shim.json'];
+    const specText = typeof s === 'string' ? s : new TextDecoder().decode(s);
+    const hosts = (JSON.parse(specText) as { match?: { hosts?: string[] } }).match?.hosts;
+    check('…and matches the final host, not the requested one', JSON.stringify(hosts) === '["www.site.test"]', hosts);
+    await r.control.closeAll();
+
+    const existing = path.join(tmp, 'apex.shim');
+    fs.writeFileSync(existing, json({ format: 'shim/1', name: 'Apex', handlers: {}, spec: { id: 'shim-apex', match: { hosts: ['site.test'] }, rules: [] } }));
+    const r2 = rig();
+    r2.redirect = r.redirect;
+    const warned = await req(r2, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile: existing });
+    check('an existing shim is warned against the final host', warned.ok === true && Array.isArray(warned.warnings)
+      && String(warned.warnings[0]).includes('www.site.test'), warned);
+    await r2.control.closeAll();
+
+    const u = (x: string): URL => new URL(x);
+    check('a host pattern without a port matches any port', hostPatternMatches('site.test', u('http://site.test:8080/')));
+    check('a host pattern with a port matches only that port', hostPatternMatches('site.test:8080', u('http://site.test:8080/'))
+      && !hostPatternMatches('site.test:8080', u('http://site.test:9090/')) && !hostPatternMatches('site.test:8080', u('http://site.test/')));
+    check('a wildcard matches subdomains, not the apex', hostPatternMatches('*.site.test', u('https://www.site.test/'))
+      && !hostPatternMatches('*.site.test', u('https://site.test/')));
   }
 }
 
