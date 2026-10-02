@@ -3,10 +3,11 @@
 // a bearer token; every request is HTTP over that socket. Nothing here
 // listens, and nothing here is reachable from a web page.
 //
-// Where userData is: Electron derives it from the app's package name, which
-// is final (`shim`) — so it is fixed per platform. SHIM_CONTROL_FILE (the
-// discovery file itself) or SHIM_USER_DATA (the folder) override it, for a
-// dev profile or a harness.
+// Where userData is: Electron names it after the app — package.json's
+// `productName` when there is one (`Shim`), before `name` (`shim`). Both are
+// final, so it is fixed per platform; the case matters on Linux
+// (~/.config/Shim). SHIM_CONTROL_FILE (the discovery file itself) or
+// SHIM_USER_DATA (the folder) override it, for a dev profile or a harness.
 
 import * as fs from 'fs';
 import * as http from 'http';
@@ -15,8 +16,9 @@ import * as path from 'path';
 
 export const DISCOVERY_FORMAT = 'shim-control/1';
 export const DISCOVERY_FILE = 'control.json';
-// Electron's app.getPath('userData') folder name: package.json's `name`.
-export const APP_DIR_NAME = 'shim';
+// Electron's app.getPath('userData') folder name: package.json's
+// `productName` (mcp-launch-harness pins it to the app's package.json).
+export const APP_DIR_NAME = 'Shim';
 
 export interface ControlInfo {
   socketPath: string;

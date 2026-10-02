@@ -55,6 +55,20 @@ export function launchCommand(platform: string, env: Record<string, string | und
   return null;
 }
 
+// How the launcher process ended, once it has: `open` exits 0 as soon as it
+// has started the app; `npm start` and a packaged binary run until Shim quits.
+export interface LaunchExit {
+  code: number | null;
+  signal: string | null;
+  // The process could not be started at all (ENOENT, EACCES).
+  error?: string;
+}
+
+export interface Launched {
+  // Null while the launcher is still running.
+  exit(): LaunchExit | null;
+}
+
 export interface LaunchDeps {
   platform: string;
   env: Record<string, string | undefined>;
@@ -62,7 +76,7 @@ export interface LaunchDeps {
   isAlive(pid: number): boolean;
   // Whether the endpoint the info names answers GET /status.
   ping(info: ControlInfo): Promise<boolean>;
-  spawn(cmd: LaunchCommand): void;
+  spawn(cmd: LaunchCommand): Launched;
   sleep(ms: number): Promise<void>;
   now(): number;
 }
@@ -92,8 +106,9 @@ export async function attachOrLaunch(deps: LaunchDeps, opts: { timeoutMs?: numbe
     };
   }
   const before = deps.readInfo();
+  let launched: Launched;
   try {
-    deps.spawn(cmd);
+    launched = deps.spawn(cmd);
   } catch (e) {
     return { ok: false, error: 'launch-failed', detail: `could not start ${cmd.describe}: ${e instanceof Error ? e.message : String(e)}` };
   }
@@ -101,6 +116,17 @@ export async function attachOrLaunch(deps: LaunchDeps, opts: { timeoutMs?: numbe
   const deadline = deps.now() + timeoutMs;
   while (deps.now() < deadline) {
     await deps.sleep(POLL_MS);
+    // A launcher that failed (no such app, a dev build that broke) will
+    // never bring an endpoint up: say so now rather than at the deadline.
+    const exit = launched.exit();
+    if (exit && (exit.error !== undefined || exit.code !== 0)) {
+      const why = exit.error ?? (exit.code !== null ? `exited with code ${exit.code}` : `was killed (${exit.signal ?? 'signal'})`);
+      return {
+        ok: false,
+        error: 'launch-failed',
+        detail: `could not start ${cmd.describe}: ${cmd.command} ${why}. Is Shim installed? Set SHIM_APP to its app or executable, or start it yourself with the control endpoint on.`,
+      };
+    }
     const info = deps.readInfo();
     // A file left by a run that died is not an answer; a new token or a live
     // pid that answers is.
