@@ -106,6 +106,7 @@ if (fs.existsSync(apiTypes)) {
 }
 check('makes visual verification a duty', /Visual intents require visual verification/.test(skill) && /view_page \{ selector \}/.test(skill));
 check('says previews act on the real site', /Your previews act on the real site/.test(skill));
+check('says previews run on a preview api (scratch storage, no settings / ai / db)', /handlers get a preview `api`, not the shim's/.test(skill) && /scratch bucket/.test(skill));
 check('tells the agent to report partial verification as unverified', /verification: partial/.test(skill) && /unverified/.test(skill));
 for (const internal of ['emit_shim_delta', 'edit-handler', 'read_handler', 'propose_tasks', '# Handler source']) {
   check(`no internal-loop vocabulary: ${internal}`, !skill.includes(internal));

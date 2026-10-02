@@ -467,14 +467,22 @@ in) targets an element inside that frame. Warn the user before touching payment 
 Handlers get `api`. Every call that can fail resolves `{ ok: false, error }` instead of
 throwing — always branch on it and render a usable state.
 
+**While previewing, handlers get a preview `api`, not the shim's.** `api.storage` reads and
+writes a scratch bucket apart from the shim's saved data — what a preview stores is gone
+after commit, and what the shim already saved isn't visible — `api.settings` has no values,
+`api.ai` calls answer `{ ok: false }`, and `api.db`, `api.storage.pack`,
+`api.storage.global` and `api.shared` are absent. Handlers must render a usable state in
+every one of those cases anyway; check the data path after commit (open the session again
+if you need to), and say in your summary what you could only verify that way.
+
 - **`api.cleanup(fn)`** — teardown for side effects (section 5).
 - **`api.origin`, `api.host`** — the page's origin and host, as strings.
 - **`api.storage`** — per-shim, per-origin key/value: `get(key)` (null when unset),
   `set(key, value)` (any JSON value), `delete(key)`, `list()`. Use it for small state:
   toggles, "played" flags, a cache of per-item data so each item is fetched at most once.
   - **`api.storage.pack`** — the same four methods over a bucket every shim in the
-    shim's pack shares. Present only while the shim is in a pack, and absent while
-    previewing: guard `api.storage.pack &&` and treat an empty bucket as normal.
+    shim's pack shares. Present only while the shim is in a pack: guard
+    `api.storage.pack &&` and treat an empty bucket as normal.
   - **`api.storage.global`** — on a global shim (one shim running on many sites), the
     same four methods over a store shared across all its sites. Present only on a
     global shim: guard `api.storage.global &&`.
