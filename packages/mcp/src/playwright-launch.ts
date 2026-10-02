@@ -5,12 +5,15 @@
 //
 // Chromium only: the driver depends on CDP isolated worlds.
 
+import { createRequire } from 'module';
+import * as path from 'path';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import { attachPlaywrightPageHost } from './playwright-page-host';
 import type { PlaywrightPageHost, PlaywrightPageHostOptions } from './playwright-page-host';
 
 export const PLAYWRIGHT_MISSING =
-  'Headless mode needs Playwright with Chromium: run `npm install playwright` and `npx playwright install chromium`.';
+  'Headless mode needs Playwright with Chromium: run `npm install playwright` and `npx playwright install chromium` ' +
+  'in your project (or point SHIM_PLAYWRIGHT_DIR at the folder whose node_modules has it).';
 
 export interface HeadlessLaunchOptions extends PlaywrightPageHostOptions {
   /** Show the browser window (the default is headless). */
@@ -30,13 +33,46 @@ export interface HeadlessPage {
 
 type PlaywrightModule = typeof import('playwright');
 
-/** Load Playwright, or throw PLAYWRIGHT_MISSING. */
-export function loadPlaywright(): PlaywrightModule {
-  try {
-    return require('playwright') as PlaywrightModule;
-  } catch (err) {
-    throw new Error(PLAYWRIGHT_MISSING, { cause: err });
+/** A `require` that resolves from `dir`, or `null` for this module's own. */
+export type RequireFrom = (dir: string | null) => (id: string) => unknown;
+
+const defaultRequireFrom: RequireFrom = (dir) => (dir === null ? require : createRequire(path.join(path.resolve(dir), 'package.json')));
+
+/**
+ * Where Playwright is looked for, in order. The Claude Code plugin runs the
+ * bundle from the plugin cache, where a plain `require` walks the cache's
+ * ancestors, never the user's project, so the caller's install is searched
+ * too: SHIM_PLAYWRIGHT_DIR first (explicit), then this module's own
+ * resolution (a normal npm install of the package), then the working
+ * directory and CLAUDE_PROJECT_DIR (the project Claude Code runs in).
+ */
+export function playwrightSearchDirs(env: Record<string, string | undefined>, cwd: string): Array<string | null> {
+  const dirs: Array<string | null> = [];
+  const add = (d: string | null): void => {
+    if (d === null ? !dirs.includes(null) : !dirs.some((x) => x !== null && path.resolve(x) === path.resolve(d))) dirs.push(d);
+  };
+  if (env.SHIM_PLAYWRIGHT_DIR) add(env.SHIM_PLAYWRIGHT_DIR);
+  add(null);
+  add(cwd);
+  if (env.CLAUDE_PROJECT_DIR) add(env.CLAUDE_PROJECT_DIR);
+  return dirs;
+}
+
+/** Load Playwright from the first place that has it, or throw PLAYWRIGHT_MISSING. */
+export function loadPlaywright(
+  options: { env?: Record<string, string | undefined>; cwd?: string; requireFrom?: RequireFrom } = {},
+): PlaywrightModule {
+  const requireFrom = options.requireFrom ?? defaultRequireFrom;
+  const dirs = playwrightSearchDirs(options.env ?? process.env, options.cwd ?? process.cwd());
+  const errors: unknown[] = [];
+  for (const dir of dirs) {
+    try {
+      return requireFrom(dir)('playwright') as PlaywrightModule;
+    } catch (err) {
+      errors.push(err);
+    }
   }
+  throw new Error(PLAYWRIGHT_MISSING, { cause: new AggregateError(errors, 'playwright was not found') });
 }
 
 /** Launch Chromium, open one page, attach the headless PageHost to it. */

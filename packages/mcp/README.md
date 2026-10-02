@@ -47,8 +47,9 @@ SHIM_MCP_MODE=headless claude --plugin-dir packages/mcp
 ```
 
 Each bundle is a single file with its dependencies inlined. Playwright is the only
-exception: it is an optional peer dependency, loaded only in headless mode, and must be
-resolvable from the package (`npm install playwright`).
+exception: it is an optional peer dependency, loaded only in headless mode. Outside a
+checkout, install it in your project (`npm install playwright && npx playwright install
+chromium`); the server looks there, or in the folder `SHIM_PLAYWRIGHT_DIR` names.
 
 ## Two modes: attach and headless
 
@@ -195,6 +196,7 @@ that file alone.
 | `SHIM_DEV_CHECKOUT` | A Shim repository checkout: launching runs `npm start` there. |
 | `SHIM_AGENT_NAME` | The agent name Shim's cards show (default: from the MCP client). |
 | `MAX_MCP_OUTPUT_TOKENS` | The tool-result budget results are fitted to (default 25000). |
+| `SHIM_PLAYWRIGHT_DIR` | A folder whose `node_modules` has Playwright, searched first (then the server's own install, the working directory and `CLAUDE_PROJECT_DIR`). |
 
 ## Build and test
 
