@@ -27,8 +27,8 @@
 //     accepted until it settles, every other call answers 'commit-pending'
 //     (ops queued ahead of it still run first).
 //   - Ending is a signal, not a queued call. end() (the agent's
-//     shim_end_session), a preemption and the idle timeout take the same
-//     path, exempt from the queue and the freeze:
+//     shim_end_session, or the sidebar's stop), a preemption and the idle
+//     timeout take the same path, exempt from the queue and the freeze:
 //       1. the session's signal aborts — the backend binds every card it
 //          raises (commit, consent, replay confirm) to it, so each closes as
 //          a deny;
@@ -50,7 +50,9 @@ import { isLeaseTimeout } from '../authoring/artifact-lease';
 
 export type SessionArtifactKind = 'shim' | 'composition';
 
-export type EndReason = 'ended' | 'preempted' | 'idle';
+// 'ended': the agent ended it (or the endpoint was turned off); 'stopped':
+// the human pressed stop in Shim's sidebar. Both take the same signal path.
+export type EndReason = 'ended' | 'stopped' | 'preempted' | 'idle';
 
 export type VersionId = string | number;
 
@@ -192,6 +194,9 @@ export interface SessionRegistryOptions {
   newId?(): string;
   // Ended sessions whose commit records are kept for idempotent retries.
   keepEnded?: number;
+  // Told whenever the live list changes: a session opened, started ending,
+  // ended, or a commit started or settled (the sidebar's session strip).
+  onChange?(): void;
   // Told whenever a session ends, after its lease is released.
   onEnded?(info: { sessionId: string; kind: SessionArtifactKind; artifactId: string; reason: EndReason; versionId: VersionId | null }): void;
   onError?(label: string, err: unknown): void;
@@ -288,6 +293,14 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
     }
   }
 
+  function changed(): void {
+    try {
+      opts.onChange?.();
+    } catch (e) {
+      report('session onChange', e);
+    }
+  }
+
   // --- idle timer -----------------------------------------------------------
 
   function armIdle(s: Session): void {
@@ -369,6 +382,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
   function endSession(s: Session, reason: EndReason): Promise<EndResult> {
     if (s.ending) return s.ending;
     s.info.state = 'ending';
+    changed();
     disarmIdle(s);
     s.offLeaseAbort();
     // 1. Every card bound to the session closes as a deny; the in-flight op
@@ -421,6 +435,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
       }
       const result: EndResult = { ok: true, reason, versionId: s.info.lastVersionId };
       live.delete(s.info.sessionId);
+      changed();
       ended.set(s.info.sessionId, { info: snapshot(s.info), commits: s.commits, result });
       while (ended.size > keepEnded) {
         const oldest = ended.keys().next();
@@ -499,6 +514,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
     lease.signal.addEventListener('abort', onPreempt);
     s.offLeaseAbort = () => lease.signal.removeEventListener('abort', onPreempt);
     armIdle(s);
+    changed();
     return { ok: true, sessionId };
   }
 
@@ -548,6 +564,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
     const s = liveSession(sessionId);
     if ('ok' in s) return s;
     s.info.commitPending = true;
+    changed();
     const promise = enqueue<CommitResult>(s, true, async (signal) => {
       if (req.revision !== s.info.revision) return { ok: false, error: 'stale-revision', detail: `latest applied revision is ${s.info.revision}` };
       if (req.revision === s.info.committedRevision) return { ok: false, error: 'nothing-to-commit', detail: `revision ${req.revision} is already committed` };
@@ -559,6 +576,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
       return { ok: true, versionId: out.versionId, revision: req.revision };
     }).then((result) => {
       s.info.commitPending = false;
+      changed();
       if (result.ok) {
         s.commits.set(req.commitId, { state: 'done', promise, result });
       } else {
