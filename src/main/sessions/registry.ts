@@ -93,6 +93,9 @@ export interface OpenRequest {
   // Who is driving (shown on Shim's cards), and what they set out to do.
   agent: string;
   intent: string;
+  // The artifact was created for this session (after its attach consent):
+  // the backend's finish removes it again when nothing was committed.
+  created?: boolean;
 }
 
 export interface BeginArgs {
@@ -101,6 +104,8 @@ export interface BeginArgs {
   target: unknown;
   agent: string;
   intent: string;
+  // See OpenRequest.created.
+  created: boolean;
   // The artifact's 'turn' lease, held for the session's life.
   lease: Lease;
   // Aborts when the session ends, for any reason.
@@ -481,7 +486,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
     try {
       handle = await backend.begin({
         sessionId, artifactId: req.artifactId, target: req.target, agent: req.agent, intent: req.intent,
-        lease, signal: controller.signal,
+        created: req.created === true, lease, signal: controller.signal,
       });
     } catch (e) {
       lease.signal.removeEventListener('abort', onEarlyAbort);
