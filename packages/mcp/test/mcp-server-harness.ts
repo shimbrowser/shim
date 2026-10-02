@@ -355,6 +355,11 @@ async function main(): Promise<void> {
     const removed = Array.isArray(again.removed) ? (again.removed as string[]).slice().sort() : [];
     check('a re-checkout removes what the composition no longer has, hidden files it wrote included', JSON.stringify(removed) === JSON.stringify(['.config.js', 'app.js', 'stale.css'])
       && !fs.existsSync(path.join(cdir, 'app.js')) && !fs.existsSync(path.join(cdir, '.config.js')) && fs.existsSync(path.join(cdir, '.git', 'HEAD')), JSON.stringify(again));
+    checkoutFiles = { ...COMP_FILES, [COMPOSITION_MARKER]: 'mine' };
+    const clash = await call(cc, 'shim_checkout', { dir: cdir });
+    check('a composition holding a file named like the marker is refused, the folder untouched', clash.isError === true
+      && /unsafe-path/.test(clash.content[0]?.text ?? '') && fs.existsSync(path.join(cdir, 'index.html'))
+      && fs.readFileSync(path.join(cdir, COMPOSITION_MARKER), 'utf8').includes('shim-composition-checkout/1'), clash.content[0]?.text);
     const rc = firstJson(await call(cc, 'read_calls', {}));
     const rcReq = sc.filter((s) => s.path === '/sessions/sess-c/call').pop();
     check('a composition tool forwards to /call', JSON.stringify(rcReq?.body) === JSON.stringify({ name: 'read_calls', input: {} }) && rc.scope === 'current');

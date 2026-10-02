@@ -25,7 +25,9 @@
 //     because the folder IS the composition: a re-checkout removes every
 //     visible file the composition no longer has. A folder that merely holds
 //     a manifest.json (a web app, an extension) is never treated as one.
-//   - Every path written is checked against the folder root.
+//   - Every path written is checked against the folder root. A composition
+//     holding a file named like the marker can't be checked out (the
+//     checkout would overwrite it) and says so.
 
 import * as fs from 'fs';
 import * as path from 'path';
@@ -227,9 +229,19 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
       );
     }
   }
+  // The checkout owns the marker's name: a composition file by that name
+  // would be overwritten by it and then read back as missing. Refuse before
+  // touching the disk rather than corrupt the working copy.
+  if (COMPOSITION_MARKER in files) {
+    throw new FolderError(
+      'unsafe-path',
+      `the composition holds a file named "${COMPOSITION_MARKER}", the name a checkout reserves for its marker — ` +
+        'ask the user to rename or remove it in Shim, then check out again',
+    );
+  }
   const targets = Object.keys(files).sort().map((rel) => [rel, resolveInside(root, rel)] as const);
-  // The composition's own hidden files (never the marker: the checkout owns that name).
-  const hidden = Object.keys(files).filter((rel) => rel !== COMPOSITION_MARKER && hasHiddenSegment(rel)).sort();
+  // The composition's own hidden files.
+  const hidden = Object.keys(files).filter(hasHiddenSegment).sort();
   const previousHidden = checkoutHiddenPaths(root);
   fs.mkdirSync(root, { recursive: true });
   // The folder is the composition: what it no longer has goes — visible
