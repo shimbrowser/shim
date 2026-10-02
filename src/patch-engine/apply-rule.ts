@@ -24,7 +24,7 @@ import { makeRuleState } from './rule-state';
 import { makeStatusReporter } from './rule-status';
 import { makeReconciler } from './rule-reconcile';
 import type { Rule, Anchor } from './types';
-import type { ShimApiBase, ShimApi } from '../preload/shim-api-types';
+import type { CoreApi, CoreHandlerApi, HostApiMembers } from './api';
 
 // --- Own-DOM guard ----------------------------------------------------------
 //
@@ -68,7 +68,7 @@ export const mountedOutputRoots = new Set<Node>();
 export function applyRule(
   rule: Rule,
   spec: RuntimeSpec,
-  api: ShimApiBase,
+  api: CoreApi,
   mutations: MutationRegistry,
   handlers: HandlerMap,
 ): () => void {
@@ -182,7 +182,7 @@ export function applyRule(
     // property scoped to this mount's `cleanups` array. Concurrent mounts of the
     // same rule on different anchors get distinct proxies — one anchor's cleanup
     // registrations don't leak into another's.
-    const mountApi: ShimApi = Object.assign(Object.create(api) as ShimApiBase, {
+    const mountApi: CoreHandlerApi = Object.assign(Object.create(api) as CoreApi & HostApiMembers, {
       cleanup(fn: () => void) {
         if (typeof fn === 'function') cleanups.push(fn);
       },

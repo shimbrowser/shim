@@ -26,7 +26,7 @@ import {
 import { compileInlineHandlers, normalizeOutputs, trimStackForEvent } from './engine-internal';
 import type { HandlerMap } from './engine-internal';
 import type { Rule, Spec } from './types';
-import type { ShimApiBase, RouteMatch, RouteMountApi } from '../preload/shim-api-types';
+import type { CoreApi, CoreRouteMountApi, HostApiMembers, RouteMatch } from './api';
 import { errMessage } from '../shared/error';
 
 // routeRule's single mounted-route record — see mountRoute/unmountRoute.
@@ -93,7 +93,7 @@ function applyRouteScroll(restoreOnly: boolean): void {
   });
 }
 
-export function routeRule(rule: Rule, spec: Spec, api: ShimApiBase, handlers: HandlerMap): () => void {
+export function routeRule(rule: Rule, spec: Spec, api: CoreApi, handlers: HandlerMap): () => void {
   const effectiveHandlers: HandlerMap = rule.handlers
     ? { ...handlers, ...compileInlineHandlers(rule.handlers, spec) }
     : handlers;
@@ -165,7 +165,7 @@ export function routeRule(rule: Rule, spec: Spec, api: ShimApiBase, handlers: Ha
     routeChangeCbs.length = 0;
     routeChangeTeardowns.clear();
     const cleanups: Array<() => void> = [];
-    const mountApi: RouteMountApi = Object.assign(Object.create(api) as ShimApiBase, {
+    const mountApi: CoreRouteMountApi = Object.assign(Object.create(api) as CoreApi & HostApiMembers, {
       cleanup(fn: () => void) { if (typeof fn === 'function') cleanups.push(fn); },
       onRouteChange(cb: (match: RouteMatch) => void | (() => void)) {
         if (typeof cb === 'function') routeChangeCbs.push(cb);

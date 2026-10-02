@@ -5,7 +5,7 @@
 
 import vm from 'vm';
 import type { Spec, Rule, Mutation } from './types';
-import type { ShimApiBase, ShimApi, RouteMatch, RouteMountApi } from '../preload/shim-api-types';
+import type { CoreApi, CoreHandlerApi, CoreRouteMountApi, RouteMatch } from './api';
 
 // --- Runtime/engine-only Spec extension ------------------------------------
 //
@@ -27,7 +27,7 @@ export interface RuntimeSpec extends Spec {
 export interface MutationHandlerDef {
   deps?: string[];
   css?: string;
-  mount(el: Element, mut: Mutation, rule: Rule, spec: Spec, api: ShimApiBase): unknown;
+  mount(el: Element, mut: Mutation, rule: Rule, spec: Spec, api: CoreHandlerApi): unknown;
 }
 export type MutationRegistry = Record<string, MutationHandlerDef>;
 
@@ -42,14 +42,14 @@ export interface ScriptHandlerArgs {
   mutation: Mutation;
   rule: Rule;
   spec: Spec;
-  api: ShimApi;
+  api: CoreHandlerApi;
 }
 export interface RouteHandlerArgs {
   match: RouteMatch;
   mutation: Mutation;
   rule: Rule;
   spec: Spec;
-  api: RouteMountApi;
+  api: CoreRouteMountApi;
 }
 export type PatchHandler = (args: ScriptHandlerArgs | RouteHandlerArgs) => unknown;
 export type HandlerMap = Record<string, PatchHandler>;
@@ -73,7 +73,7 @@ export interface RejectedSample {
 // Current deploy's {minified: original} component-name map (§8 Stage B), via
 // the api bridge. Null-safe on every degraded surface — stub apis, forwarded
 // frames, harnesses — and never throws; null means "compare raw names".
-export function getSymbols(api: ShimApiBase): Promise<Record<string, string> | null> {
+export function getSymbols(api: CoreApi): Promise<Record<string, string> | null> {
   if (!api || !api.componentId || typeof api.componentId.symbols !== 'function') {
     return Promise.resolve(null);
   }

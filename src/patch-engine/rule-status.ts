@@ -9,7 +9,7 @@ import { reorderNote, reshapeNote } from './layout-kinds';
 import { injectStripNotes } from './dispatch-mutation';
 import type { RuleRuntimeState } from './rule-state';
 import type { Rule, Spec } from './types';
-import type { ShimApiBase } from '../preload/shim-api-types';
+import type { CoreApi } from './api';
 
 export interface StatusReporter {
   // Measure viewport coverage BEFORE mountOn stamps display:none / detaches the
@@ -18,7 +18,7 @@ export interface StatusReporter {
   reportStatusIfChanged(): void;
 }
 
-export function makeStatusReporter(rule: Rule, spec: Spec, api: ShimApiBase, rs: RuleRuntimeState): StatusReporter {
+export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: RuleRuntimeState): StatusReporter {
   // Apply-time precondition notes for the layout kinds (§6): computed-style
   // checks whose failure means the compiled CSS silently does nothing (reorder
   // under a block parent, grid templates on a flex container). Joined into the

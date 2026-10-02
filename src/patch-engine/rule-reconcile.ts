@@ -15,7 +15,7 @@ import { getSymbols } from './engine-internal';
 import type { RuntimeSpec } from './engine-internal';
 import type { RuleRuntimeState } from './rule-state';
 import type { Rule, Anchor, AnchorSpec } from './types';
-import type { ShimApiBase } from '../preload/shim-api-types';
+import type { CoreApi } from './api';
 
 export interface Reconciler {
   start(): void;
@@ -25,7 +25,7 @@ export interface Reconciler {
 export function makeReconciler(
   rule: Rule,
   spec: RuntimeSpec,
-  api: ShimApiBase,
+  api: CoreApi,
   rs: RuleRuntimeState,
   mountedOutputRoots: Set<Node>,
 ): Reconciler {

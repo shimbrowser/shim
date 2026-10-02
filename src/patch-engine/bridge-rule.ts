@@ -9,9 +9,9 @@
 // teardown-by-source is a separate bridge concern not wired yet.
 
 import type { Rule, Spec, Anchor } from './types';
-import type { ShimApiBase } from '../preload/shim-api-types';
+import type { CoreApi } from './api';
 
-export function bridgeRule(rule: Rule, spec: Spec, api: ShimApiBase): () => void {
+export function bridgeRule(rule: Rule, spec: Spec, api: CoreApi): () => void {
   if (!api.bridge?.forwardRule) {
     console.warn('[shim] anchor.iframe set but api.bridge unavailable');
     return () => {};

@@ -14,7 +14,7 @@ import { routeRule } from './route-rule';
 import { bridgeRule } from './bridge-rule';
 import type { RuntimeSpec, MutationRegistry, HandlerMap } from './engine-internal';
 import type { Spec, Rule } from './types';
-import type { ShimApiBase } from '../preload/shim-api-types';
+import type { CoreApi } from './api';
 
 // The bundle run() receives from page-preload — NOT the same shape as `Spec`:
 // this is the compiled module/bag (`{ spec, mutations, handlers }`) plus two
@@ -74,7 +74,7 @@ function collectCssForSpec(spec: RuntimeSpec, mutations: MutationRegistry): Arra
 
 // Pick the right setup path for a rule. Route rules and iframe-bridge rules take
 // dedicated lifecycles; everything else is a normal anchored rule.
-function setupRule(rule: Rule, spec: RuntimeSpec, api: ShimApiBase, mutations: MutationRegistry, handlers: HandlerMap): () => void {
+function setupRule(rule: Rule, spec: RuntimeSpec, api: CoreApi, mutations: MutationRegistry, handlers: HandlerMap): () => void {
   if (rule.anchor?.iframe) return bridgeRule(rule, spec, api);
   if ((rule.mutations || []).some((m) => m.kind === 'mount-route')) {
     return routeRule(rule, spec, api, handlers);
@@ -92,7 +92,7 @@ function setupRule(rule: Rule, spec: RuntimeSpec, api: ShimApiBase, mutations: M
   return applyRule(rule, spec, api, mutations, handlers);
 }
 
-function run(patch: PatchBundle, api: ShimApiBase): PatchControl {
+function run(patch: PatchBundle, api: CoreApi): PatchControl {
   const { mutations = {}, handlers = {} } = patch;
   // Stamp two runtime-only fields onto the spec so the deep rule-processing path
   // can read them without threading params through every signature. Shallow copy
