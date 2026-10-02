@@ -1,15 +1,18 @@
 # @shimbrowser/mcp
 
-An MCP server that lets Claude Code (or any MCP client) author Shim shims against the
-running Shim browser: open a session on a site tab, check the shim out into a folder,
-edit it, preview it on the live page, look at the result, commit.
+An MCP server that lets Claude Code (or any MCP client) author Shim shims and
+compositions against the running Shim browser: open a session on a site tab (a shim) or
+a composition, check it out into a folder, edit it, preview it live, look at the result,
+commit.
 
 It talks to Shim over Shim's **control endpoint**: a Unix socket (a named pipe on
 Windows) plus a bearer token, both named in `<userData>/control.json`. The endpoint is
 off by default; turn it on in Shim's Settings, or let `shim_launch` start Shim with it on
 for one run. Every session still waits for you to allow it in Shim's sidebar, and a
-commit that grants something sensitive (a redirect target, a remote database
-connection) waits for your approval there too.
+commit that grants something sensitive (a redirect target, a composition's write to a
+site, a remote database connection) waits for your approval there too. While a session
+holds a composition, its page's `api.ai` calls are refused: a session never spends your
+API key.
 
 ## Tools
 
@@ -19,6 +22,8 @@ Registered once, at startup:
 |---|---|
 | Session | `shim_status`, `shim_launch`, `shim_list_tabs`, `shim_open_session`, `shim_checkout`, `shim_preview`, `shim_commit`, `shim_end_session` |
 | Page | `view_page`, `query_page`, `inspect_element`, `evaluate_in_page`, `read_console`, `reload_page`, `verify_across_pages`, `interact_page` (composition sessions only) |
+| API map | `list_discovered_hosts`, `request_sources`, `search_discovered_api`, `inspect_endpoint`, `replay_endpoint` |
+| Composition | `probe_request`, `read_calls` (composition sessions only) |
 
 The page tools' definitions come from `@shimbrowser/core/page-tools`, the same module
 Shim's own authoring worker uses, and Shim runs them with the same implementation.
@@ -38,13 +43,17 @@ Shim's own authoring worker uses, and Shim runs them with the same implementatio
    `commitId`; a retry after a lost reply returns the first result.
 5. `shim_end_session` discards anything uncommitted.
 
+A composition session opens with `compositionId` instead (`tabId` optional) and checks
+out `manifest.json` plus the composition's files, flat. A preview saves the changed files
+and reloads the composition's page; a manifest that adds a host asks you in Shim first.
+
 ## Claude Code plugin
 
 This package is also a Claude Code plugin: `.claude-plugin/plugin.json`, `.mcp.json`
 (which starts `dist/shim-mcp.js`) and the `shim-authoring` skill
 (`skills/shim-authoring/SKILL.md`) — the public authoring guide: the session loop, the
-folder format, every mutation kind, anchors, the runtime `api`, and the evidence each
-preview returns. From a checkout:
+folder format, every mutation kind, anchors, the runtime `api`, the composition manifest
+and `window.api`, and the evidence each preview returns. From a checkout:
 
 ```sh
 npm run build -w @shimbrowser/mcp
