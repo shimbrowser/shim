@@ -38,6 +38,29 @@ Shim's own authoring worker uses, and Shim runs them with the same implementatio
    `commitId`; a retry after a lost reply returns the first result.
 5. `shim_end_session` discards anything uncommitted.
 
+## Headless mode
+
+`shim-mcp --headless` (or `SHIM_MCP_MODE=headless`) needs no Shim browser: each session
+opens its own Chromium through Playwright (an optional peer dependency: `npm install
+playwright && npx playwright install chromium`) and works on a `.shim` file instead of a
+shim in Shim's library. `--visible` (or `SHIM_HEADLESS_VISIBLE=1`) shows the window.
+
+- `shim_open_session { url, intent, shimFile | newShimName, dir }`: the page to open, and
+  the `.shim` file to load (if it exists) and commit to — for a new shim it defaults to
+  `<dir>.shim`. Every session gets a fresh browser profile; the Shim browser's profile is
+  never read.
+- Previews, the page tools and commits behave as in attach mode; `shim_commit` writes the
+  `.shim` file (a new version, witnesses, the session's history entry). `api.storage`
+  persists to `<shimFile>.storage.json`.
+- Headless supports a stated subset (shim-core design D15): `hide`, `restyle`, `reorder`,
+  `reshape`, `script`, `inject-element`, `inject-html`, `remove`, `replace-root`, with
+  `api.storage` and `api.cleanup`. A preview that declares anything else applies nothing
+  and answers `unsupported` with the list. A handler that uses a member headless lacks
+  gets that member's unconfigured answer (`{ ok: false, error: 'requires-shim-browser' }`,
+  `undefined`, or an absent member) and its rule's evidence says `verification: partial`.
+- `shim_launch`, `shim_list_tabs`, compositions, `verify_across_pages` and
+  `interact_page` answer `requires-shim-browser`.
+
 ## Claude Code plugin
 
 This package is also a Claude Code plugin: `.claude-plugin/plugin.json`, `.mcp.json`
@@ -61,6 +84,8 @@ claude --plugin-dir packages/mcp
 | `SHIM_DEV_CHECKOUT` | A Shim repo checkout: `shim_launch` runs `npm start` there. |
 | `SHIM_AGENT_NAME` | The name Shim's cards show (default: from the MCP client). |
 | `MAX_MCP_OUTPUT_TOKENS` | The tool-result budget results are fitted to (default 25000). |
+| `SHIM_MCP_MODE` | `headless` runs headless mode (same as `--headless`). |
+| `SHIM_HEADLESS_VISIBLE` | `1` shows headless mode's Chromium windows (same as `--visible`). |
 
 ## Build
 

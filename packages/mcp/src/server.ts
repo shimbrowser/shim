@@ -8,6 +8,12 @@
 //   page tools     forwarded as-is to POST /sessions/:id/call — Shim runs
 //                  them with the same implementation its own worker uses
 //
+// Two modes, one tool contract (D2): attach (the default) drives the Shim
+// browser over its control endpoint; headless (shim-mcp --headless) drives
+// headless-control.ts, an in-process stand-in for that endpoint over a
+// Playwright page, so every tool takes the same path in both. Tools that need
+// the browser answer requires-shim-browser there.
+//
 // The server keeps only what a client needs between calls: which sessions it
 // opened, the folder each was checked out into, and the latest revision a
 // preview returned (what shim_commit commits by default). Everything that
@@ -26,7 +32,8 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { encodeWorkingCopy, decodeWorkingCopy, WorkingCopyWireError } from '@shimbrowser/core/working-copy-wire';
 import { isPageToolName } from '@shimbrowser/core/page-tools';
-import { staticTools, isSessionToolName, SERVER_INSTRUCTIONS, type SessionToolName } from './contract';
+import * as path from 'path';
+import { staticTools, isSessionToolName, SERVER_INSTRUCTIONS, HEADLESS_SERVER_INSTRUCTIONS, type SessionToolName } from './contract';
 import { ControlTransportError, type ControlClient, type ControlReply } from './control-client';
 import type { LaunchOutcome } from './launch';
 import { FolderError, readWorkingCopy, writeCheckout } from './folder';
@@ -46,6 +53,9 @@ export interface ShimMcpDeps {
   // Overrides the agent name shown on Shim's cards (default: from the MCP
   // client's own name).
   agentName?: string;
+  // 'headless': connect() is the in-process headless control
+  // (headless-control.ts). Default 'attach'.
+  mode?: 'attach' | 'headless';
 }
 
 export interface CallToolResult {
@@ -57,6 +67,8 @@ export interface CallToolResult {
 interface SessionState {
   dir: string | null;
   revision: number;
+  // Headless: the .shim file commits write.
+  shimFile?: string;
 }
 
 /** A refusal the agent gets as an error result: a stable code plus what to do. */
@@ -88,6 +100,9 @@ const HINTS: Record<string, string> = {
   'commit-timeout': 'Nobody approved the commit in Shim within two minutes. The session is still open.',
   'invalid-target': 'Use a tabId from shim_list_tabs for a tab with a site loaded.',
   'unknown-artifact': 'Use a shim id from shim_list_tabs, or newShimName to start a new shim.',
+  'requires-shim-browser': 'This needs the Shim browser: it is not available in headless mode. Run shim-mcp without --headless, with Shim running.',
+  unsupported: 'Headless mode supports a subset of shim features: remove what is listed, or author this shim in the Shim browser.',
+  'page-open-failed': 'Check the url (http or https, reachable from this machine) and try again.',
 };
 
 function failureResult(code: string, detail: string): CallToolResult {
@@ -125,8 +140,9 @@ function replyOrThrow(reply: ControlReply): Record<string, unknown> {
 export function createShimMcpServer(deps: ShimMcpDeps): Server {
   const server = new Server(
     { name: SERVER_NAME, version: deps.version },
-    { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS },
+    { capabilities: { tools: {} }, instructions: deps.mode === 'headless' ? HEADLESS_SERVER_INSTRUCTIONS : SERVER_INSTRUCTIONS },
   );
+  const headless = deps.mode === 'headless';
   const tools = staticTools().map((t) => ({ name: t.name, description: t.description, inputSchema: t.input_schema }));
   const sessions = new Map<string, SessionState>();
   let current: string | null = null;
@@ -210,6 +226,9 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         }
       }
       case 'shim_launch': {
+        if (headless) {
+          throw new ToolFailure('requires-shim-browser', 'headless mode drives its own Chromium per session: there is no Shim to launch. Open a session with shim_open_session { url, … }.');
+        }
         const seconds = typeof input.timeoutSeconds === 'number' && input.timeoutSeconds > 0 ? input.timeoutSeconds : undefined;
         const outcome = await deps.launch(seconds !== undefined ? { timeoutMs: seconds * 1000 } : {});
         if (!outcome.ok) throw new ToolFailure(outcome.error, outcome.detail);
@@ -218,30 +237,52 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       case 'shim_list_tabs':
         return [text(await control('GET', '/tabs'))];
       case 'shim_open_session': {
-        const tabId = input.tabId;
-        if (typeof tabId !== 'number' || !Number.isInteger(tabId)) throw new ToolFailure('invalid-request', 'tabId must be a tab id from shim_list_tabs');
         const intent = typeof input.intent === 'string' ? input.intent : '';
         if (!intent.trim()) throw new ToolFailure('invalid-request', 'intent is required');
         const shimId = str(input, 'shimId');
         const newShimName = str(input, 'newShimName');
-        if ((shimId === undefined) === (newShimName === undefined)) {
-          throw new ToolFailure('invalid-request', 'name exactly one of shimId (an existing shim) or newShimName (a new one)');
-        }
+        const dir = str(input, 'dir');
         const agent = deps.agentName || agentDisplayName(server.getClientVersion()?.name);
-        const body: Record<string, unknown> = {
-          kind: 'shim',
-          target: { webContentsId: tabId },
-          agent,
-          intent,
-          ...(shimId !== undefined ? { artifactId: shimId } : { create: { name: newShimName } }),
-        };
+        let body: Record<string, unknown>;
+        if (headless) {
+          const url = str(input, 'url');
+          if (!url) throw new ToolFailure('invalid-request', 'headless mode opens a page by url: pass url (tabId is for the Shim browser)');
+          if (shimId !== undefined) {
+            throw new ToolFailure('requires-shim-browser', 'headless mode has no shim library: name the .shim file to work on with shimFile');
+          }
+          // The .shim file: named, or for a new shim the checkout folder's
+          // sibling (<dir>.shim).
+          const named = str(input, 'shimFile');
+          const shimFile = named ? path.resolve(named) : newShimName && dir ? `${path.resolve(dir)}.shim` : undefined;
+          if (!shimFile) {
+            throw new ToolFailure('invalid-request', 'headless mode works on a .shim file: pass shimFile (or newShimName with dir, to create <dir>.shim)');
+          }
+          body = { kind: 'shim', target: { url }, agent, intent, shimFile, ...(newShimName !== undefined ? { create: { name: newShimName } } : {}) };
+        } else {
+          const tabId = input.tabId;
+          if (typeof tabId !== 'number' || !Number.isInteger(tabId)) throw new ToolFailure('invalid-request', 'tabId must be a tab id from shim_list_tabs');
+          if ((shimId === undefined) === (newShimName === undefined)) {
+            throw new ToolFailure('invalid-request', 'name exactly one of shimId (an existing shim) or newShimName (a new one)');
+          }
+          body = {
+            kind: 'shim',
+            target: { webContentsId: tabId },
+            agent,
+            intent,
+            ...(shimId !== undefined ? { artifactId: shimId } : { create: { name: newShimName } }),
+          };
+        }
         const opened = await control('POST', '/sessions', body);
         const id = typeof opened.sessionId === 'string' ? opened.sessionId : null;
         if (!id) throw new ToolFailure('invalid-reply', 'Shim opened a session but returned no id');
-        sessions.set(id, { dir: null, revision: 0 });
+        sessions.set(id, { dir: null, revision: 0, ...(typeof opened.shimFile === 'string' ? { shimFile: opened.shimFile } : {}) });
         current = id;
-        const out: Record<string, unknown> = { sessionId: id, ...(typeof opened.artifactId === 'string' ? { shimId: opened.artifactId } : {}) };
-        const dir = str(input, 'dir');
+        const out: Record<string, unknown> = {
+          sessionId: id,
+          ...(typeof opened.artifactId === 'string' ? { shimId: opened.artifactId } : {}),
+          ...(headless ? { mode: 'headless', shimFile: opened.shimFile, url: opened.url } : {}),
+          ...(Array.isArray(opened.warnings) ? { warnings: opened.warnings } : {}),
+        };
         if (dir) out.checkout = await checkout(id, dir);
         return [text(out)];
       }
@@ -288,7 +329,13 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           if (!(e instanceof ToolFailure) || !['control-failed', 'control-timeout', 'shim-not-running'].includes(e.code)) throw e;
           reply = await control('POST', sessionPath(id, 'commit'), body);
         }
-        return [text({ committed: true, versionId: reply.versionId, revision: reply.revision ?? revision, commitId })];
+        return [text({
+          committed: true,
+          versionId: reply.versionId,
+          revision: reply.revision ?? revision,
+          commitId,
+          ...(state.shimFile ? { writtenTo: state.shimFile } : {}),
+        })];
       }
       case 'shim_end_session': {
         const id = sessionId(input);

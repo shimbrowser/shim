@@ -532,3 +532,29 @@ per item in `api.storage`, fetch lazily for what the user interacts with, and ba
   feature waiting on the user's grant, a data path you could only check after commit.
 - When the ask is ambiguous ("make this look better"), propose one concrete change and ask
   whether they want something different.
+
+## 9. Headless mode
+
+When the server runs as `shim-mcp --headless`, there is no Shim browser: `shim_status`
+reports `mode: "headless"`, and each session opens its own Chromium page (a fresh profile,
+no logins, never Shim's). The loop is the same, with three differences:
+
+- **Open on a url and a file.** `shim_open_session { url, intent, shimFile, dir }` works on
+  the `.shim` file `shimFile`: an existing one is loaded and its rules run on the page at
+  once; with `newShimName` a new shim starts there (default `<dir>.shim`). There are no
+  tabs and no shim library, so `shim_list_tabs`, `shim_launch` and `shimId` answer
+  `requires-shim-browser`, and so do `verify_across_pages` and `interact_page`.
+- **`shim_commit` writes the file**: a new version, with its history and what the session
+  verified. `api.storage` lives in `<shimFile>.storage.json`. Hand the `.shim` file to the
+  user; they import it into Shim.
+- **A subset of features.** Headless runs `hide`, `restyle`, `reorder`, `reshape`, `script`,
+  `inject-element`, `inject-html`, `remove` and `replace-root`, with `api.storage` and
+  `api.cleanup`. A preview that uses anything else — the network and route kinds,
+  `anchor.iframe`, or a `settings` / `permissions` / `storage` / `connections`
+  declaration — applies nothing and answers `error: "unsupported"` with the list: drop it,
+  or author that shim in the Shim browser. A handler that calls a member headless lacks gets
+  the answer the browser gives an unconfigured shim (`api.fetch` resolves
+  `{ ok: false, error: "requires-shim-browser" }`, `api.settings.get` resolves `undefined`,
+  `api.db` reads as absent), the preview lists it under `unsupportedApi`, and its rule is
+  **`verification: partial`** — tell the user that rule is unverified until they try it in
+  Shim. Only a `full` rule behaves the same in Shim.

@@ -57,17 +57,22 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
       'allow it (up to two minutes); this call waits for the answer. Name an existing shim with shimId, or ' +
       'start a new one on the tab\'s site with newShimName. Pass dir to check the shim out into that folder ' +
       'right away (same as shim_checkout). While the session is open the shim is yours alone; Shim ends it ' +
-      'after 10 idle minutes, or when the user stops it or starts their own turn on that shim.',
+      'after 10 idle minutes, or when the user stops it or starts their own turn on that shim. ' +
+      'In headless mode (no Shim browser; shim_status reports mode "headless") pass url instead of tabId: the ' +
+      'session opens that page in its own Chromium, with no logins, and works on the .shim file shimFile ' +
+      '(loaded when it exists; with newShimName, created by your first commit — default <dir>.shim).',
     input_schema: {
       type: 'object',
       properties: {
-        tabId: { type: 'number', description: 'The target tab, as shim_list_tabs reports it.' },
+        tabId: { type: 'number', description: 'The target tab, as shim_list_tabs reports it. Required with the Shim browser.' },
         intent: { type: 'string', description: 'What you set out to do, in a sentence or two. Shown to the user on the card in Shim and recorded in the shim\'s chat when you commit.' },
         shimId: { type: 'string', description: 'An existing shim to work on (shim_list_tabs lists the ones on each tab\'s host).' },
         newShimName: { type: 'string', description: 'Instead of shimId: create a new shim with this name on the tab\'s site. It is kept only if you commit.' },
         dir: { type: 'string', description: 'Optional absolute folder to check the working copy out into once the session opens.' },
+        url: { type: 'string', description: 'Headless mode only, instead of tabId: the http(s) page to open.' },
+        shimFile: { type: 'string', description: 'Headless mode only, instead of shimId: the absolute path of the .shim file to work on. Commits write it.' },
       },
-      required: ['tabId', 'intent'],
+      required: ['intent'],
     },
   },
   shim_checkout: {
@@ -151,4 +156,15 @@ export const SERVER_INSTRUCTIONS =
   'shim_preview to apply the folder to the live page and read the evidence, the page tools (view_page, ' +
   'query_page, inspect_element, …) to look, then shim_commit with a summary, and shim_end_session. For a ' +
   'visual change, verify with a screenshot before committing. The shim-authoring skill documents the spec ' +
+  'format, every mutation kind, anchors and the runtime api.';
+
+export const HEADLESS_SERVER_INSTRUCTIONS =
+  'Shim applies user-authored modifications ("shims") to live websites. This server runs in HEADLESS mode: no ' +
+  'Shim browser — each session drives its own Chromium page (no logins) and works on a .shim file. ' +
+  'shim_open_session with url, intent and shimFile (plus newShimName for a new shim) and dir, edit shim.json and ' +
+  'handlers/*.js, shim_preview to apply the folder to the live page and read the evidence, the page tools ' +
+  '(view_page, query_page, inspect_element, …) to look, then shim_commit (it writes the .shim file) and ' +
+  'shim_end_session. Headless supports a subset of shim features: a preview that declares anything else answers ' +
+  '"unsupported" and applies nothing, and a rule reported verification "partial" is unverified — tell the user. ' +
+  'Tools that need the Shim browser answer requires-shim-browser. The shim-authoring skill documents the spec ' +
   'format, every mutation kind, anchors and the runtime api.';

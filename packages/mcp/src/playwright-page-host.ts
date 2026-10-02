@@ -120,8 +120,13 @@ export interface PlaywrightPageHost extends PageHost {
   detach(): Promise<void>;
 }
 
-/** The @shimbrowser/core browser bundle (`@shimbrowser/core/page`). */
+// Embedded by the one-file plugin build (scripts/build.js); undefined when
+// this module runs from the workspace or an npm install.
+declare const SHIM_CORE_PAGE_BUNDLE: string | undefined;
+
+/** The @shimbrowser/core browser bundle: the one embedded in the plugin build, else `@shimbrowser/core/page`. */
 export function readEngineBundle(): string {
+  if (typeof SHIM_CORE_PAGE_BUNDLE === 'string') return SHIM_CORE_PAGE_BUNDLE;
   return fs.readFileSync(require.resolve('@shimbrowser/core/page'), 'utf8');
 }
 
