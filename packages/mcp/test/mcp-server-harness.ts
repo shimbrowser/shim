@@ -242,6 +242,7 @@ async function main(): Promise<void> {
     let n = 0;
     const { deps: d3, sent: s3 } = rig((req) => {
       if (req.path === '/sessions') return ok({ sessionId: 'sess-2' });
+      if (req.path.endsWith('/checkout')) return ok({ revision: 0, files: encodeWorkingCopy(CHECKOUT_FILES) });
       if (req.path.endsWith('/commit')) return refuse(409, 'stale-revision', 'latest applied revision is 4');
       if (req.path.endsWith('/call')) { n += 1; return refuse(410, 'session-ended'); }
       return refuse(404, 'not-found');
@@ -261,6 +262,15 @@ async function main(): Promise<void> {
     check('…and the session is forgotten', again.isError === true && /no-session/.test(again.content[0]?.text ?? '') && n === 1);
     const preview = await call(c3, 'shim_preview', { sessionId: 'sess-2' });
     check('preview with no folder says to check out first', preview.isError === true && /no-working-copy/.test(preview.content[0]?.text ?? ''));
+    const occupied = path.join(tmpDir(), 'occupied');
+    fs.mkdirSync(occupied, { recursive: true });
+    fs.writeFileSync(path.join(occupied, 'README.md'), 'mine');
+    const openedBusy = await call(c3, 'shim_open_session', { tabId: 1, intent: 'x', shimId: 's', dir: occupied });
+    const busy = firstJson(openedBusy);
+    const busyCheckout = busy.checkout as Record<string, unknown> | undefined;
+    check('open whose checkout fails still answers the open session', openedBusy.isError !== true && busy.sessionId === 'sess-2'
+      && busyCheckout?.error === 'not-a-working-copy' && /shim_checkout/.test(String(busy.hint)), JSON.stringify(busy));
+    check('…and leaves the folder alone', fs.readdirSync(occupied).join(',') === 'README.md');
     const unknown = await call(c3, 'not_a_tool');
     check('an unknown tool is an error result', unknown.isError === true && /unknown-tool/.test(unknown.content[0]?.text ?? ''));
     await c3.close();
