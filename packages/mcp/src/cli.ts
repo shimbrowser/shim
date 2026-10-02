@@ -8,7 +8,7 @@ import { randomUUID } from 'crypto';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createShimMcpServer } from './server';
 import { defaultEnv, discoveryFilePath, readControlInfo, socketClient, type ControlInfo } from './control-client';
-import { attachOrLaunch, pidAlive, type LaunchCommand } from './launch';
+import { attachOrLaunch, pidAlive, type LaunchCommand, type LaunchExit, type Launched } from './launch';
 import { maxOutputTokens } from './results';
 
 // Replaced at bundle time (scripts/build.js); the package version otherwise.
@@ -24,7 +24,7 @@ async function ping(info: ControlInfo): Promise<boolean> {
   }
 }
 
-function spawnDetached(cmd: LaunchCommand): void {
+function spawnDetached(cmd: LaunchCommand): Launched {
   const child = spawn(cmd.command, cmd.args, {
     cwd: cmd.cwd,
     detached: true,
@@ -32,8 +32,14 @@ function spawnDetached(cmd: LaunchCommand): void {
     // npm on Windows is a .cmd shim.
     shell: process.platform === 'win32',
   });
-  child.on('error', (e) => console.error(`[shim-mcp] ${cmd.command} failed: ${e.message}`));
+  let exit: LaunchExit | null = null;
+  child.on('error', (e) => {
+    console.error(`[shim-mcp] ${cmd.command} failed: ${e.message}`);
+    exit ??= { code: null, signal: null, error: e.message };
+  });
+  child.on('exit', (code, signal) => { exit ??= { code, signal }; });
   child.unref();
+  return { exit: () => exit };
 }
 
 export async function main(): Promise<void> {
