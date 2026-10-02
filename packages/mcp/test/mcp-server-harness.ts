@@ -165,6 +165,24 @@ async function main(): Promise<void> {
     await client.close();
   }
 
+  console.log('tab ids:');
+  {
+    const { deps, sent } = rig((req) => {
+      if (req.path === '/tabs') return ok({ windows: [{ windowId: 2, tabs: [{ webContentsId: 41, tabId: 3, url: 'https://a.example/' }, { webContentsId: null, tabId: 4, url: 'https://b.example/' }] }] });
+      if (req.path === '/sessions') return ok({ sessionId: 'sess-t' });
+      return refuse(404, 'not-found');
+    });
+    const client = await connect(deps);
+    const listed = firstJson(await call(client, 'shim_list_tabs'));
+    const tabs = ((listed.windows as Array<Record<string, unknown>>)[0]?.tabs ?? []) as Array<Record<string, unknown>>;
+    check('shim_list_tabs answers each tab\'s tabId as the id a session targets (its webContentsId)', tabs[0]?.tabId === 41 && !('webContentsId' in (tabs[0] ?? {}))
+      && tabs[1]?.tabId === null && tabs[0]?.url === 'https://a.example/', JSON.stringify(tabs));
+    await call(client, 'shim_open_session', { tabId: tabs[0]?.tabId, intent: 'x', shimId: 's' });
+    const target = (sent.filter((r) => r.path === '/sessions').pop()?.body as Record<string, unknown> | undefined)?.target;
+    check('…and that tabId is the target shim_open_session sends', JSON.stringify(target) === JSON.stringify({ webContentsId: 41 }), JSON.stringify(target));
+    await client.close();
+  }
+
   console.log('a session, end to end:');
   const dir = path.join(tmpDir(), 'work');
   let previewBody: unknown = null;
