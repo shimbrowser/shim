@@ -1,0 +1,34 @@
+{
+  "name": "@shimbrowser/mcp",
+  "version": "0.7.0-dev",
+  "private": true,
+  "description": "MCP server that lets Claude Code author Shim shims against the running Shim browser.",
+  "license": "Apache-2.0",
+  "author": "Artificial Apps, LLC",
+  "homepage": "https://shimbrowser.com",
+  "bin": {
+    "shim-mcp": "./dist/shim-mcp.js"
+  },
+  "files": [
+    "dist",
+    ".claude-plugin",
+    ".mcp.json",
+    "skills",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.js",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.0",
+    "@shimbrowser/core": "0.7.0-dev"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "typescript": "6.0.3"
+  },
+  "engines": {
+    "node": ">=22.12"
+  }
+}

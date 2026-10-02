@@ -1,0 +1,24 @@
+{
+  // The package's own typecheck. Unlike @shimbrowser/core this runs under
+  // Node (a stdio MCP server that talks to Shim over a Unix socket), so Node
+  // types are in. The repo-root tsconfig also covers src/ and test/.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "customConditions": ["shim-source"],
+    "moduleDetection": "force",
+    "esModuleInterop": true,
+    "noEmit": true,
+    "strict": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    // DOM: the engine package it imports (by source) is typed against the DOM.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}
