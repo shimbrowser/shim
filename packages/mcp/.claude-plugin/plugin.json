@@ -1,0 +1,12 @@
+{
+  "name": "shim",
+  "version": "0.7.0-dev",
+  "description": "Author Shim shims from Claude Code: open a session on a tab in the running Shim browser, edit the shim as a folder, preview it on the live page, verify, commit.",
+  "author": {
+    "name": "Artificial Apps, LLC",
+    "url": "https://shimbrowser.com"
+  },
+  "homepage": "https://shimbrowser.com",
+  "license": "Apache-2.0",
+  "keywords": ["shim", "browser", "userscripts", "mcp"]
+}

@@ -38,6 +38,19 @@ Shim's own authoring worker uses, and Shim runs them with the same implementatio
    `commitId`; a retry after a lost reply returns the first result.
 5. `shim_end_session` discards anything uncommitted.
 
+## Claude Code plugin
+
+This package is also a Claude Code plugin: `.claude-plugin/plugin.json`, `.mcp.json`
+(which starts `dist/shim-mcp.js`) and the `shim-authoring` skill
+(`skills/shim-authoring/SKILL.md`) — the public authoring guide: the session loop, the
+folder format, every mutation kind, anchors, the runtime `api`, and the evidence each
+preview returns. From a checkout:
+
+```sh
+npm run build -w @shimbrowser/mcp
+claude --plugin-dir packages/mcp
+```
+
 ## Environment
 
 | Variable | Effect |
