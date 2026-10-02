@@ -269,6 +269,11 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
   // The composition's own hidden files.
   const hidden = Object.keys(files).filter(hasHiddenSegment).sort();
   const previousHidden = checkoutHiddenPaths(root);
+  // No write, removal or marker may pass through a symlink below the root.
+  // Checked before touching the disk, as the shim checkout does.
+  for (const [, abs] of targets) refuseSymlinksBelow(root, abs);
+  for (const rel of previousHidden) refuseSymlinksBelow(root, resolveInside(root, rel));
+  refuseSymlinksBelow(root, path.join(root, COMPOSITION_MARKER));
   fs.mkdirSync(root, { recursive: true });
   // The folder is the composition: what it no longer has goes — visible
   // files, and hidden ones an earlier checkout wrote.
