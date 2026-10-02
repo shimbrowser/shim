@@ -30,10 +30,11 @@
 // so per-route keys are correct there. Two hashes, two jobs.
 //
 // Pure + bare-node testable (scripts/deploy-id-harness.js); the preload only
-// contributes DOM collection.
+// contributes DOM collection. No Node builtins (design D4): the hash is the
+// pure-JS ./sha256, pinned to Node crypto's output by sha256-harness.
 
-import crypto from 'crypto';
 import { must } from '../shared/assert';
+import { sha256Hex } from './sha256';
 
 // Same last-two-labels semantics as redirect-net's trust gate — no Public
 // Suffix List, imprecise for multi-part suffixes (a.co.uk vs b.co.uk read as
@@ -61,7 +62,9 @@ function stripVolatile(url: string): string {
 function hashUrls(urls: string[]): string | null {
   const cleaned = [...new Set(urls.map(stripVolatile))].sort();
   if (!cleaned.length) return null;
-  return crypto.createHash('sha256').update(cleaned.join('\n')).digest('hex').slice(0, 16);
+  // Pure-JS sha256 (./sha256), byte-identical to Node's crypto digest, so
+  // ids minted before the engine dropped Node still compare equal.
+  return sha256Hex(cleaned.join('\n')).slice(0, 16);
 }
 
 // Only http(s) URLs carry deploy signal: `blob:` script URLs are random per
