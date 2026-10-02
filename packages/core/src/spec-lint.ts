@@ -807,4 +807,4 @@ function assertNoSpecErrors(spec: unknown, carriedHandlers?: unknown): void {
   throw err;
 }
 
-export { lintSpec, assertNoSpecErrors, BUILTIN_KINDS, observerLoopWarning };
+export { lintSpec, assertNoSpecErrors, BUILTIN_KINDS, observerLoopWarning, canonicalModule, HANDLER_REF_FIELDS };

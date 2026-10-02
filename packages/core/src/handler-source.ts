@@ -6,13 +6,50 @@
 // two so the browser's commit path and the shim folder format agree on it.
 
 import type { Spec } from './types';
+import { syntaxProbe } from './syntax-probe';
 
 /** A spec that may carry an import-time top-level `handlers` map (module form). */
 export type SpecWithHandlers = Spec & { handlers?: Record<string, string> };
 
+const MODULE_PREFIX = 'module.exports = ';
+const MODULE_SUFFIX = ';\n';
+
 /** The module form a rule-local handler expression is stored in. */
 export function expressionToModule(expression: string): string {
-  return `module.exports = ${expression};\n`;
+  return `${MODULE_PREFIX}${expression}${MODULE_SUFFIX}`;
+}
+
+// The expression expressionToModule wrapped, byte for byte (trailing
+// whitespace inside it included), when the module is exactly that wrapper.
+function exactWrappedExpression(moduleSource: string): string | null {
+  if (!moduleSource.startsWith(MODULE_PREFIX) || !moduleSource.endsWith(MODULE_SUFFIX)) return null;
+  return moduleSource.slice(MODULE_PREFIX.length, moduleSource.length - MODULE_SUFFIX.length);
+}
+
+// `module.exports = <expr>;` — the exact form expressionToModule writes, with
+// the whitespace and trailing semicolon a hand edit might change.
+const WRAPPED_EXPRESSION_RE = /^\s*module\.exports\s*=\s*([\s\S]*?)\s*;?\s*$/;
+
+/**
+ * The rule-local expression form of a handler module (a shim folder's
+ * handlers/<name>.js going back onto `rule.handlers`). A module that is just
+ * `module.exports = <expr>;` gives back `<expr>`, so expression → module →
+ * expression is the identity. Anything else (helpers beside the export, a
+ * leading comment) becomes an IIFE that runs the module in its own
+ * `(module, exports)` scope and evaluates to its `module.exports` — the same
+ * value the browser's module compile produces, in a form `module.exports =
+ * <expr>;` can carry.
+ */
+export function moduleToExpression(moduleSource: string): string {
+  const inner = exactWrappedExpression(moduleSource) ?? WRAPPED_EXPRESSION_RE.exec(moduleSource)?.[1];
+  if (inner && syntaxProbe(`(${inner}\n)`).ok) return inner;
+  return '(function () {\n'
+    + 'var module = { exports: {} };\n'
+    + '(function (module, exports) {\n'
+    + `${moduleSource}\n`
+    + '})(module, module.exports);\n'
+    + 'return module.exports;\n'
+    + '})()';
 }
 
 // Collapse the spec's handler sources into a flat { name: moduleSource }
