@@ -3,14 +3,15 @@
 // platform and override; which command starts Shim per platform and env;
 // attach when the file names a live pid that answers; launch otherwise and
 // wait for a fresh, live, answering endpoint (a stale file is never taken
-// for an answer); timeout, no launcher, and a spawn that throws.
+// for an answer); timeout, no launcher, a spawn that throws, and a launcher
+// that exits non-zero (failed now, not at the deadline) or zero (open: wait on).
 //
 //   node out/packages/mcp/test/mcp-launch-harness.js
 
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { attachOrLaunch, launchCommand, pidAlive, CONTROL_ENDPOINT_FLAG, type LaunchCommand, type LaunchDeps } from '../src/launch';
+import { attachOrLaunch, launchCommand, pidAlive, CONTROL_ENDPOINT_FLAG, type LaunchCommand, type LaunchDeps, type LaunchExit } from '../src/launch';
 import { discoveryFilePath, readControlInfo, userDataDir, type ControlInfo } from '../src/control-client';
 
 let failures = 0;
@@ -36,6 +37,8 @@ function sim(opts: {
   alive: (pid: number) => boolean;
   answers: (info: ControlInfo) => boolean;
   spawnThrows?: boolean;
+  // What the launcher's exit reads as at each poll (default: still running).
+  exit?: (polls: number) => LaunchExit | null;
 }): Sim {
   let now = 0;
   let polls = 0;
@@ -51,6 +54,7 @@ function sim(opts: {
       spawn: (cmd) => {
         if (opts.spawnThrows) throw new Error('ENOENT');
         spawned.push(cmd);
+        return { exit: () => opts.exit?.(polls) ?? null };
       },
       sleep: async (ms) => { now += ms; polls += 1; },
       now: () => now,
@@ -135,6 +139,29 @@ async function main(): Promise<void> {
     const s = sim({ file: () => null, alive: () => false, answers: () => false, spawnThrows: true });
     const r = await attachOrLaunch(s.deps);
     check('a spawn that throws: launch-failed', !r.ok && r.error === 'launch-failed' && /ENOENT/.test(r.detail));
+  }
+  {
+    // `open -a Shim` with no such app exits 1 at once.
+    const s = sim({ file: () => null, alive: () => false, answers: () => false, exit: (polls) => (polls >= 2 ? { code: 1, signal: null } : null) });
+    const r = await attachOrLaunch(s.deps);
+    check('a launcher that exits non-zero: launch-failed at once, not at the deadline',
+      !r.ok && r.error === 'launch-failed' && /exited with code 1/.test(r.detail) && s.deps.now() < 5_000, JSON.stringify(r));
+  }
+  {
+    const s = sim({ file: () => null, alive: () => false, answers: () => false, exit: () => ({ code: null, signal: null, error: 'spawn npm ENOENT' }) });
+    const r = await attachOrLaunch(s.deps);
+    check('a launcher that could not start: launch-failed with the reason', !r.ok && r.error === 'launch-failed' && /ENOENT/.test(r.detail));
+  }
+  {
+    // `open` exits 0 once the app is started; the wait goes on.
+    const s = sim({
+      file: (polls) => (polls >= 4 ? info('c', 30) : null),
+      alive: (pid) => pid === 30,
+      answers: () => true,
+      exit: (polls) => (polls >= 1 ? { code: 0, signal: null } : null),
+    });
+    const r = await attachOrLaunch(s.deps);
+    check('a launcher that exits 0 (open): keeps waiting for the endpoint', r.ok && r.how === 'launched' && r.info.token === 'c', JSON.stringify(r));
   }
   {
     const s = sim({ env: { SHIM_DEV_CHECKOUT: '/code' }, file: () => null, alive: () => false, answers: () => false });
