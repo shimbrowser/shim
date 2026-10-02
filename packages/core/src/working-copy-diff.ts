@@ -141,18 +141,20 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
   const built = nextRules.map((authored) => {
     const before = prevById.get(authored.id);
     const names = new Set(referencedHandlerNames(authored));
-    for (const name of Object.keys(before?.handlers || {})) if (name in files) names.add(name);
+    for (const name of Object.keys(before?.handlers || {})) if (Object.hasOwn(files, name)) names.add(name);
     const modules: Record<string, string> = Object.create(null) as Record<string, string>;
     for (const name of names) {
+      if (!Object.hasOwn(files, name)) continue;
       const source = files[name];
       if (source === undefined) continue;
       modules[name] = source;
       used.add(name);
     }
     const rule: Rule = { ...authored };
+    // fromEntries defines each name as an own property (`__proto__` too)
+    // while the op's rule keeps an ordinary object for the emit path.
     if (names.size) {
-      rule.handlers = {};
-      for (const [name, source] of Object.entries(modules)) rule.handlers[name] = moduleToExpression(source);
+      rule.handlers = Object.fromEntries(Object.entries(modules).map(([name, source]) => [name, moduleToExpression(source)]));
     }
     const changed = !before || ruleFingerprint(authored, modules) !== ruleFingerprint(before, previousModules(before, stored));
     if (before?.anchor?.witness && rule.anchor && anchorDigest(before.anchor) === anchorDigest(rule.anchor)) {

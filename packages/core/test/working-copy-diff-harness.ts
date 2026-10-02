@@ -212,6 +212,35 @@ check('ops never carry a witness the previous rule didn\'t have',
     .ops.every((o) => o.rule?.anchor?.witness === undefined));
 check('the working state is never mutated', stableStringify(state.spec) === stableStringify(WORKING));
 
+console.log('handler names that are Object.prototype keys (added rules)');
+const protoRules = (spec: Spec): void => {
+  spec.rules?.push(
+    { id: 'pc', anchor: { primary: { kind: 'css', value: '.pc' } }, mutations: [{ kind: 'script', handler: 'constructor', mount: { strategy: 'portal' } }] },
+  );
+};
+rejects('a rule naming "constructor" with no file is a malformed folder, not a crash', 'malformed-shim-folder',
+  () => diffWorkingCopy(state, withSpec(protoRules, checkout())),
+  'handlers/constructor.js is missing');
+rejects('a handlers/__proto__.js file is a malformed folder', 'malformed-shim-folder',
+  () => diffWorkingCopy(state, withSpec(protoRules, {
+    ...checkout(),
+    'handlers/constructor.js': expressionToModule('function ctor() {}'),
+    'handlers/__proto__.js': expressionToModule('function proto() {}'),
+  })),
+  '"__proto__" is not a valid handler name');
+applied = expectApplied('a rule using a constructor handler', withSpec(protoRules, {
+  ...checkout(),
+  'handlers/constructor.js': expressionToModule('function ctor() {}'),
+}));
+check('one add-rule', kinds(applied.ops) === 'add-rule:pc', kinds(applied.ops));
+const protoHandlers = applied.ops[0]?.rule?.handlers;
+check('the constructor handler is an own entry of an ordinary object',
+  protoHandlers !== undefined && Object.hasOwn(protoHandlers, 'constructor')
+  && Object.getPrototypeOf(protoHandlers) === Object.prototype
+  && Object.getOwnPropertyDescriptor(protoHandlers, 'constructor')?.value === 'function ctor() {}');
+check('re-diffing the applied state is a no-op',
+  diffWorkingCopy({ spec: applied.next }, checkoutShim({ spec: applied.next })).ops.length === 0);
+
 if (failures) {
   console.error(`\n${failures} failure(s)`);
   process.exit(1);

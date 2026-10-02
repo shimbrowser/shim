@@ -250,6 +250,43 @@ const folded = unpackShim(legacy);
 check('inline rule handlers fold into handlers/ (canonical on the way back)',
   folded['handlers/notes.js'] === expressionToModule('function notes() {}') && !folded[SHIM_JSON]?.includes('function notes'));
 
+console.log('handler names that are Object.prototype keys (prototype-free maps)');
+// `constructor` is a legal handler name; a plain-object map would see an
+// inherited `constructor` as present. `__proto__` is refused as a handler
+// name outright (HANDLER_NAME_RE), so a folder carrying one is malformed.
+{
+  const protoSpec = {
+    id: 'p', match: { hosts: ['example.com'] },
+    rules: [
+      { id: 'c', anchor: { primary: { kind: 'css', value: '.c' } }, mutations: [{ kind: 'script', handler: 'constructor', mount: { strategy: 'portal' } }] },
+    ],
+  };
+  const protoFolder: FolderInput = {
+    [SHIM_JSON]: JSON.stringify(protoSpec),
+    'handlers/constructor.js': expressionToModule('function ctor() {}'),
+  };
+  rejects('a rule naming "constructor" with no file', 'malformed-shim-folder',
+    () => readShimFolder({ [SHIM_JSON]: JSON.stringify(protoSpec) }),
+    'handlers/constructor.js is missing');
+  rejects('a handlers/__proto__.js file', 'malformed-shim-folder',
+    () => readShimFolder({ ...protoFolder, 'handlers/__proto__.js': expressionToModule('function proto() {}') }),
+    '"__proto__" is not a valid handler name');
+  const protoRead = readShimFolder(protoFolder);
+  check('the constructor handler file is read as an own entry', Object.keys(protoRead.handlers).join(',') === 'constructor'
+    && Object.getOwnPropertyDescriptor(protoRead.handlers, 'constructor')?.value === expressionToModule('function ctor() {}'));
+  const protoPacked = packShim(protoFolder);
+  check('…and packs as an own handler entry',
+    Object.keys(protoPacked.handlers).join(',') === 'constructor'
+    && Object.getPrototypeOf(protoPacked.handlers) === Object.prototype);
+  const protoUnpacked = unpackShim(JSON.parse(JSON.stringify(protoPacked)) as unknown);
+  check('…and unpacks back to its file', protoUnpacked['handlers/constructor.js'] === expressionToModule('function ctor() {}'));
+  const protoEnvelope = JSON.parse('{"format":"shim/1","name":"n","spec":{"id":"e","match":{"hosts":["example.com"]},"rules":[]},"handlers":{},"__proto__":{"x":1}}') as unknown;
+  const protoRepacked = packShim(unpackShim(protoEnvelope));
+  check('an envelope field named __proto__ round-trips as a field',
+    Object.hasOwn(protoRepacked, '__proto__') && Object.getPrototypeOf(protoRepacked) === Object.prototype
+    && stableStringify(JSON.parse(JSON.stringify(protoRepacked)) as unknown) === stableStringify(protoEnvelope));
+}
+
 if (failures) {
   console.error(`\n${failures} failure(s)`);
   process.exit(1);
