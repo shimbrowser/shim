@@ -99,6 +99,7 @@ const HINTS: Record<string, string> = {
   'commit-denied': 'The user declined the commit in Shim. The session is still open.',
   'commit-timeout': 'Nobody approved the commit in Shim within two minutes. The session is still open.',
   'invalid-target': 'Use a tabId from shim_list_tabs for a tab with a site loaded.',
+  'target-changed': 'The tab went to another site while the user was deciding; check shim_list_tabs and open the session again.',
   'unknown-artifact': 'Use a shim id or a compositionId from shim_list_tabs, or newShimName to start a new shim.',
 };
 
@@ -221,13 +222,17 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
   }
 
   async function pageTool(id: string, name: string, input: unknown): Promise<McpContent[]> {
-    const reply = await control('POST', sessionPath(id, 'call'), { name, input: isRecord(input) ? input : {} });
+    // sessionId picks the session here; it is not part of Shim's tool input.
+    const { sessionId: _sessionId, ...toolInput } = isRecord(input) ? input : {};
+    const reply = await control('POST', sessionPath(id, 'call'), { name, input: toolInput });
     return toMcpContent(reply.result);
   }
 
-  // An API map tool: forwarded like a page tool; a refusal carries its hint.
+  // An API map tool: forwarded like a page tool (sessionId stripped the
+  // same way); a refusal carries its hint.
   async function apiMapTool(id: string, name: string, input: unknown): Promise<McpContent[]> {
-    const reply = await control('POST', sessionPath(id, 'call'), { name, input: isRecord(input) ? input : {} });
+    const { sessionId: _sessionId, ...toolInput } = isRecord(input) ? input : {};
+    const reply = await control('POST', sessionPath(id, 'call'), { name, input: toolInput });
     return toMcpContent(withApiMapHint(reply.result));
   }
 
