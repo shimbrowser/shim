@@ -9,6 +9,8 @@
 //                  them with the same implementation its own worker uses
 //   API map tools  forwarded the same way (D13) — Shim asks the user for
 //                  each level of access on its own cards
+//   composition    probe_request, read_calls — forwarded the same way; a
+//   tools          shim session answers them as not offered
 //
 // The server keeps only what a client needs between calls: which sessions it
 // opened, the folder each was checked out into, and the latest revision a
@@ -29,10 +31,14 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { encodeWorkingCopy, decodeWorkingCopy, WorkingCopyWireError } from '@shimbrowser/core/working-copy-wire';
 import { isPageToolName } from '@shimbrowser/core/page-tools';
 import { isApiMapToolName } from '@shimbrowser/core/api-map-tools';
+import { isCompositionSessionToolName } from '@shimbrowser/core/composition-session-tools';
+import { COMPOSITION_WIRE_LIMITS, SHIM_WIRE_LIMITS } from '@shimbrowser/core/working-copy-wire';
 import { staticTools, isSessionToolName, SERVER_INSTRUCTIONS, type SessionToolName } from './contract';
 import { ControlTransportError, type ControlClient, type ControlReply } from './control-client';
 import type { LaunchOutcome } from './launch';
-import { FolderError, readWorkingCopy, writeCheckout } from './folder';
+import {
+  FolderError, readWorkingCopy, writeCheckout, writeCompositionCheckout, checkoutKind, folderKind, type WorkingCopyKind,
+} from './folder';
 import { toMcpContent, fitToBudget, type McpContent } from './results';
 
 export const SERVER_NAME = 'shim';
@@ -60,6 +66,9 @@ export interface CallToolResult {
 interface SessionState {
   dir: string | null;
   revision: number;
+  // What the session is on; null when this server didn't open it (it is
+  // then read off the checkout or the folder).
+  kind: WorkingCopyKind | null;
 }
 
 /** A refusal the agent gets as an error result: a stable code plus what to do. */
@@ -90,7 +99,7 @@ const HINTS: Record<string, string> = {
   'commit-denied': 'The user declined the commit in Shim. The session is still open.',
   'commit-timeout': 'Nobody approved the commit in Shim within two minutes. The session is still open.',
   'invalid-target': 'Use a tabId from shim_list_tabs for a tab with a site loaded.',
-  'unknown-artifact': 'Use a shim id from shim_list_tabs, or newShimName to start a new shim.',
+  'unknown-artifact': 'Use a shim id or a compositionId from shim_list_tabs, or newShimName to start a new shim.',
 };
 
 // What to do about each API map refusal (D13). These come back as a result
@@ -177,7 +186,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
   function stateOf(id: string): SessionState {
     let s = sessions.get(id);
     if (!s) {
-      s = { dir: null, revision: 0 };
+      s = { dir: null, revision: 0, kind: null };
       sessions.set(id, s);
     }
     return s;
@@ -201,8 +210,10 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       if (e instanceof WorkingCopyWireError) throw new ToolFailure(e.code, e.problems.join('; '));
       throw e;
     }
-    const written = writeCheckout(dir, files);
     const state = stateOf(id);
+    const kind = state.kind ?? checkoutKind(files);
+    state.kind = kind;
+    const written = kind === 'composition' ? writeCompositionCheckout(dir, files) : writeCheckout(dir, files);
     state.dir = written.dir;
     const revision = typeof reply.revision === 'number' ? reply.revision : state.revision;
     state.revision = revision;
@@ -247,28 +258,38 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         return [text(await control('GET', '/tabs'))];
       case 'shim_open_session': {
         const tabId = input.tabId;
-        if (typeof tabId !== 'number' || !Number.isInteger(tabId)) throw new ToolFailure('invalid-request', 'tabId must be a tab id from shim_list_tabs');
+        if (tabId !== undefined && (typeof tabId !== 'number' || !Number.isInteger(tabId))) {
+          throw new ToolFailure('invalid-request', 'tabId must be a tab id from shim_list_tabs');
+        }
         const intent = typeof input.intent === 'string' ? input.intent : '';
         if (!intent.trim()) throw new ToolFailure('invalid-request', 'intent is required');
         const shimId = str(input, 'shimId');
         const newShimName = str(input, 'newShimName');
-        if ((shimId === undefined) === (newShimName === undefined)) {
-          throw new ToolFailure('invalid-request', 'name exactly one of shimId (an existing shim) or newShimName (a new one)');
+        const compositionId = str(input, 'compositionId');
+        if ([shimId, newShimName, compositionId].filter((v) => v !== undefined).length !== 1) {
+          throw new ToolFailure('invalid-request', 'name exactly one of shimId (an existing shim), newShimName (a new one) or compositionId (a composition)');
         }
+        const kind: WorkingCopyKind = compositionId !== undefined ? 'composition' : 'shim';
+        if (kind === 'shim' && tabId === undefined) throw new ToolFailure('invalid-request', 'a shim session needs tabId: a site tab from shim_list_tabs');
         const agent = deps.agentName || agentDisplayName(server.getClientVersion()?.name);
         const body: Record<string, unknown> = {
-          kind: 'shim',
-          target: { webContentsId: tabId },
+          kind,
+          ...(tabId !== undefined ? { target: { webContentsId: tabId } } : {}),
           agent,
           intent,
-          ...(shimId !== undefined ? { artifactId: shimId } : { create: { name: newShimName } }),
+          ...(compositionId !== undefined ? { artifactId: compositionId } : shimId !== undefined ? { artifactId: shimId } : { create: { name: newShimName } }),
         };
         const opened = await control('POST', '/sessions', body);
         const id = typeof opened.sessionId === 'string' ? opened.sessionId : null;
         if (!id) throw new ToolFailure('invalid-reply', 'Shim opened a session but returned no id');
-        sessions.set(id, { dir: null, revision: 0 });
+        sessions.set(id, { dir: null, revision: 0, kind });
         current = id;
-        const out: Record<string, unknown> = { sessionId: id, ...(typeof opened.artifactId === 'string' ? { shimId: opened.artifactId } : {}) };
+        const artifactId = typeof opened.artifactId === 'string' ? opened.artifactId : null;
+        const out: Record<string, unknown> = {
+          sessionId: id,
+          kind,
+          ...(artifactId !== null ? (kind === 'composition' ? { compositionId: artifactId } : { shimId: artifactId }) : {}),
+        };
         const dir = str(input, 'dir');
         if (dir) out.checkout = await checkout(id, dir);
         return [text(out)];
@@ -283,7 +304,8 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         const state = stateOf(id);
         const dir = str(input, 'dir') ?? state.dir;
         if (!dir) throw new ToolFailure('no-working-copy', 'this session has no folder yet: shim_checkout first, or pass dir');
-        const folder = readWorkingCopy(dir);
+        const kind = state.kind ?? folderKind(dir) ?? 'shim';
+        const folder = readWorkingCopy(dir, kind === 'composition' ? COMPOSITION_WIRE_LIMITS : SHIM_WIRE_LIMITS);
         const reply = await control('POST', sessionPath(id, 'preview'), { workingCopy: encodeWorkingCopy(folder) });
         if (typeof reply.revision === 'number') state.revision = reply.revision;
         state.dir = dir;
@@ -337,6 +359,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       if (isSessionToolName(name)) content = await runSessionTool(name, input);
       else if (isPageToolName(name)) content = await pageTool(sessionId(input), name, input);
       else if (isApiMapToolName(name)) content = await apiMapTool(sessionId(input), name, input);
+      else if (isCompositionSessionToolName(name)) content = await pageTool(sessionId(input), name, input);
       else return failureResult('unknown-tool', `no tool named "${name}"`);
       return { content: fitToBudget(content, deps.maxOutputTokens) };
     } catch (e) {

@@ -1,5 +1,7 @@
 // The working copy on disk (shim-core design D10). The agent edits a folder;
-// this reads the whole folder for a preview and writes a checkout into it.
+// this reads the whole folder for a preview and writes a checkout into it —
+// a shim's (shim.json + handlers/) or a composition's (manifest.json + its
+// flat files).
 // Shim never sees a path: the server sends bytes (working-copy-wire), and
 // these reads and writes happen in the agent's own process, in a folder the
 // agent named.
@@ -13,6 +15,11 @@
 //     scatter files through it. It replaces shim.json and handlers/*.js and
 //     removes handler files the checkout no longer has; anything else in the
 //     folder is left alone (and a preview then reports it as unknown).
+//   - A composition checkout writes only into an empty folder or an earlier
+//     composition checkout (one holding the hidden marker file it leaves),
+//     because the folder IS the composition: a re-checkout removes every
+//     visible file the composition no longer has. A folder that merely holds
+//     a manifest.json (a web app, an extension) is never treated as one.
 //   - Every path written is checked against the folder root.
 
 import * as fs from 'fs';
@@ -22,6 +29,11 @@ import type { FolderInput } from '@shimbrowser/core/shim-folder';
 
 export const SHIM_JSON = 'shim.json';
 export const HANDLERS_DIR = 'handlers';
+export const MANIFEST_JSON = 'manifest.json';
+/** The hidden file that marks a folder as a composition checkout. */
+export const COMPOSITION_MARKER = '.shim-composition';
+
+export type WorkingCopyKind = 'shim' | 'composition';
 
 export class FolderError extends Error {
   readonly code: 'folder-missing' | 'folder-too-large' | 'not-a-working-copy' | 'unsafe-path';
@@ -134,4 +146,69 @@ export function writeCheckout(dir: string, files: FolderInput): CheckoutWrite {
     written.push(rel);
   }
   return { dir: root, written, removed };
+}
+
+function visibleFilesUnder(root: string): string[] {
+  const out: string[] = [];
+  const walk = (abs: string, rel: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(abs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (isHidden(entry.name)) continue;
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(path.join(abs, entry.name), childRel);
+      else if (entry.isFile()) out.push(childRel);
+    }
+  };
+  walk(root, '');
+  return out;
+}
+
+/** Writes a composition checkout (manifest.json + its files) into `dir`. */
+export function writeCompositionCheckout(dir: string, files: FolderInput): CheckoutWrite {
+  const root = path.resolve(dir);
+  if (fs.existsSync(root)) {
+    if (!fs.statSync(root).isDirectory()) throw new FolderError('not-a-working-copy', `${root} exists and is not a folder`);
+    if (visibleEntries(root).length > 0 && !fs.existsSync(path.join(root, COMPOSITION_MARKER))) {
+      throw new FolderError(
+        'not-a-working-copy',
+        `${root} is not empty and is not an earlier composition checkout — check out into an empty folder`,
+      );
+    }
+  }
+  const targets = Object.keys(files).sort().map((rel) => [rel, resolveInside(root, rel)] as const);
+  fs.mkdirSync(root, { recursive: true });
+  // The folder is the composition: what it no longer has goes.
+  const removed: string[] = [];
+  for (const rel of visibleFilesUnder(root)) {
+    if (rel in files) continue;
+    fs.unlinkSync(path.join(root, ...rel.split('/')));
+    removed.push(rel);
+  }
+  const written: string[] = [];
+  for (const [rel, abs] of targets) {
+    const content = files[rel];
+    if (content === undefined) continue;
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, content);
+    written.push(rel);
+  }
+  fs.writeFileSync(path.join(root, COMPOSITION_MARKER), `${JSON.stringify({ format: 'shim-composition-checkout/1' })}\n`);
+  return { dir: root, written, removed };
+}
+
+/** Which kind of working copy a checkout's files are. */
+export function checkoutKind(files: FolderInput): WorkingCopyKind {
+  return SHIM_JSON in files ? 'shim' : 'composition';
+}
+
+/** Which kind of working copy a folder on disk holds (null: neither). */
+export function folderKind(dir: string): WorkingCopyKind | null {
+  if (fs.existsSync(path.join(dir, SHIM_JSON))) return 'shim';
+  if (fs.existsSync(path.join(dir, COMPOSITION_MARKER)) || fs.existsSync(path.join(dir, MANIFEST_JSON))) return 'composition';
+  return null;
 }

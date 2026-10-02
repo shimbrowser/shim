@@ -13,6 +13,9 @@
 // reply once with the SAME id; refusals come back as error results with a
 // hint; page tools forward to /call with images converted to MCP content;
 // API map tools forward the same way and an API map refusal carries its hint;
+// a composition session (open by compositionId with no tab, a flat checkout
+// with its marker, a re-checkout that removes stale files, the composition
+// tools forwarded);
 // a session-ended answer forgets the session; ending a session.
 //
 //   node out/packages/mcp/test/mcp-server-harness.js
@@ -25,6 +28,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { decodeWorkingCopy, encodeWorkingCopy } from '@shimbrowser/core/working-copy-wire';
 import { SESSION_PAGE_TOOLS } from '@shimbrowser/core/page-tools';
 import { SESSION_API_MAP_TOOLS } from '@shimbrowser/core/api-map-tools';
+import { SESSION_COMPOSITION_TOOLS } from '@shimbrowser/core/composition-session-tools';
+import { COMPOSITION_MARKER } from '../src/folder';
 import { createShimMcpServer, agentDisplayName, type ShimMcpDeps } from '../src/server';
 import { SESSION_TOOL_NAMES, SESSION_TOOLS } from '../src/contract';
 import { ControlTransportError, type ControlClient, type ControlReply } from '../src/control-client';
@@ -105,8 +110,10 @@ async function main(): Promise<void> {
     const client = await connect(deps);
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name);
-    check('session tools first, then every page tool, then the API map tools',
-      JSON.stringify(names) === JSON.stringify([...SESSION_TOOL_NAMES, ...Object.keys(SESSION_PAGE_TOOLS), ...Object.keys(SESSION_API_MAP_TOOLS)]), names.join(','));
+    check('session tools first, then every page tool, the API map tools, then the composition tools',
+      JSON.stringify(names) === JSON.stringify([...SESSION_TOOL_NAMES, ...Object.keys(SESSION_PAGE_TOOLS), ...Object.keys(SESSION_API_MAP_TOOLS), ...Object.keys(SESSION_COMPOSITION_TOOLS)]), names.join(','));
+    const readCalls = tools.find((t) => t.name === 'read_calls');
+    check('composition tools are core\'s session definitions', readCalls?.description === SESSION_COMPOSITION_TOOLS.read_calls.description);
     const inspect = tools.find((t) => t.name === 'inspect_endpoint');
     check('API map tools are core\'s session definitions', inspect?.description === SESSION_API_MAP_TOOLS.inspect_endpoint.description
       && JSON.stringify(inspect?.inputSchema) === JSON.stringify(SESSION_API_MAP_TOOLS.inspect_endpoint.input_schema));
@@ -274,6 +281,47 @@ async function main(): Promise<void> {
     const unknown = await call(c3, 'not_a_tool');
     check('an unknown tool is an error result', unknown.isError === true && /unknown-tool/.test(unknown.content[0]?.text ?? ''));
     await c3.close();
+  }
+
+  console.log('a composition session:');
+  {
+    const cdir = path.join(tmpDir(), 'comp');
+    let body: unknown = null;
+    const COMP_FILES = { 'manifest.json': '{\n  "format": "composition/1"\n}\n', 'index.html': '<p>hi</p>', 'logo.png': new Uint8Array([137, 80, 78, 71, 255]) };
+    const { deps: dc, sent: sc } = rig((req) => {
+      if (req.path === '/sessions') return ok({ sessionId: 'sess-c', artifactId: 'comp-1' });
+      if (req.path === '/sessions/sess-c/checkout') return ok({ revision: 0, files: encodeWorkingCopy(COMP_FILES) });
+      if (req.path === '/sessions/sess-c/preview') { body = req.body; return ok({ applied: true, revision: 1, evidence: { changes: ['write-file app.js'] } }); }
+      if (req.path === '/sessions/sess-c/call') return ok({ result: { scope: 'current', calls: [] } });
+      return refuse(404, 'not-found');
+    });
+    const cc = await connect(dc);
+    const three = await call(cc, 'shim_open_session', { intent: 'x', shimId: 'a', compositionId: 'c' });
+    check('naming a shim and a composition together is refused', three.isError === true && /exactly one/.test(three.content[0]?.text ?? ''));
+    const noTab = await call(cc, 'shim_open_session', { intent: 'x', shimId: 'a' });
+    check('a shim session without tabId is refused', noTab.isError === true && /needs tabId/.test(noTab.content[0]?.text ?? ''));
+    fs.mkdirSync(cdir, { recursive: true });
+    fs.writeFileSync(path.join(cdir, 'manifest.json'), '{}');
+    const notOurs = await call(cc, 'shim_open_session', { intent: 'Build a crate view', compositionId: 'comp-1', dir: cdir });
+    check('a folder that merely holds a manifest.json is not a checkout target', notOurs.isError === true && /not-a-working-copy/.test(notOurs.content[0]?.text ?? ''));
+    fs.rmSync(cdir, { recursive: true });
+    const openedC = firstJson(await call(cc, 'shim_open_session', { intent: 'Build a crate view', compositionId: 'comp-1', dir: cdir }));
+    const openC = sc.filter((s) => s.path === '/sessions').pop()?.body as Record<string, unknown> | undefined;
+    check('open sends kind composition, the id, and no target without a tab', openC?.kind === 'composition' && openC.artifactId === 'comp-1' && !('target' in openC), JSON.stringify(openC));
+    check('open answers the composition id', openedC.kind === 'composition' && openedC.compositionId === 'comp-1');
+    check('the checkout writes the files flat, binary intact, with the marker', fs.existsSync(path.join(cdir, 'manifest.json'))
+      && fs.readFileSync(path.join(cdir, 'logo.png')).equals(Buffer.from([137, 80, 78, 71, 255])) && fs.existsSync(path.join(cdir, COMPOSITION_MARKER)));
+    fs.writeFileSync(path.join(cdir, 'app.js'), 'go();');
+    fs.writeFileSync(path.join(cdir, 'stale.css'), 'x');
+    const pc = firstJson(await call(cc, 'shim_preview'));
+    const sentFolder = decodeWorkingCopy((body as { workingCopy?: unknown } | null)?.workingCopy, { maxFiles: 300, maxBytes: 60 * 1024 * 1024 });
+    check('preview sends the folder without the marker', pc.revision === 1 && 'app.js' in sentFolder && !(COMPOSITION_MARKER in sentFolder), JSON.stringify(Object.keys(sentFolder)));
+    const again = firstJson(await call(cc, 'shim_checkout', { dir: cdir }));
+    check('a re-checkout removes what the composition no longer has', JSON.stringify(again.removed) === JSON.stringify(['app.js', 'stale.css']) && !fs.existsSync(path.join(cdir, 'app.js')), JSON.stringify(again));
+    const rc = firstJson(await call(cc, 'read_calls', {}));
+    const rcReq = sc.filter((s) => s.path === '/sessions/sess-c/call').pop();
+    check('a composition tool forwards to /call', JSON.stringify(rcReq?.body) === JSON.stringify({ name: 'read_calls', input: {} }) && rc.scope === 'current');
+    await cc.close();
   }
 
   console.log('agent names:');
