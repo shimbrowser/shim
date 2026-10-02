@@ -78,6 +78,16 @@ export type SessionErrorCode =
   | 'begin-failed'
   | 'invalid-request';
 
+// A backend's begin throws this when the artifact is busy with something the
+// session must not stop (one of Shim's own turns on it): open() answers
+// 'artifact-busy', as it does when the lease itself is held.
+export class ArtifactBusyError extends Error {
+  constructor(detail: string) {
+    super(detail);
+    this.name = 'ArtifactBusyError';
+  }
+}
+
 export interface SessionError {
   ok: false;
   error: SessionErrorCode | string;
@@ -133,7 +143,8 @@ export interface FinishInfo {
 // never after finish has started.
 export interface SessionBackend<H = unknown> {
   // Sets up exactly what an internal turn sets up (the kind's "begin"),
-  // under the already-held lease. A throw fails open() with 'begin-failed'.
+  // under the already-held lease. A throw fails open() with 'begin-failed'
+  // ('artifact-busy' for an ArtifactBusyError).
   begin(args: BeginArgs): Promise<H>;
   // The session's working copy as files (design D10), as of the latest
   // applied revision. Optional: a kind without one answers
@@ -486,6 +497,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
     } catch (e) {
       lease.signal.removeEventListener('abort', onEarlyAbort);
       lease.release();
+      if (e instanceof ArtifactBusyError) return { ok: false, error: 'artifact-busy', detail: e.message };
       return { ok: false, error: 'begin-failed', detail: e instanceof Error ? e.message : String(e) };
     }
     lease.signal.removeEventListener('abort', onEarlyAbort);
