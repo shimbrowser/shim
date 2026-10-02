@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // build — bundles @shimbrowser/mcp into ONE self-contained file,
 // dist/shim-mcp.js: the MCP SDK and @shimbrowser/core inlined, only Node
-// builtins left external. One file because the Claude Code plugin runs it
+// builtins (and the optional Playwright peer) left external. One file because the Claude Code plugin runs it
 // from wherever the plugin is installed, with no node_modules beside it.
 //
 //   npm run build -w @shimbrowser/mcp
@@ -28,6 +28,9 @@ async function buildMcp() {
     format: 'cjs',
     target: 'node22',
     conditions: ['shim-source'],
+    // Playwright is an optional peer (the headless PageHost, D9): never
+    // inlined, loaded at runtime only when a headless page is opened.
+    external: ['playwright', 'playwright-core'],
     define: { SHIM_MCP_VERSION: JSON.stringify(pkg.version) },
     legalComments: 'inline',
     logLevel: 'warning',
