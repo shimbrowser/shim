@@ -81,6 +81,46 @@ console.log('checkout:');
   throwsCode('a path leaving the folder is refused', 'unsafe-path', () => writeCheckout(safe, { 'shim.json': '{}', '../escape.js': 'x' }));
   check('…before anything was written', !fs.existsSync(safe) && !fs.existsSync(path.join(root, 'escape.js')));
   throwsCode('a file where the folder should be', 'not-a-working-copy', () => writeCheckout(path.join(project, 'package.json'), { 'shim.json': '{}' }));
+
+  // Symlinks in a crafted or stale folder must not carry a write or a removal
+  // outside it. (Windows without Developer Mode can't create symlinks: skip.)
+  let canLink = true;
+  try {
+    fs.symlinkSync(root, path.join(root, 'probe-link'));
+  } catch {
+    canLink = false;
+    console.log('  - symlink cases skipped: this system cannot create symlinks');
+  }
+  if (canLink) {
+    const outside = path.join(root, 'outside');
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'victim.txt'), 'keep');
+    fs.writeFileSync(path.join(outside, 'old.js'), 'keep');
+    const linkedSpec = path.join(root, 'linked-spec');
+    fs.mkdirSync(linkedSpec);
+    fs.symlinkSync(path.join(outside, 'victim.txt'), path.join(linkedSpec, 'shim.json'));
+    throwsCode('a shim.json that is a symlink is refused', 'unsafe-path', () => writeCheckout(linkedSpec, { 'shim.json': '{}' }));
+    check('…and its target is untouched', fs.readFileSync(path.join(outside, 'victim.txt'), 'utf8') === 'keep');
+    const linkedHandlers = path.join(root, 'linked-handlers');
+    fs.mkdirSync(linkedHandlers);
+    fs.writeFileSync(path.join(linkedHandlers, 'shim.json'), '{}');
+    fs.symlinkSync(outside, path.join(linkedHandlers, 'handlers'));
+    throwsCode('a handlers folder that is a symlink is refused', 'unsafe-path', () => writeCheckout(linkedHandlers, { 'shim.json': '{}', 'handlers/x.js': 'x' }));
+    check('…and nothing outside was written or removed', fs.existsSync(path.join(outside, 'old.js')) && !fs.existsSync(path.join(outside, 'x.js')));
+    throwsCode('…even when the checkout writes no handler', 'unsafe-path', () => writeCheckout(linkedHandlers, { 'shim.json': '{}' }));
+    check('…which would have removed old.js through the link', fs.existsSync(path.join(outside, 'old.js')));
+    const linkedHandler = path.join(root, 'linked-handler');
+    fs.mkdirSync(path.join(linkedHandler, 'handlers'), { recursive: true });
+    fs.writeFileSync(path.join(linkedHandler, 'shim.json'), '{}');
+    fs.symlinkSync(path.join(outside, 'victim.txt'), path.join(linkedHandler, 'handlers', 'x.js'));
+    throwsCode('a handler file that is a symlink is refused', 'unsafe-path', () => writeCheckout(linkedHandler, { 'shim.json': '{}', 'handlers/x.js': 'x' }));
+    check('…and its target is untouched', fs.readFileSync(path.join(outside, 'victim.txt'), 'utf8') === 'keep');
+    const realRoot = path.join(root, 'real-root');
+    fs.mkdirSync(realRoot);
+    const viaLink = path.join(root, 'via-link');
+    fs.symlinkSync(realRoot, viaLink);
+    check('the root itself may be a symlink (like /tmp on macOS)', writeCheckout(viaLink, { 'shim.json': '{}' }).written.length === 1 && fs.existsSync(path.join(realRoot, 'shim.json')));
+  }
 }
 
 console.log('content:');

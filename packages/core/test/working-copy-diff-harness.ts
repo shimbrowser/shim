@@ -184,6 +184,24 @@ const unreferenced: WorkingState = {
 result = diffWorkingCopy(unreferenced, checkoutShim(unreferenced));
 check('an inline handler no mutation names round-trips without an op or warning', result.ops.length === 0 && result.warnings.length === 0, JSON.stringify(result));
 
+console.log('handler names that are Object.prototype keys');
+{
+  const protoState: WorkingState = {
+    spec: { id: 'p', match: { hosts: ['example.com'] }, rules: [rule('a', { mutations: [{ kind: 'script', handler: 'constructor' }] })] },
+    handlers: { constructor: 'module.exports = function constructor() {};\n' },
+  };
+  const protoFolder = checkoutShim(protoState);
+  const untouched = diffWorkingCopy(protoState, protoFolder);
+  check('a stored handler named constructor round-trips with no op', untouched.ops.length === 0, JSON.stringify(untouched));
+  const edited = diffWorkingCopy(protoState, { ...protoFolder, 'handlers/constructor.js': 'module.exports = function constructor() { return 1; };\n' });
+  const ctor: string = 'constructor';
+  const source: unknown = edited.ops[0]?.rule?.handlers?.[ctor];
+  check('editing it carries its source as a string', edited.ops.length === 1 && typeof source === 'string' && source.includes('return 1'), JSON.stringify(edited.ops));
+  rejects('a rule naming toString with no file is refused, not bound to Object.prototype', 'malformed-shim-folder',
+    () => diffWorkingCopy(protoState, withSpec((spec) => { const m = spec.rules?.[0]?.mutations?.[0]; if (m) m.handler = 'toString'; }, protoFolder)),
+    'handlers/toString.js is missing');
+}
+
 console.log('witness parity with stripping');
 applied = expectApplied('edit both a handler and the anchor of one rule', withSpec((spec) => {
   const a = find(spec, 'b').anchor; if (a) a.fallbacks = [{ kind: 'text', value: 'Notes' }];
@@ -193,6 +211,35 @@ check('ops never carry a witness the previous rule didn\'t have',
   diffWorkingCopy({ spec: { ...WORKING, rules: WORKING.rules?.map(stripWitness) } }, { ...checkout(), 'handlers/mountB.js': expressionToModule('function mountB() {}') })
     .ops.every((o) => o.rule?.anchor?.witness === undefined));
 check('the working state is never mutated', stableStringify(state.spec) === stableStringify(WORKING));
+
+console.log('handler names that are Object.prototype keys (added rules)');
+const protoRules = (spec: Spec): void => {
+  spec.rules?.push(
+    { id: 'pc', anchor: { primary: { kind: 'css', value: '.pc' } }, mutations: [{ kind: 'script', handler: 'constructor', mount: { strategy: 'portal' } }] },
+  );
+};
+rejects('a rule naming "constructor" with no file is a malformed folder, not a crash', 'malformed-shim-folder',
+  () => diffWorkingCopy(state, withSpec(protoRules, checkout())),
+  'handlers/constructor.js is missing');
+rejects('a handlers/__proto__.js file is a malformed folder', 'malformed-shim-folder',
+  () => diffWorkingCopy(state, withSpec(protoRules, {
+    ...checkout(),
+    'handlers/constructor.js': expressionToModule('function ctor() {}'),
+    'handlers/__proto__.js': expressionToModule('function proto() {}'),
+  })),
+  '"__proto__" is not a valid handler name');
+applied = expectApplied('a rule using a constructor handler', withSpec(protoRules, {
+  ...checkout(),
+  'handlers/constructor.js': expressionToModule('function ctor() {}'),
+}));
+check('one add-rule', kinds(applied.ops) === 'add-rule:pc', kinds(applied.ops));
+const protoHandlers = applied.ops[0]?.rule?.handlers;
+check('the constructor handler is an own entry of an ordinary object',
+  protoHandlers !== undefined && Object.hasOwn(protoHandlers, 'constructor')
+  && Object.getPrototypeOf(protoHandlers) === Object.prototype
+  && Object.getOwnPropertyDescriptor(protoHandlers, 'constructor')?.value === 'function ctor() {}');
+check('re-diffing the applied state is a no-op',
+  diffWorkingCopy({ spec: applied.next }, checkoutShim({ spec: applied.next })).ops.length === 0);
 
 if (failures) {
   console.error(`\n${failures} failure(s)`);
