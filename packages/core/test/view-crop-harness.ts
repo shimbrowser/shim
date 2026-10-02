@@ -1,9 +1,9 @@
 // Diagnostic harness for view_page's element-scoped crop geometry
-// (src/main/view-crop.ts) — the padding / minimum-size / viewport-clamp
+// (packages/core/src/view-crop.ts) — the padding / minimum-size / viewport-clamp
 // rules behind the authoring loop's visual-verification screenshots (§16).
 // Bare node. Run when touching the crop math:
 //
-//   node scripts/view-crop-harness.js
+//   node out/packages/core/test/view-crop-harness.js
 //
 // Invariants under test: the crop always contains the element plus context
 // margin, sliver elements widen to a judgeable floor, the rect never
@@ -11,8 +11,8 @@
 // turns that into a "scroll it into view" error) rather than a degenerate
 // capturePage call.
 
-import { computeCropRect, CROP_PAD, CROP_MIN } from '../src/main/authoring/view-crop';
-import type { CropMeasurement } from '../src/main/authoring/view-crop';
+import { computeCropRect, CROP_PAD, CROP_MIN } from '../src/view-crop';
+import type { CropMeasurement } from '../src/view-crop';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string): void {

@@ -34,3 +34,8 @@ export type {
   CoreRouteMountApi,
 } from './api';
 export type { FetchBudget, FetchBudgetOpts, FetchBudgetTake } from './fetch-budget';
+export type {
+  PageHost, PageHostCapabilities, PageHostApiMember, PageWorld, PageRect, ScreenshotOptions,
+  PageScreenshot, ScreenshotResult, PreviewRule, PageRuntimeEvent, PageConsoleMessage,
+  PageLoadOutcome, LoadWaitOptions, PageInspection, Unsubscribe,
+} from './page-host';
