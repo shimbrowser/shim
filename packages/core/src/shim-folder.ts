@@ -106,6 +106,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * A map keyed by handler (or rule) name. Names come from the folder or the
+ * file, so they can be `__proto__` or `constructor`: on a plain object the
+ * first assignment is swallowed by the prototype setter and `in` / `[name]`
+ * see Object.prototype for the second. No prototype, no inherited keys.
+ */
+export function nameMap<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -182,11 +192,11 @@ function checkHandlerNames(names: Iterable<string>, problems: string[]): void {
 export function checkoutShim(input: { spec: Spec; handlers?: Record<string, string> }): FolderFiles {
   const { spec } = input;
   const stored = input.handlers || {};
-  const modules: Record<string, string> = {};
+  const modules = nameMap<string>();
   const problems: string[] = [];
   for (const rule of spec.rules || []) {
     for (const name of referencedHandlerNames(rule)) {
-      const stash = stored[name];
+      const stash = Object.hasOwn(stored, name) ? stored[name] : undefined;
       if (!(name in modules) && typeof stash === 'string') modules[name] = stash;
     }
   }
@@ -230,7 +240,7 @@ export function unpackShim(fileContent: string | unknown): FolderFiles {
   // Handler modules: the file's top-level map, then any inline rule source
   // (a non-canonical file) folded in. A name defined twice with different
   // source can't be one file — the same collision spec-lint rejects.
-  const modules: Record<string, string> = {};
+  const modules = nameMap<string>();
   const fileHandlers = parsed.handlers;
   if (fileHandlers !== undefined && !isRecord(fileHandlers)) problems.push('"handlers" is not an object');
   for (const [name, source] of Object.entries(isRecord(fileHandlers) ? fileHandlers : {})) {
@@ -243,7 +253,7 @@ export function unpackShim(fileContent: string | unknown): FolderFiles {
       else defineModule(modules, name, source, 'spec.handlers', problems);
     }
   }
-  const state: ShimState = { format: SHIM_STATE_FORMAT, rules: {} };
+  const state: ShimState = { format: SHIM_STATE_FORMAT, rules: nameMap<RuleState>() };
   const seen = new Set<string>();
   rules.forEach((ruleValue, index) => {
     if (!isRecord(ruleValue)) { problems.push(`spec.rules[${index}] is not an object`); return; }
@@ -268,7 +278,7 @@ export function unpackShim(fileContent: string | unknown): FolderFiles {
   if (typeof parsed.name === 'string') state.name = parsed.name;
   if (typeof spec.version === 'number') state.version = spec.version;
   if (typeof spec.bundleHash === 'string') state.bundleHash = spec.bundleHash;
-  const envelope: Record<string, unknown> = {};
+  const envelope = nameMap<unknown>();
   for (const [key, value] of Object.entries(parsed)) {
     if (key === 'format' || key === 'name' || key === 'spec' || key === 'handlers') continue;
     envelope[key] = value;
@@ -331,7 +341,7 @@ export function readShimFolder(input: FolderInput): ShimFolderContents {
   let sawSpec = false;
   let specText: string | null = null;
   let stateText: string | null = null;
-  const handlers: Record<string, string> = {};
+  const handlers = nameMap<string>();
   for (const [rawPath, content] of Object.entries(input)) {
     const path = normalizePath(rawPath);
     if (path === null) { problems.push(`"${rawPath}" is not a relative path inside the folder`); continue; }
@@ -392,7 +402,7 @@ function checkAuthoredSpec(raw: Record<string, unknown>, handlers: Record<string
       problems.push(`rule "${id}": anchor "witness" is managed by Shim — remove it`);
     }
     for (const name of referencedHandlerNames(ruleValue as unknown as Rule)) {
-      if (!(name in handlers)) problems.push(`rule "${id}" names handler "${name}" but ${handlerPath(name)} is missing`);
+      if (!Object.hasOwn(handlers, name)) problems.push(`rule "${id}" names handler "${name}" but ${handlerPath(name)} is missing`);
     }
   });
   return raw as unknown as Spec;
@@ -437,7 +447,7 @@ export function packShim(input: FolderInput): ShimFile {
   if (state?.version !== undefined) spec.version = state.version;
   if (state?.bundleHash !== undefined) spec.bundleHash = state.bundleHash;
   for (const rule of spec.rules || []) {
-    const entry = state?.rules[rule.id];
+    const entry = state && Object.hasOwn(state.rules, rule.id) ? state.rules[rule.id] : undefined;
     if (!entry || !rule.anchor || anchorDigest(rule.anchor) !== entry.anchorDigest) continue;
     rule.anchor = { ...rule.anchor, witness: clone(entry.witness) };
   }
@@ -457,7 +467,8 @@ export function packShim(input: FolderInput): ShimFile {
     handlers: { ...handlers },
   };
   for (const [key, value] of Object.entries(state?.file || {})) {
-    if (!(key in file)) file[key] = clone(value);
+    // defineProperty, so an envelope field named `__proto__` stays a field.
+    if (!Object.hasOwn(file, key)) Object.defineProperty(file, key, { value: clone(value), enumerable: true, writable: true, configurable: true });
   }
   return file;
 }

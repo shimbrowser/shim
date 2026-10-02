@@ -27,7 +27,7 @@ import type { DeltaOp } from './spec-delta';
 import { moduleForExpression, moduleToExpression } from './handler-source';
 import { canonicalModule } from './spec-lint';
 import {
-  readShimFolder, ShimFolderError, anchorDigest, referencedHandlerNames, stableStringify, handlerPath,
+  readShimFolder, ShimFolderError, anchorDigest, referencedHandlerNames, stableStringify, handlerPath, nameMap,
 } from './shim-folder';
 import type { FolderInput } from './shim-folder';
 
@@ -53,9 +53,9 @@ const UNCOMPARED_FIELDS = new Set(['rules', 'handlers', 'version', 'bundleHash',
 // One rule's handler modules as the previous state stored them: its own
 // inline source wins, then the stored map.
 function previousModules(rule: Rule, stored: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
+  const out = nameMap<string>();
   for (const name of referencedHandlerNames(rule)) {
-    const source = stored[name];
+    const source = Object.hasOwn(stored, name) ? stored[name] : undefined;
     if (typeof source === 'string') out[name] = source;
   }
   for (const [name, source] of Object.entries(rule.handlers || {})) {
@@ -70,7 +70,7 @@ function ruleFingerprint(rule: Rule, modules: Record<string, string>): string {
   const { handlers: _handlers, ...rest } = rule;
   const anchor = rest.anchor ? { ...rest.anchor } : undefined;
   if (anchor) delete anchor.witness;
-  const canonical: Record<string, string> = {};
+  const canonical = nameMap<string>();
   for (const [name, source] of Object.entries(modules)) canonical[name] = canonicalModule(source);
   return stableStringify({ ...rest, anchor, handlers: canonical });
 }
@@ -141,18 +141,20 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
   const built = nextRules.map((authored) => {
     const before = prevById.get(authored.id);
     const names = new Set(referencedHandlerNames(authored));
-    for (const name of Object.keys(before?.handlers || {})) if (name in files) names.add(name);
-    const modules: Record<string, string> = {};
+    for (const name of Object.keys(before?.handlers || {})) if (Object.hasOwn(files, name)) names.add(name);
+    const modules = nameMap<string>();
     for (const name of names) {
+      if (!Object.hasOwn(files, name)) continue;
       const source = files[name];
       if (source === undefined) continue;
       modules[name] = source;
       used.add(name);
     }
     const rule: Rule = { ...authored };
+    // fromEntries defines each name as an own property (`__proto__` too)
+    // while the op's rule keeps an ordinary object for the emit path.
     if (names.size) {
-      rule.handlers = {};
-      for (const [name, source] of Object.entries(modules)) rule.handlers[name] = moduleToExpression(source);
+      rule.handlers = Object.fromEntries(Object.entries(modules).map(([name, source]) => [name, moduleToExpression(source)]));
     }
     const changed = !before || ruleFingerprint(authored, modules) !== ruleFingerprint(before, previousModules(before, stored));
     if (before?.anchor?.witness && rule.anchor && anchorDigest(before.anchor) === anchorDigest(rule.anchor)) {
