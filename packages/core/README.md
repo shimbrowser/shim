@@ -24,6 +24,14 @@ package and is split into its own public repo at launch.
     `unpackShim` and `packShim`.
   - `@shimbrowser/core/working-copy-diff`: `diffWorkingCopy`, which turns an edited
     folder into the `DeltaOp`s that reproduce it.
+  - `@shimbrowser/core/working-copy-wire`: the working copy on the wire
+    (`shim-working-copy/1`): `encodeWorkingCopy` and `decodeWorkingCopy`, the bytes
+    an attached session sends for a preview and receives on checkout.
+  - `@shimbrowser/core/page-tools`: the page tools' one definition (`view_page`,
+    `query_page`, `inspect_element`, `evaluate_in_page`, `read_console`,
+    `reload_page`, `verify_across_pages`, `interact_page`): the Shim browser's shim
+    and composition workers offer `SHIM_PAGE_TOOLS` / `COMPOSITION_PAGE_TOOLS`, and
+    `@shimbrowser/mcp` registers `SESSION_PAGE_TOOLS`.
 
 ```sh
 npm run build -w @shimbrowser/core      # dist/: CJS, .d.ts, page bundle
