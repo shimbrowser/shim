@@ -129,7 +129,7 @@ export function fileStorage(file: string): HeadlessStorage & { readonly file: st
     list: (scope) => run(() => {
       const rows = bucket(scope, false);
       const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(rows ?? {})) out[k] = jsonValue(v);
+      for (const [k, v] of Object.entries(rows ?? {})) put(out, k, jsonValue(v));
       return out;
     }),
   };

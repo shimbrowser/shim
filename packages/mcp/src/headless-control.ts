@@ -159,6 +159,29 @@ export function loadShimFile(file: string): { ok: true; source: Omit<HeadlessShi
   };
 }
 
+/** The page's URL once it loaded: an http(s) URL, else the one requested. */
+export function finalPageUrl(current: string, requested: URL): URL {
+  try {
+    const u = new URL(current);
+    if (u.protocol === 'http:' || u.protocol === 'https:') return u;
+  } catch {
+    // not a URL: fall through
+  }
+  return requested;
+}
+
+/**
+ * Whether a match.hosts pattern covers `url` — the browser registry's
+ * semantics (src/main/patches/host-match.ts): a pattern without a port
+ * matches any port, an exact host or a `*.` subdomain wildcard; a pattern
+ * with a port matches only that exact host:port.
+ */
+export function hostPatternMatches(pattern: string, url: URL): boolean {
+  if (pattern.includes(':')) return pattern === (url.port ? `${url.hostname}:${url.port}` : url.hostname);
+  if (pattern === url.hostname) return true;
+  return pattern.startsWith('*.') && url.hostname.endsWith(pattern.slice(1));
+}
+
 export function defaultStorageFile(shimFile: string): string {
   return `${shimFile}.storage.json`;
 }
@@ -212,28 +235,24 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
     const intent = typeof body.intent === 'string' ? body.intent : '';
     const createName = isRecord(body.create) && typeof body.create.name === 'string' ? body.create.name.trim() : '';
 
-    let source: HeadlessShimSource;
+    let loadedSource: Omit<HeadlessShimSource, 'shimFile'> | null = null;
     if (fs.existsSync(shimFile)) {
       if (createName) {
         return refuse('invalid-request', `${shimFile} already exists: drop newShimName to work on it, or name a new file`);
       }
       const loaded = loadShimFile(shimFile);
       if (!loaded.ok) return refuse(loaded.error, loaded.detail);
-      source = { ...loaded.source, shimFile };
-    } else {
-      if (!createName) {
-        return refuse('invalid-request', `${shimFile} does not exist: pass newShimName to start a new shim there`);
-      }
-      const id = mintShimId();
-      source = { shimFile, name: createName, spec: newShimSpec(parsedUrl.href, id), handlers: {}, envelope: {}, created: true };
-    }
+      loadedSource = loaded.source;
 
-    // D15 preflight before anything opens: a shim declaring what headless
-    // can't run is refused whole.
-    const pre = preflightSpec(source.spec, HEADLESS_CAPABILITIES);
-    if (!pre.ok) {
-      const evidence = unsupportedEvidence(pre.unsupported);
-      return refuse('unsupported', `${String(evidence.detail)}\n- ${pre.unsupported.map((u) => u.message).join('\n- ')}`, { unsupported: evidence.unsupported });
+      // D15 preflight before anything opens: a shim declaring what headless
+      // can't run is refused whole. (A new shim declares nothing.)
+      const pre = preflightSpec(loadedSource.spec, HEADLESS_CAPABILITIES);
+      if (!pre.ok) {
+        const evidence = unsupportedEvidence(pre.unsupported);
+        return refuse('unsupported', `${String(evidence.detail)}\n- ${pre.unsupported.map((u) => u.message).join('\n- ')}`, { unsupported: evidence.unsupported });
+      }
+    } else if (!createName) {
+      return refuse('invalid-request', `${shimFile} does not exist: pass newShimName to start a new shim there`);
     }
 
     let page: HeadlessSessionPage;
@@ -242,6 +261,13 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
     } catch (e) {
       return refuse('page-open-failed', errMessage(e));
     }
+    // The page the session works on is where the url ended up, after any
+    // redirect (example.com → www.example.com, a sign-in host): a new shim
+    // matches that host, and the match warning checks against it.
+    const landed = finalPageUrl(page.host.url(), parsedUrl);
+    const source: HeadlessShimSource = loadedSource
+      ? { ...loadedSource, shimFile }
+      : { shimFile, name: createName, spec: newShimSpec(landed.href, mintShimId()), handlers: {}, envelope: {}, created: true };
     const sessionTarget: HeadlessTarget = { page, source };
     const opened = await sessions.open({ kind: 'shim', artifactId: shimFile, target: sessionTarget, agent, intent, created: source.created });
     if (!opened.ok) {
@@ -249,17 +275,15 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
       return reply({ ...opened });
     }
     const hosts = source.spec.match?.hosts ?? [];
-    const matches = hosts.some((h) => {
-      const bare = h.replace(/:\d+$/, '');
-      return bare === parsedUrl.hostname || (bare.startsWith('*.') && parsedUrl.hostname.endsWith(bare.slice(1)));
-    });
+    const matches = hosts.some((h) => hostPatternMatches(h, landed));
+    const where = landed.port ? `${landed.hostname}:${landed.port}` : landed.hostname;
     return reply({
       ok: true,
       sessionId: opened.sessionId,
       artifactId: source.spec.id,
       shimFile,
       url: page.host.url(),
-      ...(matches ? {} : { warnings: [`the shim's match.hosts (${hosts.join(', ') || 'none'}) doesn't include ${parsedUrl.hostname}: in Shim it would not run on this page`] }),
+      ...(matches ? {} : { warnings: [`the shim's match.hosts (${hosts.join(', ') || 'none'}) doesn't include ${where}: in Shim it would not run on this page`] }),
     });
   }
 
