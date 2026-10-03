@@ -32,7 +32,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Spec, Rule, Witness } from '@shimbrowser/core/types';
-import type { PageHost, PageRuntimeEvent, PreviewRule, Unsubscribe } from '@shimbrowser/core/page-host';
+import type { PageHost, PageLoadOutcome, PageRuntimeEvent, PreviewRule, Unsubscribe } from '@shimbrowser/core/page-host';
 import type { SessionBackend, BackendPreview, BackendCheckout, BackendCommit, FinishInfo } from '@shimbrowser/core/session-registry';
 import type { DeltaOp } from '@shimbrowser/core/spec-delta';
 import { applyDelta } from '@shimbrowser/core/spec-delta';
@@ -162,6 +162,30 @@ function hostnameOf(url: string): string {
   }
 }
 
+/**
+ * Whether a match.hosts pattern covers `url` — the browser registry's
+ * semantics (src/main/patches/host-match.ts): a pattern without a port
+ * matches any port, an exact host or a `*.` subdomain wildcard; a pattern
+ * with a port matches only that exact host:port.
+ */
+export function hostPatternMatches(pattern: string, url: URL): boolean {
+  if (pattern.includes(':')) return pattern === (url.port ? `${url.hostname}:${url.port}` : url.hostname);
+  if (pattern === url.hostname) return true;
+  return pattern.startsWith('*.') && url.hostname.endsWith(pattern.slice(1));
+}
+
+/** Whether `url` is an http(s) page one of the shim's declared hosts covers. */
+function onDeclaredHost(spec: Spec, url: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  return (spec.match?.hosts ?? []).some((h) => typeof h === 'string' && h !== '' && hostPatternMatches(h, u));
+}
+
 /** A new shim's spec for a page (the browser's shims.create shape). */
 export function newShimSpec(url: string, id: string): Spec {
   const u = new URL(url);
@@ -193,16 +217,30 @@ function writeAtomic(file: string, content: string): void {
 
 // The page-away guard (the browser's page-guard): page tools and previews
 // refuse once the page left the session's site, so nothing is measured or
-// witnessed against the wrong document.
+// witnessed against the wrong document. The site is the host the session
+// started on plus every host the shim declares (match.hosts, the registry's
+// pattern semantics), as in the Shim browser: a multi-host or wildcard shim
+// can be worked on across its declared sites.
 function pageAway(handle: HeadlessHandle): { error: string; detail: string } | null {
   if (handle.host.isClosed()) return { error: 'page-closed', detail: 'the session\'s page closed — end the session and open a new one' };
   const url = handle.host.url();
   const now = hostnameOf(url);
   if (now && now === handle.startHost) return null;
+  if (onDeclaredHost(handle.working, url)) return null;
   return {
     error: 'page-away',
     detail: `the page left ${handle.startHost} (it is at ${url || 'no page'}) — call reload_page to go back to ${handle.startUrl}`,
   };
+}
+
+function describeLoadOutcome(outcome: PageLoadOutcome): string {
+  switch (outcome.kind) {
+    case 'failed': return `failed: ${outcome.description || `error ${outcome.code}`}`;
+    case 'timed-out': return `timed out after ${RELOAD_LOAD_TIMEOUT_MS / 1000}s`;
+    case 'aborted': return 'aborted';
+    case 'destroyed': return 'the page went away';
+    case 'finished': return 'finished';
+  }
 }
 
 function refused(evidence: Record<string, unknown>): BackendPreview {
@@ -464,18 +502,30 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     }
     handle.reloads += 1;
     const away = pageAway(handle);
-    const loaded = handle.host.waitForLoad({ signal, timeoutMs: RELOAD_LOAD_TIMEOUT_MS, failures: 'any-frame' });
+    // Only the document's own load decides: a broken iframe must not end the
+    // wait while the main navigation is still arriving (it would wipe the
+    // previews re-applied below).
+    const loaded = handle.host.waitForLoad({ signal, timeoutMs: RELOAD_LOAD_TIMEOUT_MS, failures: 'main-frame' });
     if (away) handle.host.reload(handle.startUrl);
     else handle.host.reload();
-    await loaded;
+    const outcome = await loaded;
     if (signal.aborted) return { error: 'session ended during reload' };
     if (handle.host.isClosed()) return { error: 'the page closed during reload' };
-    await settle(signal);
+    if (outcome.kind !== 'finished') {
+      // No document to re-apply onto (or one still arriving): report it, and
+      // keep the live set so the next successful reload restores it.
+      return { error: `the reload did not finish (${describeLoadOutcome(outcome)}) — no previews were re-applied`, url: handle.host.url() };
+    }
     let reapplied = 0;
     for (const p of handle.live.values()) {
       apply(handle, p);
       reapplied++;
     }
+    // Settle after re-applying: the host applies asynchronously, so the
+    // agent's next view_page must not race the previews it was told are live.
+    await settle(signal);
+    if (signal.aborted) return { error: 'session ended during reload' };
+    if (handle.host.isClosed()) return { error: 'the page closed during reload' };
     return { ok: true, url: handle.host.url(), reapplied };
   }
 

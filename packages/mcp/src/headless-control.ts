@@ -35,7 +35,7 @@ import type { HeadlessStorage } from './playwright-page-host';
 import { HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER } from './playwright-page-host';
 import { fileStorage } from './file-storage';
 import {
-  createHeadlessShimBackend, newShimId, newShimSpec, unsupportedEvidence, BROWSER_ONLY_PAGE_TOOLS,
+  createHeadlessShimBackend, hostPatternMatches, newShimId, newShimSpec, unsupportedEvidence, BROWSER_ONLY_PAGE_TOOLS,
   type HeadlessSessionPage, type HeadlessShimSource, type HeadlessTarget, type HeadlessBackendOptions,
 } from './headless-session';
 
@@ -97,9 +97,10 @@ function errMessage(e: unknown): string {
 
 // One holder per key, never queued: a second session on the same `.shim`
 // file is busy at once (the registry answers artifact-busy).
-function exclusiveLeases(): SessionLeases {
+function exclusiveLeases(): SessionLeases & { isHeld(key: string): boolean } {
   const held = new Set<string>();
   return {
+    isHeld: (key) => held.has(key),
     async acquire(key) {
       if (held.has(key)) throw new Error(LEASE_TIMEOUT);
       held.add(key);
@@ -167,17 +168,7 @@ export function finalPageUrl(current: string, requested: URL): URL {
   return requested;
 }
 
-/**
- * Whether a match.hosts pattern covers `url` — the browser registry's
- * semantics (src/main/patches/host-match.ts): a pattern without a port
- * matches any port, an exact host or a `*.` subdomain wildcard; a pattern
- * with a port matches only that exact host:port.
- */
-export function hostPatternMatches(pattern: string, url: URL): boolean {
-  if (pattern.includes(':')) return pattern === (url.port ? `${url.hostname}:${url.port}` : url.hostname);
-  if (pattern === url.hostname) return true;
-  return pattern.startsWith('*.') && url.hostname.endsWith(pattern.slice(1));
-}
+export { hostPatternMatches };
 
 export function defaultStorageFile(shimFile: string): string {
   return `${shimFile}.storage.json`;
@@ -185,8 +176,13 @@ export function defaultStorageFile(shimFile: string): string {
 
 export function createHeadlessControl(options: HeadlessControlOptions): HeadlessControl {
   const backend = createHeadlessShimBackend(options.backend);
+  const leases = exclusiveLeases();
+  // Files an open is in flight for: claimed before the file is read, so the
+  // source a session starts from can't go stale under it (another session
+  // committing and ending while this one's page loads).
+  const opening = new Set<string>();
   const sessions = createSessionRegistry({
-    leases: { shim: exclusiveLeases() },
+    leases: { shim: leases },
     backends: { shim: backend },
     ...(options.idleTimeoutMs !== undefined ? { idleTimeoutMs: options.idleTimeoutMs } : {}),
     ...(options.timers ? { timers: options.timers } : {}),
@@ -223,6 +219,25 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
     const intent = typeof body.intent === 'string' ? body.intent : '';
     const createName = isRecord(body.create) && typeof body.create.name === 'string' ? body.create.name.trim() : '';
 
+    // Claim the file before reading it. The registry's lease is only taken
+    // once the page is open, so without the claim a second open could read
+    // the file, wait on its page while the holder commits and ends, then
+    // take the freed lease with pre-commit contents and overwrite that
+    // commit on its own.
+    if (opening.has(shimFile) || leases.isHeld(shimFile)) {
+      return refuse('artifact-busy', `another session holds ${shimFile}: end it first`);
+    }
+    opening.add(shimFile);
+    try {
+      return await openClaimed({ shimFile, parsedUrl, agent, intent, createName });
+    } finally {
+      opening.delete(shimFile);
+    }
+  }
+
+  async function openClaimed({ shimFile, parsedUrl, agent, intent, createName }: {
+    shimFile: string; parsedUrl: URL; agent: string; intent: string; createName: string;
+  }): Promise<ControlReply> {
     let loadedSource: Omit<HeadlessShimSource, 'shimFile'> | null = null;
     if (fs.existsSync(shimFile)) {
       if (createName) {

@@ -17,8 +17,12 @@
 //     noMatch, console, changes), `partial` for an unsupported-api use and
 //     for a component-identity witness, the source-scan warning, witnesses
 //     captured but never in the evidence or the checkout;
-//   - the page-away guard, and reload_page returning to the start URL and
-//     re-applying every live preview;
+//   - the page-away guard (the start host plus the shim's declared hosts),
+//     and reload_page returning to the start URL, re-applying every live
+//     preview before it settles, and re-applying nothing when the load did
+//     not finish;
+//   - a second open on a file claimed before the file is read (no stale
+//     source when the holder commits and ends while its page loads);
 //   - commit: the .shim written once per commitId, version + deploy baseline +
 //     witnesses + history, the session continuing from it;
 //   - ending tears every preview down, closes the page and frees the file.
@@ -32,7 +36,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type {
-  PageHost, PreviewRule, PageRuntimeEvent, PageConsoleMessage, PageLoadOutcome,
+  PageHost, PreviewRule, PageRuntimeEvent, PageConsoleMessage, PageLoadOutcome, LoadWaitOptions,
 } from '@shimbrowser/core/page-host';
 import { decodeWorkingCopy, encodeWorkingCopy } from '@shimbrowser/core/working-copy-wire';
 import type { FolderInput } from '@shimbrowser/core/shim-folder';
@@ -60,6 +64,8 @@ interface FakeHost extends PageHost {
   applied: PreviewRule[];
   removed: string[];
   reloads: Array<string | undefined>;
+  loadWaits: LoadWaitOptions[];
+  loadOutcome: PageLoadOutcome;
   closed: boolean;
   setUrl(url: string): void;
   emit(event: PageRuntimeEvent): void;
@@ -77,6 +83,8 @@ function fakeHost(startUrl: string): FakeHost {
     applied: [],
     removed: [],
     reloads: [],
+    loadWaits: [],
+    loadOutcome: { kind: 'finished' },
     closed: false,
     onApply: (p, h) => {
       h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 1, matchedVia: 'primary', box: { x: 0, y: 0, w: 10, h: 20 } });
@@ -97,7 +105,7 @@ function fakeHost(startUrl: string): FakeHost {
     onRuntimeEvent(l) { runtime.add(l); return () => { runtime.delete(l); }; },
     onConsole(l) { consoleL.add(l); return () => { consoleL.delete(l); }; },
     reload(u) { host.reloads.push(u); if (u) url = u; },
-    async waitForLoad(): Promise<PageLoadOutcome> { return { kind: 'finished' }; },
+    async waitForLoad(o): Promise<PageLoadOutcome> { host.loadWaits.push(o); return host.loadOutcome; },
   };
   return host;
 }
@@ -108,12 +116,18 @@ interface Rig {
   storages: HeadlessStorage[];
   writes: string[];
   failOpen: boolean;
+  // When set, opening a page waits for it (a slow page load).
+  gate: Promise<void> | null;
+  // How many previews every host had applied at each settle.
+  appliedAtSettle: number[];
   // Where opening a url lands (a redirect); the url itself by default.
   redirect: (url: string) => string;
 }
 
 function rig(): Rig {
-  const r: Rig = { control: null as unknown as HeadlessControl, hosts: [], storages: [], writes: [], failOpen: false, redirect: (u) => u };
+  const r: Rig = {
+    control: null as unknown as HeadlessControl, hosts: [], storages: [], writes: [], failOpen: false, gate: null, appliedAtSettle: [], redirect: (u) => u,
+  };
   let ids = 0;
   r.control = createHeadlessControl({
     version: 'test',
@@ -121,6 +135,7 @@ function rig(): Rig {
     newId: () => `sess${++ids}`,
     async openPage(url, storage) {
       if (r.failOpen) throw new Error('net::ERR_CONNECTION_REFUSED');
+      if (r.gate) await r.gate;
       const host = fakeHost(r.redirect(url));
       r.hosts.push(host);
       r.storages.push(storage);
@@ -128,6 +143,10 @@ function rig(): Rig {
     },
     backend: {
       settleMs: 5,
+      sleep: async () => {
+        r.appliedAtSettle.push(r.hosts.reduce((n, h) => n + h.applied.length, 0));
+        await new Promise<void>((resolve) => setTimeout(resolve, 1));
+      },
       writeShimFile: (file, content) => {
         r.writes.push(file);
         fs.writeFileSync(file, content);
@@ -255,7 +274,7 @@ async function main(): Promise<void> {
       host.applied[0]?.bundleHash === 'deploy-1' && host.applied[2]?.bundleHash === undefined);
     check('stored handler modules are inlined for the page', typeof host.applied[2]?.rule.handlers?.mark === 'string' && !host.applied[2].rule.handlers.mark.startsWith('module.exports'));
     const busy = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'x', intent: 'x', shimFile });
-    check('a second session on the same file is busy (and its page closed)', busy.error === 'artifact-busy' && (r.hosts[1]?.closed ?? false), busy);
+    check('a second session on the same file is busy, before any page opens', busy.error === 'artifact-busy' && r.hosts.length === 1, busy);
 
     const co = await req(r, 'GET', `/sessions/${id}/checkout`);
     const files = decodeWorkingCopy(co.files);
@@ -332,10 +351,21 @@ async function main(): Promise<void> {
     const awayPreview = await preview(r, id, { ...next, 'shim.json': json({ ...JSON.parse(next['shim.json'] ?? '{}') as object, intent: 'x' }) });
     check('a preview refuses too, applying nothing', awayPreview.applied === false && isRecord(awayPreview.evidence) && awayPreview.evidence.error === 'page-away');
     const liveBefore = host.applied.length;
+    const settlesBefore = r.appliedAtSettle.length;
     const reload = await req(r, 'POST', `/sessions/${id}/call`, { name: 'reload_page', input: {} });
     const reloaded = typeof reload.result === 'string' ? JSON.parse(reload.result) as Record<string, unknown> : {};
     check('reload_page goes back to the start URL, never elsewhere', host.reloads[host.reloads.length - 1] === url && reloaded.ok === true, reloaded);
     check('…and re-applies every live preview', reloaded.reapplied === 5 && host.applied.length === liveBefore + 5, reloaded);
+    check('…before it settles, so the reply never races the previews', r.appliedAtSettle.length === settlesBefore + 1
+      && r.appliedAtSettle[settlesBefore] === liveBefore + 5, r.appliedAtSettle);
+    check('…waiting on the main frame\'s load only (a broken iframe doesn\'t end the wait)', host.loadWaits[host.loadWaits.length - 1]?.failures === 'main-frame');
+    host.loadOutcome = { kind: 'failed', code: -105, description: 'net::ERR_NAME_NOT_RESOLVED' };
+    const failedAt = host.applied.length;
+    const failedReload = await req(r, 'POST', `/sessions/${id}/call`, { name: 'reload_page', input: {} });
+    const failedOut = typeof failedReload.result === 'string' ? JSON.parse(failedReload.result) as Record<string, unknown> : {};
+    check('a reload that did not finish is an error, re-applying nothing', failedOut.ok === undefined
+      && String(failedOut.error).includes('ERR_NAME_NOT_RESOLVED') && host.applied.length === failedAt, failedOut);
+    host.loadOutcome = { kind: 'finished' };
 
     // Commit.
     host.setUrl('https://elsewhere.test/');
@@ -422,6 +452,57 @@ async function main(): Promise<void> {
       && !hostPatternMatches('site.test:8080', u('http://site.test:9090/')) && !hostPatternMatches('site.test:8080', u('http://site.test/')));
     check('a wildcard matches subdomains, not the apex', hostPatternMatches('*.site.test', u('https://www.site.test/'))
       && !hostPatternMatches('*.site.test', u('https://site.test/')));
+  }
+
+  console.log('a shim declaring several hosts');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'multi.shim');
+    fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'Multi', handlers: {}, spec: { id: 'shim-multi', match: { hosts: ['site.test', '*.other.test', 'local.test:8080'] }, rules: [] } }));
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    const id = String(opened.sessionId);
+    const host = r.hosts[0] as FakeHost;
+    const tool = async (): Promise<string> => {
+      const out = await req(r, 'POST', `/sessions/${id}/call`, { name: 'inspect_element', input: { selector: 'body' } });
+      return typeof out.result === 'string' ? out.result : '';
+    };
+    host.setUrl('https://app.other.test/inbox');
+    check('a page on a wildcard-declared host is on the site', !(await tool()).includes('page-away'));
+    host.setUrl('http://local.test:8080/');
+    check('…and one on a declared host:port', !(await tool()).includes('page-away'));
+    host.setUrl('http://local.test:9090/');
+    check('…but not the same host on another port', (await tool()).includes('page-away'));
+    host.setUrl('https://other.test/');
+    check('…nor a wildcard\'s apex', (await tool()).includes('page-away'));
+    host.setUrl('https://elsewhere.test/');
+    check('…nor an undeclared host', (await tool()).includes('page-away'));
+    await r.control.closeAll();
+  }
+
+  console.log('two opens racing for one file');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'race.shim');
+    fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'Race', handlers: {}, spec: { id: 'shim-race', version: 1, match: { hosts: ['site.test'] }, rules: [] } }));
+    let release: () => void = () => undefined;
+    r.gate = new Promise<void>((resolve) => { release = resolve; });
+    const first = req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    // Bounded: an open that read the file and is waiting on its own page
+    // would otherwise hang here instead of failing.
+    const second = await Promise.race([
+      req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'b', intent: 'y', shimFile }),
+      new Promise<Record<string, unknown>>((resolve) => setTimeout(() => resolve({ error: 'still waiting on its page' }), 500)),
+    ]);
+    check('a second open while the first one\'s page loads is busy at once, reading nothing', second.error === 'artifact-busy' && r.hosts.length === 0, second);
+    r.gate = null;
+    release();
+    const opened = await first;
+    check('the first open goes on to hold the file', opened.ok === true, opened);
+    await req(r, 'DELETE', `/sessions/${String(opened.sessionId)}`);
+    const third = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'c', intent: 'z', shimFile });
+    check('once it ends the file opens again', third.ok === true, third);
+    await r.control.closeAll();
   }
 }
 
