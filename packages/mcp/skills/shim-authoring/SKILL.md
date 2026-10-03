@@ -146,6 +146,7 @@ Every `shim_preview` answers `{ revision, applied, evidence }`. On an applied pr
 | `warnings[]` | lint warnings (unknown fields, brittle anchors, an observer that watches what it mutates) and unused handler files |
 | `notes[]` | outcomes Shim reports about consent and capabilities |
 | `console` | errors and warnings the page logged since the previous preview |
+| `aiUnavailable` | a handler called `api.ai` and was refused (section 7) |
 
 A refused preview answers `applied: false` with `rejected` or `error` (and `problems` for a
 malformed folder): nothing was applied. Fix and preview again.
@@ -513,11 +514,22 @@ throwing — always branch on it and render a usable state.
 
 **While previewing, handlers get a preview `api`, not the shim's.** `api.storage` reads and
 writes a scratch bucket apart from the shim's saved data — what a preview stores is gone
-after commit, and what the shim already saved isn't visible — `api.settings` has no values,
-`api.ai` calls answer `{ ok: false }`, and `api.db`, `api.storage.pack`,
-`api.storage.global` and `api.shared` are absent. Handlers must render a usable state in
-every one of those cases anyway; check the data path after commit (open the session again
-if you need to), and say in your summary what you could only verify that way.
+after commit, and what the shim already saved isn't visible — `api.settings` has no
+values, `api.ai` calls are refused (below), and `api.db`, `api.storage.pack`, `api.storage.global` and `api.shared` are
+absent. Handlers must render a usable state in every one of those cases anyway; check the
+data path after commit (open the session again if you need to), and say in your summary
+what you could only verify that way.
+
+**`api.ai` is refused while your session is open.** On the session's tab, every `api.ai`
+call from a previewed handler — and from the shim's committed rules there — resolves
+`{ ok: false, error: "ai-unavailable-in-external-session" }`: Shim never spends the user's
+key for your session. Make sure the handler renders that failure. The preview evidence (or
+the next tool result) carries an `aiUnavailable` note when a handler called it. **The first
+time, tell the user once, in these words:**
+
+> Shim can't use your Claude Code subscription, so AI features in this shim won't run while Claude Code builds it. Once the session ends, reload the page in Shim (with an API key set) to see them work.
+
+Don't repeat it.
 
 - **`api.cleanup(fn)`** — teardown for side effects (section 5).
 - **`api.origin`, `api.host`** — the page's origin and host, as strings.

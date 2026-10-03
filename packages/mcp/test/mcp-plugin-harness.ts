@@ -15,7 +15,7 @@ import * as path from 'path';
 import { BUILTIN_KINDS } from '@shimbrowser/core/spec-lint';
 import { packShim } from '@shimbrowser/core/shim-folder';
 import { staticTools } from '../src/contract';
-import { AI_UNAVAILABLE_USER_MESSAGE } from '@shimbrowser/core/composition-session-tools';
+import { AI_UNAVAILABLE_SHIM_USER_MESSAGE, AI_UNAVAILABLE_USER_MESSAGE } from '@shimbrowser/core/composition-session-tools';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string): void {
@@ -120,6 +120,8 @@ check('documents the flat folder and its bounds', /Flat\./.test(skill) && /200 f
 for (const member of ['api.fetch(host, path', 'api.storage.get', 'api.settings.get', 'api.db.connection', '/_media/']) {
   check(`documents window.api's ${member}`, skill.includes(member));
 }
+check('tells the agent to pass the shim api.ai sentence on once, verbatim', skill.includes(`> ${AI_UNAVAILABLE_SHIM_USER_MESSAGE}`)
+  && /`aiUnavailable` \| a handler called `api.ai`/.test(skill));
 check('tells the agent to pass the api.ai sentence on once, verbatim', skill.includes(`> ${AI_UNAVAILABLE_USER_MESSAGE}`)
   && /ai-unavailable-in-external-session/.test(skill) && /Don't repeat it/.test(skill));
 

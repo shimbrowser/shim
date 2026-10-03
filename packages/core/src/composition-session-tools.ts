@@ -13,8 +13,9 @@
 //                  only
 //
 // A shim session answers all three as not offered. Also here: the answer and the
-// note a composition session gives when its page calls api.ai (D16 — an
-// external session never spends the user's key, invariant 4).
+// note a session gives when its page (a composition's, or a shim handler on
+// the session's tab) calls api.ai (D16 — an external session never spends the
+// user's key, invariant 4).
 //
 // Pure data, like page-tools.ts.
 
@@ -42,6 +43,14 @@ export const AI_UNAVAILABLE_IN_EXTERNAL_SESSION = 'ai-unavailable-in-external-se
 export const AI_UNAVAILABLE_USER_MESSAGE =
   "Shim can't use your Claude Code subscription, so AI features in this page won't run while Claude Code " +
   'builds it. Open the composition in Shim (with an API key set) to see them work.';
+
+/**
+ * The same, for a shim session: a handler on the session's tab called api.ai
+ * (a previewed one, or the shim's committed rules there) and was refused.
+ */
+export const AI_UNAVAILABLE_SHIM_USER_MESSAGE =
+  "Shim can't use your Claude Code subscription, so AI features in this shim won't run while Claude Code " +
+  'builds it. Once the session ends, reload the page in Shim (with an API key set) to see them work.';
 
 export const SESSION_COMPOSITION_TOOLS: Record<CompositionSessionToolName, ToolDefinition> = {
   probe_request: {
