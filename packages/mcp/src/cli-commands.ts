@@ -23,7 +23,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
-  packShim, unpackShim, readShimFolder, ShimFolderError, SHIM_JSON, SHIM_STATE_FILE, SHIM_FILE_FORMAT,
+  packShim, unpackShim, readShimFolder, matchHostsProblem, ShimFolderError, SHIM_STATE_FILE, SHIM_FILE_FORMAT,
   type FolderInput, type ShimFile, type RuleState,
 } from '@shimbrowser/core/shim-folder';
 import { lintSpec } from '@shimbrowser/core/spec-lint';
@@ -171,7 +171,11 @@ export function unpackFile(file: string, out?: string): UnpackResult {
   try {
     return writeCheckout(dir, files);
   } catch (e) {
-    asCliError(e);
+    // A refused folder (not a working copy, a symlink) is the user's
+    // arguments; any other failure (unwritable folder, full disk, a stale
+    // handler that won't delete) is their environment. Both exit 2.
+    if (e instanceof FolderError || e instanceof ShimFolderError) asCliError(e);
+    throw new CliError('write-failed', `could not write ${dir}: ${errMessage(e)}`);
   }
 }
 
@@ -220,9 +224,8 @@ export function lintTarget(target: string, opts: { headless?: boolean } = {}): L
     report.errors.push(...e.problems);
     return report;
   }
-  if (!isRecord(spec.match) || !Array.isArray(spec.match.hosts)) {
-    report.errors.push(`${SHIM_JSON}: "match.hosts" must be an array of host patterns`);
-  }
+  const hostsProblem = matchHostsProblem(spec);
+  if (hostsProblem) report.errors.push(hostsProblem);
   // The handler modules ride as the spec-level map, as pack lints them.
   const lint = lintSpec({ ...spec, handlers });
   report.errors.push(...lint.errors);

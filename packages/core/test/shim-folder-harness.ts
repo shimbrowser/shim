@@ -223,6 +223,7 @@ rejects('an absolute path', 'malformed-shim-folder', () => packShim({ ...good(),
 rejects('a handler file name that isn\'t a handler name', 'malformed-shim-folder', () => packShim({ ...good(), 'handlers/a.b.js': '' }), 'not a valid handler name');
 rejects('a handler file that isn\'t UTF-8', 'malformed-shim-folder', () => packShim({ ...good(), 'handlers/notes.js': new Uint8Array([0xff, 0xfe, 0x00]) }), 'not valid UTF-8');
 rejects('match.hosts missing at pack', 'malformed-shim-folder', () => packShim(edit((spec) => { delete spec.match; })), 'match.hosts');
+rejects('a non-string host at pack', 'malformed-shim-folder', () => packShim(edit((spec) => { (spec as unknown as { match: unknown }).match = { hosts: [42] }; })), 'match.hosts');
 rejects('a lint error at pack', 'spec-lint', () => packShim(edit((spec) => { spec.rules?.push({ id: 'x', mutations: [{ kind: 'cspRelax' }] }); })), 'unknown mutation kind "cspRelax"');
 rejects('a transform that does not parse', 'spec-lint', () => packShim({ ...good(), 'handlers/strip.js': 'module.exports = function (b) { return b;' }), 'does not parse as JavaScript');
 rejects('a corrupt state file', 'malformed-shim-state', () => packShim({ ...good(), [SHIM_STATE_FILE]: '{' }), 'not valid JSON');

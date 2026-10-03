@@ -260,6 +260,11 @@ async function main(): Promise<void> {
     fs.writeFileSync(blocker, 'a file');
     check('a pack it cannot write exits 2 (write-failed), no temp file left', (await cli(r, 'pack', unpacked, '--out', path.join(blocker, 'x.shim'))) === EXIT_USAGE
       && /write-failed/.test(r.err[0] ?? '') && fs.readFileSync(blocker, 'utf8') === 'a file', r.err);
+    check('an unpack it cannot write exits 2 (write-failed)', (await cli(r, 'unpack', exportedFile, '-o', path.join(blocker, 'sub'))) === EXIT_USAGE
+      && /write-failed/.test(r.err[0] ?? '') && fs.readFileSync(blocker, 'utf8') === 'a file', r.err);
+    const numericHosts = writeFolder(path.join(tmp, 'numeric-hosts'), { ...BASE_SPEC, match: { hosts: [42] } }, { markTracks: MARK });
+    check('pack exits 1 on a non-string host and writes nothing', (await cli(r, 'pack', numericHosts)) === EXIT_PROBLEM
+      && /match\.hosts/.test(r.err.join('\n')) && !fs.existsSync(`${numericHosts}.shim`), r.err);
 
     const bad = writeFolder(path.join(tmp, 'bad'), { ...BASE_SPEC, rules: [{ id: 'x', anchor: css('.x'), mutations: [{ kind: 'sparkle' }] }] });
     check('pack exits 1 on a lint error and writes nothing', (await cli(r, 'pack', bad)) === EXIT_PROBLEM
@@ -282,6 +287,9 @@ async function main(): Promise<void> {
     check('an invented kind exits 1', (await cli(r, 'lint', bad)) === EXIT_PROBLEM && /^error: .*sparkle/m.test(r.out[0] ?? ''), r.out);
     const noHosts = writeFolder(path.join(tmp, 'lint-hosts'), { id: 'h', rules: [] });
     check('a missing match.hosts is an error', (await cli(r, 'lint', noHosts)) === EXIT_PROBLEM && /match\.hosts/.test(r.out[0] ?? ''));
+    const numericHosts = writeFolder(path.join(tmp, 'lint-numeric-hosts'), { ...BASE_SPEC, match: { hosts: [42] } }, { markTracks: MARK });
+    check('a non-string host is an error, as a headless session would refuse it', (await cli(r, 'lint', numericHosts)) === EXIT_PROBLEM
+      && /match\.hosts/.test(r.out[0] ?? ''), r.out);
 
     const redirect = writeFolder(path.join(tmp, 'lint-redirect'), {
       ...BASE_SPEC,

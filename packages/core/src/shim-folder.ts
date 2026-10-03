@@ -469,6 +469,19 @@ function parseState(text: string): ShimState {
 }
 
 /**
+ * Why a spec's `match.hosts` is unusable, or null: it must be an array of
+ * host-pattern strings — what import and a headless session require — so
+ * pack and lint never bless a folder whose file those then refuse.
+ */
+export function matchHostsProblem(spec: { match?: unknown }): string | null {
+  const match = spec.match;
+  if (!isRecord(match) || !Array.isArray(match.hosts) || !match.hosts.every((h: unknown) => typeof h === 'string')) {
+    return `${SHIM_JSON}: "match.hosts" must be an array of host patterns (strings)`;
+  }
+  return null;
+}
+
+/**
  * Pack a folder into a `shim/1` file. Restores `version` / `bundleHash` and
  * each witness whose anchor digest still matches from .shim-state.json (when
  * present), checks `match.hosts` as import does, and runs spec-lint — a lint
@@ -485,9 +498,8 @@ export function packShim(input: FolderInput): ShimFile {
     rule.anchor = { ...rule.anchor, witness: clone(entry.witness) };
   }
 
-  const problems: string[] = [];
-  if (!isRecord(spec.match) || !Array.isArray(spec.match.hosts)) problems.push(`${SHIM_JSON}: "match.hosts" must be an array of host patterns`);
-  if (problems.length) throw new ShimFolderError('malformed-shim-folder', problems);
+  const hostsProblem = matchHostsProblem(spec);
+  if (hostsProblem) throw new ShimFolderError('malformed-shim-folder', [hostsProblem]);
   // The handler modules ride as the spec-level map, so a rewrite transform
   // or intercept wrap resolves its name the way it will after import.
   const { errors } = lintSpec({ ...spec, handlers });
