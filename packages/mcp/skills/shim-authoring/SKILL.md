@@ -512,10 +512,28 @@ in) targets an element inside that frame. Warn the user before touching payment 
 Handlers get `api`. Every call that can fail resolves `{ ok: false, error }` instead of
 throwing — always branch on it and render a usable state.
 
+**While previewing, handlers get a preview `api`, not the shim's.** `api.storage` reads and
+writes a scratch bucket apart from the shim's saved data — what a preview stores is gone
+after commit, and what the shim already saved isn't visible — `api.settings` has no values,
+`api.ai` calls answer `{ ok: false }`, and `api.db`, `api.storage.pack`,
+`api.storage.global` and `api.shared` are absent. Handlers must render a usable state in
+every one of those cases anyway; check the data path after commit (open the session again
+if you need to), and say in your summary what you could only verify that way.
+
 - **`api.cleanup(fn)`** — teardown for side effects (section 5).
+- **`api.origin`, `api.host`** — the page's origin and host, as strings.
 - **`api.storage`** — per-shim, per-origin key/value: `get(key)` (null when unset),
   `set(key, value)` (any JSON value), `delete(key)`, `list()`. Use it for small state:
   toggles, "played" flags, a cache of per-item data so each item is fetched at most once.
+  - **`api.storage.pack`** — the same four methods over a bucket every shim in the
+    shim's pack shares. Present only while the shim is in a pack: guard
+    `api.storage.pack &&` and treat an empty bucket as normal.
+  - **`api.storage.global`** — on a global shim (one shim running on many sites), the
+    same four methods over a store shared across all its sites. Present only on a
+    global shim: guard `api.storage.global &&`.
+- **`api.shared`** — on a global shim that declares shared functions, those functions,
+  called as `api.shared.<name>(…)` (never destructured). Present only then: guard
+  `api.shared &&`.
 - **`api.db`** — the shim's own SQLite database, for data with real shape (many rows to
   filter, sort, count). Declare tables in `storage`:
 
@@ -547,8 +565,9 @@ throwing — always branch on it and render a usable state.
   in `settings`: `[{ "key": "openaiKey", "label": "OpenAI API key", "type": "secret",
   "required": true }]` (types `text | secret | number | boolean | select`; `select` needs
   `options`; optional `help`, `default`). Read with `await api.settings.get('openaiKey')`
-  — `undefined` until the user fills it in, so render "add your key in Settings". Values
-  never travel with the shim; the schema does.
+  — `undefined` until the user fills it in, so render "add your key in Settings" — or all
+  of them at once with `await api.settings.getAll()` (`{ key: value }` for every declared
+  field). Values never travel with the shim; the schema does.
 - **`api.fetch(url, { method, headers, body })`** — a request from Shim's main process,
   outside the page's CSP and CORS: `{ ok, status, url, headers, text, truncated }` (no
   `.json()` — `JSON.parse(res.text)`). Cookie-less: public content only. For the site's own

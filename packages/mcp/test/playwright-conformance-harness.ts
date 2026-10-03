@@ -9,7 +9,8 @@
 // After the shared suite, the checks only the headless host has: D15's
 // unsupported members failing in their own shape (with an `unsupported-api`
 // event each), the engine's world staying invisible to the page, attaching to
-// a page that is already loaded, the view_page downscale, and detach.
+// a page that is already loaded, the view_page downscale and scrolled crop,
+// detach tearing previews down, and openHeadlessPage's first load.
 //
 // Needs a downloaded Chromium, so it is excluded from `npm test` and runs in
 // its own tests.yml job under plain Node:
@@ -150,6 +151,55 @@ async function main(): Promise<void> {
     check(`view_page downscales a 1600px viewport to ${MAX_SHOT_WIDTH}px`, wide.width === MAX_SHOT_WIDTH && typeof wide.height === 'number' && Math.abs(wide.height - 720) <= 2, { width: wide.width, height: wide.height, error: wide.error });
     await page.setViewportSize({ width: 1280, height: 800 });
 
+    // ── a selector crop on a scrolled page shoots the element, not the document top ──
+    // The crop rect is viewport CSS px (getBoundingClientRect); Playwright's
+    // non-fullPage clip is viewport-relative too (it adds the scroll offset
+    // itself), so the host passes the rect through unchanged. A green target
+    // 2000px down a red page, scrolled into view: the crop's centre is green.
+    {
+      const loaded = host.waitForLoad({ timeoutMs: 10000 });
+      host.reload(`${origin}/apply`);
+      check('reload to /apply finished (scrolled crop)', (await loaded).kind === 'finished');
+      await host.evaluate(`(() => {
+        document.body.replaceChildren();
+        document.body.style.margin = '0';
+        document.body.style.background = 'rgb(255, 0, 0)';
+        document.body.style.height = '4000px';
+        const t = document.createElement('div');
+        t.id = 'scrolled-target';
+        t.style.position = 'absolute';
+        t.style.left = '100px';
+        t.style.top = '2000px';
+        t.style.width = '200px';
+        t.style.height = '200px';
+        t.style.background = 'rgb(0, 255, 0)';
+        document.body.appendChild(t);
+        window.scrollTo(0, 1900);
+        return window.scrollY;
+      })()`, 'main');
+      const crop = await viewPageOnHost(host, { selector: '#scrolled-target' }, 'main');
+      let centre: unknown = crop.error ?? null;
+      if (crop.dataBase64 && crop.width && crop.height) {
+        const decoder = await browser.newPage();
+        try {
+          centre = await decoder.evaluate(async ({ b64, w, h }) => {
+            const img = new Image();
+            img.src = 'data:image/png;base64,' + b64;
+            await img.decode();
+            const c = document.createElement('canvas');
+            c.width = w; c.height = h;
+            const g = c.getContext('2d');
+            if (!g) return null;
+            g.drawImage(img, 0, 0);
+            return Array.from(g.getImageData(Math.floor(w / 2), Math.floor(h / 2), 1, 1).data.slice(0, 3));
+          }, { b64: crop.dataBase64, w: crop.width, h: crop.height });
+        } finally {
+          await decoder.close();
+        }
+      }
+      check('view_page crops a scrolled-into-view element at its viewport position', JSON.stringify(centre) === JSON.stringify([0, 255, 0]), centre);
+    }
+
     // ── load failures read like the browser's ──
     {
       // A port nothing listens on: bind one, then let it go.
@@ -162,9 +212,25 @@ async function main(): Promise<void> {
       check('a refused connection settles the load wait as failed with the net error', outcome.kind === 'failed' && outcome.code === -102, outcome);
     }
 
-    // ── detach ──
-    await host.detach();
-    check('a detached host reads as closed', host.isClosed());
+    // ── detach removes every preview and leaves the page open ──
+    {
+      const loaded = host.waitForLoad({ timeoutMs: 10000 });
+      host.reload(`${origin}/apply`);
+      check('reload to /apply finished (detach)', (await loaded).kind === 'finished');
+      host.applyPreview({ patchId: 'conformance', ruleKey: 'preview:conformance:detach-hide', rule: { id: 'detach-hide', anchor: { primary: { kind: 'css', value: '#ad' } }, mutations: [{ kind: 'hide' }] } });
+      host.applyPreview({ patchId: 'conformance', ruleKey: 'preview:conformance:detach-inject', rule: { id: 'detach-inject', anchor: { primary: { kind: 'css', value: '#html-target' } }, mutations: [{ kind: 'inject-html', placement: 'append', html: '<em id="detach-injected">x</em>' }] } });
+      const applied = await until(async () => (await host.evaluate(`getComputedStyle(document.querySelector('#ad')).display === 'none' && !!document.querySelector('#detach-injected')`, 'main')) === true ? true : null);
+      check('both previews applied before detach', applied === true);
+      await host.detach();
+      check('a detached host reads as closed', host.isClosed());
+      check('…the page itself stays open', !page.isClosed());
+      const after = await page.evaluate(() => ({
+        adDisplay: getComputedStyle(document.querySelector('#ad') as Element).display,
+        injected: !!document.querySelector('#detach-injected'),
+      }));
+      check('detach tears down every preview: the hidden element shows again', after.adDisplay !== 'none', after);
+      check('…and injected DOM is gone', !after.injected, after);
+    }
     await context.close();
 
     // ── attaching to a page that is already loaded ──
@@ -181,6 +247,22 @@ async function main(): Promise<void> {
       check('…and streams its runtime events', lateEvents.some((e) => e.kind === 'rule-status' && e.specId === 'preview:conformance:late'));
       await late.detach();
       await ctx2.close();
+    }
+
+    // ── openHeadlessPage rejects a first load that does not finish ──
+    {
+      const closed = http.createServer();
+      const deadPort = await new Promise<number>((resolve) => closed.listen(0, '127.0.0.1', () => resolve((closed.address() as AddressInfo).port)));
+      await new Promise<void>((resolve) => closed.close(() => resolve()));
+      let rejected: unknown = null;
+      try {
+        const opened = await openHeadlessPage({ url: `http://127.0.0.1:${deadPort}/` });
+        await opened.close();
+      } catch (err) {
+        rejected = err;
+      }
+      const msg = rejected instanceof Error ? rejected.message : String(rejected);
+      check('openHeadlessPage rejects an unreachable URL, naming the net error', rejected instanceof Error && msg.includes('did not load') && msg.includes('-102'), msg);
     }
 
     // ── openHeadlessPage: launch + attach + first load in one call ──

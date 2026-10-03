@@ -162,6 +162,25 @@ export function agentDisplayName(clientName: string | undefined): string {
   return clientName.slice(0, 200);
 }
 
+// GET /tabs names each tab twice: Shim's own tab id, and the webContentsId
+// a session's target needs. The agent is told one id, `tabId`, and passes it
+// to shim_open_session as the target — so it must be the webContentsId. A
+// tab whose page is gone (no webContentsId) can't be targeted and is left out.
+export function agentTabs(body: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(body.windows)) return body;
+  const windows = (body.windows as unknown[]).map((w) => {
+    if (!isRecord(w) || !Array.isArray(w.tabs)) return w;
+    const tabs = (w.tabs as unknown[]).flatMap((t) => {
+      if (!isRecord(t)) return [];
+      const { webContentsId, tabId: _shimTabId, ...rest } = t;
+      return typeof webContentsId === 'number' ? [{ tabId: webContentsId, ...rest }] : [];
+    });
+    return { ...w, tabs };
+  });
+  const { ok: _ok, ...rest } = body;
+  return { ...rest, windows };
+}
+
 function replyOrThrow(reply: ControlReply): Record<string, unknown> {
   if (reply.body.ok === true) return reply.body;
   const code = typeof reply.body.error === 'string' ? reply.body.error : `http-${reply.status}`;
@@ -361,7 +380,20 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           ...(headless ? { mode: 'headless', shimFile: opened.shimFile, url: opened.url } : {}),
           ...(Array.isArray(opened.warnings) ? { warnings: opened.warnings } : {}),
         };
-        if (dir) out.checkout = await checkout(id, dir);
+        if (dir) {
+          // The session is open whatever happens to the checkout: a failed
+          // write (a non-empty folder, say) must not read as a failed open,
+          // or the agent opens again and finds its own session holding the
+          // shim (or, for a new shim, makes a second one).
+          try {
+            out.checkout = await checkout(id, dir);
+          } catch (e) {
+            if (e instanceof ToolFailure) out.checkout = { error: e.code, detail: e.detail };
+            else if (e instanceof FolderError) out.checkout = { error: e.code, detail: e.message };
+            else throw e;
+            out.hint = 'The session is open, but the checkout failed: call shim_checkout with an empty folder.';
+          }
+        }
         return [text(out)];
       }
       case 'shim_checkout': {
