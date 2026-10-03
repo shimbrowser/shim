@@ -332,9 +332,9 @@ async function main(): Promise<void> {
     // Page tools.
     const browserOnly = await req(r, 'POST', `/sessions/${id}/call`, { name: 'verify_across_pages', input: {} });
     check('verify_across_pages answers requires-shim-browser', browserOnly.error === 'requires-shim-browser');
-    for (const name of ['search_discovered_api', 'request_sources', 'probe_request', 'read_calls']) {
+    for (const name of ['search_discovered_api', 'request_sources', 'probe_request', 'read_calls', 'inspect_storage', 'query_db', 'read_sibling_shim']) {
       const refused = await req(r, 'POST', `/sessions/${id}/call`, { name, input: {} });
-      check(`${name} answers requires-shim-browser (no API map, no compositions)`, refused.error === 'requires-shim-browser', refused);
+      check(`${name} answers requires-shim-browser (no API map, no compositions, no saved data)`, refused.error === 'requires-shim-browser', refused);
     }
     const consoleRead = await req(r, 'POST', `/sessions/${id}/call`, { name: 'read_console', input: { level: 'error' } });
     check('read_console reads the session\'s buffer', typeof consoleRead.result === 'string' && consoleRead.result.includes('TypeError'));

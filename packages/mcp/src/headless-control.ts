@@ -33,6 +33,7 @@ import { preflightSpec } from '@shimbrowser/core/capability-preflight';
 import type { Spec } from '@shimbrowser/core/types';
 import { isApiMapToolName } from '@shimbrowser/core/api-map-tools';
 import { isCompositionSessionToolName } from '@shimbrowser/core/composition-session-tools';
+import { isDataToolName } from '@shimbrowser/core/data-tools';
 import type { ControlClient, ControlInfo, ControlReply } from './control-client';
 import type { HeadlessStorage } from './playwright-page-host';
 import { HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER } from './playwright-page-host';
@@ -187,11 +188,13 @@ export function defaultStorageFile(shimFile: string): string {
   return `${shimFile}.storage.json`;
 }
 
-// The API map is what the Shim browser recorded of a site's API (D13), and
-// probe_request / read_calls run against a composition: neither exists in a
-// fresh headless Chromium.
+// The API map is what the Shim browser recorded of a site's API (D13),
+// probe_request / read_calls run against a composition, and the data tools
+// read the shim's saved data in Shim (its stored rows, its declared tables,
+// its pack siblings): none of them exists in a fresh headless Chromium.
 function browserOnlySessionTool(name: string): string | undefined {
   if (isApiMapToolName(name)) return `${name} reads the API map the Shim browser records; headless mode has none. Author in the Shim browser to use a site's API.`;
+  if (isDataToolName(name)) return `${name} reads the data a shim has saved in the Shim browser (its storage, its tables, its pack); a headless session has none. Read api.storage's file (<shimFile>.storage.json) directly, or author in the Shim browser.`;
   if (isCompositionSessionToolName(name)) return `${name} works on a composition, and compositions run only in the Shim browser.`;
   return undefined;
 }
