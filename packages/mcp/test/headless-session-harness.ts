@@ -48,7 +48,7 @@ import type {
 import { decodeWorkingCopy, encodeWorkingCopy } from '@shimbrowser/core/working-copy-wire';
 import type { FolderInput } from '@shimbrowser/core/shim-folder';
 import { fileStorage, HEADLESS_STORAGE_FORMAT } from '../src/file-storage';
-import { createHeadlessControl, hostPatternMatches, type HeadlessControl } from '../src/headless-control';
+import { createHeadlessControl, hostPatternMatches, MAX_COMMIT_ID_LENGTH, MAX_SUMMARY_LENGTH, type HeadlessControl } from '../src/headless-control';
 import { HEADLESS_CAPABILITIES, type HeadlessStorage } from '../src/playwright-page-host';
 import { cliMode } from '../src/cli';
 import { lockFileFor, tryLockFile, type FileLockOptions } from '../src/file-lock';
@@ -401,6 +401,10 @@ async function main(): Promise<void> {
     const awayCommit = await req(r, 'POST', `/sessions/${id}/commit`, { revision: 1, commitId: 'one', summary: 'Restyled rows; added two rules.' });
     check('a commit refuses once the page left the site, writing nothing', awayCommit.error === 'page-away' && r.writes.length === 0, awayCommit);
     host.setUrl(url);
+    const longId = await req(r, 'POST', `/sessions/${id}/commit`, { revision: 1, commitId: 'x'.repeat(MAX_COMMIT_ID_LENGTH + 1), summary: 's' });
+    const longSummary = await req(r, 'POST', `/sessions/${id}/commit`, { revision: 1, commitId: 'long', summary: 'x'.repeat(MAX_SUMMARY_LENGTH + 1) });
+    check('an oversized commitId or summary is refused before the registry, writing nothing', longId.error === 'invalid-request'
+      && longSummary.error === 'invalid-request' && r.writes.length === 0, { longId, longSummary });
     const c1 = await req(r, 'POST', `/sessions/${id}/commit`, { revision: 1, commitId: 'one', summary: 'Restyled rows; added two rules.' });
     check('the commit answers the new version', c1.ok === true && c1.versionId === 5 && c1.revision === 1, c1);
     const again = await req(r, 'POST', `/sessions/${id}/commit`, { revision: 1, commitId: 'one', summary: 'Restyled rows; added two rules.' });
