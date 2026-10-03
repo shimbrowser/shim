@@ -37,32 +37,43 @@ Then ask Claude for a change, for example: *"On news.example.com, hide the cooki
 and make the article text wider."* The skill tells Claude how to open a session, edit the
 shim, preview it and verify the result.
 
-To use headless mode (below), start Claude Code with `SHIM_MCP_MODE=headless` set in its
-environment, and install Chromium for Playwright. In a checkout Playwright is already
-installed, so this is enough:
+The plugin works with or without the Shim browser; there is nothing to configure. If Shim
+is running with its control endpoint on, Claude works in its tabs. If it isn't, Claude opens
+the page in a headless Chromium instead (below). `shim_status` tells Claude which modes are
+available and why.
+
+**Without Shim you need Playwright**, which downloads the Chromium that headless mode drives.
+Shim doesn't bundle a browser. Install it once:
 
 ```sh
-npx playwright install chromium
-SHIM_MCP_MODE=headless claude --plugin-dir packages/mcp
+npm install -g playwright && playwright install chromium
 ```
 
-Each bundle is a single file with its dependencies inlined. Playwright is the only
-exception: it is an optional peer dependency, loaded only in headless mode. Outside a
-checkout, install it in your project (`npm install playwright && npx playwright install
-chromium`); the server looks there, or in the folder `SHIM_PLAYWRIGHT_DIR` names.
+Or install it in the project you run Claude Code in
+(`npm install -D playwright && npx playwright install chromium`). If Playwright is missing
+when a session opens, the tool answer gives the exact command. In a checkout of this
+repository Playwright is already a dev dependency, so `npx playwright install chromium` is
+enough.
+
+Each bundle is a single file with its dependencies inlined: the MCP SDK, `@shimbrowser/core`
+and the core page bundle that headless mode injects into every page. Playwright is the only
+exception. It is an optional peer dependency, loaded only when a headless session opens, and
+looked for in this order: the folder `SHIM_PLAYWRIGHT_DIR` names, the plugin's own folder
+and `NODE_PATH`, the working directory, `CLAUDE_PROJECT_DIR`, then the global npm install.
 
 ## Two modes: attach and headless
 
 The tools and the loop are the same in both modes. Only the page changes.
 
-| | Attach (default) | Headless |
+| | Attach | Headless |
 |---|---|---|
 | The page | a tab in the running [Shim browser](https://shimbrowser.com), with your logins | a fresh Chromium that Playwright drives (`--visible` shows it) |
 | Who can use it | anyone with Shim | anyone: no Shim needed |
 | What a commit saves | a new version of the shim in Shim's library | the `.shim` file the session names |
 | Consent | Shim asks you to allow each session, and asks again at commit if the work grants something sensitive | none: the agent drives its own browser, with no logins, on a page it named |
 | Features | everything Shim supports | a stated subset (next section) |
-| Start | `shim-mcp` | `shim-mcp --headless`, or `SHIM_MCP_MODE=headless` |
+| When | a session opened on a Shim tab (`tabId`) | a session opened on a `url` while no Shim browser is reachable, or with `mode: "headless"` |
+| Only this mode | `shim-mcp --attach`, or `SHIM_MCP_MODE=attach` | `shim-mcp --headless`, or `SHIM_MCP_MODE=headless` |
 
 **Attach** talks to Shim over its **control endpoint**: a Unix socket (a named pipe on
 Windows) plus a bearer token, both named in `<userData>/control.json`. The endpoint is off by
@@ -71,6 +82,13 @@ run. Turning it on grants nothing by itself: every session waits until you allow
 Shim's sidebar. On a site tab, code the agent previews runs in the page as you, logged in,
 and discarding the session doesn't undo actions it already took. The attach card tells you
 this before you allow the session.
+
+**Auto** (the default, and what the plugin runs) holds both. A session on a Shim tab
+attaches. A session on a `url` runs headless when no Shim browser is reachable, meaning
+there is no `control.json` or the process it names is gone. The mode never switches
+silently. Every `shim_open_session` answer names its mode and why. With Shim running, a bare
+`url` is refused (`shim-running`) unless the call asks for `mode: "headless"`. A session
+keeps its mode until it ends, even if Shim starts in the meantime.
 
 **Headless** never reads the Shim browser's profile. Every session starts a new,
 non-persistent Chromium. The artifact is a `.shim` file. You can import it into Shim later,
@@ -109,9 +127,10 @@ never applied with different behavior.
   carries ran on this host, so the rule behaves the same in Shim. `partial` means something
   went unchecked. Treat a `partial` rule as unverified until you try it in Shim.
 
-Tools that need the Shim browser answer `requires-shim-browser` in headless mode:
-`shim_launch`, `shim_list_tabs`, opening a shim from Shim's library, compositions,
-`verify_across_pages` and `interact_page`.
+Tools that need the Shim browser answer `requires-shim-browser` in a headless session:
+opening a shim from Shim's library, compositions, `verify_across_pages` and
+`interact_page`. A headless-only server (`--headless`) also refuses `shim_launch` and
+`shim_list_tabs`.
 
 ## The loop, tool by tool
 
@@ -163,7 +182,7 @@ shim lint <folder | file.shim> [--headless] [--json]
 shim preview <folder> --url <url> [--screenshot <file.png>] [--selector <css>]
              [--full-page] [--visible] [--storage <file.json>] [--json]
 shim launch [--timeout <seconds>] [--json]
-shim mcp [--headless] [--visible]
+shim mcp [--attach | --headless] [--visible]
 ```
 
 | Command | What it does |
@@ -173,7 +192,7 @@ shim mcp [--headless] [--visible]
 | `lint` | The checks `pack` and a preview apply, plus lint warnings. `--headless` adds the headless capability check (errors) and a handler source scan (warnings). |
 | `preview` | Applies the folder to `url` in a fresh headless Chromium and prints the evidence. `--screenshot` saves the page after it settles; `--selector` captures one element instead. Nothing is saved; `--storage` names a file to back `api.storage`. |
 | `launch` | Attaches to the running Shim browser, or starts it with its control endpoint on. |
-| `mcp` | Starts the MCP server on stdio, the same server as `shim-mcp`. |
+| `mcp` | Starts the MCP server on stdio, the same server as `shim-mcp`: auto by default, one mode with `--attach` or `--headless`. |
 
 Exit codes: `0` success. `1` the command found a problem: lint errors, a preview that
 applied nothing or reported handler errors / unmatched / quarantined rules, a failed
@@ -188,7 +207,7 @@ that file alone.
 
 | Variable | Effect |
 |---|---|
-| `SHIM_MCP_MODE` | `headless` runs headless mode (same as `--headless`). |
+| `SHIM_MCP_MODE` | `auto` (the default), `attach` (same as `--attach`) or `headless` (same as `--headless`). |
 | `SHIM_HEADLESS_VISIBLE` | `1` shows headless mode's Chromium windows (same as `--visible`). |
 | `SHIM_CONTROL_FILE` | The discovery file to read (default `<userData>/control.json`). |
 | `SHIM_USER_DATA` | Shim's userData folder, when it isn't the platform default. |
@@ -196,7 +215,7 @@ that file alone.
 | `SHIM_DEV_CHECKOUT` | A Shim repository checkout: launching runs `npm start` there. |
 | `SHIM_AGENT_NAME` | The agent name Shim's cards show (default: from the MCP client). |
 | `MAX_MCP_OUTPUT_TOKENS` | The tool-result budget results are fitted to (default 25000). |
-| `SHIM_PLAYWRIGHT_DIR` | A folder whose `node_modules` has Playwright, searched first (then the server's own install, the working directory and `CLAUDE_PROJECT_DIR`). |
+| `SHIM_PLAYWRIGHT_DIR` | A folder whose `node_modules` has Playwright, searched first (then the server's own install and `NODE_PATH`, the working directory, `CLAUDE_PROJECT_DIR` and the global npm install). |
 
 ## Build and test
 
@@ -206,11 +225,15 @@ npm test                            # from the repository root: every harness
 ```
 
 The harnesses that need a real Chromium (`playwright-conformance`,
-`headless-session-e2e`, `shim-cli-e2e`) run in their own CI job:
+`headless-session-e2e`, `shim-cli-e2e`, `plugin-install-e2e`) run in their own CI jobs.
+`plugin-install-e2e` copies the built plugin to a temp folder outside the repository and
+starts it from its `.mcp.json` with only Playwright reachable, so it fails if the bundle
+needs anything else at runtime:
 
 ```sh
 npx playwright install chromium
 npm run build && node out/packages/mcp/test/shim-cli-e2e-harness.js
+node out/packages/mcp/test/plugin-install-e2e-harness.js
 ```
 
 ## License
