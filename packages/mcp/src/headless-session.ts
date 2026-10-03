@@ -591,7 +591,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
   }
 
   return {
-    async begin({ sessionId, target, agent, intent }) {
+    async begin({ sessionId, target, agent, intent, signal }) {
       if (!isRecord(target) || !isRecord(target.page) || !isRecord(target.source)) {
         throw new Error('a headless session needs its page and its shim');
       }
@@ -637,6 +637,9 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       handle.off.push(host.onConsole((m) => handle.console.push({ level: m.level, message: m.message, source: m.source, ts: now() })));
       // Headless has no installed shims: the committed rules run as previews.
       for (const rule of handle.working.rules || []) apply(handle, previewFor(handle, rule));
+      // The host applies asynchronously: settle (as preview and reload do) so
+      // the agent's first view_page sees the committed shim, not the bare page.
+      if (handle.live.size > 0) await settle(signal);
       return handle;
     },
     async checkout(handle): Promise<BackendCheckout> {

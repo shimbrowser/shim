@@ -11,7 +11,7 @@
 //     declaring an unsupported feature refused before any page opens, a page
 //     that fails to open, one session per .shim file;
 //   - begin applies the committed shim (handlers inlined; behind the deploy
-//     baseline only where a witness exists);
+//     baseline only where a witness exists) and settles before it answers;
 //   - preview: preflight is atomic (nothing applied, no revision), lint
 //     refuses, the evidence shape (rules with status + verification, errors,
 //     noMatch, console, changes), `partial` for an unsupported-api use and
@@ -23,6 +23,10 @@
 //     not finish;
 //   - a second open on a file claimed before the file is read (no stale
 //     source when the holder commits and ends while its page loads);
+//   - the cross-process file lock (file-lock.ts): another shim-mcp process
+//     is busy before any page opens, ending or a failed open drops the lock,
+//     a dead process's lock (or a file that isn't one) is taken over, one
+//     from another machine never is;
 //   - commit: the .shim written once per commitId, version + deploy baseline +
 //     witnesses + history, the session continuing from it;
 //   - ending tears every preview down, closes the page and frees the file.
@@ -44,6 +48,7 @@ import { fileStorage, HEADLESS_STORAGE_FORMAT } from '../src/file-storage';
 import { createHeadlessControl, hostPatternMatches, type HeadlessControl } from '../src/headless-control';
 import { HEADLESS_CAPABILITIES, type HeadlessStorage } from '../src/playwright-page-host';
 import { cliMode } from '../src/cli';
+import { lockFileFor, type FileLockOptions } from '../src/file-lock';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: unknown): void {
@@ -124,7 +129,7 @@ interface Rig {
   redirect: (url: string) => string;
 }
 
-function rig(): Rig {
+function rig(fileLock?: FileLockOptions): Rig {
   const r: Rig = {
     control: null as unknown as HeadlessControl, hosts: [], storages: [], writes: [], failOpen: false, gate: null, appliedAtSettle: [], redirect: (u) => u,
   };
@@ -133,6 +138,7 @@ function rig(): Rig {
     version: 'test',
     newShimId: () => `shim-new-${++ids}`,
     newId: () => `sess${++ids}`,
+    ...(fileLock ? { fileLock } : {}),
     async openPage(url, storage) {
       if (r.failOpen) throw new Error('net::ERR_CONNECTION_REFUSED');
       if (r.gate) await r.gate;
@@ -272,6 +278,7 @@ async function main(): Promise<void> {
     check('every committed rule runs as a preview', host.applied.map((p) => p.ruleKey).join() === 'preview:shim-tracks:hide-promo,preview:shim-tracks:row,preview:shim-tracks:mark');
     check('a rule with a witness runs behind the deploy baseline; one without does not',
       host.applied[0]?.bundleHash === 'deploy-1' && host.applied[2]?.bundleHash === undefined);
+    check('opening settles after applying the committed rules, so the first view sees them', r.appliedAtSettle[0] === 3, r.appliedAtSettle);
     check('stored handler modules are inlined for the page', typeof host.applied[2]?.rule.handlers?.mark === 'string' && !host.applied[2].rule.handlers.mark.startsWith('module.exports'));
     const busy = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'x', intent: 'x', shimFile });
     check('a second session on the same file is busy, before any page opens', busy.error === 'artifact-busy' && r.hosts.length === 1, busy);
@@ -503,6 +510,49 @@ async function main(): Promise<void> {
     const third = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'c', intent: 'z', shimFile });
     check('once it ends the file opens again', third.ok === true, third);
     await r.control.closeAll();
+  }
+
+  console.log('two shim-mcp processes on one file');
+  {
+    const shimFile = path.join(tmp, 'shared.shim');
+    fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'Shared', handlers: {}, spec: { id: 'shim-shared', version: 1, match: { hosts: ['site.test'] }, rules: [] } }));
+    const lockFile = lockFileFor(shimFile);
+    const a = rig({ pid: 1001, isAlive: () => true });
+    const b = rig({ pid: 1002, isAlive: () => true });
+    const first = await req(a, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('the first process opens the file and locks it', first.ok === true && fs.existsSync(lockFile), first);
+    const other = await req(b, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'b', intent: 'y', shimFile });
+    check('another process is busy, before any page opens', other.error === 'artifact-busy' && b.hosts.length === 0 && String(other.detail).includes('pid 1001'), other);
+    await req(a, 'DELETE', `/sessions/${String(first.sessionId)}`);
+    check('ending the session drops the lock', !fs.existsSync(lockFile));
+    const now = await req(b, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'b', intent: 'y', shimFile });
+    check('…and the other process opens it', now.ok === true, now);
+    await b.control.closeAll();
+    check('closing every session drops its locks', !fs.existsSync(lockFile));
+
+    a.failOpen = true;
+    const failed = await req(a, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('an open that fails leaves no lock behind', failed.error === 'page-open-failed' && !fs.existsSync(lockFile), failed);
+
+    // A process that crashed holding the file.
+    const hostname = os.hostname();
+    fs.writeFileSync(lockFile, JSON.stringify({ format: 'shim-mcp-lock/1', pid: 4242, hostname, token: 'dead', at: 1 }));
+    const c = rig({ pid: 1003, isAlive: (pid) => pid !== 4242 });
+    const takeover = await req(c, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'c', intent: 'z', shimFile });
+    check('a dead process\'s lock is taken over', takeover.ok === true && !fs.readFileSync(lockFile, 'utf8').includes('"dead"'), takeover);
+    await c.control.closeAll();
+
+    fs.writeFileSync(lockFile, 'not a lock');
+    const d = rig({ pid: 1004, isAlive: () => true });
+    const junk = await req(d, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'd', intent: 'z', shimFile });
+    check('a file that isn\'t a lock is taken over', junk.ok === true, junk);
+    await d.control.closeAll();
+
+    fs.writeFileSync(lockFile, JSON.stringify({ format: 'shim-mcp-lock/1', pid: 4242, hostname: `${hostname}-elsewhere`, token: 'remote', at: 1 }));
+    const e = rig({ pid: 1005, isAlive: () => false });
+    const remote = await req(e, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'e', intent: 'z', shimFile });
+    check('a lock from another machine is never judged stale', remote.error === 'artifact-busy' && e.hosts.length === 0 && fs.readFileSync(lockFile, 'utf8').includes('remote'), remote);
+    fs.unlinkSync(lockFile);
   }
 }
 

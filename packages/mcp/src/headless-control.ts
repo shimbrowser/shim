@@ -20,7 +20,8 @@
 //     never the Shim browser's persist:user).
 //   - The artifact is a `.shim` file the session loads (if it exists) and
 //     commits to, not a row in Shim's library. Its path is the lease key, so
-//     two sessions can't hold one file.
+//     two sessions can't hold one file — and a `<file>.lock` beside it
+//     (file-lock.ts) extends that across shim-mcp processes.
 //   - Compositions, Shim's tabs, the shim library and the browser-only page
 //     tools answer `requires-shim-browser`.
 
@@ -34,6 +35,7 @@ import type { ControlClient, ControlInfo, ControlReply } from './control-client'
 import type { HeadlessStorage } from './playwright-page-host';
 import { HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER } from './playwright-page-host';
 import { fileStorage } from './file-storage';
+import { tryLockFile, type FileLock, type FileLockOptions } from './file-lock';
 import {
   createHeadlessShimBackend, hostPatternMatches, newShimId, newShimSpec, unsupportedEvidence, BROWSER_ONLY_PAGE_TOOLS,
   type HeadlessSessionPage, type HeadlessShimSource, type HeadlessTarget, type HeadlessBackendOptions,
@@ -55,6 +57,8 @@ export interface HeadlessControlOptions {
   timers?: Timers;
   newId?(): string;
   newShimId?(): string;
+  /** The cross-process file lock's process identity (tests stand in other processes). */
+  fileLock?: FileLockOptions;
 }
 
 /** The control client, plus ending every open session (the server shutting down). */
@@ -96,8 +100,9 @@ function errMessage(e: unknown): string {
 }
 
 // One holder per key, never queued: a second session on the same `.shim`
-// file is busy at once (the registry answers artifact-busy).
-function exclusiveLeases(): SessionLeases & { isHeld(key: string): boolean } {
+// file is busy at once (the registry answers artifact-busy). `onRelease` runs
+// as a lease frees its key (dropping the file's cross-process lock).
+function exclusiveLeases(onRelease: (key: string) => void): SessionLeases & { isHeld(key: string): boolean } {
   const held = new Set<string>();
   return {
     isHeld: (key) => held.has(key),
@@ -112,6 +117,7 @@ function exclusiveLeases(): SessionLeases & { isHeld(key: string): boolean } {
           if (released) return;
           released = true;
           held.delete(key);
+          onRelease(key);
         },
       };
       return lease;
@@ -176,7 +182,14 @@ export function defaultStorageFile(shimFile: string): string {
 
 export function createHeadlessControl(options: HeadlessControlOptions): HeadlessControl {
   const backend = createHeadlessShimBackend(options.backend);
-  const leases = exclusiveLeases();
+  // This process's cross-process locks, by file: taken before the file is
+  // read, handed to the session's lease, dropped when that lease is.
+  const fileLocks = new Map<string, FileLock>();
+  const dropFileLock = (key: string): void => {
+    fileLocks.get(key)?.release();
+    fileLocks.delete(key);
+  };
+  const leases = exclusiveLeases(dropFileLock);
   // Files an open is in flight for: claimed before the file is read, so the
   // source a session starts from can't go stale under it (another session
   // committing and ending while this one's page loads).
@@ -227,11 +240,24 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
     if (opening.has(shimFile) || leases.isHeld(shimFile)) {
       return refuse('artifact-busy', `another session holds ${shimFile}: end it first`);
     }
+    // Then claim it from every other shim-mcp process: each has its own
+    // leases, and two holders would both commit, the last rename silently
+    // dropping the other's work.
+    let locked;
+    try {
+      locked = tryLockFile(shimFile, options.fileLock);
+    } catch (e) {
+      return refuse('invalid-request', `could not lock ${shimFile}: ${errMessage(e)}`);
+    }
+    if (!locked.ok) return refuse('artifact-busy', locked.detail);
+    fileLocks.set(shimFile, locked.lock);
     opening.add(shimFile);
     try {
       return await openClaimed({ shimFile, parsedUrl, agent, intent, createName });
     } finally {
       opening.delete(shimFile);
+      // A session that opened holds the lock until its lease frees it.
+      if (!leases.isHeld(shimFile)) dropFileLock(shimFile);
     }
   }
 
