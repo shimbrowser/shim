@@ -27,8 +27,10 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
   shim_status: {
     name: 'shim_status',
     description:
-      'Report whether the Shim browser is running with its control endpoint on, its version, and the ' +
-      'sessions open on it. Call first; if Shim is not reachable, call shim_launch.',
+      'Report which authoring modes are available right now and why: attach (a tab in the running Shim browser, ' +
+      'with the user\'s logins; needs Shim running with its control endpoint on) and headless (a fresh Chromium ' +
+      'driven by Playwright, no Shim needed; needs Playwright installed — when it is not, the exact install command). ' +
+      'Also the sessions this server opened, each with its mode, and what to do next. Call first.',
     input_schema: { type: 'object', properties: {} },
   },
   shim_launch: {
@@ -58,9 +60,11 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
       'start a new one on the tab\'s site with newShimName. Pass dir to check the shim out into that folder ' +
       'right away (same as shim_checkout). While the session is open the shim is yours alone; Shim ends it ' +
       'after 10 idle minutes, or when the user stops it or starts their own turn on that shim. ' +
-      'In headless mode (no Shim browser; shim_status reports mode "headless") pass url instead of tabId: the ' +
-      'session opens that page in its own Chromium, with no logins, and works on the .shim file shimFile ' +
-      '(loaded when it exists; with newShimName, created by your first commit — default <dir>.shim).',
+      'Headless (no Shim browser needed): pass url instead of tabId. The session opens that page in its own ' +
+      'Chromium, with no logins, and works on the .shim file shimFile (loaded when it exists; with newShimName, ' +
+      'created by your first commit — default <dir>.shim). A url opens headless only while no Shim browser is ' +
+      'reachable; with Shim running, use its tab (tabId) or pass mode "headless" explicitly. The answer always ' +
+      'names the session\'s mode and why.',
     input_schema: {
       type: 'object',
       properties: {
@@ -71,6 +75,11 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
         dir: { type: 'string', description: 'Optional absolute folder to check the working copy out into once the session opens.' },
         url: { type: 'string', description: 'Headless mode only, instead of tabId: the http(s) page to open.' },
         shimFile: { type: 'string', description: 'Headless mode only, instead of shimId: the absolute path of the .shim file to work on. Commits write it.' },
+        mode: {
+          type: 'string',
+          enum: ['attach', 'headless'],
+          description: 'Optional. The default is attach for a tabId, and headless for a url while no Shim browser is reachable. Pass "headless" to open a url headless even with Shim running.',
+        },
       },
       required: ['intent'],
     },
@@ -179,3 +188,16 @@ export const HEADLESS_SERVER_INSTRUCTIONS =
   '"unsupported" and applies nothing, and a rule reported verification "partial" is unverified — tell the user. ' +
   'Tools that need the Shim browser answer requires-shim-browser. The shim-authoring skill documents the spec ' +
   'format, every mutation kind, anchors and the runtime api.';
+
+export const AUTO_SERVER_INSTRUCTIONS =
+  'Shim applies user-authored modifications ("shims") to live websites. This server authors shims in two modes, ' +
+  'the same tools in both: ATTACH works on a tab in the running Shim browser (the user\'s logins; the user allows ' +
+  'each session in Shim; commits go to Shim\'s library), HEADLESS needs no Shim and drives its own Chromium per ' +
+  'session (no logins; commits write a .shim file). Call shim_status first: it says which modes are available, ' +
+  'why, and what to do next. Attach: shim_list_tabs, shim_open_session with tabId. Headless: shim_open_session with ' +
+  'url, intent, newShimName (or shimFile) and dir. Then edit shim.json and handlers/*.js, shim_preview to apply ' +
+  'the folder to the live page and read the evidence, the page tools (view_page, query_page, inspect_element, …) ' +
+  'to look, shim_commit with a summary, and shim_end_session. For a visual change, verify with a screenshot ' +
+  'before committing. Headless supports a subset of shim features: a preview declaring anything else answers ' +
+  '"unsupported", and a rule reported verification "partial" is unverified — tell the user. The shim-authoring ' +
+  'skill documents the spec format, every mutation kind, anchors and the runtime api.';

@@ -186,9 +186,17 @@ async function main(): Promise<void> {
 
   console.log('cli mode');
   {
-    check('attach by default', !cliMode([], {}).headless);
-    check('--headless', cliMode(['--headless'], {}).headless && !cliMode(['--headless'], {}).visible);
-    check('SHIM_MCP_MODE=headless and --visible', cliMode(['--visible'], { SHIM_MCP_MODE: 'headless' }).headless && cliMode(['--visible'], {}).visible);
+    check('auto by default (what the plugin runs)', cliMode([], {}).mode === 'auto' && cliMode([], { SHIM_MCP_MODE: 'auto' }).mode === 'auto');
+    check('--attach', cliMode(['--attach'], {}).mode === 'attach' && cliMode([], { SHIM_MCP_MODE: 'attach' }).mode === 'attach');
+    check('--headless', cliMode(['--headless'], {}).mode === 'headless' && !cliMode(['--headless'], {}).visible);
+    check('SHIM_MCP_MODE=headless and --visible', cliMode(['--visible'], { SHIM_MCP_MODE: 'headless' }).mode === 'headless' && cliMode(['--visible'], {}).visible);
+    check('a flag beats the environment', cliMode(['--attach'], { SHIM_MCP_MODE: 'headless' }).mode === 'attach');
+    let both = '';
+    try { cliMode(['--attach', '--headless'], {}); } catch (e) { both = e instanceof Error ? e.message : String(e); }
+    check('--attach with --headless is an error', /exclusive/.test(both), both);
+    let bad = '';
+    try { cliMode([], { SHIM_MCP_MODE: 'cloud' }); } catch (e) { bad = e instanceof Error ? e.message : String(e); }
+    check('an unknown SHIM_MCP_MODE is an error, never a silent default', /auto, attach or headless/.test(bad), bad);
   }
 
   console.log('opening');

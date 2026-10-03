@@ -330,6 +330,8 @@ async function main(): Promise<void> {
     check('--headless --visible pass through', (await cli(r, 'mcp', '--headless', '--visible')) === EXIT_OK
       && JSON.stringify(r.mcp.at(-1)) === '["--headless","--visible"]');
     check('anything else exits 2 without starting', (await cli(r, 'mcp', '--port', '1')) === EXIT_USAGE && r.mcp.length === 2);
+    check('--attach passes through', (await cli(r, 'mcp', '--attach')) === EXIT_OK && JSON.stringify(r.mcp.at(-1)) === '["--attach"]');
+    check('--attach with --headless exits 2 without starting', (await cli(r, 'mcp', '--attach', '--headless')) === EXIT_USAGE && r.mcp.length === 3);
   }
 
   console.log('preview');
