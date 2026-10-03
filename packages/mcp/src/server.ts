@@ -245,14 +245,18 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
 
   async function checkout(id: string, dir: string): Promise<Record<string, unknown>> {
     const reply = await control('GET', sessionPath(id, 'checkout'));
+    const state = stateOf(id);
+    // Decoded under the session's own limits, known before the files are:
+    // a composition may carry far more than a shim (50 MiB vs 8). A session
+    // this process didn't open decodes under the larger bound, then its
+    // files say which kind it is.
     let files;
     try {
-      files = decodeWorkingCopy(reply.files);
+      files = decodeWorkingCopy(reply.files, state.kind === 'shim' ? SHIM_WIRE_LIMITS : COMPOSITION_WIRE_LIMITS);
     } catch (e) {
       if (e instanceof WorkingCopyWireError) throw new ToolFailure(e.code, e.problems.join('; '));
       throw e;
     }
-    const state = stateOf(id);
     const kind = state.kind ?? checkoutKind(files);
     state.kind = kind;
     const written = kind === 'composition' ? writeCompositionCheckout(dir, files) : writeCheckout(dir, files);
@@ -372,9 +376,11 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           try {
             out.checkout = await checkout(id, dir);
           } catch (e) {
+            // Any failure, including a native fs error (an unwritable dir, a
+            // full disk), is the checkout's, never the open's.
             if (e instanceof ToolFailure) out.checkout = { error: e.code, detail: e.detail };
             else if (e instanceof FolderError) out.checkout = { error: e.code, detail: e.message };
-            else throw e;
+            else out.checkout = { error: 'checkout-failed', detail: e instanceof Error ? e.message : String(e) };
             out.hint = 'The session is open, but the checkout failed: call shim_checkout with an empty folder.';
           }
         }
