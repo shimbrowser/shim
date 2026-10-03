@@ -4,6 +4,7 @@
 // a small stateless helper — no rule/patch state lives in this module.
 
 import vm from 'vm';
+import { handlerExpressionSource } from '../shared/handler-source';
 import type { Spec, Rule, Mutation } from './types';
 import type { ShimApiBase, ShimApi, RouteMatch, RouteMountApi } from '../preload/shim-api-types';
 
@@ -135,10 +136,12 @@ export function compileInlineHandlers(rawHandlers: Record<string, string>, spec:
       // come BEFORE the `//# sourceURL=...` line. `//` starts a single-line
       // comment that runs to the next newline; if the pragma sat between
       // `${source}` and `)`, the comment would eat the paren and the function
-      // expression never closes.
+      // expression never closes. The same trap applies to the source's OWN
+      // trailing `// comment` — handlerExpressionSource puts that `)` on its
+      // own line too.
       const sourceURL = `shim://patches/${specId}/handlers/${name}.js`;
       out[name] = vm.runInThisContext(
-        `(${source})\n//# sourceURL=${sourceURL}\n`,
+        `${handlerExpressionSource(source)}\n//# sourceURL=${sourceURL}\n`,
         { filename: sourceURL },
       );
     } catch (err) {

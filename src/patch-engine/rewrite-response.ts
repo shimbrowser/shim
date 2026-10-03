@@ -27,6 +27,7 @@
 
 import * as routeMatch from './route-match';
 import type { Token } from './route-match';
+import { handlerExpressionSource } from '../shared/handler-source';
 
 // The shape of `mutation.endpoint` on a `rewrite-response` mutation (design
 // doc "Spec shape"). Declared here for downstream consumers (the `Mutation`
@@ -119,7 +120,7 @@ export type DetectedForm = { form: TransformForm } | { form: null; error: string
 // probes fail, with the FIRST (expr) probe's error message, since that's
 // the form most transform sources are actually written in.
 export function detectTransformForm(src: string, tryCompile: CompileProbe): DetectedForm {
-  const expr = tryCompile('(' + src + '\n)');
+  const expr = tryCompile(handlerExpressionSource(src));
   if (expr.ok) return { form: 'expr' };
   const mod = tryCompile(src);
   if (mod.ok) return { form: 'module' };

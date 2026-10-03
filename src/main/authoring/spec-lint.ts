@@ -30,6 +30,7 @@ import {
 import { validateRewriteMutation, detectTransformForm } from '../../patch-engine/rewrite-response';
 import type { CompileProbe } from '../../patch-engine/rewrite-response';
 import { validateInterceptMutation } from '../../patch-engine/intercept';
+import { handlerModuleSource } from '../../shared/handler-source';
 
 // vm.Script-backed compile probe for `detectTransformForm` — main-process
 // counterpart to rewrite-install.ts's identical-shaped probe (Node/Electron-
@@ -524,7 +525,7 @@ function lintHandlerNameCollisions(
         ruleId: rid,
         // A rule-local handler is a bare function expression; this is the
         // module form extractHandlers stores it in.
-        module: canonicalModule(`module.exports = ${src};\n`),
+        module: canonicalModule(handlerModuleSource(src)),
         refFields: handlerRefFields(ruleValue.mutations, name),
       });
     }
