@@ -214,6 +214,9 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
   let worldContextId: number | null = null;
   let worldWaiters: Array<(id: number | null) => void> = [];
   let detached = false;
+  // Pending load waits, so detach can settle them and drop their listeners
+  // at once rather than leaving them watching a page it no longer drives.
+  const loadWaits = new Set<(outcome: PageLoadOutcome) => void>();
   // Preview work runs in order, one step at a time, so an apply and a remove
   // sent back to back land in that order — as IPC sends do in the browser.
   let queue: Promise<void> = Promise.resolve();
@@ -486,6 +489,7 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
       const settle = (outcome: PageLoadOutcome): void => {
         if (settled) return;
         settled = true;
+        loadWaits.delete(settle);
         clearTimeout(timer);
         page.off('load', onLoad);
         page.off('requestfailed', onFailed);
@@ -511,7 +515,8 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
       const onClose = (): void => settle({ kind: 'destroyed' });
       const onAbort = (): void => settle({ kind: 'aborted' });
       const timer = setTimeout(() => settle({ kind: 'timed-out' }), timeoutMs);
-      if (page.isClosed()) { settle({ kind: 'destroyed' }); return; }
+      if (detached || page.isClosed()) { settle({ kind: 'destroyed' }); return; }
+      loadWaits.add(settle);
       page.on('load', onLoad);
       page.on('requestfailed', onFailed);
       page.on('close', onClose);
@@ -556,6 +561,9 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
       detached = true;
       runtimeListeners.clear();
       consoleListeners.clear();
+      // A detached host reads as closed, so a pending load wait ends the way
+      // it would on close — now, with its timer and page listeners removed.
+      for (const settle of [...loadWaits]) settle({ kind: 'destroyed' });
       // Let queued preview work settle first (a step still waiting for the
       // world gives up now), then tear down every preview the runtime holds:
       // the page stays open, and a caller reusing it gets it back unmodified.
