@@ -9,7 +9,8 @@
 //   lintTarget     a folder or a `.shim` file → spec-lint's errors and warnings;
 //                  `headless` adds the D15 preflight and source scan
 //   previewFolder  a folder against a url, headless: a fresh Chromium, the
-//                  folder's rules applied through the same headless session a
+//                  folder's rules (with their .shim-state.json witnesses)
+//                  applied through the same headless session a
 //                  `shim-mcp --headless` agent drives, the evidence (D11) and
 //                  optionally a screenshot. Nothing is committed and nothing
 //                  of the session is kept.
@@ -23,7 +24,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   packShim, unpackShim, readShimFolder, ShimFolderError, SHIM_JSON, SHIM_STATE_FILE, SHIM_FILE_FORMAT,
-  type FolderInput, type ShimFile,
+  type FolderInput, type ShimFile, type RuleState,
 } from '@shimbrowser/core/shim-folder';
 import { lintSpec } from '@shimbrowser/core/spec-lint';
 import { preflightSpec, scanRuleHandlers } from '@shimbrowser/core/capability-preflight';
@@ -73,11 +74,20 @@ function requireFolder(dir: string): string {
   return abs;
 }
 
+// A file the user named, written whole or not at all. A filesystem failure
+// (unwritable folder, full disk, a failed rename) is the user's environment,
+// not the shim: a CliError ('write-failed'), so it exits 2 like an unreadable
+// file rather than 1.
 function writeAtomic(file: string, content: string): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${Date.now().toString(36)}.tmp`;
-  fs.writeFileSync(tmp, content);
-  fs.renameSync(tmp, file);
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, content);
+    fs.renameSync(tmp, file);
+  } catch (e) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* the folder itself is the problem */ }
+    throw new CliError('write-failed', `could not write ${file}: ${errMessage(e)}`);
+  }
 }
 
 /** A shim folder as `pack` needs it: the working copy plus the tool-managed .shim-state.json. */
@@ -90,7 +100,13 @@ export function readFolderWithState(dir: string): FolderInput {
     asCliError(e);
   }
   const statePath = path.join(abs, SHIM_STATE_FILE);
-  if (fs.existsSync(statePath)) files[SHIM_STATE_FILE] = fs.readFileSync(statePath, 'utf8');
+  if (fs.existsSync(statePath)) {
+    try {
+      files[SHIM_STATE_FILE] = fs.readFileSync(statePath, 'utf8');
+    } catch (e) {
+      throw new CliError('file-missing', `could not read ${statePath}: ${errMessage(e)}`);
+    }
+  }
   return files;
 }
 
@@ -271,21 +287,29 @@ function listOf(v: unknown): unknown[] {
 /**
  * Preview a shim folder on `url` in a fresh headless Chromium.
  *
- * The session starts from the folder's own spec with no rules (written to a
- * throwaway `.shim`), so the preview adds every rule and the evidence covers
- * all of them. The page closes and the throwaway file is removed before this
- * resolves.
+ * The folder must pack (the folder format, `match.hosts`, spec-lint): a
+ * preview never blesses what `shim pack` would refuse. The session starts
+ * from the packed spec with no rules (written to a throwaway `.shim`), so the
+ * preview adds every rule and the evidence covers all of them; each rule
+ * whose anchor is unchanged gets back the witness .shim-state.json kept for
+ * it (and the spec its bundleHash), so a selector that now lands on the wrong
+ * element quarantines as it would in Shim instead of being re-fingerprinted.
+ * The page closes and the throwaway file is removed before this resolves.
  */
 export async function previewFolder(opts: PreviewOptions, deps: PreviewDeps): Promise<PreviewOutcome> {
-  const dir = requireFolder(opts.dir);
-  let files: FolderInput;
-  let spec: Spec;
+  const withState = readFolderWithState(opts.dir);
+  let packed: ShimFile;
+  let seedWitnesses: Record<string, RuleState> | undefined;
   try {
-    files = readWorkingCopy(dir);
-    ({ spec } = readShimFolder(files));
+    packed = packShim(withState);
+    seedWitnesses = readShimFolder(withState).state?.rules;
   } catch (e) {
     asCliError(e);
   }
+  // The working copy the session diffs: the folder without the tool-managed state.
+  const files: FolderInput = { ...withState };
+  delete files[SHIM_STATE_FILE];
+  const spec: Spec = packed.spec;
   let parsed: URL;
   try {
     parsed = new URL(opts.url);
@@ -298,8 +322,8 @@ export async function previewFolder(opts: PreviewOptions, deps: PreviewDeps): Pr
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-preview-'));
   const shimFile = path.join(tmp, 'preview.shim');
-  const base = { ...JSON.parse(JSON.stringify(spec)) as Spec, rules: [], version: 1 };
-  fs.writeFileSync(shimFile, JSON.stringify({ format: SHIM_FILE_FORMAT, name: spec.id, spec: base, handlers: {} }));
+  const base = { ...JSON.parse(JSON.stringify(spec)) as Spec, rules: [] };
+  fs.writeFileSync(shimFile, JSON.stringify({ format: SHIM_FILE_FORMAT, name: packed.name, spec: base, handlers: {} }));
 
   // Set by openPage below; a holder, so the narrowing survives the awaits.
   const held: { page: PreviewPage | null } = { page: null };
@@ -312,7 +336,10 @@ export async function previewFolder(opts: PreviewOptions, deps: PreviewDeps): Pr
       return page;
     },
     ...(storageFile ? { storageFileFor: () => storageFile } : {}),
-    ...(deps.settleMs !== undefined ? { backend: { settleMs: deps.settleMs } } : {}),
+    backend: {
+      ...(deps.settleMs !== undefined ? { settleMs: deps.settleMs } : {}),
+      ...(seedWitnesses ? { seedWitnesses } : {}),
+    },
   });
 
   const outcome: PreviewOutcome = { ok: false, applied: false, url: parsed.href, warnings: [] };
