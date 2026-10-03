@@ -76,6 +76,8 @@ interface FakeHost extends PageHost {
   loadOutcome: PageLoadOutcome;
   closed: boolean;
   setUrl(url: string): void;
+  // A full-document navigation: a new document, so a fresh engine world.
+  navigate(url: string): void;
   emit(event: PageRuntimeEvent): void;
   log(message: PageConsoleMessage): void;
   // Runs on every applyPreview: what the "engine" reports for it.
@@ -86,6 +88,8 @@ function fakeHost(startUrl: string): FakeHost {
   const runtime = new Set<(e: PageRuntimeEvent) => void>();
   const consoleL = new Set<(m: PageConsoleMessage) => void>();
   let url = startUrl;
+  // The engine world's globals: one set per document.
+  let world: Record<string, unknown> = {};
   const host: FakeHost = {
     capabilities: HEADLESS_CAPABILITIES,
     applied: [],
@@ -101,10 +105,15 @@ function fakeHost(startUrl: string): FakeHost {
     url: () => url,
     isClosed: () => host.closed,
     setUrl(next) { url = next; },
+    navigate(next) { url = next; world = {}; },
     emit(e) { for (const l of [...runtime]) l(e); },
     log(m) { for (const l of [...consoleL]) l(m); },
     async evaluate(code) {
       if (code.includes('deployIdForDocument')) return 'deploy-2';
+      const write = /^globalThis\["(\w+)"\] = (".*")$/.exec(code);
+      if (write?.[1] && write[2]) { world[write[1]] = JSON.parse(write[2]) as unknown; return world[write[1]]; }
+      const read = /^globalThis\["(\w+)"\] \?\? null$/.exec(code);
+      if (read?.[1]) return world[read[1]] ?? null;
       return null;
     },
     async screenshot() { return { error: 'the fake host takes no screenshots' }; },
@@ -112,7 +121,7 @@ function fakeHost(startUrl: string): FakeHost {
     removePreview(key) { host.removed.push(key); },
     onRuntimeEvent(l) { runtime.add(l); return () => { runtime.delete(l); }; },
     onConsole(l) { consoleL.add(l); return () => { consoleL.delete(l); }; },
-    reload(u) { host.reloads.push(u); if (u) url = u; },
+    reload(u) { host.reloads.push(u); if (u) url = u; world = {}; },
     async waitForLoad(o): Promise<PageLoadOutcome> { host.loadWaits.push(o); return host.loadOutcome; },
   };
   return host;
@@ -376,6 +385,16 @@ async function main(): Promise<void> {
     check('a reload that did not finish is an error, re-applying nothing', failedOut.ok === undefined
       && String(failedOut.error).includes('ERR_NAME_NOT_RESOLVED') && host.applied.length === failedAt, failedOut);
     host.loadOutcome = { kind: 'finished' };
+    // Bring the page back to a finished document with every preview on it.
+    await req(r, 'POST', `/sessions/${id}/call`, { name: 'reload_page', input: {} });
+
+    // The page navigates itself (a link, a form) to a new document on the site.
+    host.navigate(url);
+    const navAt = host.applied.length;
+    await req(r, 'POST', `/sessions/${id}/call`, { name: 'view_page', input: {} });
+    check('a full navigation on the site re-applies every live preview before a page tool runs', host.applied.length === navAt + 5, host.applied.length - navAt);
+    await req(r, 'POST', `/sessions/${id}/call`, { name: 'view_page', input: {} });
+    check('…once: the same document is not re-applied again', host.applied.length === navAt + 5, host.applied.length - navAt);
 
     // Commit.
     host.setUrl('https://elsewhere.test/');
@@ -405,6 +424,11 @@ async function main(): Promise<void> {
       && history[1]?.content === 'Tidy up' && history[1]?.agent === 'Claude Code' && history[2]?.versionId === 5, history);
     const nothing = await req(r, 'POST', `/sessions/${id}/commit`, { revision: 1, commitId: 'three', summary: 's' });
     check('committing the committed revision again is nothing-to-commit', nothing.error === 'nothing-to-commit');
+
+    host.navigate(url);
+    const navPreviewAt = host.applied.length;
+    const navPreview = await preview(r, id, { ...next, 'shim.json': json({ ...JSON.parse(next['shim.json'] ?? '{}') as object, intent: 'after a navigation' }) });
+    check('a preview after a full navigation re-applies the live set first', host.applied.length === navPreviewAt + 5 && isRecord(navPreview.evidence), host.applied.length - navPreviewAt);
 
     // End.
     const live = new Set(host.applied.map((p) => p.ruleKey));
@@ -597,6 +621,39 @@ async function main(): Promise<void> {
     fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'No hosts', handlers: {}, spec: { id: 'shim-nohosts', version: 1, rules: [] } }));
     const none = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
     check('…as is one with no match at all', none.error === 'malformed-shim-file' && r.hosts.length === 0, none);
+  }
+
+  console.log('a hand-edited .shim with malformed rules');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'badrules.shim');
+    const rule = (mutations: unknown): Record<string, unknown> => ({ id: 'r1', anchor: { primary: { kind: 'css', value: '.x' } }, mutations });
+    fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'Bad', handlers: {}, spec: { id: 'shim-bad', version: 1, match: { hosts: ['site.test'] }, rules: [rule({ kind: 'hide' })] } }));
+    const shape = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('a rule whose mutations is an object is refused before preflight or any page (not internal-error)', shape.error === 'malformed-shim-file' && r.hosts.length === 0, shape);
+    fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'Bad', handlers: {}, spec: { id: 'shim-bad', version: 1, match: { hosts: ['site.test'] }, rules: [rule([{ kind: 'explode' }])] } }));
+    const kind = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('an invented mutation kind is refused by the commit-time lint', kind.error === 'spec-lint' && r.hosts.length === 0, kind);
+    check('…holding nothing', !fs.existsSync(lockFileFor(shimFile)) && r.control.sessions.list().length === 0);
+  }
+
+  console.log('a rule whose id is __proto__ keeps its witness through a commit');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'proto.shim');
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile, create: { name: 'Proto' } });
+    const pid = String(opened.sessionId);
+    const co = await req(r, 'GET', `/sessions/${pid}/checkout`);
+    const folder = decodeWorkingCopy(co.files);
+    const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown>;
+    spec.rules = [JSON.parse('{"id":"__proto__","anchor":{"primary":{"kind":"css","value":".promo"}},"mutations":[{"kind":"hide"}]}') as unknown];
+    const pv = await preview(r, pid, { ...folder, 'shim.json': json(spec) } as Record<string, string>);
+    check('the __proto__ rule previews', pv.applied === true, pv);
+    const cm = await req(r, 'POST', `/sessions/${pid}/commit`, { revision: 1, commitId: 'p1', summary: 's' });
+    check('…and commits', cm.ok === true, cm);
+    const saved = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { rules: Array<{ id: string; anchor?: { witness?: unknown } }> } };
+    check('…with its captured witness on the committed rule', isRecord(saved.spec.rules.find((x) => x.id === '__proto__')?.anchor?.witness), saved.spec.rules);
+    await req(r, 'DELETE', `/sessions/${pid}`);
   }
 }
 
