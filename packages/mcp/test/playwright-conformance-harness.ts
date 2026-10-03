@@ -142,6 +142,8 @@ async function main(): Promise<void> {
     check('ShimCore is not visible in the page\'s main world', (await host.evaluate('typeof window.ShimCore', 'main')) === 'undefined');
     check('the engine runtime is not visible in the page\'s main world', (await host.evaluate('typeof window.__shimCoreRuntime', 'main')) === 'undefined');
     check('the engine world has the engine', (await host.evaluate('typeof ShimCore.run', 'engine')) === 'function');
+    check('evaluate answers values JSON can\'t carry (NaN, -0, a bigint)', Number.isNaN(await host.evaluate('NaN', 'main'))
+      && Object.is(await host.evaluate('-0', 'main'), -0) && (await host.evaluate('2n ** 70n', 'main')) === 2n ** 70n);
     check('capabilities: the D15 headless set', !HEADLESS_CAPABILITIES.iframeRules && !HEADLESS_CAPABILITIES.componentIdentity
       && HEADLESS_CAPABILITIES.apiMembers.length === 0 && host.inspection === undefined);
 
@@ -242,6 +244,7 @@ async function main(): Promise<void> {
       check('…and removes its page listeners', JSON.stringify(listenersAfter) === JSON.stringify(listenersBefore), { listenersBefore, listenersAfter });
       check('a load wait begun after detach settles at once as destroyed', (await host.waitForLoad({ timeoutMs: 60000 })).kind === 'destroyed');
       check('a detached host reads as closed', host.isClosed());
+      check('…with no URL', host.url() === '');
       check('…the page itself stays open', !page.isClosed());
       const after = await page.evaluate(() => ({
         adDisplay: getComputedStyle(document.querySelector('#ad') as Element).display,
