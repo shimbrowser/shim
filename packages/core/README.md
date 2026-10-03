@@ -126,6 +126,7 @@ page bundle:
 | `page-host` | The `PageHost` interface: evaluate per world, screenshot, preview apply / remove, runtime-event and console streams, reload, capabilities. |
 | `page-host-tools` | The page tools' page-side bodies, run over any `PageHost`. |
 | `page-tools` | The page tools' one definition (`view_page`, `query_page`, `inspect_element`, …). |
+| `data-tools` | The data tools' one definition (`inspect_storage`, `query_db`, `read_sibling_shim`). |
 | `page-host-conformance` | The conformance cases every `PageHost` must pass. |
 | `session-registry` | Authoring sessions: one owner per artifact, revisions, idempotent commit, idle timeout. |
 | `capability-preflight` | The headless capability contract: `preflightSpec`, `scanRuleHandlers`, `verificationLevel`. |

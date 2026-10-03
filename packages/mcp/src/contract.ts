@@ -3,11 +3,13 @@
 // tools/list_changed. The session tools are defined here; the page tools'
 // one definition is @shimbrowser/core/page-tools, the same module Shim's own
 // workers take theirs from, the API map tools' is
-// @shimbrowser/core/api-map-tools (D13), and the composition-only tools' is
+// @shimbrowser/core/api-map-tools (D13), the data tools' is
+// @shimbrowser/core/data-tools, and the composition-only tools' is
 // @shimbrowser/core/composition-session-tools.
 
 import { SESSION_PAGE_TOOLS, PAGE_TOOL_NAMES, type ToolDefinition } from '@shimbrowser/core/page-tools';
 import { SESSION_API_MAP_TOOLS, API_MAP_TOOL_NAMES } from '@shimbrowser/core/api-map-tools';
+import { SESSION_DATA_TOOLS, DATA_TOOL_NAMES } from '@shimbrowser/core/data-tools';
 import { SESSION_COMPOSITION_TOOLS, COMPOSITION_SESSION_TOOL_NAMES } from '@shimbrowser/core/composition-session-tools';
 
 export const SESSION_TOOL_NAMES = [
@@ -60,8 +62,11 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
     description:
       'Open an authoring session on one shim (against one of Shim\'s site tabs) or one composition. The user is ' +
       'asked in Shim to allow it (up to two minutes); this call waits for the answer. Name an existing shim with ' +
-      'shimId, start a new one on the tab\'s site with newShimName, or name a composition with compositionId (its ' +
-      'page opens in Shim as the preview; tabId is optional). Pass dir to check the work out into that folder ' +
+      'shimId, start a new one on the tab\'s site with newShimName, name a composition with compositionId, or ' +
+      'start a new composition with newCompositionName (and optionally the mount you propose for its ' +
+      'compose://<mount> address; the user can change it before allowing, and the answer says which they chose). ' +
+      'A composition\'s page opens in Shim as the preview; tabId is optional. Something new is kept only if you ' +
+      'commit. Pass dir to check the work out into that folder ' +
       'right away (same as shim_checkout). While the session is open the shim or composition is yours alone; Shim ' +
       'ends it after 10 idle minutes, or when the user stops it or starts their own turn on it. ' +
       'In headless mode (no Shim browser; shim_status reports mode "headless") pass url instead of tabId: the ' +
@@ -76,6 +81,8 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
         shimId: { type: 'string', description: 'An existing shim to work on (shim_list_tabs lists the ones on each tab\'s host).' },
         newShimName: { type: 'string', description: 'Instead of shimId: create a new shim with this name on the tab\'s site. It is kept only if you commit.' },
         compositionId: { type: 'string', description: 'Instead of a shim: the composition to work on (shim_list_tabs lists them).' },
+        newCompositionName: { type: 'string', description: 'Instead of compositionId: create a new composition with this name (a manifest and an empty index.html to start from). It is kept only if you commit.' },
+        mount: { type: 'string', description: 'With newCompositionName: the address to propose, compose://<mount> — lowercase letters, digits and hyphens, not starting with a hyphen, and not already taken. Omitted: Shim suggests one from the name. The user may change it.' },
         dir: { type: 'string', description: 'Optional absolute folder to check the working copy out into once the session opens.' },
         url: { type: 'string', description: 'Headless mode only, instead of tabId: the http(s) page to open.' },
         shimFile: { type: 'string', description: 'Headless mode only, instead of shimId: the absolute path of the .shim file to work on. Commits write it.' },
@@ -150,7 +157,7 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
   },
 };
 
-// A page, API map or composition tool as this server registers it: core's
+// A page, API map, data or composition tool as this server registers it: core's
 // session definition, plus the optional sessionId every session tool takes —
 // so an agent holding two sessions can aim it at either. The server strips it
 // before the call reaches Shim (whose tools never see it).
@@ -161,12 +168,13 @@ function withSessionId(tool: ToolDefinition): ToolDefinition {
   };
 }
 
-/** Every tool, in registration order: session tools, page tools, the API map tools, then the composition-only tools. */
+/** Every tool, in registration order: session tools, page tools, the API map tools, the data tools, then the composition-only tools. */
 export function staticTools(): ToolDefinition[] {
   return [
     ...SESSION_TOOL_NAMES.map((n) => SESSION_TOOLS[n]),
     ...PAGE_TOOL_NAMES.map((n) => withSessionId(SESSION_PAGE_TOOLS[n])),
     ...API_MAP_TOOL_NAMES.map((n) => withSessionId(SESSION_API_MAP_TOOLS[n])),
+    ...DATA_TOOL_NAMES.map((n) => withSessionId(SESSION_DATA_TOOLS[n])),
     ...COMPOSITION_SESSION_TOOL_NAMES.map((n) => withSessionId(SESSION_COMPOSITION_TOOLS[n])),
   ];
 }
@@ -185,8 +193,9 @@ export const SERVER_INSTRUCTIONS =
   'for a composition, …) to look, then shim_commit with a summary, and shim_end_session. For a visual change, ' +
   'verify with a screenshot before committing. When the work needs a site\'s own API, the API map tools ' +
   '(list_discovered_hosts, request_sources, search_discovered_api, inspect_endpoint, replay_endpoint) read ' +
-  'what Shim recorded of it, per site the user grants; a composition session also has probe_request and ' +
-  'read_calls. The shim-authoring skill documents both formats, every mutation kind, anchors, the runtime ' +
+  'what Shim recorded of it, per site the user grants. inspect_storage and query_db read what the work has ' +
+  'saved, and read_sibling_shim a shim\'s pack siblings; a composition session also has probe_request, ' +
+  'read_calls and verify_mint. The shim-authoring skill documents both formats, every mutation kind, anchors, the runtime ' +
   'api and window.api.';
 
 export const HEADLESS_SERVER_INSTRUCTIONS =

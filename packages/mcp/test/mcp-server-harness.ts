@@ -3,8 +3,9 @@
 // the SDK's in-memory transport, and every request the server makes to Shim
 // is recorded and answered by a script.
 //
-// Covers: the static tool list (session tools, the page tools, then the API
-// map tools — exactly core's session definitions); shim_status with and without Shim; opening a
+// Covers: the static tool list (session tools, the page tools, the API map
+// tools, the data tools, then the composition tools — exactly core's
+// session definitions); shim_status with and without Shim; opening a
 // session (the agent name from the MCP client, an existing shim or a new
 // one, refusing both or neither, a checkout into a folder); checkout writes
 // the folder; preview sends the WHOLE folder as a wire working copy (hidden
@@ -13,6 +14,8 @@
 // reply once with the SAME id; refusals come back as error results with a
 // hint; page tools forward to /call with images converted to MCP content;
 // API map tools forward the same way and an API map refusal carries its hint;
+// a new composition (newCompositionName with a proposed mount, the answer's
+// mount, a refused mount's hint);
 // a composition session (open by compositionId with no tab, a flat checkout
 // with its marker, a re-checkout that removes stale files, the composition
 // tools forwarded);
@@ -28,6 +31,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { decodeWorkingCopy, encodeWorkingCopy } from '@shimbrowser/core/working-copy-wire';
 import { SESSION_PAGE_TOOLS } from '@shimbrowser/core/page-tools';
 import { SESSION_API_MAP_TOOLS } from '@shimbrowser/core/api-map-tools';
+import { SESSION_DATA_TOOLS } from '@shimbrowser/core/data-tools';
 import { SESSION_COMPOSITION_TOOLS } from '@shimbrowser/core/composition-session-tools';
 import { COMPOSITION_MARKER } from '../src/folder';
 import { createShimMcpServer, agentDisplayName, type ShimMcpDeps } from '../src/server';
@@ -110,8 +114,18 @@ async function main(): Promise<void> {
     const client = await connect(deps);
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name);
-    check('session tools first, then every page tool, the API map tools, then the composition tools',
-      JSON.stringify(names) === JSON.stringify([...SESSION_TOOL_NAMES, ...Object.keys(SESSION_PAGE_TOOLS), ...Object.keys(SESSION_API_MAP_TOOLS), ...Object.keys(SESSION_COMPOSITION_TOOLS)]), names.join(','));
+    check('session tools first, then every page tool, the API map tools, the data tools, then the composition tools',
+      JSON.stringify(names) === JSON.stringify([
+        ...SESSION_TOOL_NAMES, ...Object.keys(SESSION_PAGE_TOOLS), ...Object.keys(SESSION_API_MAP_TOOLS),
+        ...Object.keys(SESSION_DATA_TOOLS), ...Object.keys(SESSION_COMPOSITION_TOOLS),
+      ]), names.join(','));
+    const queryDb = tools.find((t) => t.name === 'query_db');
+    const { sessionId: queryDbSession, ...queryDbCore } = (queryDb?.inputSchema.properties ?? {}) as Record<string, unknown>;
+    check('data tools are core\'s session definitions', queryDb?.description === SESSION_DATA_TOOLS.query_db.description
+      && JSON.stringify(queryDbCore) === JSON.stringify(SESSION_DATA_TOOLS.query_db.input_schema.properties)
+      && JSON.stringify(queryDb?.inputSchema.required) === JSON.stringify(SESSION_DATA_TOOLS.query_db.input_schema.required));
+    check('every data tool also takes an optional sessionId', !!queryDbSession && tools.filter((t) => t.name in SESSION_DATA_TOOLS)
+      .every((t) => 'sessionId' in ((t.inputSchema.properties ?? {}) as Record<string, unknown>) && !(t.inputSchema.required ?? []).includes('sessionId')));
     const readCalls = tools.find((t) => t.name === 'read_calls');
     const { sessionId: readCallsSession, ...readCallsCore } = (readCalls?.inputSchema.properties ?? {}) as Record<string, unknown>;
     check('composition tools are core\'s session definitions', readCalls?.description === SESSION_COMPOSITION_TOOLS.read_calls.description
@@ -269,6 +283,13 @@ async function main(): Promise<void> {
   check('a page tool\'s sessionId picks the session and is not forwarded', JSON.stringify(aimed?.body) === JSON.stringify({ name: 'inspect_element', input: { selector: '.banner' } }));
   check('a string result comes back as text', JSON.parse(page.content[0]?.text ?? '{}').name === 'query_page');
 
+  await call(client, 'query_db', { sql: 'select count(*) from notes', sessionId: 'sess-1' });
+  const dataReq = [...sent].reverse().find((s) => s.path === '/sessions/sess-1/call');
+  check('a data tool forwards name and input to /call, sessionId stripped', JSON.stringify(dataReq?.body) === JSON.stringify({ name: 'query_db', input: { sql: 'select count(*) from notes' } }));
+  await call(client, 'inspect_storage', {});
+  const inspectReq = [...sent].reverse().find((s) => s.path === '/sessions/sess-1/call');
+  check('inspect_storage forwards too', JSON.stringify(inspectReq?.body) === JSON.stringify({ name: 'inspect_storage', input: {} }));
+
   const search = firstJson(await call(client, 'search_discovered_api', { description: 'tracks', host: 'a.example' }));
   const searchReq = [...sent].reverse().find((s) => s.path === '/sessions/sess-1/call');
   check('an API map tool forwards name and input to /call', JSON.stringify(searchReq?.body) === JSON.stringify({ name: 'search_discovered_api', input: { description: 'tracks', host: 'a.example' } }));
@@ -342,6 +363,37 @@ async function main(): Promise<void> {
     await c3.close();
   }
 
+  console.log('a new composition:');
+  {
+    const { deps: dn, sent: sn } = rig((req) => {
+      if (req.path === '/sessions') return ok({ sessionId: 'sess-n', artifactId: 'uid-new', mount: 'my-crates' });
+      if (req.path === '/sessions/sess-n') return ok({ reason: 'ended', versionId: null });
+      return refuse(404, 'not-found');
+    });
+    const cn = await connect(dn);
+    const stray = await call(cn, 'shim_open_session', { intent: 'x', compositionId: 'c', mount: 'crates' });
+    check('a mount without newCompositionName is refused', stray.isError === true && /mount goes with newCompositionName/.test(stray.content[0]?.text ?? ''));
+    const two = await call(cn, 'shim_open_session', { intent: 'x', compositionId: 'c', newCompositionName: 'Crates' });
+    check('naming a composition and a new one together is refused', two.isError === true && /exactly one/.test(two.content[0]?.text ?? ''));
+    const opened = firstJson(await call(cn, 'shim_open_session', { intent: 'Build a crate view', newCompositionName: 'Crates', mount: 'crates' }));
+    const body = sn.filter((x) => x.path === '/sessions').pop()?.body as Record<string, unknown> | undefined;
+    const create = body?.create as Record<string, unknown> | undefined;
+    check('open sends kind composition and create { name, mount }, no target and no artifactId', body?.kind === 'composition'
+      && create?.name === 'Crates' && create.mount === 'crates' && !('artifactId' in body) && !('target' in body), JSON.stringify(body));
+    check('the answer names the new composition and the mount the user chose', opened.kind === 'composition' && opened.compositionId === 'uid-new' && opened.mount === 'my-crates', JSON.stringify(opened));
+    await call(cn, 'shim_open_session', { intent: 'Build a crate view', newCompositionName: 'Shelf' });
+    const bare = (sn.filter((x) => x.path === '/sessions').pop()?.body as Record<string, unknown> | undefined)?.create as Record<string, unknown> | undefined;
+    check('without a mount, none is proposed (Shim suggests one)', bare?.name === 'Shelf' && !('mount' in bare), JSON.stringify(bare));
+    await cn.close();
+  }
+  {
+    const { deps: dt } = rig((req) => (req.path === '/sessions' ? refuse(409, 'mount-taken', 'compose://crates is already taken') : refuse(404, 'not-found')));
+    const ct = await connect(dt);
+    const taken = await call(ct, 'shim_open_session', { intent: 'x', newCompositionName: 'Crates', mount: 'crates' });
+    check('a taken mount comes back as an error with a hint', taken.isError === true && /mount-taken/.test(taken.content[0]?.text ?? '') && /different mount/.test(taken.content[0]?.text ?? ''));
+    await ct.close();
+  }
+
   console.log('a composition session:');
   {
     const cdir = path.join(tmpDir(), 'comp');
@@ -410,9 +462,47 @@ async function main(): Promise<void> {
     check('a composition holding a file named like the marker is refused, the folder untouched', clash.isError === true
       && /unsafe-path/.test(clash.content[0]?.text ?? '') && fs.existsSync(path.join(cdir, 'index.html'))
       && fs.readFileSync(path.join(cdir, COMPOSITION_MARKER), 'utf8').includes('shim-composition-checkout/1'), clash.content[0]?.text);
+    checkoutFiles = COMP_FILES;
+    // A stray or corrupt file by the marker's name does not make a folder a checkout.
+    for (const [label, marker] of [['an empty stray', ''], ['a corrupt', '{"hidden": ['], ['a foreign-format', '{"format":"other","hidden":[]}']] as const) {
+      const project = path.join(tmpDir(), `stray-${label.replace(/\W+/g, '-')}`);
+      fs.mkdirSync(project, { recursive: true });
+      fs.writeFileSync(path.join(project, 'README.md'), 'mine');
+      fs.writeFileSync(path.join(project, COMPOSITION_MARKER), marker);
+      const stray = await call(cc, 'shim_checkout', { dir: project });
+      check(`${label} marker beside a project does not authorize the checkout, nothing deleted`, stray.isError === true
+        && /not-a-working-copy/.test(stray.content[0]?.text ?? '') && fs.readFileSync(path.join(project, 'README.md'), 'utf8') === 'mine'
+        && fs.readFileSync(path.join(project, COMPOSITION_MARKER), 'utf8') === marker, stray.content[0]?.text);
+    }
+    const onlyStray = path.join(tmpDir(), 'only-stray-marker');
+    fs.mkdirSync(onlyStray, { recursive: true });
+    fs.writeFileSync(path.join(onlyStray, COMPOSITION_MARKER), 'not json');
+    const onlyStrayOut = await call(cc, 'shim_checkout', { dir: onlyStray });
+    check('a folder holding only a stray marker is refused and left alone', onlyStrayOut.isError === true
+      && fs.readdirSync(onlyStray).join(',') === COMPOSITION_MARKER, onlyStrayOut.content[0]?.text);
+    // A hidden file the user already has is not the checkout's to overwrite.
+    const dotted = path.join(tmpDir(), 'dotted');
+    fs.mkdirSync(path.join(dotted, '.well-known'), { recursive: true });
+    fs.writeFileSync(path.join(dotted, '.config.js'), 'my config');
+    const collide = await call(cc, 'shim_checkout', { dir: dotted });
+    check('a checkout refuses to overwrite a hidden file no earlier checkout wrote', collide.isError === true
+      && /not-a-working-copy/.test(collide.content[0]?.text ?? '') && /\.config\.js/.test(collide.content[0]?.text ?? '')
+      && fs.readFileSync(path.join(dotted, '.config.js'), 'utf8') === 'my config' && !fs.existsSync(path.join(dotted, 'index.html')), collide.content[0]?.text);
+    fs.rmSync(path.join(dotted, '.config.js'));
+    const intoDotted = firstJson(await call(cc, 'shim_checkout', { dir: dotted }));
+    check('…while a hidden folder of the user\'s with no clashing file is fine', Array.isArray(intoDotted.files)
+      && fs.existsSync(path.join(dotted, '.well-known', 'data.json')) && fs.existsSync(path.join(dotted, COMPOSITION_MARKER)), JSON.stringify(intoDotted));
+    fs.writeFileSync(path.join(dotted, '.config.js'), 'edited');
+    const redo = firstJson(await call(cc, 'shim_checkout', { dir: dotted }));
+    check('…and a re-checkout overwrites the hidden files its marker lists', Array.isArray(redo.files)
+      && fs.readFileSync(path.join(dotted, '.config.js'), 'utf8') === 'export default {};', JSON.stringify(redo));
     const rc = firstJson(await call(cc, 'read_calls', {}));
     const rcReq = sc.filter((s) => s.path === '/sessions/sess-c/call').pop();
     check('a composition tool forwards to /call', JSON.stringify(rcReq?.body) === JSON.stringify({ name: 'read_calls', input: {} }) && rc.scope === 'current');
+    const mintConfig = { url: 'https://auth.example/token', tokenPath: 'access_token', header: 'Authorization' };
+    await call(cc, 'verify_mint', { config: mintConfig });
+    const vmReq = sc.filter((s) => s.path === '/sessions/sess-c/call').pop();
+    check('verify_mint forwards to /call as-is (its card is Shim\'s)', JSON.stringify(vmReq?.body) === JSON.stringify({ name: 'verify_mint', input: { config: mintConfig } }), JSON.stringify(vmReq?.body));
     await cc.close();
   }
 

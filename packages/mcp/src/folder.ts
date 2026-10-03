@@ -112,17 +112,29 @@ export function readWorkingCopy(dir: string, limits: WireLimits = SHIM_WIRE_LIMI
 }
 
 /** The hidden paths a composition checkout in `dir` wrote (its marker's list). */
-export function checkoutHiddenPaths(dir: string): Set<string> {
+const MARKER_FORMAT = 'shim-composition-checkout/1';
+
+/**
+ * The hidden paths a composition checkout's marker lists, or null when the
+ * folder holds no valid marker: absent, unreadable, not JSON, or not this
+ * format. Only a valid marker proves an earlier checkout owns the folder.
+ */
+function readCompositionMarker(dir: string): Set<string> | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(fs.readFileSync(path.join(dir, COMPOSITION_MARKER), 'utf8'));
   } catch {
-    return new Set();
+    return null;
   }
-  const list = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? (parsed as { hidden?: unknown }).hidden : undefined;
-  if (!Array.isArray(list)) return new Set();
-  return new Set(list.filter((p): p is string => typeof p === 'string' && p !== COMPOSITION_MARKER
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+  const marker = parsed as { format?: unknown; hidden?: unknown };
+  if (marker.format !== MARKER_FORMAT || !Array.isArray(marker.hidden)) return null;
+  return new Set(marker.hidden.filter((p): p is string => typeof p === 'string' && p !== COMPOSITION_MARKER
     && hasHiddenSegment(p) && workingCopyPathProblem(p) === null));
+}
+
+export function checkoutHiddenPaths(dir: string): Set<string> {
+  return readCompositionMarker(dir) ?? new Set();
 }
 
 /** A composition working copy: every visible file plus the hidden files its checkout wrote. */
@@ -235,6 +247,15 @@ function visibleFilesUnder(root: string): string[] {
   return out;
 }
 
+function pathExists(abs: string): boolean {
+  try {
+    fs.lstatSync(abs);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function isRegularFile(abs: string): boolean {
   try {
     return fs.lstatSync(abs).isFile();
@@ -248,10 +269,18 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
   const root = path.resolve(dir);
   if (fs.existsSync(root)) {
     if (!fs.statSync(root).isDirectory()) throw new FolderError('not-a-working-copy', `${root} exists and is not a folder`);
-    if (visibleEntries(root).length > 0 && !fs.existsSync(path.join(root, COMPOSITION_MARKER))) {
+    // Only a marker this checkout wrote proves ownership: everything visible
+    // the incoming composition lacks gets deleted below. A stray or corrupt
+    // file by the marker's name proves nothing, so it is refused too. Never
+    // read (or later overwrite) a marker through a symlink.
+    refuseSymlinksBelow(root, path.join(root, COMPOSITION_MARKER));
+    const markerPresent = fs.existsSync(path.join(root, COMPOSITION_MARKER));
+    if ((visibleEntries(root).length > 0 || markerPresent) && readCompositionMarker(root) === null) {
       throw new FolderError(
         'not-a-working-copy',
-        `${root} is not empty and is not an earlier composition checkout — check out into an empty folder`,
+        markerPresent
+          ? `${root} holds a ${COMPOSITION_MARKER} that is not a composition checkout marker — check out into an empty folder`
+          : `${root} is not empty and is not an earlier composition checkout — check out into an empty folder`,
       );
     }
   }
@@ -274,6 +303,17 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
   for (const [, abs] of targets) refuseSymlinksBelow(root, abs);
   for (const rel of previousHidden) refuseSymlinksBelow(root, resolveInside(root, rel));
   refuseSymlinksBelow(root, path.join(root, COMPOSITION_MARKER));
+  // A hidden path the composition has may already exist without an earlier
+  // checkout having written it (the user's own .env, say): hidden entries
+  // don't count against an empty folder, so refuse rather than overwrite.
+  const unowned = hidden.filter((rel) => !previousHidden.has(rel) && pathExists(resolveInside(root, rel)));
+  if (unowned.length > 0) {
+    throw new FolderError(
+      'not-a-working-copy',
+      `${root} already holds ${unowned.map((rel) => `"${rel}"`).join(', ')}, which the composition also has and no earlier checkout wrote — ` +
+        'check out into an empty folder',
+    );
+  }
   fs.mkdirSync(root, { recursive: true });
   // The folder is the composition: what it no longer has goes — visible
   // files, and hidden ones an earlier checkout wrote.
@@ -293,7 +333,7 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
     fs.writeFileSync(abs, content);
     written.push(rel);
   }
-  fs.writeFileSync(path.join(root, COMPOSITION_MARKER), `${JSON.stringify({ format: 'shim-composition-checkout/1', hidden })}\n`);
+  fs.writeFileSync(path.join(root, COMPOSITION_MARKER), `${JSON.stringify({ format: MARKER_FORMAT, hidden })}\n`);
   return { dir: root, written, removed };
 }
 

@@ -9,8 +9,8 @@
 //                  them with the same implementation its own worker uses
 //   API map tools  forwarded the same way (D13) — Shim asks the user for
 //                  each level of access on its own cards
-//   composition    probe_request, read_calls — forwarded the same way; a
-//   tools          shim session answers them as not offered
+//   composition    probe_request, read_calls, verify_mint — forwarded the
+//   tools          same way; a shim session answers them as not offered
 //
 // Two modes, one tool contract (D2): attach (the default) drives the Shim
 // browser over its control endpoint; headless (shim-mcp --headless) drives
@@ -38,6 +38,7 @@ import { encodeWorkingCopy, decodeWorkingCopy, WorkingCopyWireError } from '@shi
 import { isPageToolName } from '@shimbrowser/core/page-tools';
 import * as path from 'path';
 import { isApiMapToolName } from '@shimbrowser/core/api-map-tools';
+import { isDataToolName } from '@shimbrowser/core/data-tools';
 import { isCompositionSessionToolName } from '@shimbrowser/core/composition-session-tools';
 import { COMPOSITION_WIRE_LIMITS, SHIM_WIRE_LIMITS } from '@shimbrowser/core/working-copy-wire';
 import { staticTools, isSessionToolName, SERVER_INSTRUCTIONS, HEADLESS_SERVER_INSTRUCTIONS, type SessionToolName } from './contract';
@@ -112,7 +113,9 @@ const HINTS: Record<string, string> = {
   'commit-timeout': 'Nobody approved the commit in Shim within two minutes. The session is still open.',
   'invalid-target': 'Use a tabId from shim_list_tabs for a tab with a site loaded.',
   'target-changed': 'The tab went to another site while the user was deciding; check shim_list_tabs and open the session again.',
-  'unknown-artifact': 'Use a shim id or a compositionId from shim_list_tabs, or newShimName to start a new shim.',
+  'unknown-artifact': 'Use a shim id or a compositionId from shim_list_tabs, or newShimName / newCompositionName to start a new one.',
+  'mount-taken': 'Another composition has that address; propose a different mount (shim_list_tabs lists the ones in use), or omit it and Shim suggests a free one.',
+  'invalid-mount': 'A mount is lowercase letters, digits and hyphens, not starting with a hyphen.',
   'requires-shim-browser': 'This needs the Shim browser: it is not available in headless mode. Run shim-mcp without --headless, with Shim running.',
   unsupported: 'Headless mode supports a subset of shim features: remove what is listed, or author this shim in the Shim browser.',
   'page-open-failed': 'Check the url (http or https, reachable from this machine) and try again.',
@@ -306,12 +309,14 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         const shimId = str(input, 'shimId');
         const newShimName = str(input, 'newShimName');
         const compositionId = str(input, 'compositionId');
+        const newCompositionName = str(input, 'newCompositionName');
+        const mount = str(input, 'mount');
         const dir = str(input, 'dir');
         const agent = deps.agentName || agentDisplayName(server.getClientVersion()?.name);
         let kind: WorkingCopyKind;
         let body: Record<string, unknown>;
         if (headless) {
-          if (compositionId !== undefined) {
+          if (compositionId !== undefined || newCompositionName !== undefined) {
             throw new ToolFailure('requires-shim-browser', 'compositions run only in the Shim browser: author them in attach mode');
           }
           const url = str(input, 'url');
@@ -333,17 +338,21 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           if (tabId !== undefined && (typeof tabId !== 'number' || !Number.isInteger(tabId))) {
             throw new ToolFailure('invalid-request', 'tabId must be a tab id from shim_list_tabs');
           }
-          if ([shimId, newShimName, compositionId].filter((v) => v !== undefined).length !== 1) {
-            throw new ToolFailure('invalid-request', 'name exactly one of shimId (an existing shim), newShimName (a new one) or compositionId (a composition)');
+          if ([shimId, newShimName, compositionId, newCompositionName].filter((v) => v !== undefined).length !== 1) {
+            throw new ToolFailure('invalid-request', 'name exactly one of shimId (an existing shim), newShimName (a new one), compositionId (a composition) or newCompositionName (a new one)');
           }
-          kind = compositionId !== undefined ? 'composition' : 'shim';
+          if (mount !== undefined && newCompositionName === undefined) throw new ToolFailure('invalid-request', 'mount goes with newCompositionName (a new composition\'s address)');
+          kind = compositionId !== undefined || newCompositionName !== undefined ? 'composition' : 'shim';
           if (kind === 'shim' && tabId === undefined) throw new ToolFailure('invalid-request', 'a shim session needs tabId: a site tab from shim_list_tabs');
           body = {
             kind,
             ...(tabId !== undefined ? { target: { webContentsId: tabId } } : {}),
             agent,
             intent,
-            ...(compositionId !== undefined ? { artifactId: compositionId } : shimId !== undefined ? { artifactId: shimId } : { create: { name: newShimName } }),
+            ...(compositionId !== undefined ? { artifactId: compositionId }
+              : shimId !== undefined ? { artifactId: shimId }
+                : newCompositionName !== undefined ? { create: { name: newCompositionName, ...(mount !== undefined ? { mount } : {}) } }
+                  : { create: { name: newShimName } }),
           };
         }
         const opened = await control('POST', '/sessions', body);
@@ -358,6 +367,8 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           ...(artifactId !== null ? (kind === 'composition' ? { compositionId: artifactId } : { shimId: artifactId }) : {}),
           ...(headless ? { mode: 'headless', shimFile: opened.shimFile, url: opened.url } : {}),
           ...(Array.isArray(opened.warnings) ? { warnings: opened.warnings } : {}),
+          // A new composition's address, as the user allowed it.
+          ...(typeof opened.mount === 'string' ? { mount: opened.mount } : {}),
         };
         if (dir) {
           // The session is open whatever happens to the checkout: a failed
@@ -446,6 +457,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       if (isSessionToolName(name)) content = await runSessionTool(name, input);
       else if (isPageToolName(name)) content = await pageTool(sessionId(input), name, input);
       else if (isApiMapToolName(name)) content = await apiMapTool(sessionId(input), name, input);
+      else if (isDataToolName(name)) content = await pageTool(sessionId(input), name, input);
       else if (isCompositionSessionToolName(name)) content = await pageTool(sessionId(input), name, input);
       else return failureResult('unknown-tool', `no tool named "${name}"`);
       return { content: fitToBudget(content, deps.maxOutputTokens) };

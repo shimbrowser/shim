@@ -147,6 +147,7 @@ Every `shim_preview` answers `{ revision, applied, evidence }`. On an applied pr
 | `warnings[]` | lint warnings (unknown fields, brittle anchors, an observer that watches what it mutates) and unused handler files |
 | `notes[]` | outcomes Shim reports about consent and capabilities |
 | `console` | errors and warnings the page logged since the previous preview |
+| `aiUnavailable` | a handler called `api.ai` and was refused (section 7) |
 
 A refused preview answers `applied: false` with `rejected` or `error` (and `problems` for a
 malformed folder): nothing was applied. Fix and preview again.
@@ -221,7 +222,7 @@ All of them act on the session's tab.
   views ("on every post"). Report honestly: matched → verified there; your rule no-match
   → it does not apply there (likely different markup); unvisited page-types → unverified.
 - `interact_page` is for composition sessions (section 9); a shim session answers that it
-  isn't offered. So are `probe_request` and `read_calls`.
+  isn't offered. So are `probe_request`, `read_calls` and `verify_mint`.
 
 ### The site's own API: the API map tools
 
@@ -261,11 +262,28 @@ Then, for a granted site only — every call names its `host`:
 An endpoint id belongs to its site: naming it under another host answers `not-found`.
 Refusals come back as `{ ok: false, error, hint }` — `host-not-granted`, `no-sources`,
 `sources-denied`, `site-names-denied`, `replay-declined`, `consent-timeout`,
-`too-many-pending`, `discovery-off`. Don't re-ask for what the user declined; a
-timeout or a full queue of cards is not a no, so those can be retried. In the handler, call the
+`too-many-pending`, `discovery-off` (Discovery is off in Shim: there is no map to read —
+`request_sources` still asks and grants, with every site under `noApiMap`, and in a
+composition session that grant is all `probe_request` needs). Don't re-ask for what the
+user declined; a timeout or a full queue of cards is not a no, so those can be retried. In the handler, call the
 endpoint with the page's `fetch(url, { credentials: 'include' })` (section 7).
 
-Storage and database inspection are not available to sessions in this build.
+### What the shim has saved: the data tools
+
+All three only read, and only this shim's own data (and its pack's).
+
+- **`inspect_storage`** — everything the shim has saved: one row per (origin, key) of
+  `api.storage` with the parsed value, plus `packRows` for a shim in a pack, `globalRows`
+  for a global shim, and `dbSchema` (the live tables and row counts) when it declares
+  `storage`. This is the committed data — a preview's scratch bucket (section 7) is not in
+  it. Use it when the ask depends on what is already saved ("the counter is wrong").
+- **`query_db { sql, connection? }`** — a read-only SQL query against the shim's own
+  database (its `storage` tables) or a declared remote connection. SELECT only: anything
+  else is refused before it reaches the database. Results are capped; add `LIMIT`.
+- **`read_sibling_shim { name }`** — another shim in this shim's pack, in full: its spec,
+  handler source and last few exchanges. Use it before building on a sibling's data or
+  conventions (storage keys, class prefixes). A shim in no pack answers that it has no
+  siblings; a wrong name answers the valid ones.
 
 ## 5. Mutation kinds
 
@@ -515,11 +533,22 @@ throwing — always branch on it and render a usable state.
 
 **While previewing, handlers get a preview `api`, not the shim's.** `api.storage` reads and
 writes a scratch bucket apart from the shim's saved data — what a preview stores is gone
-after commit, and what the shim already saved isn't visible — `api.settings` has no values,
-`api.ai` calls answer `{ ok: false }`, and `api.db`, `api.storage.pack`,
-`api.storage.global` and `api.shared` are absent. Handlers must render a usable state in
-every one of those cases anyway; check the data path after commit (open the session again
-if you need to), and say in your summary what you could only verify that way.
+after commit, and what the shim already saved isn't visible to the handler (read it with
+`inspect_storage`, section 4) — `api.settings` has no values, `api.ai` calls are refused (below), and `api.db`, `api.storage.pack`, `api.storage.global` and `api.shared` are
+absent. Handlers must render a usable state in every one of those cases anyway; check the
+data path after commit (open the session again if you need to), and say in your summary
+what you could only verify that way.
+
+**`api.ai` is refused while your session is open.** On the session's tab, every `api.ai`
+call from a previewed handler — and from the shim's committed rules there — resolves
+`{ ok: false, error: "ai-unavailable-in-external-session" }`: Shim never spends the user's
+key for your session. Make sure the handler renders that failure. The preview evidence (or
+the next tool result) carries an `aiUnavailable` note when a handler called it. **The first
+time, tell the user once, in these words:**
+
+> Shim can't use your Claude Code subscription, so AI features in this shim won't run while Claude Code builds it. Once the session ends, reload the page in Shim (with an API key set) to see them work.
+
+Don't repeat it.
 
 - **`api.cleanup(fn)`** — teardown for side effects (section 5).
 - **`api.origin`, `api.host`** — the page's origin and host, as strings.
@@ -610,12 +639,20 @@ this section is what differs.
 ### The session
 
 1. **Pick the composition.** `shim_list_tabs` lists every composition (`compositions[]`:
-   `id`, `name`, `mount`) and gives an open composition tab its `compositionId`. Creating a
-   new composition isn't a session action: ask the user to create one in Shim first, then
-   open a session on it.
+   `id`, `name`, `mount`) and gives an open composition tab its `compositionId`. To build a
+   new one, start it in the session instead (step 2).
 2. **Open.** `shim_open_session { compositionId, intent, dir }` — `tabId` is optional (the
    window the preview opens in). The user allows it in Shim; the composition's page opens
    there as your preview.
+   For a **new** composition, pass `newCompositionName` instead of `compositionId`, and
+   optionally `mount`: the address you propose, `compose://<mount>` — lowercase letters,
+   digits and hyphens, not starting with a hyphen, not already in use (`shim_list_tabs`
+   lists the mounts taken). Without one, Shim suggests one from the name. The user can
+   change the address on the card before allowing, so read the answer: it carries the new
+   `compositionId` and the `mount` they chose. A refused mount answers `mount-taken` or
+   `invalid-mount` before any card. The new composition starts as a manifest with no
+   hosts and an empty `index.html`, and is **kept only if you commit**: end the session
+   without a commit and it is deleted, its address freed.
 3. **Check out** (with `dir`, or `shim_checkout { dir }`): `manifest.json` plus every file of
    the composition, flat. Use an empty folder.
 4. **Edit, then `shim_preview`.** Shim validates the folder, saves the changed files onto the
@@ -685,7 +722,8 @@ style.css
   `{ after, chars, length? }`, the text right after a literal prefix, optionally in a page
   the mint page links to via `follow` `{ urlAfter, urlHost }`) and where to send it
   (`header`, with an optional `scheme` such as `"Bearer"`, or `query`). Design one with
-  `probe_request` (the page or script the token is in).
+  `probe_request` (the page or script the token is in), and check it with `verify_mint`
+  before you put it in the manifest.
 - **`settings`**, **`permissions`**, **`storage`**, **`connections`** — the same
   declarations a shim makes (section 7): settings fields (`text | secret | number | boolean
   | select`), `"permissions": ["ai"]`, local tables, remote databases.
@@ -772,11 +810,26 @@ A refused preview answers `applied: false` with `error` and `problems`:
   with a 2xx status** and the page shows the result (a DOM check plus a screenshot); a
   call that failed, or none at all, means it isn't working yet.
 - **`probe_request { host, path }`** — one GET of your own through the composition's real
-  fetch path to a declared, granted host, answering the status and up to 20,000 characters
-  of the body. For designing a mint or checking a live response shape; it is never
-  evidence that the page works.
+  fetch path, answering the status and up to 20,000 characters of the body. The host must
+  be declared in the manifest, allowed by the user (the preview's card), **and** granted to
+  your session with `request_sources` — otherwise it answers `host-not-declared`,
+  `host-not-allowed` or `host-not-granted` before any request. GET only. For designing a
+  mint or checking a live response shape; it is never evidence that the page works.
+- **`verify_mint { config, testEndpoint? }`** — runs a proposed `mint` config end to end
+  against the user's real session: Shim first asks the user, on a card, to let the mint
+  host be called signed in as them (and the `follow` host, on a second card), and nothing
+  is requested before they answer. Declined, or unanswered in two minutes, it answers
+  `denied` — ask the user rather than retrying. Otherwise it answers whether the token was
+  extracted (`detail` says why not) and, with a `testEndpoint` (a read-only endpoint on the
+  mint host's site), the status it got. It never returns the token or any body. Each call
+  asks again.
 - The API map tools (section 4) work the same, except `replay_endpoint` runs GET and HEAD
   only (`read-only`).
+- **`inspect_storage`** and **`query_db`** (section 4) read the composition's own saved
+  data: its `api.storage` rows, its declared tables (`dbSchema`), and each declared remote
+  connection and whether the user configured it. While you build, the page's own writes
+  are refused, so what they show is the data as of the last commit. `read_sibling_shim` is
+  for shims (`shim-only`).
 
 ## 10. Headless mode
 
@@ -789,7 +842,7 @@ no logins, never Shim's). The loop is the same, with three differences:
   once; with `newShimName` a new shim starts there (default `<dir>.shim`). There are no
   tabs and no shim library, so `shim_list_tabs`, `shim_launch` and `shimId` answer
   `requires-shim-browser`, and so do `verify_across_pages`, compositions (section 9) and
-  their tools, and the API map tools (section 4).
+  their tools, the API map tools and the data tools (section 4).
 - **`shim_commit` writes the file**: a new version, with its history and what the session
   verified. `api.storage` lives in `<shimFile>.storage.json`. Hand the `.shim` file to the
   user; they import it into Shim.

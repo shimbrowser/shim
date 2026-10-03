@@ -153,8 +153,10 @@ Tools that need the Shim browser answer `requires-shim-browser` in headless mode
 A composition session (attach mode only) opens with `compositionId` instead, and `tabId`
 is optional. It checks out `manifest.json` plus the composition's files, in a flat folder.
 A preview saves the changed files and reloads the composition's page. If the manifest adds
-a host, Shim asks you first. A commit that grants a composition a write to a site waits for
-your approval in Shim. While a session holds a composition, its page's `api.ai` calls are
+a host, Shim asks you first. `newCompositionName` (with an optional proposed `mount`)
+starts a new composition instead: Shim's card lets you change its `compose://` address
+before allowing, and the composition is kept only if the session commits. A commit that
+grants a composition a write to a site waits for your approval in Shim. While a session holds a composition, its page's `api.ai` calls are
 refused, so a session never spends your API key.
 
 When the work needs a site's own API, the API map tools (attach mode only) read what Shim
@@ -168,10 +170,13 @@ All tools are registered when the server starts:
 | Session | `shim_status`, `shim_launch`, `shim_list_tabs`, `shim_open_session`, `shim_checkout`, `shim_preview`, `shim_commit`, `shim_end_session` |
 | Page | `view_page`, `query_page`, `inspect_element`, `evaluate_in_page`, `read_console`, `reload_page`, `verify_across_pages`, `interact_page` (composition sessions only) |
 | API map | `list_discovered_hosts`, `request_sources`, `search_discovered_api`, `inspect_endpoint`, `replay_endpoint` |
-| Composition | `probe_request`, `read_calls` (composition sessions only) |
+| Data | `inspect_storage`, `query_db` (read-only), `read_sibling_shim` (shim sessions only; the shim's own pack) |
+| Composition | `probe_request`, `read_calls`, `verify_mint` (composition sessions only) |
 
 The page tools are defined in `@shimbrowser/core/page-tools`, the same module Shim's
-built-in authoring uses, and both hosts run them with the same implementation.
+built-in authoring uses, and both hosts run them with the same implementation. The data
+tools are defined in `@shimbrowser/core/data-tools`, which Shim's own worker uses too; they
+need the Shim browser.
 
 ## The `shim` command line
 

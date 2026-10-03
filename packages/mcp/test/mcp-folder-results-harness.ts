@@ -124,13 +124,13 @@ console.log('checkout:');
     // A composition checkout is held to the same rule.
     const linkedFile = path.join(root, 'comp-linked-file');
     fs.mkdirSync(linkedFile);
-    fs.writeFileSync(path.join(linkedFile, COMPOSITION_MARKER), '{}');
+    fs.writeFileSync(path.join(linkedFile, COMPOSITION_MARKER), JSON.stringify({ format: 'shim-composition-checkout/1', hidden: [] }));
     fs.symlinkSync(path.join(outside, 'victim.txt'), path.join(linkedFile, 'index.html'));
     throwsCode('a composition file that is a symlink is refused', 'unsafe-path', () => writeCompositionCheckout(linkedFile, { 'manifest.json': '{}', 'index.html': 'x' }));
     check('…before anything was written', !fs.existsSync(path.join(linkedFile, 'manifest.json')) && fs.readFileSync(path.join(outside, 'victim.txt'), 'utf8') === 'keep');
     const linkedDir = path.join(root, 'comp-linked-dir');
     fs.mkdirSync(linkedDir);
-    fs.writeFileSync(path.join(linkedDir, COMPOSITION_MARKER), '{}');
+    fs.writeFileSync(path.join(linkedDir, COMPOSITION_MARKER), JSON.stringify({ format: 'shim-composition-checkout/1', hidden: [] }));
     fs.symlinkSync(outside, path.join(linkedDir, 'assets'));
     throwsCode('a composition folder that is a symlink is refused', 'unsafe-path', () => writeCompositionCheckout(linkedDir, { 'manifest.json': '{}', 'assets/old.js': 'x' }));
     check('…and its target is untouched', fs.readFileSync(path.join(outside, 'old.js'), 'utf8') === 'keep');

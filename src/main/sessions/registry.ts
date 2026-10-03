@@ -15,7 +15,7 @@ import * as core from '@shimbrowser/core/session-registry';
 export type {
   SessionArtifactKind, EndReason, VersionId, SessionErrorCode, SessionError, OpenRequest,
   BackendPreview, BackendCheckout, BackendCommit, FinishInfo, SessionInfo, OpenResult, CheckoutResult,
-  PreviewResult, CallResult, CommitResult, EndResult, CommitRequest, Timers, SessionRegistry,
+  PreviewResult, CallResult, CommitResult, EndResult, CommitRequest, Timers, SessionRegistry, SessionMint,
 } from '@shimbrowser/core/session-registry';
 export { IDLE_TIMEOUT_MS, OPEN_LEASE_TIMEOUT_MS, END_SETTLE_TIMEOUT_MS, ArtifactBusyError, BeginRefusal } from '@shimbrowser/core/session-registry';
 
