@@ -142,6 +142,14 @@ export function loadShimFile(file: string): { ok: true; source: Omit<HeadlessShi
   }
   const parsed = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as ShimFile;
   const spec = parsed.spec as Spec & { handlers?: Record<string, string> };
+  // unpackShim leaves match to import; the session reads match.hosts from
+  // its first reply on (the page-away guard, the match warning) and commit
+  // requires it, so a file without a usable list is refused before anything
+  // opens.
+  const match: unknown = (spec as { match?: unknown }).match;
+  if (!isRecord(match) || !Array.isArray(match.hosts) || !match.hosts.every((h) => typeof h === 'string')) {
+    return { ok: false, error: 'malformed-shim-file', detail: 'spec.match.hosts must be an array of host patterns (strings)' };
+  }
   // Handlers ride as the file's top-level module map; a non-canonical file's
   // inline sources stay on their rules (previews inline either way).
   const handlers: Record<string, string> = {};
@@ -303,17 +311,23 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
       await page.close().catch(() => undefined);
       return reply({ ...opened });
     }
-    const hosts = source.spec.match?.hosts ?? [];
-    const matches = hosts.some((h) => hostPatternMatches(h, landed));
-    const where = landed.port ? `${landed.hostname}:${landed.port}` : landed.hostname;
-    return reply({
-      ok: true,
-      sessionId: opened.sessionId,
-      artifactId: source.spec.id,
-      shimFile,
-      url: page.host.url(),
-      ...(matches ? {} : { warnings: [`the shim's match.hosts (${hosts.join(', ') || 'none'}) doesn't include ${where}: in Shim it would not run on this page`] }),
-    });
+    try {
+      const hosts = source.spec.match?.hosts ?? [];
+      const matches = hosts.some((h) => hostPatternMatches(h, landed));
+      const where = landed.port ? `${landed.hostname}:${landed.port}` : landed.hostname;
+      return reply({
+        ok: true,
+        sessionId: opened.sessionId,
+        artifactId: source.spec.id,
+        shimFile,
+        url: page.host.url(),
+        ...(matches ? {} : { warnings: [`the shim's match.hosts (${hosts.join(', ') || 'none'}) doesn't include ${where}: in Shim it would not run on this page`] }),
+      });
+    } catch (e) {
+      // The caller never learns this session's id: don't leave it holding the file.
+      await sessions.end(opened.sessionId, 'ended');
+      throw e;
+    }
   }
 
   function segments(url: string): string[] | null {

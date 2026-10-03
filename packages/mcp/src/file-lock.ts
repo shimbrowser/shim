@@ -14,6 +14,14 @@
 // stale: one on this machine whose pid is gone, or one that isn't a lock at
 // all, is taken over. A lock from another machine (a shared filesystem) is
 // never judged stale — its holder can't be checked from here.
+//
+// Taking over is compare-and-delete: under a short-lived `<file>.lock.takeover`
+// mutex (created the same atomic way), the lock is re-read and removed only
+// if it is still the one judged stale. Two processes recovering the same
+// stale lock at once therefore can't both win — the second finds the first's
+// fresh lock and is busy. (Only a crash inside that sub-millisecond section
+// leaves the mutex behind; its dead holder is then recovered the same way,
+// once, so a further concurrent crash there is the remaining window.)
 
 import * as fs from 'fs';
 import * as os from 'os';
@@ -137,26 +145,71 @@ export function tryLockFile(file: string, options: FileLockOptions = {}): FileLo
     };
   };
 
-  // Two tries: the second only after removing a stale lock.
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     if (link(lockPath, text)) return acquired();
     const held = readLock(lockPath);
     if (held === 'missing') continue; // released between the link and the read
     const stale = held === null || (held.hostname === hostname && !isAlive(held.pid));
-    if (!stale) {
-      return {
-        ok: false,
-        holder: { pid: held.pid, hostname: held.hostname },
-        detail: `another shim-mcp process (pid ${held.pid}${held.hostname === hostname ? '' : ` on ${held.hostname}`}) holds ${file}: end its session first`,
-      };
-    }
-    try {
-      fs.unlinkSync(lockPath);
-    } catch (e) {
-      if (errCode(e) !== 'ENOENT') throw e;
-    }
+    if (!stale) return busy(file, hostname, held);
+    const took = underMutex(`${lockPath}.takeover`, { pid, hostname, isAlive }, () => {
+      // Compare, then delete: only the lock judged stale, never one another
+      // process installed since.
+      const now = readLock(lockPath);
+      if (now !== 'missing') {
+        const same = held === null ? now === null : now !== null && now.token === held.token;
+        if (!same) return false;
+        try {
+          fs.unlinkSync(lockPath);
+        } catch (e) {
+          if (errCode(e) !== 'ENOENT') throw e;
+        }
+      }
+      return link(lockPath, text);
+    });
+    if (took === true) return acquired();
+    if (took === 'busy') break;
+    // The lock changed under us: judge the new one.
   }
   const held = readLock(lockPath);
-  const holder = held !== 'missing' && held !== null ? { pid: held.pid, hostname: held.hostname } : null;
-  return { ok: false, holder, detail: `another process claimed ${file} at the same moment: try again` };
+  if (held !== 'missing' && held !== null) return busy(file, hostname, held);
+  return { ok: false, holder: null, detail: `another process is claiming ${file} at the same moment: try again` };
+}
+
+function busy(file: string, hostname: string, held: LockContent): FileLockResult {
+  return {
+    ok: false,
+    holder: { pid: held.pid, hostname: held.hostname },
+    detail: `another shim-mcp process (pid ${held.pid}${held.hostname === hostname ? '' : ` on ${held.hostname}`}) holds ${file}: end its session first`,
+  };
+}
+
+// Run `fn` holding `mutexPath`, or answer 'busy' when a live process holds it.
+function underMutex<T>(
+  mutexPath: string, who: { pid: number; hostname: string; isAlive(pid: number): boolean }, fn: () => T,
+): T | 'busy' {
+  const token = randomUUID();
+  const text = `${JSON.stringify({ format: FILE_LOCK_FORMAT, pid: who.pid, hostname: who.hostname, token, at: Date.now() })}\n`;
+  let mine = link(mutexPath, text);
+  if (!mine) {
+    const held = readLock(mutexPath);
+    const abandoned = held === 'missing' || held === null || (held.hostname === who.hostname && !who.isAlive(held.pid));
+    if (!abandoned) return 'busy';
+    if (held !== 'missing') {
+      try {
+        fs.unlinkSync(mutexPath);
+      } catch (e) {
+        if (errCode(e) !== 'ENOENT') throw e;
+      }
+    }
+    mine = link(mutexPath, text);
+    if (!mine) return 'busy';
+  }
+  try {
+    return fn();
+  } finally {
+    const current = readLock(mutexPath);
+    if (current !== 'missing' && current !== null && current.token === token) {
+      try { fs.unlinkSync(mutexPath); } catch { /* already gone */ }
+    }
+  }
 }

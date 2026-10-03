@@ -26,7 +26,10 @@
 //   - the cross-process file lock (file-lock.ts): another shim-mcp process
 //     is busy before any page opens, ending or a failed open drops the lock,
 //     a dead process's lock (or a file that isn't one) is taken over, one
-//     from another machine never is;
+//     from another machine never is, and a takeover only removes the lock it
+//     judged stale (under the takeover mutex, itself recovered from a dead
+//     holder);
+//   - a .shim whose match.hosts isn't a list of strings refused at open;
 //   - commit: the .shim written once per commitId, version + deploy baseline +
 //     witnesses + history, the session continuing from it;
 //   - ending tears every preview down, closes the page and frees the file.
@@ -48,7 +51,7 @@ import { fileStorage, HEADLESS_STORAGE_FORMAT } from '../src/file-storage';
 import { createHeadlessControl, hostPatternMatches, type HeadlessControl } from '../src/headless-control';
 import { HEADLESS_CAPABILITIES, type HeadlessStorage } from '../src/playwright-page-host';
 import { cliMode } from '../src/cli';
-import { lockFileFor, type FileLockOptions } from '../src/file-lock';
+import { lockFileFor, tryLockFile, type FileLockOptions } from '../src/file-lock';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: unknown): void {
@@ -553,6 +556,47 @@ async function main(): Promise<void> {
     const remote = await req(e, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'e', intent: 'z', shimFile });
     check('a lock from another machine is never judged stale', remote.error === 'artifact-busy' && e.hosts.length === 0 && fs.readFileSync(lockFile, 'utf8').includes('remote'), remote);
     fs.unlinkSync(lockFile);
+
+    // Two processes recovering one stale lock: the other one wins between
+    // this one judging the lock stale and removing it.
+    const deadLock = JSON.stringify({ format: 'shim-mcp-lock/1', pid: 4242, hostname, token: 'dead', at: 1 });
+    const fresh = JSON.stringify({ format: 'shim-mcp-lock/1', pid: 5151, hostname, token: 'winner', at: 2 });
+    fs.writeFileSync(lockFile, deadLock);
+    const raced = tryLockFile(shimFile, {
+      pid: 1006,
+      isAlive: (pid) => {
+        if (pid === 4242) {
+          fs.writeFileSync(lockFile, fresh); // the other recoverer took over first
+          return false;
+        }
+        return true;
+      },
+    });
+    check('a stale lock another process took over first is never removed', !raced.ok && raced.holder?.pid === 5151 && fs.readFileSync(lockFile, 'utf8').includes('winner'), raced);
+    check('…and the takeover mutex is released', !fs.existsSync(`${lockFile}.takeover`));
+
+    fs.writeFileSync(lockFile, deadLock);
+    fs.writeFileSync(`${lockFile}.takeover`, JSON.stringify({ format: 'shim-mcp-lock/1', pid: 6161, hostname, token: 'busy', at: 3 }));
+    const blocked = tryLockFile(shimFile, { pid: 1007, isAlive: (pid) => pid !== 4242 });
+    check('while a live process holds the takeover mutex, a stale lock is not touched', !blocked.ok && fs.readFileSync(lockFile, 'utf8').includes('"dead"'), blocked);
+    const recovered = tryLockFile(shimFile, { pid: 1008, isAlive: (pid) => pid !== 4242 && pid !== 6161 });
+    check('a mutex its dead holder left behind is recovered', recovered.ok && !fs.existsSync(`${lockFile}.takeover`), recovered);
+    if (recovered.ok) recovered.lock.release();
+    check('…and its lock released', !fs.existsSync(lockFile));
+    check('no temp files are left beside the lock', fs.readdirSync(tmp).every((f) => !f.endsWith('.tmp')), fs.readdirSync(tmp));
+  }
+
+  console.log('a .shim whose match.hosts is unusable');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'nohosts.shim');
+    fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'No hosts', handlers: {}, spec: { id: 'shim-nohosts', version: 1, match: { hosts: 'site.test' }, rules: [] } }));
+    const bad = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('is refused before any page opens', bad.error === 'malformed-shim-file' && r.hosts.length === 0, bad);
+    check('…holding nothing', !fs.existsSync(lockFileFor(shimFile)) && r.control.sessions.list().length === 0);
+    fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'No hosts', handlers: {}, spec: { id: 'shim-nohosts', version: 1, rules: [] } }));
+    const none = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('…as is one with no match at all', none.error === 'malformed-shim-file' && r.hosts.length === 0, none);
   }
 }
 
