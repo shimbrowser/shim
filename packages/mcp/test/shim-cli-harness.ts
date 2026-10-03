@@ -251,6 +251,14 @@ async function main(): Promise<void> {
     const plain = path.join(tmp, 'plain.json');
     fs.copyFileSync(exportedFile, plain);
     check('unpack of a file without .shim needs --out', (await cli(r, 'unpack', plain)) === EXIT_USAGE && /--out/.test(r.err[0] ?? ''));
+    // A file literally named `.shim` has no stem: stripping the extension
+    // from its path would unpack into its parent folder.
+    const bareDir = path.join(tmp, 'bare');
+    fs.mkdirSync(bareDir);
+    const bare = path.join(bareDir, '.shim');
+    fs.copyFileSync(exportedFile, bare);
+    check('unpack of a file named just .shim needs --out, writing nothing beside it', (await cli(r, 'unpack', bare)) === EXIT_USAGE
+      && /--out/.test(r.err[0] ?? '') && fs.readdirSync(bareDir).join(',') === '.shim', fs.readdirSync(bareDir));
     const pack = path.join(tmp, 'pack.shim');
     fs.writeFileSync(pack, json({ format: 'shim-pack/1', name: 'p', shims: [] }));
     check('unpack refuses another .shim format', (await cli(r, 'unpack', pack, '-o', path.join(tmp, 'pack-out'))) === EXIT_PROBLEM
