@@ -137,11 +137,22 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
   },
 };
 
+// A page tool as this server registers it: core's session definition, plus
+// the optional sessionId every session tool takes — so an agent holding two
+// sessions can aim a page tool at either. The server strips it before the
+// call reaches Shim (whose page tools never see it).
+function withSessionId(tool: ToolDefinition): ToolDefinition {
+  return {
+    ...tool,
+    input_schema: { ...tool.input_schema, properties: { ...tool.input_schema.properties, sessionId: SESSION_ID } },
+  };
+}
+
 /** Every tool, in registration order: session tools, then page tools. */
 export function staticTools(): ToolDefinition[] {
   return [
     ...SESSION_TOOL_NAMES.map((n) => SESSION_TOOLS[n]),
-    ...PAGE_TOOL_NAMES.map((n) => SESSION_PAGE_TOOLS[n]),
+    ...PAGE_TOOL_NAMES.map((n) => withSessionId(SESSION_PAGE_TOOLS[n])),
   ];
 }
 
