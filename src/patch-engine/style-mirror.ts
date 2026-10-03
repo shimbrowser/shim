@@ -1,0 +1,148 @@
+// Strict-CSP fallback for the engine's <style> sheets.
+//
+// The engine writes all shim CSS as text inside <style data-shim=…> elements
+// (css-sheets.ts). A page whose CSP sets `style-src` without 'unsafe-inline'
+// refuses those elements: Chromium never builds their `sheet`, so every
+// hide / restyle / reorder / replace-root rule silently does nothing.
+// Constructable stylesheets are not subject to that check — a
+// `new CSSStyleSheet()` + `replaceSync()` adopted via `adoptedStyleSheets`
+// applies under any `style-src` (measured in Electron, from the preload's
+// isolated world: the sheet is shared with the main world and its
+// `@layer shim` rules beat the site's un-layered `!important` rules exactly as
+// the <style> path does). It is DOM-standard, so the engine stays
+// host-agnostic (Electron preload, Playwright init script, anything else).
+//
+// Design: the <style> element stays the single source of truth. Every
+// ordering / in-place-update / teardown decision is still made on its text
+// nodes (css-sheets.ts is unchanged in that respect), and after each change
+// the caller asks this module to re-sync. If the element is connected but has
+// no `sheet` — the browser refused it — we mirror its exact textContent into
+// one constructed sheet per element. Because the mirror IS the element's text,
+// every invariant the text-node path keeps (priority order inside the tier-1
+// sheet, in-place update, teardown removing exactly one rule) holds for the
+// mirror by construction. Mirrors are adopted after any sheets the page itself
+// adopted, ordered among themselves by their source elements' document order —
+// the same relative order the <style> elements would have had.
+//
+// On a page that accepts the <style> (no strict CSP) `sheet` is non-null, so
+// this module never constructs anything and the page is byte-for-byte what it
+// was before. Nothing here may throw into the engine.
+
+type StyleRoot = Document | ShadowRoot;
+
+interface Mirror {
+  sheet: CSSStyleSheet;
+  root: StyleRoot;
+}
+
+// Source element → its mirror. Only populated on pages that refused a sheet.
+const mirrors = new Map<HTMLStyleElement, Mirror>();
+// Every sheet this module ever constructed, so a reconcile can strip ours
+// out of `adoptedStyleSheets` (including mirrors already dropped from the map)
+// while leaving the page's own adopted sheets untouched.
+const ownSheets = new WeakSet<CSSStyleSheet>();
+
+function canConstruct(): boolean {
+  return typeof CSSStyleSheet === 'function'
+    && typeof CSSStyleSheet.prototype.replaceSync === 'function';
+}
+
+function adoptingRoot(style: HTMLStyleElement): StyleRoot | null {
+  if (!style.isConnected) return null;
+  const root = style.getRootNode();
+  if (!('adoptedStyleSheets' in root)) return null;
+  if (typeof Document !== 'undefined' && root instanceof Document) return root;
+  if (typeof ShadowRoot !== 'undefined' && root instanceof ShadowRoot) return root;
+  return null;
+}
+
+// A connected <style> without a `sheet` is one the browser refused (CSP). An
+// accepted element always has one, even when empty.
+function isRefused(style: HTMLStyleElement): boolean {
+  return style.sheet === null;
+}
+
+function construct(cssText: string): CSSStyleSheet {
+  const sheet = new CSSStyleSheet();
+  sheet.replaceSync(cssText);
+  ownSheets.add(sheet);
+  return sheet;
+}
+
+function documentOrder(a: HTMLStyleElement, b: HTMLStyleElement): number {
+  return a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+}
+
+// Rewrite `root.adoptedStyleSheets` to [page's own sheets…, our mirrors in
+// document order]. Assigns only when something changed, so a no-op sync never
+// churns the page's style recalc.
+function reconcile(root: StyleRoot): void {
+  const ours = [...mirrors.entries()]
+    .filter(([, m]) => m.root === root)
+    .sort(([a], [b]) => documentOrder(a, b))
+    .map(([, m]) => m.sheet);
+  const current = root.adoptedStyleSheets;
+  const desired = [...current.filter((s) => !ownSheets.has(s)), ...ours];
+  if (desired.length === current.length && desired.every((s, i) => s === current[i])) return;
+  root.adoptedStyleSheets = desired;
+}
+
+// Re-sync one engine-owned <style> after its text changed (or after it was
+// inserted). Mirrors it when the browser refused it, drops the mirror when the
+// element now applies on its own, and prunes mirrors whose element left the
+// document (a removed engine sheet stops applying on strict pages exactly as
+// it does elsewhere).
+export function syncStyleMirror(style: HTMLStyleElement): void {
+  try {
+    if (!canConstruct()) return;
+    const touched = new Set<StyleRoot>();
+    for (const [el, m] of mirrors) {
+      if (!el.isConnected) {
+        mirrors.delete(el);
+        touched.add(m.root);
+      }
+    }
+    const root = adoptingRoot(style);
+    const existing = mirrors.get(style);
+    if (root && isRefused(style)) {
+      const text = style.textContent || '';
+      if (existing && existing.root === root) {
+        existing.sheet.replaceSync(text);
+      } else {
+        if (existing) touched.add(existing.root);
+        mirrors.set(style, { sheet: construct(text), root });
+      }
+      touched.add(root);
+    } else if (existing) {
+      mirrors.delete(style);
+      touched.add(existing.root);
+    }
+    for (const r of touched) reconcile(r);
+  } catch {
+    /* a fallback must never break the page or the engine */
+  }
+}
+
+// Sync the <style> that owns a rule's text node (no-op when the node isn't
+// inside one — e.g. it was just removed and the caller passes the old parent).
+export function syncStyleOwner(parent: Node | null): void {
+  if (parent && typeof HTMLStyleElement !== 'undefined' && parent instanceof HTMLStyleElement) {
+    syncStyleMirror(parent);
+  }
+}
+
+// One-shot variant for an engine-owned <style> whose text never changes and
+// whose root is engine-owned too (the route host's shadow-root base sheet):
+// once adopted on the shadow root the mirror travels with it across
+// detach / re-append, so no bookkeeping is needed. Call after the element is
+// connected — refusal is only observable then.
+export function adoptIfRefused(style: HTMLStyleElement): void {
+  try {
+    if (!canConstruct()) return;
+    const root = adoptingRoot(style);
+    if (!root || !isRefused(style)) return;
+    root.adoptedStyleSheets = [...root.adoptedStyleSheets, construct(style.textContent || '')];
+  } catch {
+    /* a fallback must never break the page or the engine */
+  }
+}
