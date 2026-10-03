@@ -1,13 +1,17 @@
-// Starting the MCP server on stdio, in either mode — what `shim-mcp` (cli.ts,
+// Starting the MCP server on stdio, in any mode — what `shim-mcp` (cli.ts,
 // the plugin's .mcp.json entry) and `shim mcp` (shim-cli.ts) both run. Wires
-// the server to the real discovery file, socket, launcher and clock. Logs go
-// to stderr: stdout is the MCP channel.
+// the server to the real discovery file, socket, launcher, Playwright and
+// clock. Logs go to stderr: stdout is the MCP channel.
 //
-//   (no flag)      attach mode: drive the running Shim browser
-//   --headless     headless mode (shim-core design D9, D15): no Shim browser;
-//                  each session opens its own Playwright Chromium
-//                  (`--visible` shows its window). Also SHIM_MCP_MODE=headless
-//                  / SHIM_HEADLESS_VISIBLE=1.
+//   (no flag)      auto (modes.ts): a Shim tab attaches; a url opens a
+//                  headless session while no Shim browser is reachable. What
+//                  the plugin runs, so one entry serves people with Shim and
+//                  people without it.
+//   --attach       attach mode only: drive the running Shim browser
+//   --headless     headless mode only (shim-core design D9, D15): each
+//                  session opens its own Playwright Chromium
+//   --visible      headless sessions show their window
+//   Also SHIM_MCP_MODE=auto|attach|headless and SHIM_HEADLESS_VISIBLE=1.
 //
 // No entry-point guard lives here: both bundles import this module, and each
 // keeps its own `require.main === module` check.
@@ -19,9 +23,12 @@ import { createShimMcpServer } from './server';
 import { defaultEnv, discoveryFilePath, readControlInfo, socketClient, type ControlInfo, type PathEnv } from './control-client';
 import { attachOrLaunch, pidAlive, type LaunchCommand, type LaunchExit, type Launched, type LaunchOutcome } from './launch';
 import { maxOutputTokens } from './results';
-import { createHeadlessControl } from './headless-control';
-import { loadPlaywright, openLoadedHeadlessPage } from './playwright-launch';
+import { createHeadlessControl, type HeadlessControl } from './headless-control';
+import { headlessReadiness, openLoadedHeadlessPage } from './playwright-launch';
+import { cliMode, probeAttach, type CliMode } from './modes';
 import { VERSION } from './version';
+
+export { cliMode, type CliMode } from './modes';
 
 async function ping(info: ControlInfo): Promise<boolean> {
   try {
@@ -65,31 +72,10 @@ export function launchShim(pathEnv: PathEnv, opts: { timeoutMs?: number } = {}):
   }, opts);
 }
 
-export interface CliMode {
-  headless: boolean;
-  visible: boolean;
-}
-
-/** The mode the command line and environment ask for. */
-export function cliMode(argv: readonly string[], env: Record<string, string | undefined>): CliMode {
-  const headless = argv.includes('--headless') || env.SHIM_MCP_MODE === 'headless';
-  const visible = argv.includes('--visible') || env.SHIM_HEADLESS_VISIBLE === '1';
-  return { headless, visible };
-}
-
-function playwrightAvailable(): boolean {
-  try {
-    loadPlaywright();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function serveHeadless(mode: CliMode, env: Record<string, string | undefined>): Promise<void> {
-  const control = createHeadlessControl({
+function headlessControl(mode: CliMode): HeadlessControl {
+  return createHeadlessControl({
     version: VERSION,
-    playwrightAvailable,
+    playwrightAvailable: () => headlessReadiness().available,
     // A fresh Chromium per session, never a persistent profile: headless
     // never reads the Shim browser's persist:user (invariant 10).
     async openPage(url, storage) {
@@ -97,6 +83,21 @@ async function serveHeadless(mode: CliMode, env: Record<string, string | undefin
       return { host: opened.host, close: () => opened.close() };
     },
   });
+}
+
+// Headless sessions are this process's own browsers: close them when the
+// client goes away.
+function closeOnExit(control: HeadlessControl): void {
+  const shutdown = (): void => {
+    void control.closeAll().finally(() => process.exit(0));
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+  process.stdin.once('end', shutdown);
+}
+
+async function serveHeadless(mode: CliMode, env: Record<string, string | undefined>): Promise<void> {
+  const control = headlessControl(mode);
   const server = createShimMcpServer({
     version: VERSION,
     mode: 'headless',
@@ -106,13 +107,34 @@ async function serveHeadless(mode: CliMode, env: Record<string, string | undefin
     newCommitId: randomUUID,
     maxOutputTokens: maxOutputTokens(env),
     ...(env.SHIM_AGENT_NAME ? { agentName: env.SHIM_AGENT_NAME } : {}),
+    headlessReadiness: () => headlessReadiness(),
   });
-  const shutdown = (): void => {
-    void control.closeAll().finally(() => process.exit(0));
-  };
-  process.once('SIGINT', shutdown);
-  process.once('SIGTERM', shutdown);
-  process.stdin.once('end', shutdown);
+  closeOnExit(control);
+  await server.connect(new StdioServerTransport());
+}
+
+async function serveAuto(mode: CliMode, pathEnv: PathEnv): Promise<void> {
+  const controlFile = discoveryFilePath(pathEnv);
+  const control = headlessControl(mode);
+  const server = createShimMcpServer({
+    version: VERSION,
+    mode: 'auto',
+    controlFile,
+    // Attach only to a Shim that is there: a discovery file naming a dead
+    // process (Shim crashed) is no endpoint.
+    connect: () => {
+      const info = readControlInfo(controlFile);
+      return info && pidAlive(info.pid) ? socketClient(info) : null;
+    },
+    headlessControl: control,
+    probeAttach: () => probeAttach(controlFile, readControlInfo, pidAlive),
+    headlessReadiness: () => headlessReadiness(),
+    launch: (opts) => launchShim(pathEnv, opts),
+    newCommitId: randomUUID,
+    maxOutputTokens: maxOutputTokens(pathEnv.env),
+    ...(pathEnv.env.SHIM_AGENT_NAME ? { agentName: pathEnv.env.SHIM_AGENT_NAME } : {}),
+  });
+  closeOnExit(control);
   await server.connect(new StdioServerTransport());
 }
 
@@ -120,8 +142,12 @@ async function serveHeadless(mode: CliMode, env: Record<string, string | undefin
 export async function runMcpServer(argv: readonly string[]): Promise<void> {
   const pathEnv = defaultEnv();
   const mode = cliMode(argv, pathEnv.env);
-  if (mode.headless) {
+  if (mode.mode === 'headless') {
     await serveHeadless(mode, pathEnv.env);
+    return;
+  }
+  if (mode.mode === 'auto') {
+    await serveAuto(mode, pathEnv);
     return;
   }
   const controlFile = discoveryFilePath(pathEnv);

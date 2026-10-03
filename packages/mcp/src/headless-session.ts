@@ -39,7 +39,7 @@ import { applyDelta } from '@shimbrowser/core/spec-delta';
 import { lintSpec } from '@shimbrowser/core/spec-lint';
 import {
   checkoutShim, packShim, anchorDigest, referencedHandlerNames, ShimFolderError,
-  SHIM_STATE_FILE, SHIM_STATE_FORMAT, type ShimFile, type ShimState, type FolderInput,
+  SHIM_STATE_FILE, SHIM_STATE_FORMAT, type ShimFile, type ShimState, type FolderInput, type RuleState,
 } from '@shimbrowser/core/shim-folder';
 import { moduleToExpression } from '@shimbrowser/core/handler-source';
 import { diffWorkingCopy } from '@shimbrowser/core/working-copy-diff';
@@ -105,6 +105,14 @@ export interface HeadlessBackendOptions {
   sleep?(ms: number): Promise<void>;
   /** Where commits are written (default: fs, atomically). */
   writeShimFile?(file: string, content: string): void;
+  /**
+   * Witnesses kept outside the `.shim` (a folder's .shim-state.json rules, by
+   * rule id): a preview that adds a rule the working state doesn't have gets
+   * its entry's witness back while the anchor digest still matches — as pack
+   * restores it — so `shim preview` verifies against the fingerprint the shim
+   * was committed with instead of capturing a fresh one.
+   */
+  seedWitnesses?: Record<string, RuleState>;
 }
 
 interface TimedEvent {
@@ -232,6 +240,21 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const writeShimFile = options.writeShimFile ?? writeAtomic;
+  const seedWitnesses = options.seedWitnesses;
+
+  // A rule new to the working state takes its seeded witness while its anchor
+  // is the one the witness was captured for (HeadlessBackendOptions.seedWitnesses).
+  function seedAddedRules(prev: Spec, next: Spec, ops: DeltaOp[]): void {
+    if (!seedWitnesses || !next.rules) return;
+    const had = new Set((prev.rules || []).map((r) => r.id));
+    const added = new Set(ops.filter((op) => op.op === 'add-rule' && op.rule?.id && !had.has(op.rule.id)).map((op) => op.rule?.id));
+    next.rules = next.rules.map((rule) => {
+      if (!added.has(rule.id) || !rule.anchor || rule.anchor.witness) return rule;
+      const entry = Object.hasOwn(seedWitnesses, rule.id) ? seedWitnesses[rule.id] : undefined;
+      if (!entry || entry.anchorDigest !== anchorDigest(rule.anchor)) return rule;
+      return { ...rule, anchor: { ...rule.anchor, witness: clone(entry.witness) } };
+    });
+  }
 
   function apply(handle: HeadlessHandle, preview: PreviewRule): void {
     handle.unsupported.delete(preview.ruleKey);
@@ -301,6 +324,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       });
     }
     const next = applyDelta(handle.working, diff.ops);
+    seedAddedRules(handle.working, next, diff.ops);
     // The browser's commit-time check, dry-run: a lint error applies nothing.
     // First, so an invented kind reads as the typo it is, not as a feature
     // this host lacks.

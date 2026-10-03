@@ -23,9 +23,13 @@ browser.
 
 ## 1. The session loop
 
-1. **Find Shim.** `shim_status`; if it isn't running, `shim_launch`. Shim's control
-   endpoint is off by default — launching turns it on for this run; the user can also turn
-   it on in Shim's Settings.
+1. **Pick a mode.** `shim_status` says which modes are available, why, and what to do
+   next. **Attach** works in a tab of the running Shim browser, with the user's logins, and
+   commits to Shim's library. **Headless** needs no Shim: it opens the page in its own
+   Chromium and commits to a `.shim` file (section 9). If the user has Shim but it isn't
+   reachable, `shim_launch` starts it. Shim's control endpoint is off by default; launching
+   turns it on for this run, and the user can also turn it on in Shim's Settings. If
+   neither mode is available, give the user the install command `shim_status` names.
 2. **Pick the tab.** `shim_list_tabs` lists every open tab with its `tabId`, URL and, for a
    site tab, the shims that already run on its host. Work against the tab showing the page
    the user means.
@@ -833,16 +837,27 @@ A refused preview answers `applied: false` with `error` and `problems`:
 
 ## 10. Headless mode
 
-When the server runs as `shim-mcp --headless`, there is no Shim browser: `shim_status`
-reports `mode: "headless"`, and each session opens its own Chromium page (a fresh profile,
-no logins, never Shim's). The loop is the same, with three differences:
+A session runs headless when you open it on a `url` and no Shim browser is reachable, or
+when you pass `mode: "headless"`, or when the server runs as `shim-mcp --headless`. The
+session opens its own Chromium page (a fresh profile, no logins, never Shim's). The
+`shim_open_session` answer always says `mode` and `modeReason`: tell the user which one you
+are in, because what a commit saves differs. With Shim running, a bare `url` answers
+`shim-running`: work in the user's Shim tab (`shim_list_tabs`, then `tabId`) unless they
+want a standalone `.shim` file, in which case pass `mode: "headless"`.
+
+Headless needs Playwright. If it is missing, opening answers `playwright-missing` (or
+`chromium-missing`) with the exact command to run. Give the user that command; don't run
+installs on their machine without asking.
+
+The loop is the same, with three differences:
 
 - **Open on a url and a file.** `shim_open_session { url, intent, shimFile, dir }` works on
   the `.shim` file `shimFile`: an existing one is loaded and its rules run on the page at
-  once; with `newShimName` a new shim starts there (default `<dir>.shim`). There are no
-  tabs and no shim library, so `shim_list_tabs`, `shim_launch` and `shimId` answer
-  `requires-shim-browser`, and so do `verify_across_pages`, compositions (section 9) and
-  their tools, the API map tools and the data tools (section 4).
+  once; with `newShimName` a new shim starts there (default `<dir>.shim`). A headless
+  session has no tabs and no shim library, so `shimId` answers `requires-shim-browser`,
+  and so do `verify_across_pages`, `interact_page`, compositions (section 9) and their
+  tools, the API map tools and the data tools (section 4). A headless-only server also
+  refuses `shim_list_tabs` and `shim_launch`.
 - **`shim_commit` writes the file**: a new version, with its history and what the session
   verified. `api.storage` lives in `<shimFile>.storage.json`. Hand the `.shim` file to the
   user; they import it into Shim.

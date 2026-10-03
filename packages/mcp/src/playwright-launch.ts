@@ -5,6 +5,7 @@
 //
 // Chromium only: the driver depends on CDP isolated worlds.
 
+import { spawnSync } from 'child_process';
 import { createRequire } from 'module';
 import * as path from 'path';
 import type { Browser, BrowserContext, Page } from 'playwright';
@@ -12,9 +13,30 @@ import { attachPlaywrightPageHost } from './playwright-page-host';
 import type { PlaywrightPageHost, PlaywrightPageHostOptions } from './playwright-page-host';
 import type { PageLoadOutcome } from '@shimbrowser/core/page-host';
 
+/** The one-time install that makes headless mode work anywhere (a global install is searched, see playwrightSearchDirs). */
+export const PLAYWRIGHT_INSTALL_COMMAND = 'npm install -g playwright && playwright install chromium';
+/** The same, local to a project (found through the working directory or CLAUDE_PROJECT_DIR). */
+export const PLAYWRIGHT_PROJECT_INSTALL_COMMAND = 'npm install -D playwright && npx playwright install chromium';
+
 export const PLAYWRIGHT_MISSING =
-  'Headless mode needs Playwright with Chromium: run `npm install playwright` and `npx playwright install chromium` ' +
-  'in your project (or point SHIM_PLAYWRIGHT_DIR at the folder whose node_modules has it).';
+  'Headless mode needs Playwright, which downloads its own Chromium (Shim does not bundle one), and it was not found. ' +
+  `Install it once: \`${PLAYWRIGHT_INSTALL_COMMAND}\`. Or in your project: \`${PLAYWRIGHT_PROJECT_INSTALL_COMMAND}\`. ` +
+  'Or point SHIM_PLAYWRIGHT_DIR at a folder whose node_modules has it.';
+
+/** Why headless mode can't open a page right now, with the command that fixes it. */
+export type HeadlessProblem = 'playwright-missing' | 'chromium-missing';
+
+export class HeadlessUnavailableError extends Error {
+  readonly code: HeadlessProblem;
+  /** The exact command that fixes it. */
+  readonly install: string;
+  constructor(code: HeadlessProblem, message: string, install: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'HeadlessUnavailableError';
+    this.code = code;
+    this.install = install;
+  }
+}
 
 export interface HeadlessLaunchOptions extends PlaywrightPageHostOptions {
   /** Show the browser window (the default is headless). */
@@ -46,20 +68,52 @@ export function describeLoadFailure(outcome: Exclude<PageLoadOutcome, { kind: 'f
   }
 }
 
+/** A `require` bound to one folder: loads a module, and (a real one) says where it is. */
+export interface ModuleLoader {
+  (id: string): unknown;
+  resolve?(id: string): string;
+}
+
 /** A `require` that resolves from `dir`, or `null` for this module's own. */
-export type RequireFrom = (dir: string | null) => (id: string) => unknown;
+export type RequireFrom = (dir: string | null) => ModuleLoader;
 
 const defaultRequireFrom: RequireFrom = (dir) => (dir === null ? require : createRequire(path.join(path.resolve(dir), 'package.json')));
 
 /**
+ * Folders whose `node_modules` a global npm install lands in, derived without
+ * running anything: npm's configured prefix, then the prefix of the node that
+ * runs this (nvm, the official installers, most package managers put global
+ * packages beside their node). `<prefix>/lib/node_modules` on POSIX,
+ * `<prefix>/node_modules` on Windows.
+ */
+export function globalPrefixDirs(env: Record<string, string | undefined>, execPath: string, platform: string): string[] {
+  const p = platform === 'win32' ? path.win32 : path.posix;
+  const forPrefix = (prefix: string): string => (platform === 'win32' ? prefix : p.join(prefix, 'lib'));
+  const out: string[] = [];
+  const prefix = env.npm_config_prefix || env.NPM_CONFIG_PREFIX;
+  if (prefix) out.push(forPrefix(prefix));
+  const nodePrefix = platform === 'win32' ? p.dirname(execPath) : p.dirname(p.dirname(execPath));
+  const derived = forPrefix(nodePrefix);
+  if (!out.includes(derived)) out.push(derived);
+  return out;
+}
+
+/**
  * Where Playwright is looked for, in order. The Claude Code plugin runs the
  * bundle from the plugin cache, where a plain `require` walks the cache's
- * ancestors, never the user's project, so the caller's install is searched
- * too: SHIM_PLAYWRIGHT_DIR first (explicit), then this module's own
- * resolution (a normal npm install of the package), then the working
- * directory and CLAUDE_PROJECT_DIR (the project Claude Code runs in).
+ * ancestors (the plugin's own folder included), never the user's project, so
+ * the caller's installs are searched too: SHIM_PLAYWRIGHT_DIR first
+ * (explicit), then this module's own resolution (a normal npm install of the
+ * package, the plugin folder, and NODE_PATH), then the working directory and
+ * CLAUDE_PROJECT_DIR (the project Claude Code runs in), then a global install
+ * (globalPrefixDirs). `npm root -g` is asked last, by loadPlaywright, only
+ * when all of these miss.
  */
-export function playwrightSearchDirs(env: Record<string, string | undefined>, cwd: string): Array<string | null> {
+export function playwrightSearchDirs(
+  env: Record<string, string | undefined>,
+  cwd: string,
+  global: readonly string[] = [],
+): Array<string | null> {
   const dirs: Array<string | null> = [];
   const add = (d: string | null): void => {
     if (d === null ? !dirs.includes(null) : !dirs.some((x) => x !== null && path.resolve(x) === path.resolve(d))) dirs.push(d);
@@ -68,34 +122,140 @@ export function playwrightSearchDirs(env: Record<string, string | undefined>, cw
   add(null);
   add(cwd);
   if (env.CLAUDE_PROJECT_DIR) add(env.CLAUDE_PROJECT_DIR);
+  for (const g of global) add(g);
   return dirs;
 }
 
-/** Load Playwright from the first place that has it, or throw PLAYWRIGHT_MISSING. */
-export function loadPlaywright(
-  options: { env?: Record<string, string | undefined>; cwd?: string; requireFrom?: RequireFrom } = {},
-): PlaywrightModule {
+let npmRootCache: { value: string | null } | null = null;
+
+/** `npm root -g`'s parent (the folder whose node_modules it is), asked once per process; null when npm can't say. */
+export function npmGlobalDir(): string | null {
+  if (npmRootCache) return npmRootCache.value;
+  let value: string | null = null;
+  try {
+    const out = spawnSync('npm', ['root', '-g'], { encoding: 'utf8', timeout: 10_000, shell: process.platform === 'win32', stdio: ['ignore', 'pipe', 'ignore'] });
+    const root = out.status === 0 ? out.stdout.trim() : '';
+    if (root) value = path.dirname(root);
+  } catch {
+    value = null;
+  }
+  npmRootCache = { value };
+  return value;
+}
+
+export interface LoadPlaywrightOptions {
+  env?: Record<string, string | undefined>;
+  cwd?: string;
+  requireFrom?: RequireFrom;
+  /** The global install folders searched after the project (default: globalPrefixDirs for this node). */
+  globalDirs?: readonly string[];
+  /** Asked when every other place misses (default: npmGlobalDir). */
+  npmGlobalDir?: () => string | null;
+}
+
+export interface FoundPlaywright {
+  module: PlaywrightModule;
+  /** The playwright package folder, when the loader could say. */
+  packageDir: string | null;
+}
+
+/** The command that downloads the Chromium the Playwright found at `packageDir` drives (its own CLI, so the versions match). */
+export function chromiumInstallCommand(packageDir: string | null): string {
+  return packageDir ? `node "${path.join(packageDir, 'cli.js')}" install chromium` : 'npx playwright install chromium';
+}
+
+/** Find Playwright in the first place that has it, or throw a HeadlessUnavailableError (playwright-missing). */
+export function locatePlaywright(options: LoadPlaywrightOptions = {}): FoundPlaywright {
   const requireFrom = options.requireFrom ?? defaultRequireFrom;
-  const dirs = playwrightSearchDirs(options.env ?? process.env, options.cwd ?? process.cwd());
+  const env = options.env ?? process.env;
+  const globalDirs = options.globalDirs ?? globalPrefixDirs(env, process.execPath, process.platform);
+  const dirs = playwrightSearchDirs(env, options.cwd ?? process.cwd(), globalDirs);
   const errors: unknown[] = [];
-  for (const dir of dirs) {
+  const tryDir = (dir: string | null): FoundPlaywright | null => {
     try {
-      return requireFrom(dir)('playwright') as PlaywrightModule;
+      const loader = requireFrom(dir);
+      const module = loader('playwright') as PlaywrightModule;
+      let packageDir: string | null = null;
+      try {
+        packageDir = loader.resolve ? path.dirname(loader.resolve('playwright/package.json')) : null;
+      } catch {
+        packageDir = null;
+      }
+      return { module, packageDir };
     } catch (err) {
       errors.push(err);
+      return null;
     }
+  };
+  for (const dir of dirs) {
+    const found = tryDir(dir);
+    if (found) return found;
   }
-  throw new Error(PLAYWRIGHT_MISSING, { cause: new AggregateError(errors, 'playwright was not found') });
+  const npmDir = (options.npmGlobalDir ?? npmGlobalDir)();
+  if (npmDir !== null && !dirs.some((d) => d !== null && path.resolve(d) === path.resolve(npmDir))) {
+    const found = tryDir(npmDir);
+    if (found) return found;
+  }
+  throw new HeadlessUnavailableError('playwright-missing', PLAYWRIGHT_MISSING, PLAYWRIGHT_INSTALL_COMMAND, {
+    cause: new AggregateError(errors, 'playwright was not found'),
+  });
+}
+
+let found: FoundPlaywright | null = null;
+
+/** Load Playwright from the first place that has it, or throw PLAYWRIGHT_MISSING (a HeadlessUnavailableError). */
+export function loadPlaywright(options: LoadPlaywrightOptions = {}): PlaywrightModule {
+  return locatePlaywright(options).module;
+}
+
+/** This process's Playwright, found once (a miss is looked for again next time: the user may have installed it since). */
+function processPlaywright(): FoundPlaywright {
+  found ??= locatePlaywright();
+  return found;
+}
+
+/** Whether headless mode can open a page, and if not, the command that fixes it. Chromium itself is checked when a page opens. */
+export type HeadlessReadiness =
+  | { available: true; playwright: string }
+  | { available: false; error: HeadlessProblem; reason: string; install: string };
+
+export function headlessReadiness(locate: () => FoundPlaywright = processPlaywright): HeadlessReadiness {
+  try {
+    const pw = locate();
+    return { available: true, playwright: pw.packageDir ?? 'found' };
+  } catch (err) {
+    if (err instanceof HeadlessUnavailableError) return { available: false, error: err.code, reason: err.message, install: err.install };
+    throw err;
+  }
+}
+
+// Playwright's own wording for a browser that was never downloaded.
+const MISSING_BROWSER = /Executable doesn't exist|playwright install|browserType\.launch: .*not found/i;
+
+/** A launch failure as what to do about it: a missing download is chromium-missing, with the command; anything else stays an error. */
+export function launchFailure(err: unknown, packageDir: string | null): Error {
+  const message = err instanceof Error ? err.message : String(err);
+  if (MISSING_BROWSER.test(message)) {
+    const install = chromiumInstallCommand(packageDir);
+    return new HeadlessUnavailableError(
+      'chromium-missing',
+      `Playwright is installed${packageDir ? ` (${packageDir})` : ''} but the Chromium it drives is not downloaded: run \`${install}\`. ` +
+      'Shim does not bundle Chromium.',
+      install,
+      { cause: err },
+    );
+  }
+  return new Error(`Chromium failed to launch: ${message.split('\n')[0] ?? message}`, { cause: err });
 }
 
 /** Launch Chromium, open one page, attach the headless PageHost to it. */
 export async function openHeadlessPage(options: HeadlessLaunchOptions = {}): Promise<HeadlessPage> {
-  const { chromium } = loadPlaywright();
+  const pw = processPlaywright();
   let browser: Browser;
   try {
-    browser = await chromium.launch({ headless: options.visible !== true });
+    browser = await pw.module.chromium.launch({ headless: options.visible !== true });
   } catch (err) {
-    throw new Error(`${PLAYWRIGHT_MISSING} (${err instanceof Error ? err.message : String(err)})`, { cause: err });
+    throw launchFailure(err, pw.packageDir);
   }
   try {
     const context: BrowserContext = await browser.newContext({ viewport: options.viewport ?? { width: 1280, height: 800 } });

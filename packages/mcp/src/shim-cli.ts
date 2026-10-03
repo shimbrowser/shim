@@ -36,14 +36,16 @@ Usage:
                [--full-page] [--visible] [--storage <file.json>] [--json]
       Apply a shim folder to a page in a fresh headless Chromium and print the
       evidence: per-rule matches, handler errors, console. Needs Playwright
-      (npm install playwright && npx playwright install chromium).
+      (once: npm install -g playwright && playwright install chromium).
 
   shim launch [--timeout <seconds>] [--json]
       Attach to the running Shim browser, or start it with its control
       endpoint on.
 
-  shim mcp [--headless] [--visible]
-      Start the MCP server on stdio (what the Claude Code plugin runs).
+  shim mcp [--attach | --headless] [--visible]
+      Start the MCP server on stdio (what the Claude Code plugin runs). By
+      default a Shim tab attaches and a url opens headless while no Shim
+      browser is reachable; --attach / --headless allow one mode only.
 
   shim help | --help      shim version | --version
 `;
@@ -197,10 +199,13 @@ async function run(argv: string[], ctx: ShimCliContext): Promise<number> {
     }
 
     case 'mcp':
-      // The server's own flags (--headless, --visible), read by cliMode.
+      // The server's own flags (--attach, --headless, --visible), read by cliMode.
       for (const arg of rest) {
-        if (arg !== '--headless' && arg !== '--visible') throw new UsageError(`shim mcp takes --headless and --visible only (got ${arg})`);
+        if (arg !== '--attach' && arg !== '--headless' && arg !== '--visible') {
+          throw new UsageError(`shim mcp takes --attach, --headless and --visible only (got ${arg})`);
+        }
       }
+      if (rest.includes('--attach') && rest.includes('--headless')) throw new UsageError('shim mcp: --attach and --headless are exclusive');
       await ctx.runMcp(rest);
       return EXIT_OK;
 
