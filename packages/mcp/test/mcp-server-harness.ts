@@ -453,6 +453,16 @@ async function main(): Promise<void> {
     const rc = firstJson(await call(cc, 'read_calls', {}));
     const rcReq = sc.filter((s) => s.path === '/sessions/sess-c/call').pop();
     check('a composition tool forwards to /call', JSON.stringify(rcReq?.body) === JSON.stringify({ name: 'read_calls', input: {} }) && rc.scope === 'current');
+    {
+      // Over the 8 MiB shim bound, inside the composition's: decoded under
+      // the session's own limits, not the default shim ones.
+      checkoutFiles = { ...COMP_FILES, 'big.bin': new Uint8Array(9 * 1024 * 1024) };
+      const bigDir = path.join(tmpDir(), 'big-composition');
+      const big = await call(cc, 'shim_checkout', { sessionId: 'sess-c', dir: bigDir });
+      check('a composition checkout over the shim size bound still checks out', big.isError !== true
+        && fs.statSync(path.join(bigDir, 'big.bin')).size === 9 * 1024 * 1024, big.content[0]?.text?.slice(0, 300));
+      checkoutFiles = COMP_FILES;
+    }
     await cc.close();
   }
 
