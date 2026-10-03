@@ -12,7 +12,17 @@
 //     (or that sits after a new one) is removed and re-emitted, which
 //     appends it. The resulting rule order is the folder's.
 //   - settings / permissions / intent / storage / connections changes →
-//     their replace-wholesale `set-*` op.
+//     their replace-wholesale `set-*` op. They're compared in the form
+//     applyDelta stores them in (an absent settings / permissions list is
+//     `[]`, intent is normalizeIntent'd), so applying the ops always yields a
+//     state the same folder diffs against to no ops — re-syncing an unchanged
+//     folder never emits an op (and a commit) again.
+//   - a global shim's `sharedHandlers` (its `api.shared` code-space) → one
+//     `set-shared-handler` per added or changed entry and one
+//     `remove-shared-handler` per dropped one. The evolution contract (a
+//     still-referenced function can't be removed) is enforced at commit, as
+//     for an internal turn. On a non-global shim it stays not-editable — an
+//     internal turn never adds a shared code-space there either.
 //   - any other spec field (id, match, css, …) has no op, so changing it is
 //     a ShimFolderError('not-editable') rather than a silent drop.
 //
@@ -26,6 +36,7 @@ import type { Spec, Rule } from './types';
 import type { DeltaOp } from './spec-delta';
 import { moduleForExpression, moduleToExpression } from './handler-source';
 import { canonicalModule } from './spec-lint';
+import { normalizeIntent } from './intent';
 import {
   readShimFolder, ShimFolderError, anchorDigest, referencedHandlerNames, stableStringify, handlerPath,
 } from './shim-folder';
@@ -75,6 +86,39 @@ function ruleFingerprint(rule: Rule, modules: Record<string, string>): string {
   return stableStringify({ ...rest, anchor, handlers: canonical });
 }
 
+// A declaration as applyDelta would store it: set-settings / set-permissions
+// store a missing list as `[]`, set-intent trims and caps. A malformed value
+// passes through unchanged so declarationOp still reports it.
+function canonicalDeclaration(field: DeclarationField, value: unknown): unknown {
+  if ((field === 'settings' || field === 'permissions') && value === undefined) return [];
+  if (field === 'intent' && typeof value === 'string') return normalizeIntent(value);
+  return value;
+}
+
+// A global shim's shared code-space, diffed entry by entry: an absent map and
+// an empty one are the same, so re-syncing never emits an op.
+function sharedHandlerOps(before: unknown, after: unknown, problems: string[]): DeltaOp[] {
+  if (after !== undefined && !isStringMap(after)) {
+    problems.push('"sharedHandlers" must be an object of function sources');
+    return [];
+  }
+  const prev: Record<string, string> = isStringMap(before) ? before : {};
+  const next: Record<string, string> = after ?? {};
+  const ops: DeltaOp[] = [];
+  for (const [name, source] of Object.entries(next)) {
+    if (!Object.hasOwn(prev, name) || prev[name] !== source) ops.push({ op: 'set-shared-handler', name, source });
+  }
+  for (const name of Object.keys(prev)) {
+    if (!Object.hasOwn(next, name)) ops.push({ op: 'remove-shared-handler', name });
+  }
+  return ops;
+}
+
+function isStringMap(value: unknown): value is Record<string, string> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    && Object.values(value).every((v) => typeof v === 'string');
+}
+
 function declarationOp(field: DeclarationField, value: unknown, problems: string[]): DeltaOp | null {
   switch (field) {
     case 'settings':
@@ -88,7 +132,7 @@ function declarationOp(field: DeclarationField, value: unknown, problems: string
       return { op: 'set-permissions', permissions: Array.isArray(value) ? (value as string[]) : [] };
     case 'intent':
       if (value !== undefined && typeof value !== 'string') { problems.push('"intent" must be a string'); return null; }
-      return { op: 'set-intent', intent: value };
+      return { op: 'set-intent', intent: normalizeIntent(value) };
     case 'storage':
       return { op: 'set-storage', storage: value };
     case 'connections':
@@ -113,6 +157,8 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
   const nextRecord = next as unknown as Record<string, unknown>;
   const prevRecord = prev as unknown as Record<string, unknown>;
   const declarations = new Set<string>(DECLARATION_FIELDS);
+  const sharedEditable = prev.global === true;
+  if (sharedEditable) declarations.add('sharedHandlers');
   for (const key of new Set([...Object.keys(prevRecord), ...Object.keys(nextRecord)])) {
     if (UNCOMPARED_FIELDS.has(key) || declarations.has(key)) continue;
     if (stableStringify(prevRecord[key]) !== stableStringify(nextRecord[key])) {
@@ -123,10 +169,12 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
 
   const ops: DeltaOp[] = [];
   for (const field of DECLARATION_FIELDS) {
-    if (stableStringify(prevRecord[field]) === stableStringify(nextRecord[field])) continue;
+    const before = canonicalDeclaration(field, prevRecord[field]);
+    if (stableStringify(before) === stableStringify(canonicalDeclaration(field, nextRecord[field]))) continue;
     const op = declarationOp(field, nextRecord[field], problems);
     if (op) ops.push(op);
   }
+  if (sharedEditable) ops.push(...sharedHandlerOps(prevRecord.sharedHandlers, nextRecord.sharedHandlers, problems));
   if (problems.length) throw new ShimFolderError('malformed-shim-folder', problems);
 
   const prevRules = (prev.rules || []).filter((rule) => typeof rule?.id === 'string');

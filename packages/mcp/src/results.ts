@@ -120,3 +120,8 @@ export function fitToBudget(content: McpContent[], maxTokens: number): McpConten
   }
   return out;
 }
+
+/** One text, cut down to fit `maxTokens` the way fitToBudget cuts a text block. */
+export function fitText(text: string, maxTokens: number): string {
+  return fitToBudget([{ type: 'text', text }], maxTokens).map((block) => (block.type === 'text' ? block.text : '')).join('');
+}
