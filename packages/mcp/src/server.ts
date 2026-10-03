@@ -188,28 +188,6 @@ function replyOrThrow(reply: ControlReply): Record<string, unknown> {
   throw new ToolFailure(code, detail);
 }
 
-// shim_list_tabs answers each tab's tabId as the id shim_open_session
-// targets: Shim's webContentsId (GET /tabs names it so, beside Shim's own
-// per-window tab number, which no tool takes). The per-window number is left
-// out rather than offered as a second, wrong "tabId".
-export function agentTabs(reply: Record<string, unknown>): Record<string, unknown> {
-  if (!Array.isArray(reply.windows)) return reply;
-  return {
-    ...reply,
-    windows: reply.windows.map((w: unknown) => {
-      if (!isRecord(w) || !Array.isArray(w.tabs)) return w;
-      return {
-        ...w,
-        tabs: w.tabs.map((t: unknown) => {
-          if (!isRecord(t)) return t;
-          const { webContentsId, tabId: _perWindow, ...rest } = t;
-          return { tabId: typeof webContentsId === 'number' ? webContentsId : null, ...rest };
-        }),
-      };
-    }),
-  };
-}
-
 export function createShimMcpServer(deps: ShimMcpDeps): Server {
   const server = new Server(
     { name: SERVER_NAME, version: deps.version },

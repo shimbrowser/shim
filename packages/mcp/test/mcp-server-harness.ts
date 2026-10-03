@@ -176,7 +176,7 @@ async function main(): Promise<void> {
     const listed = firstJson(await call(client, 'shim_list_tabs'));
     const tabs = ((listed.windows as Array<Record<string, unknown>>)[0]?.tabs ?? []) as Array<Record<string, unknown>>;
     check('shim_list_tabs answers each tab\'s tabId as the id a session targets (its webContentsId)', tabs[0]?.tabId === 41 && !('webContentsId' in (tabs[0] ?? {}))
-      && tabs[1]?.tabId === null && tabs[0]?.url === 'https://a.example/', JSON.stringify(tabs));
+      && tabs.length === 1 && tabs[0]?.url === 'https://a.example/', JSON.stringify(tabs));
     await call(client, 'shim_open_session', { tabId: tabs[0]?.tabId, intent: 'x', shimId: 's' });
     const target = (sent.filter((r) => r.path === '/sessions').pop()?.body as Record<string, unknown> | undefined)?.target;
     check('…and that tabId is the target shim_open_session sends', JSON.stringify(target) === JSON.stringify({ webContentsId: 41 }), JSON.stringify(target));
@@ -373,7 +373,10 @@ async function main(): Promise<void> {
     fs.mkdirSync(cdir, { recursive: true });
     fs.writeFileSync(path.join(cdir, 'manifest.json'), '{}');
     const notOurs = await call(cc, 'shim_open_session', { intent: 'Build a crate view', compositionId: 'comp-1', dir: cdir });
-    check('a folder that merely holds a manifest.json is not a checkout target', notOurs.isError === true && /not-a-working-copy/.test(notOurs.content[0]?.text ?? ''));
+    const notOursOut = firstJson(notOurs);
+    check('a folder that merely holds a manifest.json is not a checkout target (the session still opens)', notOurs.isError !== true
+      && (notOursOut.checkout as Record<string, unknown> | undefined)?.error === 'not-a-working-copy'
+      && fs.readdirSync(cdir).join(',') === 'manifest.json', JSON.stringify(notOursOut));
     fs.rmSync(cdir, { recursive: true });
     const openedC = firstJson(await call(cc, 'shim_open_session', { intent: 'Build a crate view', compositionId: 'comp-1', dir: cdir }));
     const openC = sc.filter((s) => s.path === '/sessions').pop()?.body as Record<string, unknown> | undefined;
