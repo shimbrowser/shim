@@ -592,7 +592,9 @@ function toPascalCase(value: string): string {
 // `carriedHandlers`: handler sources the caller holds OUTSIDE the spec (a
 // `.shim` file's top-level `handlers` map) — same role as
 // shims.assertHandlersBound's extraDefinedSources. Read by the handler-name
-// collision check only; every other check sees exactly what it always has.
+// collision check and by transform/wrap binding (rewrite-response /
+// intercept), which must see the sources an import will write to
+// patch_files; every other check sees exactly what it always has.
 function lintSpec(spec: unknown, carriedHandlers?: unknown): LintResult {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -685,15 +687,21 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown): LintResult {
 
     lintMediaHideRule(rid, rule, mutationsList, warnings);
 
-    // The "patch-level handler set" a rewrite-response transform may resolve
-    // through, alongside this rule's own `handlers` — merged once per rule
-    // (not per mutation) since it's the same scope for every mutation in the
-    // rule. `s.handlers` is the import-carried top-level map (LintableSpec);
-    // rule.handlers wins on key collision, matching shims.ts's own
-    // baseSources → ruleSources merge order for the analogous script-handler
-    // lookup.
+    // The "patch-level handler set" a rewrite-response transform / intercept
+    // wrap may resolve through, alongside this rule's own `handlers` — merged
+    // once per rule (not per mutation) since it's the same scope for every
+    // mutation in the rule. Lowest to highest precedence: the caller-carried
+    // map (a `.shim` file's top-level `handlers` — export strips both
+    // rule.handlers and spec.handlers, so on import this is the ONLY place a
+    // transform/wrap source lives; it lands in patch_files, which is what the
+    // runtime bag resolves through), then `s.handlers`, then rule.handlers —
+    // the same extraDefinedSources → spec.handlers → rule.handlers order
+    // shims' findUnboundScriptHandlers uses for script handlers. Precedence
+    // only matters for binding here: a name defined with DIFFERENT source in
+    // two of these places is still rejected by lintHandlerNameCollisions.
     const handlerScope: { handlers: Record<string, unknown> } = {
       handlers: {
+        ...(isRecord(carriedHandlers) ? carriedHandlers : {}),
         ...(s && isRecord(s.handlers) ? s.handlers : {}),
         ...(isRecord(rule.handlers) ? rule.handlers : {}),
       },
