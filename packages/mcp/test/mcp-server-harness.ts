@@ -337,6 +337,18 @@ async function main(): Promise<void> {
     check('open whose checkout fails still answers the open session', openedBusy.isError !== true && busy.sessionId === 'sess-2'
       && busyCheckout?.error === 'not-a-working-copy' && /shim_checkout/.test(String(busy.hint)), JSON.stringify(busy));
     check('…and leaves the folder alone', fs.readdirSync(occupied).join(',') === 'README.md');
+    if (process.getuid?.() !== 0) {
+      // A native fs error (EACCES here), not a FolderError: still the
+      // checkout's failure, never a failed open.
+      const locked = path.join(tmpDir(), 'locked');
+      fs.mkdirSync(locked, { mode: 0o500 });
+      const openedLocked = await call(c3, 'shim_open_session', { tabId: 1, intent: 'x', shimId: 's', dir: path.join(locked, 'wc') });
+      const lockedBody = firstJson(openedLocked);
+      const lockedCheckout = lockedBody.checkout as Record<string, unknown> | undefined;
+      check('an fs error during the checkout still answers the open session', openedLocked.isError !== true && lockedBody.sessionId === 'sess-2'
+        && lockedCheckout?.error === 'checkout-failed' && typeof lockedCheckout.detail === 'string', JSON.stringify(lockedBody));
+      fs.chmodSync(locked, 0o700);
+    }
     const unknown = await call(c3, 'not_a_tool');
     check('an unknown tool is an error result', unknown.isError === true && /unknown-tool/.test(unknown.content[0]?.text ?? ''));
     await c3.close();
