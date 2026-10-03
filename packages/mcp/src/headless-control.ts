@@ -31,6 +31,7 @@ import * as path from 'path';
 import { createSessionRegistry, LEASE_TIMEOUT, type SessionLease, type SessionLeases, type SessionRegistry, type Timers } from '@shimbrowser/core/session-registry';
 import { unpackShim, ShimFolderError, type ShimFile } from '@shimbrowser/core/shim-folder';
 import { preflightSpec } from '@shimbrowser/core/capability-preflight';
+import { lintSpec } from '@shimbrowser/core/spec-lint';
 import type { Spec } from '@shimbrowser/core/types';
 import { isApiMapToolName } from '@shimbrowser/core/api-map-tools';
 import { isCompositionSessionToolName } from '@shimbrowser/core/composition-session-tools';
@@ -164,6 +165,17 @@ export function loadShimFile(file: string): { ok: true; source: Omit<HeadlessShi
   }
   const specOnly = { ...spec };
   delete specOnly.handlers;
+  // The commit-time lint a preview and a commit run (packShim's), before
+  // anything opens: unpackShim checks the envelope, not the rules, so a
+  // hand-edited file could otherwise reach preflight (which would throw on a
+  // malformed rule) or the page (where it would silently misapply). Lint
+  // throws on a structurally broken rule (a non-array `mutations`).
+  try {
+    const { errors } = lintSpec({ ...specOnly, handlers });
+    if (errors.length) return { ok: false, error: 'spec-lint', detail: errors.join('; ') };
+  } catch (e) {
+    return { ok: false, error: 'malformed-shim-file', detail: `the shim's rules are malformed: ${errMessage(e)}` };
+  }
   const envelope: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(parsed)) {
     if (key !== 'format' && key !== 'name' && key !== 'spec' && key !== 'handlers') envelope[key] = value;

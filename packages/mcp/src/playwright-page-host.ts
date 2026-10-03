@@ -169,6 +169,20 @@ const NET_ERRORS: Record<string, number> = {
   'net::ERR_EMPTY_RESPONSE': -324,
   'net::ERR_TOO_MANY_REDIRECTS': -310,
 };
+// A CDP RemoteObject's value as returnByValue hands it back. JSON can't hold
+// NaN, ±Infinity, -0 or a bigint, so CDP sends those as
+// `unserializableValue` ("NaN", "-0", "12n", …) with no `value`: decoded here
+// so the headless host answers what the Electron host does.
+export function remoteObjectValue(result: { value?: unknown; unserializableValue?: string }): unknown {
+  const raw = result.unserializableValue;
+  if (raw === undefined) return result.value;
+  if (raw.endsWith('n')) {
+    try { return BigInt(raw.slice(0, -1)); } catch { return undefined; }
+  }
+  if (raw === '-0') return -0;
+  return Number(raw);
+}
+
 export function netErrorCode(errorText: string): number {
   const key = errorText.trim().split(/\s/)[0] ?? '';
   return NET_ERRORS[key] ?? -2;
@@ -365,7 +379,7 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
       const ex = res.exceptionDetails;
       throw new Error(ex.exception?.description ?? ex.text);
     }
-    return res.result.value;
+    return remoteObjectValue(res.result);
   }
 
   async function evaluate(code: string, world: PageWorld): Promise<unknown> {
@@ -539,7 +553,9 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
 
   return {
     capabilities: HEADLESS_CAPABILITIES,
-    url: () => (page.isClosed() ? '' : page.url()),
+    // Detached reads as closed (isClosed), so no URL either: the page itself
+    // stays open, but this host no longer answers for it.
+    url: () => (detached || page.isClosed() ? '' : page.url()),
     isClosed: () => detached || page.isClosed(),
     evaluate,
     screenshot,

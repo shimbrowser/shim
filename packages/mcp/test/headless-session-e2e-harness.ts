@@ -245,7 +245,7 @@ async function main(): Promise<void> {
     await call('shim_end_session', {});
 
     // --- a .shim declaring an unsupported kind can't open --------------------------
-    const bad = { ...file, spec: { ...fspec, rules: [...frules, { id: 'icpt', anchor: { primary: { kind: 'css', value: 'body' } }, mutations: [{ kind: 'intercept', module: 'm', wrap: 'w' }] }] } };
+    const bad = { ...file, spec: { ...fspec, rules: [...frules, { id: 'icpt', anchor: { primary: { kind: 'css', value: 'body' } }, mutations: [{ kind: 'intercept', module: { loader: 'amd', id: 'm' }, wrap: 'w' }], handlers: { w: 'function w(mod) { return mod; }' } }] } };
     const badFile = path.join(tmp, 'bad.shim');
     fs.writeFileSync(badFile, JSON.stringify(bad));
     const refusedOpen = await call('shim_open_session', { url: `${origin}/`, intent: 'x', shimFile: badFile });

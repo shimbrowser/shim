@@ -121,7 +121,11 @@ export function defaultShimFileFor(dir: string): string {
 /** The folder a `.shim` unpacks into by default: its path without the extension. */
 export function defaultFolderFor(file: string): string {
   const abs = path.resolve(file);
-  if (!abs.endsWith('.shim') || abs.length === '.shim'.length) {
+  // The basename, not the resolved path: a file literally named `.shim` has
+  // no stem, and stripping the extension from its path would unpack into
+  // its parent folder (the current directory, say).
+  const base = path.basename(abs);
+  if (!base.endsWith('.shim') || base.length === '.shim'.length) {
     throw new CliError('invalid-arguments', `${abs} has no .shim extension: name the folder to unpack into with --out`);
   }
   return abs.slice(0, -'.shim'.length);
