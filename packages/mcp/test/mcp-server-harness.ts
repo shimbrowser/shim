@@ -52,7 +52,7 @@ function refuse(status: number, error: string, detail?: string): ControlReply {
 
 const PNG_1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
-function rig(script: Script, opts: { running?: boolean; agentName?: string } = {}) {
+function rig(script: Script, opts: { running?: boolean; agentName?: string; maxOutputTokens?: number } = {}) {
   const sent: Sent[] = [];
   let ids = 0;
   const control: ControlClient = {
@@ -69,7 +69,7 @@ function rig(script: Script, opts: { running?: boolean; agentName?: string } = {
     connect: () => (opts.running === false ? null : control),
     launch: async () => ({ ok: true, how: 'attached', info: control.info, detail: 'running' }),
     newCommitId: () => `commit-${++ids}`,
-    maxOutputTokens: 25_000,
+    maxOutputTokens: opts.maxOutputTokens ?? 25_000,
     ...(opts.agentName ? { agentName: opts.agentName } : {}),
   };
   return { sent, deps };
@@ -414,6 +414,26 @@ async function main(): Promise<void> {
     const rcReq = sc.filter((s) => s.path === '/sessions/sess-c/call').pop();
     check('a composition tool forwards to /call', JSON.stringify(rcReq?.body) === JSON.stringify({ name: 'read_calls', input: {} }) && rc.scope === 'current');
     await cc.close();
+  }
+
+  console.log('error results are held to the output budget:');
+  {
+    // A refusal can list hundreds of bad paths; an unbounded error would be
+    // dropped whole by Claude Code, losing the diagnostic.
+    const longDetail = Array.from({ length: 500 }, (_, i) => `handlers/${'x'.repeat(200)}-${i}.js is not a valid handler name`).join('; ');
+    const { deps: d4 } = rig((req) => {
+      if (req.path === '/sessions') return ok({ sessionId: 'sess-4' });
+      if (req.path.endsWith('/checkout')) return ok({ revision: 0, files: encodeWorkingCopy(CHECKOUT_FILES) });
+      if (req.path.endsWith('/commit')) return refuse(409, 'stale-revision', longDetail);
+      return refuse(404, 'not-found');
+    }, { maxOutputTokens: 1_000 });
+    const c4 = await connect(d4);
+    await call(c4, 'shim_open_session', { tabId: 1, intent: 'x', shimId: 's', dir: path.join(tmpDir(), 'budget') });
+    const big = await call(c4, 'shim_commit', { summary: 's', revision: 1 });
+    const bigText = big.content.map((b) => b.text ?? '').join('');
+    check('an oversized error is cut to the budget', big.isError === true && bigText.length <= 1_000 * 4 && longDetail.length > 1_000 * 4, String(bigText.length));
+    check('…keeping its code, the cut marker and the hint', /^stale-revision: handlers\//.test(bigText) && /more characters cut/.test(bigText) && /Preview again/.test(bigText), bigText.slice(-300));
+    await c4.close();
   }
 
   console.log('agent names:');

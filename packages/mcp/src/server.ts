@@ -46,7 +46,7 @@ import type { LaunchOutcome } from './launch';
 import {
   FolderError, readWorkingCopy, readCompositionWorkingCopy, writeCheckout, writeCompositionCheckout, checkoutKind, folderKind, type WorkingCopyKind,
 } from './folder';
-import { toMcpContent, fitToBudget, type McpContent } from './results';
+import { toMcpContent, fitToBudget, fitText, estimateTokens, type McpContent } from './results';
 
 export const SERVER_NAME = 'shim';
 
@@ -138,9 +138,14 @@ function withApiMapHint(result: unknown): unknown {
   return hint ? { ...result, hint } : result;
 }
 
-function failureResult(code: string, detail: string): CallToolResult {
+// An error answer is held to the same output budget as a success: a detail
+// listing hundreds of bad folder paths would otherwise be dropped whole by
+// Claude Code. The detail gives way; the code and the hint always survive.
+function failureResult(code: string, detail: string, maxTokens: number): CallToolResult {
   const hint = HINTS[code];
-  return { isError: true, content: [{ type: 'text', text: `${code}: ${detail}${hint ? `\n${hint}` : ''}` }] };
+  const tail = hint ? `\n${hint}` : '';
+  const head = fitText(`${code}: ${detail}`, Math.max(0, maxTokens - estimateTokens({ type: 'text', text: tail })));
+  return { isError: true, content: [{ type: 'text', text: `${head}${tail}` }] };
 }
 
 function text(value: unknown): McpContent {
@@ -447,7 +452,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       else if (isPageToolName(name)) content = await pageTool(sessionId(input), name, input);
       else if (isApiMapToolName(name)) content = await apiMapTool(sessionId(input), name, input);
       else if (isCompositionSessionToolName(name)) content = await pageTool(sessionId(input), name, input);
-      else return failureResult('unknown-tool', `no tool named "${name}"`);
+      else return failureResult('unknown-tool', `no tool named "${name}"`, deps.maxOutputTokens);
       return { content: fitToBudget(content, deps.maxOutputTokens) };
     } catch (e) {
       if (e instanceof ToolFailure) {
@@ -455,10 +460,10 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           const id = str(input, 'sessionId') ?? current;
           if (id) forget(id);
         }
-        return failureResult(e.code, e.detail);
+        return failureResult(e.code, e.detail, deps.maxOutputTokens);
       }
-      if (e instanceof FolderError) return failureResult(e.code, e.message);
-      return failureResult('internal-error', e instanceof Error ? e.message : String(e));
+      if (e instanceof FolderError) return failureResult(e.code, e.message, deps.maxOutputTokens);
+      return failureResult('internal-error', e instanceof Error ? e.message : String(e), deps.maxOutputTokens);
     }
   });
 

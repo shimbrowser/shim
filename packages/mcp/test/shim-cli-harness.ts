@@ -8,7 +8,7 @@
 //     unpack → pack is lossless, a witness survives an unrelated edit and is
 //     dropped when its anchor changes, a lint error or a malformed folder
 //     exits 1 with every problem, unpack never writes into a folder that
-//     isn't empty or a shim folder;
+//     isn't empty or a shim folder, a pack it can't write exits 2;
 //   - lint on a folder and on a .shim file, --json, and --headless adding
 //     D15's preflight (errors) and source scan (warnings);
 //   - launch: attached / launched / failed, --timeout, --json never printing
@@ -16,8 +16,11 @@
 //   - mcp: forwards its two flags to the server, refuses anything else;
 //   - preview over a scripted PageHost: every rule's evidence, the
 //     screenshot written, exit 1 for handler errors / no match / an
-//     unsupported kind (nothing applied), a folder without rules, --storage
-//     backing api.storage, and nothing left behind (page closed, temp gone).
+//     unsupported kind (nothing applied), a folder without rules, a folder
+//     pack would refuse (no match.hosts, a lint error) refused before a page
+//     opens, .shim-state.json witnesses (and the deploy baseline) restored
+//     for unchanged anchors, --storage backing api.storage, and nothing left
+//     behind (page closed, temp gone).
 //
 // The real-browser run of `shim preview` is shim-cli-e2e-harness.ts (the
 // playwright-conformance CI job).
@@ -253,6 +256,29 @@ async function main(): Promise<void> {
     check('unpack refuses another .shim format', (await cli(r, 'unpack', pack, '-o', path.join(tmp, 'pack-out'))) === EXIT_PROBLEM
       && /shim-pack\/1/.test(r.err.join('\n')));
 
+    const blocker = path.join(tmp, 'not-a-folder');
+    fs.writeFileSync(blocker, 'a file');
+    check('a pack it cannot write exits 2 (write-failed), no temp file left', (await cli(r, 'pack', unpacked, '--out', path.join(blocker, 'x.shim'))) === EXIT_USAGE
+      && /write-failed/.test(r.err[0] ?? '') && fs.readFileSync(blocker, 'utf8') === 'a file', r.err);
+    check('an unpack it cannot write exits 2 (write-failed)', (await cli(r, 'unpack', exportedFile, '-o', path.join(blocker, 'sub'))) === EXIT_USAGE
+      && /write-failed/.test(r.err[0] ?? '') && fs.readFileSync(blocker, 'utf8') === 'a file', r.err);
+    const numericHosts = writeFolder(path.join(tmp, 'numeric-hosts'), { ...BASE_SPEC, match: { hosts: [42] } }, { markTracks: MARK });
+    check('pack exits 1 on a non-string host and writes nothing', (await cli(r, 'pack', numericHosts)) === EXIT_PROBLEM
+      && /match\.hosts/.test(r.err.join('\n')) && !fs.existsSync(`${numericHosts}.shim`), r.err);
+
+    // An unreadable file in the folder is the environment, not the shim (root reads anything).
+    if (process.getuid?.() !== 0) {
+      const unreadable = writeFolder(path.join(tmp, 'unreadable'), BASE_SPEC, { markTracks: MARK });
+      const locked = path.join(unreadable, 'handlers', 'markTracks.js');
+      fs.chmodSync(locked, 0o000);
+      try {
+        check('a folder with an unreadable file exits 2 (read-failed) for pack and lint', (await cli(r, 'pack', unreadable)) === EXIT_USAGE
+          && /read-failed/.test(r.err[0] ?? '') && (await cli(r, 'lint', unreadable)) === EXIT_USAGE && /read-failed/.test(r.err[0] ?? ''), r.err);
+      } finally {
+        fs.chmodSync(locked, 0o644);
+      }
+    }
+
     const bad = writeFolder(path.join(tmp, 'bad'), { ...BASE_SPEC, rules: [{ id: 'x', anchor: css('.x'), mutations: [{ kind: 'sparkle' }] }] });
     check('pack exits 1 on a lint error and writes nothing', (await cli(r, 'pack', bad)) === EXIT_PROBLEM
       && /spec-lint/.test(r.err[0] ?? '') && /sparkle/.test(r.err[0] ?? '') && !fs.existsSync(`${bad}.shim`), r.err);
@@ -274,6 +300,9 @@ async function main(): Promise<void> {
     check('an invented kind exits 1', (await cli(r, 'lint', bad)) === EXIT_PROBLEM && /^error: .*sparkle/m.test(r.out[0] ?? ''), r.out);
     const noHosts = writeFolder(path.join(tmp, 'lint-hosts'), { id: 'h', rules: [] });
     check('a missing match.hosts is an error', (await cli(r, 'lint', noHosts)) === EXIT_PROBLEM && /match\.hosts/.test(r.out[0] ?? ''));
+    const numericHosts = writeFolder(path.join(tmp, 'lint-numeric-hosts'), { ...BASE_SPEC, match: { hosts: [42] } }, { markTracks: MARK });
+    check('a non-string host is an error, as a headless session would refuse it', (await cli(r, 'lint', numericHosts)) === EXIT_PROBLEM
+      && /match\.hosts/.test(r.out[0] ?? ''), r.out);
 
     const redirect = writeFolder(path.join(tmp, 'lint-redirect'), {
       ...BASE_SPEC,
@@ -371,7 +400,64 @@ async function main(): Promise<void> {
     check('a url outside match.hosts is a warning, not a failure', other === EXIT_OK && /warning: .*doesn't include elsewhere\.test/.test(r.out[0] ?? ''), r.out);
 
     check('a non-http url exits 2', (await cli(r, 'preview', dir, '--url', 'file:///etc/hosts')) === EXIT_USAGE);
+    const savedTmp = process.env.TMPDIR;
+    const notATempDir = path.join(tmp, 'tmp-is-a-file');
+    fs.writeFileSync(notATempDir, 'x');
+    process.env.TMPDIR = notATempDir;
+    let tmpCode: number;
+    try {
+      tmpCode = await cli(r, 'preview', dir, '--url', 'https://site.test/');
+    } finally {
+      if (savedTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = savedTmp;
+    }
+    check('a temp folder it cannot create exits 2 (write-failed)', tmpCode === EXIT_USAGE && /write-failed/.test(r.err[0] ?? ''), r.err);
     check('a malformed folder exits 1', (await cli(r, 'preview', path.join(tmp, 'broken'), '--url', 'https://site.test/')) === EXIT_PROBLEM);
+    const opened = r.pages.length;
+    const hostless = writeFolder(path.join(tmp, 'preview-hostless'), { id: 'demo-tracks', rules: BASE_SPEC.rules }, { markTracks: MARK });
+    check('a folder without match.hosts exits 1 before a page opens, as pack does', (await cli(r, 'preview', hostless, '--url', 'https://site.test/')) === EXIT_PROBLEM
+      && /match\.hosts/.test(r.err.join('\n')) && r.pages.length === opened, r.err);
+    const linty = writeFolder(path.join(tmp, 'preview-lint'), { ...BASE_SPEC, rules: [{ id: 'x', anchor: css('.x'), mutations: [{ kind: 'sparkle' }] }] });
+    check('a spec-lint error exits 1 before a page opens', (await cli(r, 'preview', linty, '--url', 'https://site.test/')) === EXIT_PROBLEM
+      && /sparkle/.test(r.err.join('\n')) && r.pages.length === opened, r.err);
+
+    // An unpacked folder: .shim-state.json keeps each rule's witness.
+    const witnessed = {
+      format: 'shim/1',
+      name: 'Demo tracks',
+      spec: {
+        ...BASE_SPEC,
+        version: 4,
+        bundleHash: 'deploy-1',
+        rules: [
+          { id: 'hide-promo', anchor: { ...css('.promo'), witness: { v: 1, tag: 'div', cls: ['promo'] } }, mutations: [{ kind: 'hide' }] },
+          { id: 'mark', anchor: { ...css('.tracks'), witness: { v: 1, tag: 'ul' } }, mutations: [{ kind: 'script', handler: 'markTracks' }] },
+        ],
+      },
+      handlers: { markTracks: MARK },
+    };
+    const witnessedFile = path.join(tmp, 'witnessed.shim');
+    fs.writeFileSync(witnessedFile, json(witnessed));
+    await cli(r, 'unpack', witnessedFile);
+    const wdir = path.join(tmp, 'witnessed');
+    const wspec = readJson(path.join(wdir, 'shim.json')) as { rules: Array<{ id: string; anchor: unknown }> };
+    const wmark = wspec.rules.find((x) => x.id === 'mark');
+    if (wmark) wmark.anchor = css('ul.tracks');
+    fs.writeFileSync(path.join(wdir, 'shim.json'), json(wspec));
+    // The engine quarantines a rule whose witness no longer verifies.
+    r.onApply = (p, emit) => {
+      if (p.rule.anchor?.witness) emit({ kind: 'rule-quarantined', specId: p.ruleKey, ruleId: p.rule.id, selector: '.promo' });
+      else matchOne(p, emit);
+    };
+    const wcode = await cli(r, 'preview', wdir, '--url', 'https://site.test/');
+    const wpage = r.pages.at(-1);
+    const sent = (id: string): PreviewRule | undefined => wpage?.applied.find((p) => p.rule.id === id);
+    check('an unchanged anchor previews with its saved witness and the deploy baseline', stableStringify(sent('hide-promo')?.rule.anchor?.witness)
+      === stableStringify({ v: 1, tag: 'div', cls: ['promo'] }) && sent('hide-promo')?.bundleHash === 'deploy-1', wpage?.applied);
+    check('a changed anchor previews without one', sent('mark') !== undefined && sent('mark')?.rule.anchor?.witness === undefined
+      && sent('mark')?.bundleHash === undefined);
+    check('the witness that no longer verifies quarantines: exit 1', wcode === EXIT_PROBLEM && /quarantined[^\n]*\n {4}hide-promo/.test(r.out[0] ?? ''), r.out);
+    r.onApply = matchOne;
 
     const storageFile = path.join(tmp, 'store.json');
     await cli(r, 'preview', dir, '--url', 'https://site.test/', '--storage', storageFile);

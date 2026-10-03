@@ -32,14 +32,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Spec, Rule, Witness } from '@shimbrowser/core/types';
-import type { PageHost, PageRuntimeEvent, PreviewRule, Unsubscribe } from '@shimbrowser/core/page-host';
+import type { PageHost, PageLoadOutcome, PageRuntimeEvent, PreviewRule, Unsubscribe } from '@shimbrowser/core/page-host';
 import type { SessionBackend, BackendPreview, BackendCheckout, BackendCommit, FinishInfo } from '@shimbrowser/core/session-registry';
 import type { DeltaOp } from '@shimbrowser/core/spec-delta';
 import { applyDelta } from '@shimbrowser/core/spec-delta';
 import { lintSpec } from '@shimbrowser/core/spec-lint';
 import {
   checkoutShim, packShim, anchorDigest, referencedHandlerNames, ShimFolderError,
-  SHIM_STATE_FILE, SHIM_STATE_FORMAT, type ShimFile, type ShimState, type FolderInput,
+  SHIM_STATE_FILE, SHIM_STATE_FORMAT, type ShimFile, type ShimState, type FolderInput, type RuleState,
 } from '@shimbrowser/core/shim-folder';
 import { moduleToExpression } from '@shimbrowser/core/handler-source';
 import { diffWorkingCopy } from '@shimbrowser/core/working-copy-diff';
@@ -105,6 +105,14 @@ export interface HeadlessBackendOptions {
   sleep?(ms: number): Promise<void>;
   /** Where commits are written (default: fs, atomically). */
   writeShimFile?(file: string, content: string): void;
+  /**
+   * Witnesses kept outside the `.shim` (a folder's .shim-state.json rules, by
+   * rule id): a preview that adds a rule the working state doesn't have gets
+   * its entry's witness back while the anchor digest still matches — as pack
+   * restores it — so `shim preview` verifies against the fingerprint the shim
+   * was committed with instead of capturing a fresh one.
+   */
+  seedWitnesses?: Record<string, RuleState>;
 }
 
 interface TimedEvent {
@@ -162,6 +170,30 @@ function hostnameOf(url: string): string {
   }
 }
 
+/**
+ * Whether a match.hosts pattern covers `url` — the browser registry's
+ * semantics (src/main/patches/host-match.ts): a pattern without a port
+ * matches any port, an exact host or a `*.` subdomain wildcard; a pattern
+ * with a port matches only that exact host:port.
+ */
+export function hostPatternMatches(pattern: string, url: URL): boolean {
+  if (pattern.includes(':')) return pattern === (url.port ? `${url.hostname}:${url.port}` : url.hostname);
+  if (pattern === url.hostname) return true;
+  return pattern.startsWith('*.') && url.hostname.endsWith(pattern.slice(1));
+}
+
+/** Whether `url` is an http(s) page one of the shim's declared hosts covers. */
+function onDeclaredHost(spec: Spec, url: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  return (spec.match?.hosts ?? []).some((h) => typeof h === 'string' && h !== '' && hostPatternMatches(h, u));
+}
+
 /** A new shim's spec for a page (the browser's shims.create shape). */
 export function newShimSpec(url: string, id: string): Spec {
   const u = new URL(url);
@@ -193,16 +225,30 @@ function writeAtomic(file: string, content: string): void {
 
 // The page-away guard (the browser's page-guard): page tools and previews
 // refuse once the page left the session's site, so nothing is measured or
-// witnessed against the wrong document.
+// witnessed against the wrong document. The site is the host the session
+// started on plus every host the shim declares (match.hosts, the registry's
+// pattern semantics), as in the Shim browser: a multi-host or wildcard shim
+// can be worked on across its declared sites.
 function pageAway(handle: HeadlessHandle): { error: string; detail: string } | null {
   if (handle.host.isClosed()) return { error: 'page-closed', detail: 'the session\'s page closed — end the session and open a new one' };
   const url = handle.host.url();
   const now = hostnameOf(url);
   if (now && now === handle.startHost) return null;
+  if (onDeclaredHost(handle.working, url)) return null;
   return {
     error: 'page-away',
     detail: `the page left ${handle.startHost} (it is at ${url || 'no page'}) — call reload_page to go back to ${handle.startUrl}`,
   };
+}
+
+function describeLoadOutcome(outcome: PageLoadOutcome): string {
+  switch (outcome.kind) {
+    case 'failed': return `failed: ${outcome.description || `error ${outcome.code}`}`;
+    case 'timed-out': return `timed out after ${RELOAD_LOAD_TIMEOUT_MS / 1000}s`;
+    case 'aborted': return 'aborted';
+    case 'destroyed': return 'the page went away';
+    case 'finished': return 'finished';
+  }
 }
 
 function refused(evidence: Record<string, unknown>): BackendPreview {
@@ -232,6 +278,21 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const writeShimFile = options.writeShimFile ?? writeAtomic;
+  const seedWitnesses = options.seedWitnesses;
+
+  // A rule new to the working state takes its seeded witness while its anchor
+  // is the one the witness was captured for (HeadlessBackendOptions.seedWitnesses).
+  function seedAddedRules(prev: Spec, next: Spec, ops: DeltaOp[]): void {
+    if (!seedWitnesses || !next.rules) return;
+    const had = new Set((prev.rules || []).map((r) => r.id));
+    const added = new Set(ops.filter((op) => op.op === 'add-rule' && op.rule?.id && !had.has(op.rule.id)).map((op) => op.rule?.id));
+    next.rules = next.rules.map((rule) => {
+      if (!added.has(rule.id) || !rule.anchor || rule.anchor.witness) return rule;
+      const entry = Object.hasOwn(seedWitnesses, rule.id) ? seedWitnesses[rule.id] : undefined;
+      if (!entry || entry.anchorDigest !== anchorDigest(rule.anchor)) return rule;
+      return { ...rule, anchor: { ...rule.anchor, witness: clone(entry.witness) } };
+    });
+  }
 
   function apply(handle: HeadlessHandle, preview: PreviewRule): void {
     handle.unsupported.delete(preview.ruleKey);
@@ -301,6 +362,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       });
     }
     const next = applyDelta(handle.working, diff.ops);
+    seedAddedRules(handle.working, next, diff.ops);
     // The browser's commit-time check, dry-run: a lint error applies nothing.
     // First, so an invented kind reads as the typo it is, not as a feature
     // this host lacks.
@@ -464,18 +526,30 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     }
     handle.reloads += 1;
     const away = pageAway(handle);
-    const loaded = handle.host.waitForLoad({ signal, timeoutMs: RELOAD_LOAD_TIMEOUT_MS, failures: 'any-frame' });
+    // Only the document's own load decides: a broken iframe must not end the
+    // wait while the main navigation is still arriving (it would wipe the
+    // previews re-applied below).
+    const loaded = handle.host.waitForLoad({ signal, timeoutMs: RELOAD_LOAD_TIMEOUT_MS, failures: 'main-frame' });
     if (away) handle.host.reload(handle.startUrl);
     else handle.host.reload();
-    await loaded;
+    const outcome = await loaded;
     if (signal.aborted) return { error: 'session ended during reload' };
     if (handle.host.isClosed()) return { error: 'the page closed during reload' };
-    await settle(signal);
+    if (outcome.kind !== 'finished') {
+      // No document to re-apply onto (or one still arriving): report it, and
+      // keep the live set so the next successful reload restores it.
+      return { error: `the reload did not finish (${describeLoadOutcome(outcome)}) — no previews were re-applied`, url: handle.host.url() };
+    }
     let reapplied = 0;
     for (const p of handle.live.values()) {
       apply(handle, p);
       reapplied++;
     }
+    // Settle after re-applying: the host applies asynchronously, so the
+    // agent's next view_page must not race the previews it was told are live.
+    await settle(signal);
+    if (signal.aborted) return { error: 'session ended during reload' };
+    if (handle.host.isClosed()) return { error: 'the page closed during reload' };
     return { ok: true, url: handle.host.url(), reapplied };
   }
 
@@ -541,7 +615,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
   }
 
   return {
-    async begin({ sessionId, target, agent, intent }) {
+    async begin({ sessionId, target, agent, intent, signal }) {
       if (!isRecord(target) || !isRecord(target.page) || !isRecord(target.source)) {
         throw new Error('a headless session needs its page and its shim');
       }
@@ -587,6 +661,9 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       handle.off.push(host.onConsole((m) => handle.console.push({ level: m.level, message: m.message, source: m.source, ts: now() })));
       // Headless has no installed shims: the committed rules run as previews.
       for (const rule of handle.working.rules || []) apply(handle, previewFor(handle, rule));
+      // The host applies asynchronously: settle (as preview and reload do) so
+      // the agent's first view_page sees the committed shim, not the bare page.
+      if (handle.live.size > 0) await settle(signal);
       return handle;
     },
     async checkout(handle): Promise<BackendCheckout> {
