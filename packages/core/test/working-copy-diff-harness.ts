@@ -18,6 +18,7 @@ import type { WorkingState } from '../src/working-copy-diff';
 import { checkoutShim, ShimFolderError, SHIM_JSON, stableStringify } from '../src/shim-folder';
 import type { FolderInput, ShimFolderErrorCode } from '../src/shim-folder';
 import { applyDelta } from '../src/spec-delta';
+import { MAX_INTENT_CHARS } from '../src/intent';
 import type { DeltaOp } from '../src/spec-delta';
 import { expressionToModule } from '../src/handler-source';
 import type { Spec, Rule, Witness } from '../src/types';
@@ -148,6 +149,25 @@ check('one set-* op each, in a fixed order',
   applied.ops.map((o) => o.op).join() === 'set-settings,set-permissions,set-intent,set-storage,set-connections', applied.ops.map((o) => o.op).join());
 applied = expectApplied('a removed declaration', withSpec((spec) => { delete spec.intent; }));
 check('clears it', kinds(applied.ops) === 'set-intent:' && applied.next.intent === undefined, kinds(applied.ops));
+// Re-syncing the same folder onto the state its ops produced must be a no-op —
+// otherwise every sync of an unchanged folder emits (and commits) again.
+const settles = (label: string, files: FolderInput, prev: WorkingState = state): DeltaOp[] => {
+  const first = diffWorkingCopy(prev, files).ops;
+  const again = diffWorkingCopy({ spec: applyDelta(prev.spec, first), handlers: prev.handlers }, files).ops;
+  check(`${label}: re-diffing the applied state is no ops`, again.length === 0, kinds(again));
+  return first;
+};
+let settled = settles('removed settings + permissions', withSpec((spec) => { delete spec.settings; delete spec.permissions; }),
+  { spec: { ...WORKING, settings: [{ key: 'k', type: 'string' }] } });
+check('clears both (stored as [])', settled.map((o) => o.op).join() === 'set-settings,set-permissions', settled.map((o) => o.op).join());
+settled = settles('an empty list where the state has none', withSpec((spec) => { spec.settings = []; }));
+check('is no change', settled.length === 0, kinds(settled));
+settled = settles('an intent with surrounding whitespace', withSpec((spec) => { spec.intent = '  hide more junk \n'; }));
+check('emits the trimmed intent', settled.length === 1 && settled[0]?.intent === 'hide more junk', JSON.stringify(settled));
+settled = settles('an over-long intent', withSpec((spec) => { spec.intent = 'x'.repeat(MAX_INTENT_CHARS + 50); }));
+check('emits the truncated intent', settled.length === 1 && (settled[0]?.intent?.length ?? 0) <= MAX_INTENT_CHARS, JSON.stringify(settled[0]?.intent?.length));
+settled = settles('only whitespace changed around the stored intent', withSpec((spec) => { spec.intent = ' hide junk '; }));
+check('is no change', settled.length === 0, kinds(settled));
 rejects('settings that aren\'t an array', 'malformed-shim-folder', () => diffWorkingCopy(state, withSpec((spec) => { (spec as unknown as Record<string, unknown>).settings = {}; })), '"settings" must be an array');
 rejects('permissions that aren\'t strings', 'malformed-shim-folder', () => diffWorkingCopy(state, withSpec((spec) => { (spec as unknown as Record<string, unknown>).permissions = [1]; })), '"permissions" must be an array of strings');
 
