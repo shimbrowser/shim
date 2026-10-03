@@ -261,6 +261,32 @@ check('the constructor handler is an own entry of an ordinary object',
 check('re-diffing the applied state is a no-op',
   diffWorkingCopy({ spec: applied.next }, checkoutShim({ spec: applied.next })).ops.length === 0);
 
+console.log('a global shim\'s shared code-space');
+const globalState: WorkingState = {
+  spec: { ...state.spec, global: true, sharedHandlers: { fmt: 'function fmt(x) { return String(x); }', keep: 'function keep() {}' } },
+  handlers: state.handlers,
+};
+const globalCheckout = (): FolderInput => checkoutShim(globalState);
+check('an untouched global checkout diffs to no ops', diffWorkingCopy(globalState, globalCheckout()).ops.length === 0);
+const sharedKinds = (ops: DeltaOp[]): string => ops.map((op) => `${op.op}:${op.name ?? ''}`).join(' ');
+applied = expectApplied('a shared handler added, one edited, one removed', withSpec((spec) => {
+  spec.sharedHandlers = { fmt: 'function fmt(x) { return `#${x}`; }', total: 'function total(a) { return a.length; }' };
+}, globalCheckout()), globalState);
+check('one set per added / changed entry, one remove per dropped one',
+  sharedKinds(applied.ops) === 'set-shared-handler:fmt set-shared-handler:total remove-shared-handler:keep', sharedKinds(applied.ops));
+check('re-diffing the applied global state is a no-op',
+  diffWorkingCopy({ spec: applied.next }, checkoutShim({ spec: applied.next })).ops.length === 0);
+const emptied = applyDelta(globalState.spec, diffWorkingCopy(globalState, withSpec((spec) => { delete spec.sharedHandlers; }, globalCheckout())).ops);
+check('dropping the map removes every entry', JSON.stringify(emptied.sharedHandlers) === '{}');
+check('an emptied map against an absent one is no change',
+  diffWorkingCopy({ spec: emptied }, withSpec((spec) => { delete spec.sharedHandlers; }, checkoutShim({ spec: emptied }))).ops.length === 0);
+rejects('a non-string shared handler', 'malformed-shim-folder',
+  () => diffWorkingCopy(globalState, withSpec((spec) => { (spec as unknown as Record<string, unknown>).sharedHandlers = { fmt: 1 }; }, globalCheckout())),
+  '"sharedHandlers"');
+rejects('shared handlers on a non-global shim', 'not-editable',
+  () => diffWorkingCopy(state, withSpec((spec) => { spec.sharedHandlers = { fmt: 'function fmt() {}' }; })),
+  '"sharedHandlers"');
+
 if (failures) {
   console.error(`\n${failures} failure(s)`);
   process.exit(1);
