@@ -100,7 +100,10 @@ const RUNTIME_SPEC_FIELDS = ['priority', '__cssPriority'] as const;
 
 // A handler name is its file name, so it must be a safe one: no separators,
 // no dots (so no `..` and no hidden files), not empty.
-const HANDLER_NAME_RE = /^[A-Za-z0-9_$][A-Za-z0-9_$-]*$/;
+// `__proto__` is excluded: as a key it can't be an own property of the
+// spec's plain `handlers` objects (nor of the browser's stored-handler bag,
+// which would drop it on import).
+const HANDLER_NAME_RE = /^(?!__proto__$)[A-Za-z0-9_$][A-Za-z0-9_$-]*$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

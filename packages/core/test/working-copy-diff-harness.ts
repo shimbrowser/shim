@@ -218,25 +218,26 @@ console.log('handler names that are Object.prototype keys');
 const protoRules = (spec: Spec): void => {
   spec.rules?.push(
     { id: 'pc', anchor: { primary: { kind: 'css', value: '.pc' } }, mutations: [{ kind: 'script', handler: 'constructor', mount: { strategy: 'portal' } }] },
-    { id: 'pp', anchor: { primary: { kind: 'css', value: '.pp' } }, mutations: [{ kind: 'script', handler: '__proto__', mount: { strategy: 'portal' } }] },
   );
 };
 rejects('a rule naming "constructor" with no file is a malformed folder, not a crash', 'malformed-shim-folder',
-  () => diffWorkingCopy(state, withSpec(protoRules, { ...checkout(), 'handlers/__proto__.js': expressionToModule('function proto() {}') })),
+  () => diffWorkingCopy(state, withSpec(protoRules)),
   'handlers/constructor.js is missing');
-applied = expectApplied('rules using constructor / __proto__ handlers', withSpec(protoRules, {
+applied = expectApplied('a rule using a constructor handler', withSpec(protoRules, {
   ...checkout(),
   'handlers/constructor.js': expressionToModule('function ctor() {}'),
-  'handlers/__proto__.js': expressionToModule('function proto() {}'),
 }));
-check('two add-rules', kinds(applied.ops) === 'add-rule:pc add-rule:pp', kinds(applied.ops));
-const protoHandlers = applied.ops[1]?.rule?.handlers;
-check('the __proto__ handler is an own entry of an ordinary object',
-  protoHandlers !== undefined && Object.hasOwn(protoHandlers, '__proto__')
-  && Object.getPrototypeOf(protoHandlers) === Object.prototype
-  && Object.getOwnPropertyDescriptor(protoHandlers, '__proto__')?.value === 'function proto() {}');
+check('one add-rule', kinds(applied.ops) === 'add-rule:pc', kinds(applied.ops));
+const ctorHandlers = applied.ops[0]?.rule?.handlers;
+check('the constructor handler is an own entry of an ordinary object',
+  ctorHandlers !== undefined && Object.hasOwn(ctorHandlers, 'constructor')
+  && Object.getPrototypeOf(ctorHandlers) === Object.prototype
+  && Object.getOwnPropertyDescriptor(ctorHandlers, 'constructor')?.value === 'function ctor() {}');
 check('re-diffing the applied state is a no-op',
   diffWorkingCopy({ spec: applied.next }, checkoutShim({ spec: applied.next })).ops.length === 0);
+rejects('a __proto__ handler file is refused (the browser\'s stored-handler bag would drop it)', 'malformed-shim-folder',
+  () => diffWorkingCopy(state, { ...checkout(), 'handlers/__proto__.js': expressionToModule('function proto() {}') }),
+  '"__proto__" is not a valid handler name');
 
 if (failures) {
   console.error(`\n${failures} failure(s)`);
