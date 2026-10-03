@@ -9,7 +9,8 @@
 // install command; a live pid whose endpoint doesn't answer); a url opens
 // headless only while no Shim is reachable, and with Shim running it is
 // refused (shim-running) unless the call asks for headless: never a silent
-// switch; every open answer names its mode and why; a tabId attaches; each
+// switch; every open answer names its mode and why; a tabId attaches, and so
+// does a composition (it needs no tab, and runs only in Shim); each
 // session keeps its mode for every later call even after Shim appears; two
 // sessions in different modes side by side; refusals carry auto-mode hints;
 // the single-mode servers refuse the other mode; the probe's reading of the
@@ -212,6 +213,16 @@ async function main(): Promise<void> {
     const opened2 = (s.openedHere as Array<{ sessionId: string; mode: string }> | undefined) ?? [];
     check('status lists the sessions with their modes', opened2.some((x) => x.sessionId === aid && x.mode === 'attach') && opened2.some((x) => x.mode === 'headless'), JSON.stringify(s.openedHere));
 
+    const composed = await call(client, 'shim_open_session', { intent: 'x', newCompositionName: 'Board', mount: 'board' });
+    const composedJson = composed.isError ? {} : json(composed);
+    check('a composition with no tabId attaches (it runs only in Shim, and needs no tab)', composedJson.mode === 'attach' && composedJson.kind === 'composition', textOf(composed));
+    const composedSent = r.attach.filter((x) => x.path === '/sessions').pop();
+    check('…sending the new composition to Shim', JSON.stringify(composedSent?.body).includes('"create":{"name":"Board","mount":"board"}'), JSON.stringify(composedSent?.body));
+    const existing = await call(client, 'shim_open_session', { intent: 'x', compositionId: 'comp-1' });
+    check('an existing composition with no tabId attaches too', !existing.isError && json(existing).mode === 'attach', textOf(existing));
+    const pinned = await call(client, 'shim_open_session', { intent: 'x', compositionId: 'comp-1', mode: 'headless' });
+    check('a composition pinned headless is requires-shim-browser', pinned.isError === true && textOf(pinned).startsWith('requires-shim-browser'), textOf(pinned));
+
     const bad = await call(client, 'shim_open_session', { url: 'https://site.test/', intent: 'x', mode: 'cloud' });
     check('an unknown mode is invalid-request', bad.isError === true && textOf(bad).startsWith('invalid-request'));
     const neither = await call(client, 'shim_open_session', { intent: 'x', newShimName: 'N' });
@@ -226,6 +237,8 @@ async function main(): Promise<void> {
     const res = await call(client, 'shim_open_session', { tabId: 3, intent: 'x', newShimName: 'N' });
     check('a tabId with no Shim is shim-not-running, with the probe\'s reason', res.isError === true && textOf(res).startsWith('shim-not-running') && /no discovery file/.test(textOf(res)), textOf(res));
     check('…and the hint offers headless', /headless session with shim_open_session \{ url/.test(textOf(res)));
+    const comp = await call(client, 'shim_open_session', { intent: 'x', newCompositionName: 'Board' });
+    check('a composition with no Shim is shim-not-running, not a headless open', comp.isError === true && textOf(comp).startsWith('shim-not-running') && !r.headless.some((x) => x.path === '/sessions'), textOf(comp));
     const tabs = await call(client, 'shim_list_tabs');
     check('shim_list_tabs with no Shim says the same', tabs.isError === true && /shim_launch/.test(textOf(tabs)) && /url/.test(textOf(tabs)));
     await client.close();

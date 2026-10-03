@@ -446,7 +446,10 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         if (requested !== undefined && requested !== 'attach' && requested !== 'headless') {
           throw new ToolFailure('invalid-request', 'mode must be "attach" or "headless" (or left out)');
         }
-        const picked = pickMode(requested, input.tabId !== undefined, url !== undefined);
+        // A composition runs only in the Shim browser and needs no tab: it
+        // picks attach as a tabId does (a headless pin still refuses it below).
+        const wantsComposition = compositionId !== undefined || newCompositionName !== undefined;
+        const picked = pickMode(requested, input.tabId !== undefined || wantsComposition, url !== undefined);
         const agent = deps.agentName || agentDisplayName(server.getClientVersion()?.name);
         let kind: WorkingCopyKind;
         let body: Record<string, unknown>;
