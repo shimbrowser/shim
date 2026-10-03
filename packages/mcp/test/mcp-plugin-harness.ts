@@ -114,6 +114,11 @@ for (const internal of ['emit_shim_delta', 'edit-handler', 'read_handler', 'prop
   check(`no internal-loop vocabulary: ${internal}`, !skill.includes(internal));
 }
 check('never asks the agent to write witnesses', !/"witness"\s*:/.test(skill));
+// What readShimFolder / diffWorkingCopy enforce must be in the folder rules,
+// or an agent following them exactly is refused.
+check('states the portable handler-name exclusions (__proto__, device names, case)',
+  skill.includes('`__proto__`') && skill.includes('`con`') && /differ only in case/.test(skill));
+check('documents sharedHandlers as editable on a global shim', /On a global shim[\s\S]{0,200}`sharedHandlers`/.test(skill) && skill.includes('api.shared.<name>'));
 
 console.log('the worked example:');
 const specBlock = /`shim\.json`:\n\n```json\n([\s\S]*?)\n```/.exec(skill)?.[1];

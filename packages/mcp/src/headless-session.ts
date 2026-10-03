@@ -38,8 +38,8 @@ import type { DeltaOp } from '@shimbrowser/core/spec-delta';
 import { applyDelta } from '@shimbrowser/core/spec-delta';
 import { lintSpec } from '@shimbrowser/core/spec-lint';
 import {
-  checkoutShim, packShim, anchorDigest, referencedHandlerNames, ShimFolderError,
-  SHIM_STATE_FILE, SHIM_STATE_FORMAT, type ShimFile, type ShimState, type FolderInput, type RuleState,
+  checkoutShim, packShim, anchorDigest, referencedHandlerNames, nameMap, ShimFolderError,
+  SHIM_STATE_FILE, SHIM_STATE_FORMAT, type ShimFile, type ShimState, type RuleState, type FolderInput,
 } from '@shimbrowser/core/shim-folder';
 import { moduleToExpression } from '@shimbrowser/core/handler-source';
 import { diffWorkingCopy } from '@shimbrowser/core/working-copy-diff';
@@ -148,7 +148,19 @@ export interface HeadlessHandle {
   unreported: Array<{ ruleId: string; member: string }>;
   reloads: number;
   off: Unsubscribe[];
+  /** The token marking the document the live previews were applied to (see documentChanged). */
+  docToken: string | null;
+  docTokens: number;
 }
+
+// A document's mark, kept in the engine world: that world is created afresh
+// for every document, so a full navigation (a link, a form, a script's
+// location change — not only reload_page) drops the mark along with every
+// preview applied to the old document. A same-document (SPA) navigation
+// keeps both.
+const DOC_TOKEN_KEY = '__shimSessionDocument';
+const DOC_TOKEN_READ = `globalThis[${JSON.stringify(DOC_TOKEN_KEY)}] ?? null`;
+const docTokenWrite = (token: string): string => `globalThis[${JSON.stringify(DOC_TOKEN_KEY)}] = ${JSON.stringify(token)}`;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -336,6 +348,35 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     }
   }
 
+  // Marks the current document as the one the live previews are on.
+  async function markDocument(handle: HeadlessHandle): Promise<void> {
+    handle.docTokens += 1;
+    const token = `${handle.sessionId}:${handle.docTokens}`;
+    try {
+      await handle.host.evaluate(docTokenWrite(token), 'engine');
+      handle.docToken = token;
+    } catch {
+      handle.docToken = null;
+    }
+  }
+
+  // An in-scope full navigation since the last check left a fresh document
+  // with none of the live previews on it: re-apply them (as reload_page does)
+  // before anything measures, screenshots or adds to the page.
+  async function followDocument(handle: HeadlessHandle, signal: AbortSignal): Promise<void> {
+    if (handle.host.isClosed()) return;
+    let token: unknown;
+    try {
+      token = await handle.host.evaluate(DOC_TOKEN_READ, 'engine');
+    } catch {
+      return; // no engine world yet: the next call looks again
+    }
+    if (token !== null && token === handle.docToken) return;
+    for (const p of handle.live.values()) apply(handle, p);
+    await markDocument(handle);
+    if (handle.live.size > 0) await settle(signal);
+  }
+
   async function preview(handle: HeadlessHandle, input: unknown, signal: AbortSignal): Promise<BackendPreview> {
     if (!isRecord(input) || !('workingCopy' in input)) {
       return refused({ error: 'invalid-request', detail: 'a headless preview takes the working copy ({ workingCopy })' });
@@ -373,6 +414,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     if (!pre.ok) return refused(unsupportedEvidence(pre.unsupported));
     const away = pageAway(handle);
     if (away) return refused(away);
+    await followDocument(handle, signal);
     if (signal.aborted) return refused({ error: 'session-ended' });
 
     const appliedAt = now();
@@ -464,13 +506,15 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     if (name in BROWSER_ONLY_PAGE_TOOLS) {
       return JSON.stringify({ error: REQUIRES_SHIM_BROWSER, detail: BROWSER_ONLY_PAGE_TOOLS[name] });
     }
-    const guardOr = (): string | null => {
+    const guardOr = async (): Promise<string | null> => {
       const away = pageAway(handle);
-      return away ? JSON.stringify(away) : null;
+      if (away) return JSON.stringify(away);
+      await followDocument(handle, signal);
+      return null;
     };
     switch (name) {
       case 'view_page': {
-        const away = guardOr();
+        const away = await guardOr();
         if (away) return away;
         const selector = str('selector');
         const view = await viewPageOnHost(handle.host, selector ? { selector } : undefined, 'main');
@@ -481,13 +525,13 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         ];
       }
       case 'query_page': {
-        const away = guardOr();
+        const away = await guardOr();
         if (away) return away;
         const r = await queryPageByScript(handle.host, str('description'), QUERY_TIMEOUT_MS, 'main');
         return JSON.stringify('error' in r ? { error: r.detail ? `${r.error}: ${r.detail}` : r.error } : { candidates: r.candidates });
       }
       case 'inspect_element': {
-        const away = guardOr();
+        const away = await guardOr();
         if (away) return away;
         const r = await inspectElementByScript(handle.host, str('selector'), INSPECT_TIMEOUT_MS, 'main');
         return JSON.stringify('error' in r ? { found: false, error: r.detail ? `${r.error}: ${r.detail}` : r.error } : r.element);
@@ -496,7 +540,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         const expression = args.expression;
         const problem = expressionProblem(expression);
         if (problem) return JSON.stringify({ error: problem });
-        const away = guardOr();
+        const away = await guardOr();
         if (away) return away;
         return JSON.stringify(await evaluateOnHost(handle.host, String(expression), EVALUATE_TIMEOUT_MS, 'main'));
       }
@@ -545,6 +589,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       apply(handle, p);
       reapplied++;
     }
+    await markDocument(handle);
     // Settle after re-applying: the host applies asynchronously, so the
     // agent's next view_page must not race the previews it was told are live.
     await settle(signal);
@@ -585,7 +630,9 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       name: handle.source.name,
       version,
       ...(bundleHash ? { bundleHash } : {}),
-      rules: {},
+      // No prototype: a rule id may be "__proto__", which a plain object's
+      // assignment would swallow (and drop that rule's witness).
+      rules: nameMap<RuleState>(),
       file: { ...handle.envelope, authoringHistory: history },
     };
     for (const rule of spec.rules || []) {
@@ -643,6 +690,8 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         unreported: [],
         reloads: 0,
         off: [],
+        docToken: null,
+        docTokens: 0,
       };
       handle.off.push(host.onRuntimeEvent((event) => {
         handle.events.push({ at: now(), event });
@@ -661,6 +710,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       handle.off.push(host.onConsole((m) => handle.console.push({ level: m.level, message: m.message, source: m.source, ts: now() })));
       // Headless has no installed shims: the committed rules run as previews.
       for (const rule of handle.working.rules || []) apply(handle, previewFor(handle, rule));
+      await markDocument(handle);
       // The host applies asynchronously: settle (as preview and reload do) so
       // the agent's first view_page sees the committed shim, not the bare page.
       if (handle.live.size > 0) await settle(signal);

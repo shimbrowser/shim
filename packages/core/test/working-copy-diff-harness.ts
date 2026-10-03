@@ -286,6 +286,9 @@ rejects('a non-string shared handler', 'malformed-shim-folder',
 rejects('shared handlers on a non-global shim', 'not-editable',
   () => diffWorkingCopy(state, withSpec((spec) => { spec.sharedHandlers = { fmt: 'function fmt() {}' }; })),
   '"sharedHandlers"');
+rejects('a "__proto__" shared handler (applyDelta would drop it)', 'malformed-shim-folder',
+  () => diffWorkingCopy(globalState, withSpec((spec) => { spec.sharedHandlers = JSON.parse('{"__proto__":"function p() {}"}') as Record<string, string>; }, globalCheckout())),
+  '"__proto__"');
 
 if (failures) {
   console.error(`\n${failures} failure(s)`);

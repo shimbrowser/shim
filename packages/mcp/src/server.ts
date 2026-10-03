@@ -318,9 +318,11 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           try {
             out.checkout = await checkout(id, dir);
           } catch (e) {
+            // Any failure, including a native fs error (an unwritable dir, a
+            // full disk), is the checkout's, never the open's.
             if (e instanceof ToolFailure) out.checkout = { error: e.code, detail: e.detail };
             else if (e instanceof FolderError) out.checkout = { error: e.code, detail: e.message };
-            else throw e;
+            else out.checkout = { error: 'checkout-failed', detail: e instanceof Error ? e.message : String(e) };
             out.hint = 'The session is open, but the checkout failed: call shim_checkout with an empty folder.';
           }
         }

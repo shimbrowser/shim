@@ -106,6 +106,9 @@ function sharedHandlerOps(before: unknown, after: unknown, problems: string[]): 
   const next: Record<string, string> = after ?? {};
   const ops: DeltaOp[] = [];
   for (const [name, source] of Object.entries(next)) {
+    // A plain-object assignment of "__proto__" hits the prototype setter
+    // instead of storing the entry, so the preview would silently drop it.
+    if (name === '__proto__') { problems.push('"sharedHandlers" cannot name a function "__proto__"'); continue; }
     if (!Object.hasOwn(prev, name) || prev[name] !== source) ops.push({ op: 'set-shared-handler', name, source });
   }
   for (const name of Object.keys(prev)) {
