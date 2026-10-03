@@ -129,6 +129,7 @@ export const API_MAP_HINTS: Record<string, string> = {
   'read-only': 'A composition session can only replay GET and HEAD.',
   'discovery-off': 'Discovery is off in Shim\'s settings; ask the user to turn it on if the shim needs the site\'s API.',
   'consent-timeout': 'Nobody answered the card in Shim. Ask the user to watch Shim\'s sidebar and try again.',
+  'too-many-pending': 'Too many cards are waiting in Shim. Try again once the user has answered them.',
 };
 
 function withApiMapHint(result: unknown): unknown {

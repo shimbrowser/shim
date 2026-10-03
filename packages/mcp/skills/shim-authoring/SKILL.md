@@ -261,7 +261,8 @@ Then, for a granted site only — every call names its `host`:
 An endpoint id belongs to its site: naming it under another host answers `not-found`.
 Refusals come back as `{ ok: false, error, hint }` — `host-not-granted`, `no-sources`,
 `sources-denied`, `site-names-denied`, `replay-declined`, `consent-timeout`,
-`discovery-off`. Don't re-ask for what the user declined. In the handler, call the
+`too-many-pending`, `discovery-off`. Don't re-ask for what the user declined; a
+timeout or a full queue of cards is not a no, so those can be retried. In the handler, call the
 endpoint with the page's `fetch(url, { credentials: 'include' })` (section 7).
 
 Storage and database inspection are not available to sessions in this build.
