@@ -404,6 +404,40 @@ async function main(): Promise<void> {
     check('a composition holding a file named like the marker is refused, the folder untouched', clash.isError === true
       && /unsafe-path/.test(clash.content[0]?.text ?? '') && fs.existsSync(path.join(cdir, 'index.html'))
       && fs.readFileSync(path.join(cdir, COMPOSITION_MARKER), 'utf8').includes('shim-composition-checkout/1'), clash.content[0]?.text);
+    checkoutFiles = COMP_FILES;
+    // A stray or corrupt file by the marker's name does not make a folder a checkout.
+    for (const [label, marker] of [['an empty stray', ''], ['a corrupt', '{"hidden": ['], ['a foreign-format', '{"format":"other","hidden":[]}']] as const) {
+      const project = path.join(tmpDir(), `stray-${label.replace(/\W+/g, '-')}`);
+      fs.mkdirSync(project, { recursive: true });
+      fs.writeFileSync(path.join(project, 'README.md'), 'mine');
+      fs.writeFileSync(path.join(project, COMPOSITION_MARKER), marker);
+      const stray = await call(cc, 'shim_checkout', { dir: project });
+      check(`${label} marker beside a project does not authorize the checkout, nothing deleted`, stray.isError === true
+        && /not-a-working-copy/.test(stray.content[0]?.text ?? '') && fs.readFileSync(path.join(project, 'README.md'), 'utf8') === 'mine'
+        && fs.readFileSync(path.join(project, COMPOSITION_MARKER), 'utf8') === marker, stray.content[0]?.text);
+    }
+    const onlyStray = path.join(tmpDir(), 'only-stray-marker');
+    fs.mkdirSync(onlyStray, { recursive: true });
+    fs.writeFileSync(path.join(onlyStray, COMPOSITION_MARKER), 'not json');
+    const onlyStrayOut = await call(cc, 'shim_checkout', { dir: onlyStray });
+    check('a folder holding only a stray marker is refused and left alone', onlyStrayOut.isError === true
+      && fs.readdirSync(onlyStray).join(',') === COMPOSITION_MARKER, onlyStrayOut.content[0]?.text);
+    // A hidden file the user already has is not the checkout's to overwrite.
+    const dotted = path.join(tmpDir(), 'dotted');
+    fs.mkdirSync(path.join(dotted, '.well-known'), { recursive: true });
+    fs.writeFileSync(path.join(dotted, '.config.js'), 'my config');
+    const collide = await call(cc, 'shim_checkout', { dir: dotted });
+    check('a checkout refuses to overwrite a hidden file no earlier checkout wrote', collide.isError === true
+      && /not-a-working-copy/.test(collide.content[0]?.text ?? '') && /\.config\.js/.test(collide.content[0]?.text ?? '')
+      && fs.readFileSync(path.join(dotted, '.config.js'), 'utf8') === 'my config' && !fs.existsSync(path.join(dotted, 'index.html')), collide.content[0]?.text);
+    fs.rmSync(path.join(dotted, '.config.js'));
+    const intoDotted = firstJson(await call(cc, 'shim_checkout', { dir: dotted }));
+    check('…while a hidden folder of the user\'s with no clashing file is fine', Array.isArray(intoDotted.files)
+      && fs.existsSync(path.join(dotted, '.well-known', 'data.json')) && fs.existsSync(path.join(dotted, COMPOSITION_MARKER)), JSON.stringify(intoDotted));
+    fs.writeFileSync(path.join(dotted, '.config.js'), 'edited');
+    const redo = firstJson(await call(cc, 'shim_checkout', { dir: dotted }));
+    check('…and a re-checkout overwrites the hidden files its marker lists', Array.isArray(redo.files)
+      && fs.readFileSync(path.join(dotted, '.config.js'), 'utf8') === 'export default {};', JSON.stringify(redo));
     const rc = firstJson(await call(cc, 'read_calls', {}));
     const rcReq = sc.filter((s) => s.path === '/sessions/sess-c/call').pop();
     check('a composition tool forwards to /call', JSON.stringify(rcReq?.body) === JSON.stringify({ name: 'read_calls', input: {} }) && rc.scope === 'current');
