@@ -13,6 +13,8 @@
 // reply once with the SAME id; refusals come back as error results with a
 // hint; page tools forward to /call with images converted to MCP content;
 // API map tools forward the same way and an API map refusal carries its hint;
+// a new composition (newCompositionName with a proposed mount, the answer's
+// mount, a refused mount's hint);
 // a composition session (open by compositionId with no tab, a flat checkout
 // with its marker, a re-checkout that removes stale files, the composition
 // tools forwarded);
@@ -340,6 +342,37 @@ async function main(): Promise<void> {
     const unknown = await call(c3, 'not_a_tool');
     check('an unknown tool is an error result', unknown.isError === true && /unknown-tool/.test(unknown.content[0]?.text ?? ''));
     await c3.close();
+  }
+
+  console.log('a new composition:');
+  {
+    const { deps: dn, sent: sn } = rig((req) => {
+      if (req.path === '/sessions') return ok({ sessionId: 'sess-n', artifactId: 'uid-new', mount: 'my-crates' });
+      if (req.path === '/sessions/sess-n') return ok({ reason: 'ended', versionId: null });
+      return refuse(404, 'not-found');
+    });
+    const cn = await connect(dn);
+    const stray = await call(cn, 'shim_open_session', { intent: 'x', compositionId: 'c', mount: 'crates' });
+    check('a mount without newCompositionName is refused', stray.isError === true && /mount goes with newCompositionName/.test(stray.content[0]?.text ?? ''));
+    const two = await call(cn, 'shim_open_session', { intent: 'x', compositionId: 'c', newCompositionName: 'Crates' });
+    check('naming a composition and a new one together is refused', two.isError === true && /exactly one/.test(two.content[0]?.text ?? ''));
+    const opened = firstJson(await call(cn, 'shim_open_session', { intent: 'Build a crate view', newCompositionName: 'Crates', mount: 'crates' }));
+    const body = sn.filter((x) => x.path === '/sessions').pop()?.body as Record<string, unknown> | undefined;
+    const create = body?.create as Record<string, unknown> | undefined;
+    check('open sends kind composition and create { name, mount }, no target and no artifactId', body?.kind === 'composition'
+      && create?.name === 'Crates' && create.mount === 'crates' && !('artifactId' in body) && !('target' in body), JSON.stringify(body));
+    check('the answer names the new composition and the mount the user chose', opened.kind === 'composition' && opened.compositionId === 'uid-new' && opened.mount === 'my-crates', JSON.stringify(opened));
+    await call(cn, 'shim_open_session', { intent: 'Build a crate view', newCompositionName: 'Shelf' });
+    const bare = (sn.filter((x) => x.path === '/sessions').pop()?.body as Record<string, unknown> | undefined)?.create as Record<string, unknown> | undefined;
+    check('without a mount, none is proposed (Shim suggests one)', bare?.name === 'Shelf' && !('mount' in bare), JSON.stringify(bare));
+    await cn.close();
+  }
+  {
+    const { deps: dt } = rig((req) => (req.path === '/sessions' ? refuse(409, 'mount-taken', 'compose://crates is already taken') : refuse(404, 'not-found')));
+    const ct = await connect(dt);
+    const taken = await call(ct, 'shim_open_session', { intent: 'x', newCompositionName: 'Crates', mount: 'crates' });
+    check('a taken mount comes back as an error with a hint', taken.isError === true && /mount-taken/.test(taken.content[0]?.text ?? '') && /different mount/.test(taken.content[0]?.text ?? ''));
+    await ct.close();
   }
 
   console.log('a composition session:');

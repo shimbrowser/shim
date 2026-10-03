@@ -100,7 +100,9 @@ const HINTS: Record<string, string> = {
   'commit-timeout': 'Nobody approved the commit in Shim within two minutes. The session is still open.',
   'invalid-target': 'Use a tabId from shim_list_tabs for a tab with a site loaded.',
   'target-changed': 'The tab went to another site while the user was deciding; check shim_list_tabs and open the session again.',
-  'unknown-artifact': 'Use a shim id or a compositionId from shim_list_tabs, or newShimName to start a new shim.',
+  'unknown-artifact': 'Use a shim id or a compositionId from shim_list_tabs, or newShimName / newCompositionName to start a new one.',
+  'mount-taken': 'Another composition has that address; propose a different mount (shim_list_tabs lists the ones in use), or omit it and Shim suggests a free one.',
+  'invalid-mount': 'A mount is lowercase letters, digits and hyphens, not starting with a hyphen.',
 };
 
 // What to do about each API map refusal (D13). These come back as a result
@@ -290,10 +292,13 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         const shimId = str(input, 'shimId');
         const newShimName = str(input, 'newShimName');
         const compositionId = str(input, 'compositionId');
-        if ([shimId, newShimName, compositionId].filter((v) => v !== undefined).length !== 1) {
-          throw new ToolFailure('invalid-request', 'name exactly one of shimId (an existing shim), newShimName (a new one) or compositionId (a composition)');
+        const newCompositionName = str(input, 'newCompositionName');
+        const mount = str(input, 'mount');
+        if ([shimId, newShimName, compositionId, newCompositionName].filter((v) => v !== undefined).length !== 1) {
+          throw new ToolFailure('invalid-request', 'name exactly one of shimId (an existing shim), newShimName (a new one), compositionId (a composition) or newCompositionName (a new one)');
         }
-        const kind: WorkingCopyKind = compositionId !== undefined ? 'composition' : 'shim';
+        if (mount !== undefined && newCompositionName === undefined) throw new ToolFailure('invalid-request', 'mount goes with newCompositionName (a new composition\'s address)');
+        const kind: WorkingCopyKind = compositionId !== undefined || newCompositionName !== undefined ? 'composition' : 'shim';
         if (kind === 'shim' && tabId === undefined) throw new ToolFailure('invalid-request', 'a shim session needs tabId: a site tab from shim_list_tabs');
         const agent = deps.agentName || agentDisplayName(server.getClientVersion()?.name);
         const body: Record<string, unknown> = {
@@ -301,7 +306,10 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           ...(tabId !== undefined ? { target: { webContentsId: tabId } } : {}),
           agent,
           intent,
-          ...(compositionId !== undefined ? { artifactId: compositionId } : shimId !== undefined ? { artifactId: shimId } : { create: { name: newShimName } }),
+          ...(compositionId !== undefined ? { artifactId: compositionId }
+            : shimId !== undefined ? { artifactId: shimId }
+              : newCompositionName !== undefined ? { create: { name: newCompositionName, ...(mount !== undefined ? { mount } : {}) } }
+                : { create: { name: newShimName } }),
         };
         const opened = await control('POST', '/sessions', body);
         const id = typeof opened.sessionId === 'string' ? opened.sessionId : null;
@@ -313,6 +321,8 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           sessionId: id,
           kind,
           ...(artifactId !== null ? (kind === 'composition' ? { compositionId: artifactId } : { shimId: artifactId }) : {}),
+          // A new composition's address, as the user allowed it.
+          ...(typeof opened.mount === 'string' ? { mount: opened.mount } : {}),
         };
         const dir = str(input, 'dir');
         if (dir) {

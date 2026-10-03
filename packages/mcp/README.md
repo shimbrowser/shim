@@ -46,6 +46,9 @@ Shim's own authoring worker uses, and Shim runs them with the same implementatio
 A composition session opens with `compositionId` instead (`tabId` optional) and checks
 out `manifest.json` plus the composition's files, flat. A preview saves the changed files
 and reloads the composition's page; a manifest that adds a host asks you in Shim first.
+`newCompositionName` (with an optional proposed `mount`) starts a new composition
+instead: Shim's card lets you change its `compose://` address before allowing, and the
+composition is kept only if the session commits.
 
 ## Claude Code plugin
 

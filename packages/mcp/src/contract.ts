@@ -60,8 +60,11 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
     description:
       'Open an authoring session on one shim (against one of Shim\'s site tabs) or one composition. The user is ' +
       'asked in Shim to allow it (up to two minutes); this call waits for the answer. Name an existing shim with ' +
-      'shimId, start a new one on the tab\'s site with newShimName, or name a composition with compositionId (its ' +
-      'page opens in Shim as the preview; tabId is optional). Pass dir to check the work out into that folder ' +
+      'shimId, start a new one on the tab\'s site with newShimName, name a composition with compositionId, or ' +
+      'start a new composition with newCompositionName (and optionally the mount you propose for its ' +
+      'compose://<mount> address; the user can change it before allowing, and the answer says which they chose). ' +
+      'A composition\'s page opens in Shim as the preview; tabId is optional. Something new is kept only if you ' +
+      'commit. Pass dir to check the work out into that folder ' +
       'right away (same as shim_checkout). While the session is open the shim or composition is yours alone; Shim ' +
       'ends it after 10 idle minutes, or when the user stops it or starts their own turn on it.',
     input_schema: {
@@ -72,6 +75,8 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
         shimId: { type: 'string', description: 'An existing shim to work on (shim_list_tabs lists the ones on each tab\'s host).' },
         newShimName: { type: 'string', description: 'Instead of shimId: create a new shim with this name on the tab\'s site. It is kept only if you commit.' },
         compositionId: { type: 'string', description: 'Instead of a shim: the composition to work on (shim_list_tabs lists them).' },
+        newCompositionName: { type: 'string', description: 'Instead of compositionId: create a new composition with this name (a manifest and an empty index.html to start from). It is kept only if you commit.' },
+        mount: { type: 'string', description: 'With newCompositionName: the address to propose, compose://<mount> — lowercase letters, digits and hyphens, not starting with a hyphen, and not already taken. Omitted: Shim suggests one from the name. The user may change it.' },
         dir: { type: 'string', description: 'Optional absolute folder to check the working copy out into once the session opens.' },
       },
       required: ['intent'],

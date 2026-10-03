@@ -608,12 +608,20 @@ this section is what differs.
 ### The session
 
 1. **Pick the composition.** `shim_list_tabs` lists every composition (`compositions[]`:
-   `id`, `name`, `mount`) and gives an open composition tab its `compositionId`. Creating a
-   new composition isn't a session action: ask the user to create one in Shim first, then
-   open a session on it.
+   `id`, `name`, `mount`) and gives an open composition tab its `compositionId`. To build a
+   new one, start it in the session instead (step 2).
 2. **Open.** `shim_open_session { compositionId, intent, dir }` — `tabId` is optional (the
    window the preview opens in). The user allows it in Shim; the composition's page opens
    there as your preview.
+   For a **new** composition, pass `newCompositionName` instead of `compositionId`, and
+   optionally `mount`: the address you propose, `compose://<mount>` — lowercase letters,
+   digits and hyphens, not starting with a hyphen, not already in use (`shim_list_tabs`
+   lists the mounts taken). Without one, Shim suggests one from the name. The user can
+   change the address on the card before allowing, so read the answer: it carries the new
+   `compositionId` and the `mount` they chose. A refused mount answers `mount-taken` or
+   `invalid-mount` before any card. The new composition starts as a manifest with no
+   hosts and an empty `index.html`, and is **kept only if you commit**: end the session
+   without a commit and it is deleted, its address freed.
 3. **Check out** (with `dir`, or `shim_checkout { dir }`): `manifest.json` plus every file of
    the composition, flat. Use an empty folder.
 4. **Edit, then `shim_preview`.** Shim validates the folder, saves the changed files onto the
