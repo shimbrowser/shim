@@ -261,7 +261,9 @@ Then, for a granted site only — every call names its `host`:
 An endpoint id belongs to its site: naming it under another host answers `not-found`.
 Refusals come back as `{ ok: false, error, hint }` — `host-not-granted`, `no-sources`,
 `sources-denied`, `site-names-denied`, `replay-declined`, `consent-timeout`,
-`discovery-off`. Don't re-ask for what the user declined. In the handler, call the
+`discovery-off` (Discovery is off in Shim: there is no map to read — `request_sources`
+still asks and grants, with every site under `noApiMap`, and in a composition session
+that grant is all `probe_request` needs). Don't re-ask for what the user declined. In the handler, call the
 endpoint with the page's `fetch(url, { credentials: 'include' })` (section 7).
 
 ### What the shim has saved: the data tools

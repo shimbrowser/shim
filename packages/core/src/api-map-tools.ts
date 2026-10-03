@@ -70,7 +70,9 @@ export const SESSION_API_MAP_TOOLS: Record<ApiMapToolName, ToolDefinition> = {
       'schemas and summaries, and replaying them. Waits for the answer. Each granted site lasts for the ' +
       'session (the user can revoke it from Shim at any time); sites already granted are not asked again. ' +
       `At most ${MAX_SOURCES_PER_REQUEST} sites per call. Answers which sites were granted, and which of ` +
-      'those have no recorded API map yet.',
+      'those have no recorded API map yet. With Discovery off in Shim it still asks and grants (a composition ' +
+      "session's probe_request needs only the grant) and lists every site under noApiMap; the other API map " +
+      'tools then answer discovery-off.',
     input_schema: {
       type: 'object',
       properties: {
