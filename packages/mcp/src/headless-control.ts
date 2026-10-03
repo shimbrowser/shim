@@ -129,6 +129,12 @@ function exclusiveLeases(onRelease: (key: string) => void): SessionLeases & { is
   };
 }
 
+// The browser's control route bounds (src/main/control/router.ts): the
+// registry keeps every successful commitId as a retry key, and a summary
+// lands in the .shim's authoring history.
+export const MAX_COMMIT_ID_LENGTH = 256;
+export const MAX_SUMMARY_LENGTH = 10_000;
+
 /** The `.shim` file a headless session starts from, or a refusal. */
 export function loadShimFile(file: string): { ok: true; source: Omit<HeadlessShimSource, 'shimFile'> } | { ok: false; error: string; detail: string } {
   let text: string;
@@ -417,8 +423,12 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
         if (m !== 'POST') return refuse('method-not-allowed');
         if (!isRecord(body)) return refuse('invalid-request', 'the body must be a JSON object');
         if (typeof body.revision !== 'number') return refuse('invalid-request', 'revision is required');
-        if (typeof body.commitId !== 'string') return refuse('invalid-request', 'commitId is required');
-        if (typeof body.summary !== 'string') return refuse('invalid-request', 'summary is required');
+        if (typeof body.commitId !== 'string' || body.commitId === '' || body.commitId.length > MAX_COMMIT_ID_LENGTH) {
+          return refuse('invalid-request', `commitId is required (at most ${MAX_COMMIT_ID_LENGTH} characters)`);
+        }
+        if (typeof body.summary !== 'string' || body.summary.length > MAX_SUMMARY_LENGTH) {
+          return refuse('invalid-request', `summary must be a string of at most ${MAX_SUMMARY_LENGTH} characters`);
+        }
         return reply({ ...(await sessions.commit(id, { revision: body.revision, commitId: body.commitId, summary: body.summary })) });
       }
       default:
