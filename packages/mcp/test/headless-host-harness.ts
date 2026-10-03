@@ -13,7 +13,10 @@
 //   - load failures map to Chromium's net error codes;
 //   - the engine bundle the driver injects is the built page bundle;
 //   - Playwright is found from the caller's install (SHIM_PLAYWRIGHT_DIR,
-//     the working directory, CLAUDE_PROJECT_DIR), not only beside the bundle.
+//     the working directory, CLAUDE_PROJECT_DIR, a global install, then
+//     `npm root -g`), not only beside the bundle; a miss is
+//     playwright-missing with the exact install command, a never-downloaded
+//     Chromium is chromium-missing with the command for the Playwright found.
 //
 // The driver itself runs against a real Chromium in
 // playwright-conformance-harness.ts (its own CI job).
@@ -30,7 +33,10 @@ import {
   HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER, memoryStorage, netErrorCode, readEngineBundle,
 } from '../src/playwright-page-host';
 import { pageRuntimeSource } from '../src/headless-page-runtime';
-import { PLAYWRIGHT_MISSING, loadPlaywright, playwrightSearchDirs, type RequireFrom } from '../src/playwright-launch';
+import {
+  PLAYWRIGHT_INSTALL_COMMAND, PLAYWRIGHT_MISSING, HeadlessUnavailableError, chromiumInstallCommand, globalPrefixDirs,
+  headlessReadiness, launchFailure, loadPlaywright, locatePlaywright, playwrightSearchDirs, type RequireFrom,
+} from '../src/playwright-launch';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string): void {
@@ -116,13 +122,34 @@ async function main(): Promise<void> {
   }
 
   console.log('launch');
-  check('a missing Playwright install has an actionable message', /npm install playwright/.test(PLAYWRIGHT_MISSING) && /playwright install chromium/.test(PLAYWRIGHT_MISSING));
+  check('a missing Playwright install has an actionable message', PLAYWRIGHT_MISSING.includes(PLAYWRIGHT_INSTALL_COMMAND)
+    && /npm install -D playwright/.test(PLAYWRIGHT_MISSING) && /does not bundle/.test(PLAYWRIGHT_MISSING));
+  check('the install command is global, then its own Chromium', PLAYWRIGHT_INSTALL_COMMAND === 'npm install -g playwright && playwright install chromium');
+  {
+    const missing = launchFailure(new Error("browserType.launch: Executable doesn't exist at /x/chrome-headless-shell\nLooks like Playwright was just installed"), '/pw/node_modules/playwright');
+    check('a never-downloaded Chromium is chromium-missing', missing instanceof HeadlessUnavailableError && missing.code === 'chromium-missing', missing.message);
+    check('…with the found Playwright\'s own CLI (versions match)', missing instanceof HeadlessUnavailableError
+      && missing.install === `node "${path.join('/pw/node_modules/playwright', 'cli.js')}" install chromium` && missing.message.includes(missing.install));
+    const other = launchFailure(new Error('spawn EACCES'), null);
+    check('any other launch failure stays an error, never a misleading install hint', !(other instanceof HeadlessUnavailableError) && /spawn EACCES/.test(other.message));
+    check('without a package folder the command is npx', chromiumInstallCommand(null) === 'npx playwright install chromium');
+    const real = path.dirname(require.resolve('playwright/package.json'));
+    check('Playwright ships cli.js at its package root (what chromiumInstallCommand runs)', fs.existsSync(path.join(real, 'cli.js')));
+  }
 
   console.log('finding Playwright');
   {
     const dirs = playwrightSearchDirs({ SHIM_PLAYWRIGHT_DIR: '/pw', CLAUDE_PROJECT_DIR: '/proj' }, '/cwd');
     check('the search order is explicit dir, own resolution, cwd, project dir', JSON.stringify(dirs) === '["/pw",null,"/cwd","/proj"]', JSON.stringify(dirs));
     check('duplicates are searched once', JSON.stringify(playwrightSearchDirs({ CLAUDE_PROJECT_DIR: '/cwd/' }, '/cwd')) === '[null,"/cwd"]');
+    check('a global install is searched after the project', JSON.stringify(playwrightSearchDirs({ CLAUDE_PROJECT_DIR: '/proj' }, '/cwd', ['/g/lib']))
+      === '[null,"/cwd","/proj","/g/lib"]');
+    check('global prefix on POSIX: <node prefix>/lib', JSON.stringify(globalPrefixDirs({}, '/home/u/.nvm/versions/node/v22/bin/node', 'linux'))
+      === '["/home/u/.nvm/versions/node/v22/lib"]');
+    check('npm\'s configured prefix first', JSON.stringify(globalPrefixDirs({ npm_config_prefix: '/opt/npm' }, '/usr/bin/node', 'darwin'))
+      === '["/opt/npm/lib","/usr/lib"]');
+    check('global prefix on Windows: the node folder itself', JSON.stringify(globalPrefixDirs({}, 'C:\\Program Files\\nodejs\\node.exe', 'win32'))
+      === JSON.stringify(['C:\\Program Files\\nodejs']));
     // The plugin case: the bundle's own require can't see the project.
     const tried: Array<string | null> = [];
     const fake: RequireFrom = (dir) => (id) => {
@@ -130,11 +157,29 @@ async function main(): Promise<void> {
       if (dir === '/proj' && id === 'playwright') return { chromium: 'from-project' };
       throw new Error(`Cannot find module '${id}'`);
     };
-    const found = loadPlaywright({ env: { CLAUDE_PROJECT_DIR: '/proj' }, cwd: '/cwd', requireFrom: fake }) as unknown as { chromium: string };
+    let npmAsked = 0;
+    const npmRoot = (): string | null => { npmAsked += 1; return null; };
+    const found = loadPlaywright({ env: { CLAUDE_PROJECT_DIR: '/proj' }, cwd: '/cwd', requireFrom: fake, globalDirs: [], npmGlobalDir: npmRoot }) as unknown as { chromium: string };
     check('an install only the project has is found', found.chromium === 'from-project' && JSON.stringify(tried) === '[null,"/cwd","/proj"]', JSON.stringify(tried));
-    let missing = '';
-    try { loadPlaywright({ env: {}, cwd: '/cwd', requireFrom: fake }); } catch (e) { missing = e instanceof Error ? e.message : String(e); }
-    check('nowhere at all is PLAYWRIGHT_MISSING', missing === PLAYWRIGHT_MISSING);
+    check('npm is not asked when a cheaper place has it', npmAsked === 0);
+    let missing: unknown = null;
+    try { loadPlaywright({ env: {}, cwd: '/cwd', requireFrom: fake, globalDirs: ['/g/lib'], npmGlobalDir: npmRoot }); } catch (e) { missing = e; }
+    check('nowhere at all is PLAYWRIGHT_MISSING, as playwright-missing with the install command', missing instanceof HeadlessUnavailableError
+      && missing.message === PLAYWRIGHT_MISSING && missing.code === 'playwright-missing' && missing.install === PLAYWRIGHT_INSTALL_COMMAND);
+    check('…after asking npm once, last', npmAsked === 1);
+    tried.length = 0;
+    const globalFake: RequireFrom = (dir) => (id) => {
+      tried.push(dir);
+      if (dir === '/npm/global' && id === 'playwright') return { chromium: 'from-npm-root' };
+      throw new Error(`Cannot find module '${id}'`);
+    };
+    const fromNpm = loadPlaywright({ env: {}, cwd: '/cwd', requireFrom: globalFake, globalDirs: ['/g/lib'], npmGlobalDir: () => '/npm/global' }) as unknown as { chromium: string };
+    check('`npm root -g` finds a global install the prefix guess missed', fromNpm.chromium === 'from-npm-root' && JSON.stringify(tried) === '[null,"/cwd","/g/lib","/npm/global"]', JSON.stringify(tried));
+    const notReady = headlessReadiness(() => { throw new HeadlessUnavailableError('playwright-missing', PLAYWRIGHT_MISSING, PLAYWRIGHT_INSTALL_COMMAND); });
+    check('readiness without Playwright: unavailable, why, and the command', !notReady.available && notReady.error === 'playwright-missing'
+      && notReady.install === PLAYWRIGHT_INSTALL_COMMAND && notReady.reason === PLAYWRIGHT_MISSING);
+    const ready = headlessReadiness(() => ({ module: {} as never, packageDir: '/pw' }));
+    check('readiness with Playwright names where it was found', ready.available && ready.playwright === '/pw');
     // The real resolver, from a folder outside this repo.
     const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-pw-'));
     try {
@@ -142,8 +187,9 @@ async function main(): Promise<void> {
       fs.mkdirSync(pkg, { recursive: true });
       fs.writeFileSync(path.join(pkg, 'package.json'), '{"name":"playwright","main":"index.js"}');
       fs.writeFileSync(path.join(pkg, 'index.js'), 'module.exports = { stub: true };');
-      const real = loadPlaywright({ env: { SHIM_PLAYWRIGHT_DIR: proj }, cwd: proj }) as unknown as { stub?: boolean };
-      check('SHIM_PLAYWRIGHT_DIR resolves from that folder\'s node_modules', real.stub === true);
+      const real = locatePlaywright({ env: { SHIM_PLAYWRIGHT_DIR: proj }, cwd: proj });
+      check('SHIM_PLAYWRIGHT_DIR resolves from that folder\'s node_modules', (real.module as unknown as { stub?: boolean }).stub === true);
+      check('…and says where the package is', real.packageDir !== null && fs.realpathSync(real.packageDir) === fs.realpathSync(pkg), String(real.packageDir));
     } finally {
       fs.rmSync(proj, { recursive: true, force: true });
     }

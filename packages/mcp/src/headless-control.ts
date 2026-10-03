@@ -34,6 +34,7 @@ import type { ControlClient, ControlInfo, ControlReply } from './control-client'
 import type { HeadlessStorage } from './playwright-page-host';
 import { HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER } from './playwright-page-host';
 import { fileStorage } from './file-storage';
+import { HeadlessUnavailableError, PLAYWRIGHT_MISSING } from './playwright-launch';
 import {
   createHeadlessShimBackend, newShimId, newShimSpec, unsupportedEvidence, BROWSER_ONLY_PAGE_TOOLS,
   type HeadlessSessionPage, type HeadlessShimSource, type HeadlessTarget, type HeadlessBackendOptions,
@@ -197,6 +198,11 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
   const mintShimId = options.newShimId ?? (() => newShimId());
   const info: ControlInfo = { socketPath: '', token: '', pid: process.pid, appVersion: `${options.version} (headless)`, startedAt: Date.now() };
 
+  function playwrightStatus(): Record<string, unknown> {
+    const available = options.playwrightAvailable ? options.playwrightAvailable() : null;
+    return { playwright: available, ...(available === false ? { playwrightMissing: PLAYWRIGHT_MISSING } : {}) };
+  }
+
   async function openSession(body: unknown): Promise<ControlReply> {
     if (!isRecord(body)) return refuse('invalid-request', 'the body must be a JSON object');
     if (body.kind !== 'shim') {
@@ -247,6 +253,9 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
     try {
       page = await options.openPage(parsedUrl.href, fileStorage(storageFileFor(shimFile)));
     } catch (e) {
+      // No Playwright, or no Chromium for it: say which, with the exact
+      // command that fixes it (Shim never bundles a browser).
+      if (e instanceof HeadlessUnavailableError) return refuse(e.code, e.message, { install: e.install });
       return refuse('page-open-failed', errMessage(e));
     }
     // The page the session works on is where the url ended up, after any
@@ -299,7 +308,7 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
         mode: 'headless',
         version: options.version,
         enabled: true,
-        playwright: options.playwrightAvailable ? options.playwrightAvailable() : null,
+        ...playwrightStatus(),
         sessions: sessions.list().map((s) => ({ sessionId: s.sessionId, shimFile: s.artifactId, revision: s.revision, state: s.state })),
       });
     }
