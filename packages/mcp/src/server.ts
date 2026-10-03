@@ -449,7 +449,10 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         // A composition runs only in the Shim browser and needs no tab: it
         // picks attach as a tabId does (a headless pin still refuses it below).
         const wantsComposition = compositionId !== undefined || newCompositionName !== undefined;
-        const picked = pickMode(requested, input.tabId !== undefined || wantsComposition, url !== undefined);
+        const pickedMode = pickMode(requested, input.tabId !== undefined || wantsComposition, url !== undefined);
+        const picked = wantsComposition && pickedMode.mode === 'attach'
+          ? { mode: pickedMode.mode, why: 'the Shim browser, where compositions run (its preview opens in a Shim tab); commits go to Shim\'s library' }
+          : pickedMode;
         const agent = deps.agentName || agentDisplayName(server.getClientVersion()?.name);
         let kind: WorkingCopyKind;
         let body: Record<string, unknown>;

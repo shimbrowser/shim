@@ -216,6 +216,7 @@ async function main(): Promise<void> {
     const composed = await call(client, 'shim_open_session', { intent: 'x', newCompositionName: 'Board', mount: 'board' });
     const composedJson = composed.isError ? {} : json(composed);
     check('a composition with no tabId attaches (it runs only in Shim, and needs no tab)', composedJson.mode === 'attach' && composedJson.kind === 'composition', textOf(composed));
+    check('…and its reason names the composition, not a tab', /compositions run/.test(String(composedJson.modeReason)), String(composedJson.modeReason));
     const composedSent = r.attach.filter((x) => x.path === '/sessions').pop();
     check('…sending the new composition to Shim', JSON.stringify(composedSent?.body).includes('"create":{"name":"Board","mount":"board"}'), JSON.stringify(composedSent?.body));
     const existing = await call(client, 'shim_open_session', { intent: 'x', compositionId: 'comp-1' });
