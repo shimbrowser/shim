@@ -31,6 +31,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import { encodeWorkingCopy, decodeWorkingCopy, WorkingCopyWireError } from '@shimbrowser/core/working-copy-wire';
 import { isPageToolName } from '@shimbrowser/core/page-tools';
 import { isApiMapToolName } from '@shimbrowser/core/api-map-tools';
+import { isDataToolName } from '@shimbrowser/core/data-tools';
 import { isCompositionSessionToolName } from '@shimbrowser/core/composition-session-tools';
 import { COMPOSITION_WIRE_LIMITS, SHIM_WIRE_LIMITS } from '@shimbrowser/core/working-copy-wire';
 import { staticTools, isSessionToolName, SERVER_INSTRUCTIONS, type SessionToolName } from './contract';
@@ -406,6 +407,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       if (isSessionToolName(name)) content = await runSessionTool(name, input);
       else if (isPageToolName(name)) content = await pageTool(sessionId(input), name, input);
       else if (isApiMapToolName(name)) content = await apiMapTool(sessionId(input), name, input);
+      else if (isDataToolName(name)) content = await pageTool(sessionId(input), name, input);
       else if (isCompositionSessionToolName(name)) content = await pageTool(sessionId(input), name, input);
       else return failureResult('unknown-tool', `no tool named "${name}"`);
       return { content: fitToBudget(content, deps.maxOutputTokens) };

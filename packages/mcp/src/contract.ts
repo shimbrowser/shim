@@ -3,11 +3,13 @@
 // tools/list_changed. The session tools are defined here; the page tools'
 // one definition is @shimbrowser/core/page-tools, the same module Shim's own
 // workers take theirs from, the API map tools' is
-// @shimbrowser/core/api-map-tools (D13), and the composition-only tools' is
+// @shimbrowser/core/api-map-tools (D13), the data tools' is
+// @shimbrowser/core/data-tools, and the composition-only tools' is
 // @shimbrowser/core/composition-session-tools.
 
 import { SESSION_PAGE_TOOLS, PAGE_TOOL_NAMES, type ToolDefinition } from '@shimbrowser/core/page-tools';
 import { SESSION_API_MAP_TOOLS, API_MAP_TOOL_NAMES } from '@shimbrowser/core/api-map-tools';
+import { SESSION_DATA_TOOLS, DATA_TOOL_NAMES } from '@shimbrowser/core/data-tools';
 import { SESSION_COMPOSITION_TOOLS, COMPOSITION_SESSION_TOOL_NAMES } from '@shimbrowser/core/composition-session-tools';
 
 export const SESSION_TOOL_NAMES = [
@@ -149,7 +151,7 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
   },
 };
 
-// A page, API map or composition tool as this server registers it: core's
+// A page, API map, data or composition tool as this server registers it: core's
 // session definition, plus the optional sessionId every session tool takes —
 // so an agent holding two sessions can aim it at either. The server strips it
 // before the call reaches Shim (whose tools never see it).
@@ -160,12 +162,13 @@ function withSessionId(tool: ToolDefinition): ToolDefinition {
   };
 }
 
-/** Every tool, in registration order: session tools, page tools, the API map tools, then the composition-only tools. */
+/** Every tool, in registration order: session tools, page tools, the API map tools, the data tools, then the composition-only tools. */
 export function staticTools(): ToolDefinition[] {
   return [
     ...SESSION_TOOL_NAMES.map((n) => SESSION_TOOLS[n]),
     ...PAGE_TOOL_NAMES.map((n) => withSessionId(SESSION_PAGE_TOOLS[n])),
     ...API_MAP_TOOL_NAMES.map((n) => withSessionId(SESSION_API_MAP_TOOLS[n])),
+    ...DATA_TOOL_NAMES.map((n) => withSessionId(SESSION_DATA_TOOLS[n])),
     ...COMPOSITION_SESSION_TOOL_NAMES.map((n) => withSessionId(SESSION_COMPOSITION_TOOLS[n])),
   ];
 }
@@ -184,6 +187,7 @@ export const SERVER_INSTRUCTIONS =
   'for a composition, …) to look, then shim_commit with a summary, and shim_end_session. For a visual change, ' +
   'verify with a screenshot before committing. When the work needs a site\'s own API, the API map tools ' +
   '(list_discovered_hosts, request_sources, search_discovered_api, inspect_endpoint, replay_endpoint) read ' +
-  'what Shim recorded of it, per site the user grants; a composition session also has probe_request, ' +
+  'what Shim recorded of it, per site the user grants. inspect_storage and query_db read what the work has ' +
+  'saved, and read_sibling_shim a shim\'s pack siblings; a composition session also has probe_request, ' +
   'read_calls and verify_mint. The shim-authoring skill documents both formats, every mutation kind, anchors, the runtime ' +
   'api and window.api.';

@@ -264,7 +264,22 @@ Refusals come back as `{ ok: false, error, hint }` — `host-not-granted`, `no-s
 `discovery-off`. Don't re-ask for what the user declined. In the handler, call the
 endpoint with the page's `fetch(url, { credentials: 'include' })` (section 7).
 
-Storage and database inspection are not available to sessions in this build.
+### What the shim has saved: the data tools
+
+All three only read, and only this shim's own data (and its pack's).
+
+- **`inspect_storage`** — everything the shim has saved: one row per (origin, key) of
+  `api.storage` with the parsed value, plus `packRows` for a shim in a pack, `globalRows`
+  for a global shim, and `dbSchema` (the live tables and row counts) when it declares
+  `storage`. This is the committed data — a preview's scratch bucket (section 7) is not in
+  it. Use it when the ask depends on what is already saved ("the counter is wrong").
+- **`query_db { sql, connection? }`** — a read-only SQL query against the shim's own
+  database (its `storage` tables) or a declared remote connection. SELECT only: anything
+  else is refused before it reaches the database. Results are capped; add `LIMIT`.
+- **`read_sibling_shim { name }`** — another shim in this shim's pack, in full: its spec,
+  handler source and last few exchanges. Use it before building on a sibling's data or
+  conventions (storage keys, class prefixes). A shim in no pack answers that it has no
+  siblings; a wrong name answers the valid ones.
 
 ## 5. Mutation kinds
 
@@ -514,8 +529,8 @@ throwing — always branch on it and render a usable state.
 
 **While previewing, handlers get a preview `api`, not the shim's.** `api.storage` reads and
 writes a scratch bucket apart from the shim's saved data — what a preview stores is gone
-after commit, and what the shim already saved isn't visible — `api.settings` has no
-values, `api.ai` calls are refused (below), and `api.db`, `api.storage.pack`, `api.storage.global` and `api.shared` are
+after commit, and what the shim already saved isn't visible to the handler (read it with
+`inspect_storage`, section 4) — `api.settings` has no values, `api.ai` calls are refused (below), and `api.db`, `api.storage.pack`, `api.storage.global` and `api.shared` are
 absent. Handlers must render a usable state in every one of those cases anyway; check the
 data path after commit (open the session again if you need to), and say in your summary
 what you could only verify that way.
@@ -806,3 +821,8 @@ A refused preview answers `applied: false` with `error` and `problems`:
   asks again.
 - The API map tools (section 4) work the same, except `replay_endpoint` runs GET and HEAD
   only (`read-only`).
+- **`inspect_storage`** and **`query_db`** (section 4) read the composition's own saved
+  data: its `api.storage` rows, its declared tables (`dbSchema`), and each declared remote
+  connection and whether the user configured it. While you build, the page's own writes
+  are refused, so what they show is the data as of the last commit. `read_sibling_shim` is
+  for shims (`shim-only`).

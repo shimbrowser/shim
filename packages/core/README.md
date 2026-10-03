@@ -32,6 +32,9 @@ package and is split into its own public repo at launch.
     `reload_page`, `verify_across_pages`, `interact_page`): the Shim browser's shim
     and composition workers offer `SHIM_PAGE_TOOLS` / `COMPOSITION_PAGE_TOOLS`, and
     `@shimbrowser/mcp` registers `SESSION_PAGE_TOOLS`.
+  - `@shimbrowser/core/data-tools`: the data tools' one definition (`inspect_storage`,
+    `query_db`, `read_sibling_shim`): the browser's workers offer `WORKER_DATA_TOOLS`,
+    and `@shimbrowser/mcp` registers `SESSION_DATA_TOOLS`.
 
 ```sh
 npm run build -w @shimbrowser/core      # dist/: CJS, .d.ts, page bundle

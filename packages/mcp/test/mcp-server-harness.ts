@@ -3,8 +3,9 @@
 // the SDK's in-memory transport, and every request the server makes to Shim
 // is recorded and answered by a script.
 //
-// Covers: the static tool list (session tools, the page tools, then the API
-// map tools — exactly core's session definitions); shim_status with and without Shim; opening a
+// Covers: the static tool list (session tools, the page tools, the API map
+// tools, the data tools, then the composition tools — exactly core's
+// session definitions); shim_status with and without Shim; opening a
 // session (the agent name from the MCP client, an existing shim or a new
 // one, refusing both or neither, a checkout into a folder); checkout writes
 // the folder; preview sends the WHOLE folder as a wire working copy (hidden
@@ -30,6 +31,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { decodeWorkingCopy, encodeWorkingCopy } from '@shimbrowser/core/working-copy-wire';
 import { SESSION_PAGE_TOOLS } from '@shimbrowser/core/page-tools';
 import { SESSION_API_MAP_TOOLS } from '@shimbrowser/core/api-map-tools';
+import { SESSION_DATA_TOOLS } from '@shimbrowser/core/data-tools';
 import { SESSION_COMPOSITION_TOOLS } from '@shimbrowser/core/composition-session-tools';
 import { COMPOSITION_MARKER } from '../src/folder';
 import { createShimMcpServer, agentDisplayName, type ShimMcpDeps } from '../src/server';
@@ -112,8 +114,18 @@ async function main(): Promise<void> {
     const client = await connect(deps);
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name);
-    check('session tools first, then every page tool, the API map tools, then the composition tools',
-      JSON.stringify(names) === JSON.stringify([...SESSION_TOOL_NAMES, ...Object.keys(SESSION_PAGE_TOOLS), ...Object.keys(SESSION_API_MAP_TOOLS), ...Object.keys(SESSION_COMPOSITION_TOOLS)]), names.join(','));
+    check('session tools first, then every page tool, the API map tools, the data tools, then the composition tools',
+      JSON.stringify(names) === JSON.stringify([
+        ...SESSION_TOOL_NAMES, ...Object.keys(SESSION_PAGE_TOOLS), ...Object.keys(SESSION_API_MAP_TOOLS),
+        ...Object.keys(SESSION_DATA_TOOLS), ...Object.keys(SESSION_COMPOSITION_TOOLS),
+      ]), names.join(','));
+    const queryDb = tools.find((t) => t.name === 'query_db');
+    const { sessionId: queryDbSession, ...queryDbCore } = (queryDb?.inputSchema.properties ?? {}) as Record<string, unknown>;
+    check('data tools are core\'s session definitions', queryDb?.description === SESSION_DATA_TOOLS.query_db.description
+      && JSON.stringify(queryDbCore) === JSON.stringify(SESSION_DATA_TOOLS.query_db.input_schema.properties)
+      && JSON.stringify(queryDb?.inputSchema.required) === JSON.stringify(SESSION_DATA_TOOLS.query_db.input_schema.required));
+    check('every data tool also takes an optional sessionId', !!queryDbSession && tools.filter((t) => t.name in SESSION_DATA_TOOLS)
+      .every((t) => 'sessionId' in ((t.inputSchema.properties ?? {}) as Record<string, unknown>) && !(t.inputSchema.required ?? []).includes('sessionId')));
     const readCalls = tools.find((t) => t.name === 'read_calls');
     const { sessionId: readCallsSession, ...readCallsCore } = (readCalls?.inputSchema.properties ?? {}) as Record<string, unknown>;
     check('composition tools are core\'s session definitions', readCalls?.description === SESSION_COMPOSITION_TOOLS.read_calls.description
@@ -270,6 +282,13 @@ async function main(): Promise<void> {
   const aimed = [...sent].reverse().find((s) => s.path === '/sessions/sess-1/call');
   check('a page tool\'s sessionId picks the session and is not forwarded', JSON.stringify(aimed?.body) === JSON.stringify({ name: 'inspect_element', input: { selector: '.banner' } }));
   check('a string result comes back as text', JSON.parse(page.content[0]?.text ?? '{}').name === 'query_page');
+
+  await call(client, 'query_db', { sql: 'select count(*) from notes', sessionId: 'sess-1' });
+  const dataReq = [...sent].reverse().find((s) => s.path === '/sessions/sess-1/call');
+  check('a data tool forwards name and input to /call, sessionId stripped', JSON.stringify(dataReq?.body) === JSON.stringify({ name: 'query_db', input: { sql: 'select count(*) from notes' } }));
+  await call(client, 'inspect_storage', {});
+  const inspectReq = [...sent].reverse().find((s) => s.path === '/sessions/sess-1/call');
+  check('inspect_storage forwards too', JSON.stringify(inspectReq?.body) === JSON.stringify({ name: 'inspect_storage', input: {} }));
 
   const search = firstJson(await call(client, 'search_discovered_api', { description: 'tracks', host: 'a.example' }));
   const searchReq = [...sent].reverse().find((s) => s.path === '/sessions/sess-1/call');
