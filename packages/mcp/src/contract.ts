@@ -184,6 +184,6 @@ export const SERVER_INSTRUCTIONS =
   'for a composition, …) to look, then shim_commit with a summary, and shim_end_session. For a visual change, ' +
   'verify with a screenshot before committing. When the work needs a site\'s own API, the API map tools ' +
   '(list_discovered_hosts, request_sources, search_discovered_api, inspect_endpoint, replay_endpoint) read ' +
-  'what Shim recorded of it, per site the user grants; a composition session also has probe_request and ' +
-  'read_calls. The shim-authoring skill documents both formats, every mutation kind, anchors, the runtime ' +
+  'what Shim recorded of it, per site the user grants; a composition session also has probe_request, ' +
+  'read_calls and verify_mint. The shim-authoring skill documents both formats, every mutation kind, anchors, the runtime ' +
   'api and window.api.';

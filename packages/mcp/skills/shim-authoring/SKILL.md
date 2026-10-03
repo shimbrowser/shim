@@ -220,7 +220,7 @@ All of them act on the session's tab.
   views ("on every post"). Report honestly: matched → verified there; your rule no-match
   → it does not apply there (likely different markup); unvisited page-types → unverified.
 - `interact_page` is for composition sessions (section 9); a shim session answers that it
-  isn't offered. So are `probe_request` and `read_calls`.
+  isn't offered. So are `probe_request`, `read_calls` and `verify_mint`.
 
 ### The site's own API: the API map tools
 
@@ -691,7 +691,8 @@ style.css
   `{ after, chars, length? }`, the text right after a literal prefix, optionally in a page
   the mint page links to via `follow` `{ urlAfter, urlHost }`) and where to send it
   (`header`, with an optional `scheme` such as `"Bearer"`, or `query`). Design one with
-  `probe_request` (the page or script the token is in).
+  `probe_request` (the page or script the token is in), and check it with `verify_mint`
+  before you put it in the manifest.
 - **`settings`**, **`permissions`**, **`storage`**, **`connections`** — the same
   declarations a shim makes (section 7): settings fields (`text | secret | number | boolean
   | select`), `"permissions": ["ai"]`, local tables, remote databases.
@@ -778,8 +779,18 @@ A refused preview answers `applied: false` with `error` and `problems`:
   with a 2xx status** and the page shows the result (a DOM check plus a screenshot); a
   call that failed, or none at all, means it isn't working yet.
 - **`probe_request { host, path }`** — one GET of your own through the composition's real
-  fetch path to a declared, granted host, answering the status and up to 20,000 characters
-  of the body. For designing a mint or checking a live response shape; it is never
-  evidence that the page works.
+  fetch path, answering the status and up to 20,000 characters of the body. The host must
+  be declared in the manifest, allowed by the user (the preview's card), **and** granted to
+  your session with `request_sources` — otherwise it answers `host-not-declared`,
+  `host-not-allowed` or `host-not-granted` before any request. GET only. For designing a
+  mint or checking a live response shape; it is never evidence that the page works.
+- **`verify_mint { config, testEndpoint? }`** — runs a proposed `mint` config end to end
+  against the user's real session: Shim first asks the user, on a card, to let the mint
+  host be called signed in as them (and the `follow` host, on a second card), and nothing
+  is requested before they answer. Declined, or unanswered in two minutes, it answers
+  `denied` — ask the user rather than retrying. Otherwise it answers whether the token was
+  extracted (`detail` says why not) and, with a `testEndpoint` (a read-only endpoint on the
+  mint host's site), the status it got. It never returns the token or any body. Each call
+  asks again.
 - The API map tools (section 4) work the same, except `replay_endpoint` runs GET and HEAD
   only (`read-only`).

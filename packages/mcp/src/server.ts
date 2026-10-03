@@ -9,8 +9,8 @@
 //                  them with the same implementation its own worker uses
 //   API map tools  forwarded the same way (D13) — Shim asks the user for
 //                  each level of access on its own cards
-//   composition    probe_request, read_calls — forwarded the same way; a
-//   tools          shim session answers them as not offered
+//   composition    probe_request, read_calls, verify_mint — forwarded the
+//   tools          same way; a shim session answers them as not offered
 //
 // The server keeps only what a client needs between calls: which sessions it
 // opened, the folder each was checked out into, and the latest revision a

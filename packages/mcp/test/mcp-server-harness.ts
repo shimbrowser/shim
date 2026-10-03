@@ -474,6 +474,10 @@ async function main(): Promise<void> {
     const rc = firstJson(await call(cc, 'read_calls', {}));
     const rcReq = sc.filter((s) => s.path === '/sessions/sess-c/call').pop();
     check('a composition tool forwards to /call', JSON.stringify(rcReq?.body) === JSON.stringify({ name: 'read_calls', input: {} }) && rc.scope === 'current');
+    const mintConfig = { url: 'https://auth.example/token', tokenPath: 'access_token', header: 'Authorization' };
+    await call(cc, 'verify_mint', { config: mintConfig });
+    const vmReq = sc.filter((s) => s.path === '/sessions/sess-c/call').pop();
+    check('verify_mint forwards to /call as-is (its card is Shim\'s)', JSON.stringify(vmReq?.body) === JSON.stringify({ name: 'verify_mint', input: { config: mintConfig } }), JSON.stringify(vmReq?.body));
     await cc.close();
   }
 

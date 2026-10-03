@@ -23,7 +23,7 @@ Registered once, at startup:
 | Session | `shim_status`, `shim_launch`, `shim_list_tabs`, `shim_open_session`, `shim_checkout`, `shim_preview`, `shim_commit`, `shim_end_session` |
 | Page | `view_page`, `query_page`, `inspect_element`, `evaluate_in_page`, `read_console`, `reload_page`, `verify_across_pages`, `interact_page` (composition sessions only) |
 | API map | `list_discovered_hosts`, `request_sources`, `search_discovered_api`, `inspect_endpoint`, `replay_endpoint` |
-| Composition | `probe_request`, `read_calls` (composition sessions only) |
+| Composition | `probe_request`, `read_calls`, `verify_mint` (composition sessions only) |
 
 The page tools' definitions come from `@shimbrowser/core/page-tools`, the same module
 Shim's own authoring worker uses, and Shim runs them with the same implementation.
