@@ -525,7 +525,22 @@ if you need to), and say in your summary what you could only verify that way.
   handler's `api.db &&` fallback; the data path works after commit.
 - **Remote databases** — `connections: [{ "name": "warehouse", "engine": "postgres" }]`
   (`postgres | mysql | mariadb | mssql | sqlite-remote | supabase`) names a database the
-  user already runs; they paste its URL into the shim's Settings, never you. Reach it with
+  user already runs; they paste its URL into the shim's Settings, never you. Each entry
+  may nest a `storage` of the same `{ "tables": [...] }` shape as the shim's own:
+
+  ```json
+  "connections": [{ "name": "warehouse", "engine": "postgres", "storage": { "tables": [
+    { "name": "track_notes", "columns": [
+      { "name": "id", "type": "integer", "primaryKey": true },
+      { "name": "body", "type": "text" }] }] } }]
+  ```
+
+  On the SQL engines Shim creates missing tables and columns from it, additively, when the
+  shim first touches the connection — declare the schema there rather than running DDL
+  yourself. It is also the table allowlist: once a connection declares a table, a
+  statement touching an undeclared one (on `postgres | mysql | mariadb | mssql`) waits on
+  the user's approval, so declare every table you use. Omit `storage` to talk to an
+  existing schema as is. Reach a connection with
   `api.db.connection("warehouse").query(…)` / `.run(…)`; unconfigured, calls answer
   `not-configured`. A `supabase` connection instead takes a supabase-js-like builder;
   only this subset of it exists:
@@ -541,7 +556,9 @@ if you need to), and say in your summary what you could only verify that way.
   `{ ok, rows, truncated? }`; a write `{ ok, changes }`, plus `rows` when it ends in
   `.select()` — never supabase-js's `{ data, error }`. Row-level security can filter a
   write to nothing and still answer `ok` with `changes: 0`, so check `changes`. An
-  `update`/`delete` with no filter waits on the user's approval. A new
+  `update`/`delete` with no filter waits on the user's approval. A supabase connection's
+  `storage` creates nothing — the user makes tables in their Supabase project — but it is
+  still the table allowlist, so declare every table the shim touches. A new
   connection asks the user at commit. Treat remote data as shared: additive changes only,
   and say so before writing.
 - **`api.settings`** — values the user supplies (API keys, preferences). Declare the fields
@@ -550,7 +567,9 @@ if you need to), and say in your summary what you could only verify that way.
   `options`; optional `help`, `default`). Read with `await api.settings.get('openaiKey')`
   — `undefined` until the user fills it in, so render "add your key in Settings" — or all
   of them at once with `await api.settings.getAll()` (`{ key: value }` for every declared
-  field). Values never travel with the shim; the schema does.
+  field). The schema travels with the shim; `secret` values never do, but non-secret
+  values ride along when the user exports a pack — keep anything personal in a `secret`
+  field (or in `api.storage`) rather than a `text`, `number`, `boolean` or `select` one.
 - **`api.fetch(url, { method, headers, body })`** — a request from Shim's main process,
   outside the page's CSP and CORS: `{ ok, status, url, headers, text, truncated }` (no
   `.json()` — `JSON.parse(res.text)`). Cookie-less: public content only. For the site's own

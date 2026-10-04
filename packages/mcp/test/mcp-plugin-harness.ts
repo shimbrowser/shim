@@ -123,6 +123,25 @@ if (fs.existsSync(supabaseBuilder)) {
     check(`the guide names supabase .${method}(`, skill.includes(`.${method}(`) || new RegExp(`\`\\.${method}\``).test(skill));
   }
 }
+// A remote connection's nested `storage` is how its tables get created and
+// what its allowlist reads — the guide must show the shape, and that a
+// supabase connection's creates nothing but still allowlists.
+const connBlock = /```json\n\s*("connections": \[[\s\S]*?)\n\s*```/.exec(skill)?.[1];
+function showsConnectionStorage(block: string | undefined): boolean {
+  try {
+    const parsed = JSON.parse(`{${block ?? ''}}`) as { connections?: { engine?: string; storage?: { tables?: unknown[] } }[] };
+    return (parsed.connections ?? []).some((c) => c.engine !== 'supabase' && (c.storage?.tables?.length ?? 0) > 0);
+  } catch {
+    return false;
+  }
+}
+check('shows a remote connection with a nested storage declaration', showsConnectionStorage(connBlock));
+check('says nested storage creates tables additively and is the table allowlist', /creates missing tables and columns/.test(skill) && /table allowlist/.test(skill));
+check('says a supabase connection\'s storage creates nothing but still allowlists', /supabase connection's\s+`storage` creates nothing/.test(skill));
+// Non-secret setting values ride a pack export (packs/core.ts → exportToShim
+// includeSettings) — only secret values never travel.
+check('does not claim setting values never travel', !/Values never travel with the shim/.test(skill));
+check('says non-secret setting values ride a pack export', /`secret` values never do, but non-secret\s+values ride along when the user exports a pack/.test(skill));
 // The preview bucket is one per site and never cleared — the guide must not
 // promise it is discarded, and must warn that it may hold earlier keys.
 check('does not claim preview storage is gone after commit', !/preview stores is gone/.test(skill));
