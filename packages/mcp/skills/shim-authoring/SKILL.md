@@ -548,12 +548,15 @@ Handlers get `api`. Every call that can fail resolves `{ ok: false, error }` ins
 throwing — always branch on it and render a usable state.
 
 **While previewing, handlers get a preview `api`, not the shim's.** `api.storage` reads and
-writes a scratch bucket apart from the shim's saved data — what a preview stores is gone
-after commit, and what the shim already saved isn't visible to the handler (read it with
-`inspect_storage`, section 4) — `api.settings` has no values, `api.ai` calls are refused (below), and `api.db`, `api.storage.pack`, `api.storage.global` and `api.shared` are
-absent. Handlers must render a usable state in every one of those cases anyway; check the
-data path after commit (open the session again if you need to), and say in your summary
-what you could only verify that way.
+writes a scratch bucket apart from the shim's saved data: what the shim already saved isn't
+visible to the handler (read it with `inspect_storage`, section 4), and what a preview stores
+never reaches the shim. That bucket is one per site, shared by every preview there (other
+shims' and earlier sessions' too) and never cleared, so it may already hold keys — don't read
+a value you didn't just write as evidence, and prefer keys unique to this shim.
+`api.settings` has no values, `api.ai` calls are refused (below), and `api.db`,
+`api.storage.pack`, `api.storage.global` and `api.shared` are absent. Handlers must render a
+usable state in every one of those cases anyway; check the data path after commit (open the
+session again if you need to), and say in your summary what you could only verify that way.
 
 **`api.ai` is refused while your session is open.** On the session's tab, every `api.ai`
 call from a previewed handler — and from the shim's committed rules there — resolves
@@ -593,7 +596,10 @@ Don't repeat it.
 
   Names are lowercase `snake_case`; types `text | integer | real | blob`. Additive changes
   apply on commit. Then `await api.db.query(sql, params)` (reads only; `{ ok, rows,
-  truncated? }`, capped at 5,000 rows / 1 MB) and `await api.db.run(sql, params)` (writes
+  truncated? }`, capped by default at 5,000 rows / 1 MB; a shim that really needs bigger
+  reads raises its own caps with `"storage": { "limits": { "maxRows": 20000,
+  "maxResultBytes": 5000000 }, "tables": [...] }`, up to 100,000 rows / 20 MB — prefer
+  `LIMIT`/`OFFSET` paging or an aggregate first) and `await api.db.run(sql, params)` (writes
   and DDL; `{ ok, changes, lastInsertRowid }`). Parameterized (`?`) only, one statement per
   call. Destructive DDL waits on the user's approval. Errors to handle: `not-declared`,
   `approval-required`, `denied`, `classification: …`, `rejected: …`, `sqlite: …`,
@@ -601,10 +607,40 @@ Don't repeat it.
   handler's `api.db &&` fallback; the data path works after commit.
 - **Remote databases** — `connections: [{ "name": "warehouse", "engine": "postgres" }]`
   (`postgres | mysql | mariadb | mssql | sqlite-remote | supabase`) names a database the
-  user already runs; they paste its URL into the shim's Settings, never you. Reach it with
+  user already runs; they paste its URL into the shim's Settings, never you. Each entry
+  may nest a `storage` of the same `{ "tables": [...] }` shape as the shim's own:
+
+  ```json
+  "connections": [{ "name": "warehouse", "engine": "postgres", "storage": { "tables": [
+    { "name": "track_notes", "columns": [
+      { "name": "id", "type": "integer", "primaryKey": true },
+      { "name": "body", "type": "text" }] }] } }]
+  ```
+
+  On the SQL engines Shim creates missing tables and columns from it, additively, when the
+  shim first touches the connection — declare the schema there rather than running DDL
+  yourself. It is also the table allowlist: once a connection declares a table, a
+  statement touching an undeclared one (on `postgres | mysql | mariadb | mssql`) waits on
+  the user's approval, so declare every table you use. Omit `storage` to talk to an
+  existing schema as is. Reach a connection with
   `api.db.connection("warehouse").query(…)` / `.run(…)`; unconfigured, calls answer
-  `not-configured`. `supabase` takes a supabase-js-like builder
-  (`.from("notes").select("*").eq(…)`), answering `{ ok, rows, changes }`. A new
+  `not-configured`. A `supabase` connection instead takes a supabase-js-like builder;
+  only this subset of it exists:
+  - start: `.from(table)` then one of `.select(columns?)`, `.insert(row | rows)`,
+    `.upsert(row | rows, { onConflict? })`, `.update(patch)`, `.delete()`;
+  - filters: `.eq` `.neq` `.gt` `.gte` `.lt` `.lte` `.like` `.ilike` `(column, value)`,
+    `.in(column, values)`, `.is(column, value)`, `.not(column, op, value)`, `.or("a.eq.1,b.gt.2")`;
+  - read modifiers: `.order(column, { ascending? })`, `.limit(n)`, `.range(from, to)`,
+    `.single()`, `.maybeSingle()`; after a write, `.select(columns?)` returns the
+    affected rows. Writes take at most 1,000 rows.
+
+  Columns are plain names (or `*`) — no embedded relations, `->` or `::`. A read answers
+  `{ ok, rows, truncated? }`; a write `{ ok, changes }`, plus `rows` when it ends in
+  `.select()` — never supabase-js's `{ data, error }`. Row-level security can filter a
+  write to nothing and still answer `ok` with `changes: 0`, so check `changes`. An
+  `update`/`delete` with no filter waits on the user's approval. A supabase connection's
+  `storage` creates nothing — the user makes tables in their Supabase project — but it is
+  still the table allowlist, so declare every table the shim touches. A new
   connection asks the user at commit. Treat remote data as shared: additive changes only,
   and say so before writing.
 - **`api.settings`** — values the user supplies (API keys, preferences). Declare the fields
@@ -613,11 +649,16 @@ Don't repeat it.
   `options`; optional `help`, `default`). Read with `await api.settings.get('openaiKey')`
   — `undefined` until the user fills it in, so render "add your key in Settings" — or all
   of them at once with `await api.settings.getAll()` (`{ key: value }` for every declared
-  field). Values never travel with the shim; the schema does.
+  field). The schema travels with the shim; `secret` values never do, but non-secret
+  values ride along when the user exports a pack — keep anything personal in a `secret`
+  field (or in `api.storage`) rather than a `text`, `number`, `boolean` or `select` one.
 - **`api.fetch(url, { method, headers, body })`** — a request from Shim's main process,
   outside the page's CSP and CORS: `{ ok, status, url, headers, text, truncated }` (no
-  `.json()` — `JSON.parse(res.text)`). Cookie-less: public content only. For the site's own
-  authenticated endpoints, use the page's `fetch(url, { credentials: 'include' })`.
+  `.json()` — `JSON.parse(res.text)`). It sends no cookies, but it does send the headers
+  you pass, so a third-party API authenticated by a key works: read the key from a `secret`
+  setting and pass it as `Authorization` or the API's key header. Only for the site's own
+  endpoints that need the user's logged-in session, use the page's
+  `fetch(url, { credentials: 'include' })`.
 - **`api.ai.complete({ prompt | messages, system?, model?, maxTokens? })`** — Claude, on the
   user's own Anthropic key, which the shim never sees: `{ ok, text }`. Requires
   `"permissions": ["ai"]`; the user grants it in Shim after the commit, and until then calls

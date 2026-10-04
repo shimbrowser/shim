@@ -40,6 +40,8 @@ export interface PageRuntimeControl {
   apply(patchId: string, rule: Rule, ruleKey: string, bundleHash: string | null): boolean;
   remove(ruleKey: string): boolean;
   resolve(id: number, value: unknown): boolean;
+  /** Rejects a pending api call: the driver's store failed. */
+  reject(id: number, message: string): boolean;
   previewKeys(): string[];
 }
 
@@ -66,12 +68,12 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
   };
 
   // --- api calls answered by the driver -------------------------------------
-  const pending = new Map<number, (value: unknown) => void>();
+  const pending = new Map<number, { resolve: (value: unknown) => void; reject: (err: Error) => void }>();
   let seq = 0;
   const call = (method: string, patchId: string, args: unknown[]): Promise<unknown> => {
     const id = ++seq;
-    return new Promise((resolve) => {
-      pending.set(id, resolve);
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
       post({ type: 'call', id, method, patchId, origin: location.origin, args });
     });
   };
@@ -189,7 +191,13 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
     resolve(id, value) {
       const settle = pending.get(id);
       pending.delete(id);
-      if (settle) settle(value);
+      if (settle) settle.resolve(value);
+      return Boolean(settle);
+    },
+    reject(id, message) {
+      const settle = pending.get(id);
+      pending.delete(id);
+      if (settle) settle.reject(new Error(message));
       return Boolean(settle);
     },
     previewKeys: () => [...previews.keys()],

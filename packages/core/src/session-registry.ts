@@ -46,6 +46,13 @@
 //          tears down (previews, the composition journal, the finish-turn
 //          step) and the lease is released — last, always.
 //     end() resolves with the last committed versionId, if any.
+//   - Opening is cancellable. open() takes the caller's signal: a caller
+//     gone before the lease is granted never takes it, one gone during begin
+//     aborts the session's signal (begin's cards close as a deny), and one
+//     gone by the time begin returns gets the session torn down before
+//     open() answers 'open-cancelled'. settleOpens() resolves once no
+//     open() is in progress, so a shutdown can wait for opens it cancelled
+//     and then end every session list() shows — none outlives it.
 //   - Idle timeout. No call for idleTimeoutMs (10 minutes) while nothing is
 //     queued or running ends the session; the discard is the backend's
 //     finish with uncommitted changes.
@@ -106,6 +113,7 @@ export type SessionErrorCode =
   | 'artifact-busy'
   | 'begin-failed'
   | 'target-changed'
+  | 'open-cancelled'
   | 'invalid-request';
 
 // A backend's begin throws this when the artifact is busy with something the
@@ -156,6 +164,10 @@ export interface OpenRequest {
   // was given and the mount the human chose on the attach card. Implies
   // created.
   mint?: SessionMint;
+  // Aborts when the caller goes away (its request closed, the endpoint
+  // stopped): an open still in progress is cancelled, never left holding
+  // the lease for nobody.
+  signal?: AbortSignal;
 }
 
 // A begin that refuses for a reason the agent can act on: answered as its
@@ -302,6 +314,9 @@ export interface SessionRegistry {
   // The live session holding an artifact, if any.
   sessionFor(kind: SessionArtifactKind, artifactId: string): SessionInfo | null;
   list(): SessionInfo[];
+  // Resolves once no open() is in progress (one started meanwhile is waited
+  // for too). A session such an open() created is listed by then.
+  settleOpens(): Promise<void>;
 }
 
 // --- internals --------------------------------------------------------------
@@ -375,6 +390,7 @@ export function createSessionRegistry<L extends SessionLease = SessionLease>(opt
 
   const live = new Map<string, S>();
   const ended = new Map<string, EndedSession>();
+  const opening = new Set<Promise<OpenResult>>();
 
   function report(label: string, err: unknown): void {
     try {
@@ -545,18 +561,35 @@ export function createSessionRegistry<L extends SessionLease = SessionLease>(opt
 
   // --- public ---------------------------------------------------------------
 
-  async function open(req: OpenRequest): Promise<OpenResult> {
+  const OPEN_CANCELLED: SessionError = { ok: false, error: 'open-cancelled', detail: 'the caller went away before the session opened' };
+
+  function open(req: OpenRequest): Promise<OpenResult> {
+    const p = openSession(req);
+    opening.add(p);
+    const done = (): void => { opening.delete(p); };
+    p.then(done, done);
+    return p;
+  }
+
+  async function openSession(req: OpenRequest): Promise<OpenResult> {
     if (typeof req.artifactId !== 'string' || req.artifactId === '') return { ok: false, error: 'invalid-request', detail: 'artifactId is required' };
     const backend = opts.backends[req.kind];
     const leases = opts.leases[req.kind];
     if (!backend || !leases) return { ok: false, error: 'unknown-kind' };
+    const callerGone = (): boolean => req.signal?.aborted === true;
+    if (callerGone()) return OPEN_CANCELLED;
     const sessionId = newId();
     let lease: L;
     try {
       lease = await leases.acquire(leaseKey(req.kind, req.artifactId), 'turn', { owner: sessionId, timeoutMs: openLeaseTimeoutMs });
     } catch (e) {
-      if (acquireTimedOut(e)) return { ok: false, error: 'artifact-busy' };
+      if (acquireTimedOut(e)) return callerGone() ? OPEN_CANCELLED : { ok: false, error: 'artifact-busy' };
       throw e;
+    }
+    // The caller went away while we waited: nobody would own the session.
+    if (callerGone()) {
+      lease.release();
+      return OPEN_CANCELLED;
     }
     // A preempter queued behind us while we waited: it wins.
     if (lease.signal.aborted) {
@@ -564,10 +597,16 @@ export function createSessionRegistry<L extends SessionLease = SessionLease>(opt
       return { ok: false, error: 'artifact-busy' };
     }
     const controller = new AbortController();
-    // A preemption during begin aborts the session signal, so begin can stop
-    // early; the session is torn down right after.
+    // A preemption — or the caller going away — during begin aborts the
+    // session signal, so begin can stop early; the session is torn down
+    // right after.
     const onEarlyAbort = (): void => controller.abort();
     lease.signal.addEventListener('abort', onEarlyAbort);
+    req.signal?.addEventListener('abort', onEarlyAbort);
+    const offEarlyAbort = (): void => {
+      lease.signal.removeEventListener('abort', onEarlyAbort);
+      req.signal?.removeEventListener('abort', onEarlyAbort);
+    };
     let handle: unknown;
     try {
       handle = await backend.begin({
@@ -577,14 +616,15 @@ export function createSessionRegistry<L extends SessionLease = SessionLease>(opt
         lease, signal: controller.signal,
       });
     } catch (e) {
-      lease.signal.removeEventListener('abort', onEarlyAbort);
+      offEarlyAbort();
       lease.release();
+      if (callerGone()) return OPEN_CANCELLED;
       if (e instanceof ArtifactBusyError) return { ok: false, error: 'artifact-busy', detail: e.message };
       if (e instanceof TargetChangedError) return { ok: false, error: 'target-changed', detail: e.message };
       if (e instanceof BeginRefusal) return { ok: false, error: e.code, detail: e.message };
       return { ok: false, error: 'begin-failed', detail: e instanceof Error ? e.message : String(e) };
     }
-    lease.signal.removeEventListener('abort', onEarlyAbort);
+    offEarlyAbort();
     const s: S = {
       info: {
         sessionId, kind: req.kind, artifactId: req.artifactId, agent: req.agent, intent: req.intent,
@@ -602,6 +642,10 @@ export function createSessionRegistry<L extends SessionLease = SessionLease>(opt
       offLeaseAbort: () => undefined,
     };
     live.set(sessionId, s);
+    if (callerGone()) {
+      await endSession(s, 'ended');
+      return OPEN_CANCELLED;
+    }
     if (lease.signal.aborted || controller.signal.aborted) {
       await endSession(s, 'preempted');
       return { ok: false, error: 'artifact-busy' };
@@ -711,6 +755,9 @@ export function createSessionRegistry<L extends SessionLease = SessionLease>(opt
     },
     list() {
       return [...live.values()].map((s) => snapshot(s.info));
+    },
+    async settleOpens() {
+      while (opening.size > 0) await Promise.allSettled([...opening]);
     },
   };
 }

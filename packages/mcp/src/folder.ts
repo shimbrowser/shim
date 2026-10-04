@@ -30,8 +30,13 @@
 //     symlink (a crafted or stale folder could otherwise redirect a write
 //     or a removal outside it). A composition holding a file named like the
 //     marker can't be checked out (the checkout would overwrite it) and says so.
+//   - A file is replaced, never written in place: the content goes to a new
+//     hidden temp file that is renamed over the entry, so a target that is a
+//     hard link to a file outside the folder only loses its link here — the
+//     shared inode is never truncated or rewritten.
 
 import * as fs from 'fs';
+import { randomBytes } from 'crypto';
 import * as path from 'path';
 import { workingCopyPathProblem, SHIM_WIRE_LIMITS, type WireLimits } from '@shimbrowser/core/working-copy-wire';
 import type { FolderInput } from '@shimbrowser/core/shim-folder';
@@ -173,6 +178,25 @@ function refuseSymlinksBelow(root: string, abs: string): void {
   }
 }
 
+// Replaces the directory entry at `abs` with a fresh file. The temp file is
+// created exclusively (so nothing already at that name, link or not, is
+// followed) next to the target (so the rename never crosses a device), and is
+// hidden (so a leftover from a crash never reads as part of the working copy).
+function replaceFile(abs: string, content: string | Uint8Array): void {
+  const temp = path.join(path.dirname(abs), `.${path.basename(abs)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
+  fs.writeFileSync(temp, content, { flag: 'wx' });
+  try {
+    fs.renameSync(temp, abs);
+  } catch (err) {
+    try {
+      fs.unlinkSync(temp);
+    } catch {
+      // Already gone: nothing to clean up.
+    }
+    throw err;
+  }
+}
+
 function visibleEntries(dir: string): string[] {
   try {
     return fs.readdirSync(dir).filter((n) => !isHidden(n));
@@ -221,7 +245,7 @@ export function writeCheckout(dir: string, files: FolderInput): CheckoutWrite {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     const content = files[rel];
     if (content === undefined) continue;
-    fs.writeFileSync(abs, content);
+    replaceFile(abs, content);
     written.push(rel);
   }
   return { dir: root, written, removed };
@@ -330,21 +354,30 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
     const content = files[rel];
     if (content === undefined) continue;
     fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.writeFileSync(abs, content);
+    replaceFile(abs, content);
     written.push(rel);
   }
-  fs.writeFileSync(path.join(root, COMPOSITION_MARKER), `${JSON.stringify({ format: MARKER_FORMAT, hidden })}\n`);
+  replaceFile(path.join(root, COMPOSITION_MARKER), `${JSON.stringify({ format: MARKER_FORMAT, hidden })}\n`);
   return { dir: root, written, removed };
 }
 
-/** Which kind of working copy a checkout's files are. */
+/**
+ * Which kind of working copy a checkout's files are. A composition always
+ * carries manifest.json and a shim checkout never does, while a composition
+ * may hold a file of its own named shim.json — so the manifest decides.
+ */
 export function checkoutKind(files: FolderInput): WorkingCopyKind {
-  return SHIM_JSON in files ? 'shim' : 'composition';
+  return MANIFEST_JSON in files ? 'composition' : 'shim';
 }
 
-/** Which kind of working copy a folder on disk holds (null: neither). */
+/**
+ * Which kind of working copy a folder on disk holds (null: neither). The
+ * composition marker comes first: a composition checkout may hold its own
+ * shim.json.
+ */
 export function folderKind(dir: string): WorkingCopyKind | null {
+  if (fs.existsSync(path.join(dir, COMPOSITION_MARKER))) return 'composition';
   if (fs.existsSync(path.join(dir, SHIM_JSON))) return 'shim';
-  if (fs.existsSync(path.join(dir, COMPOSITION_MARKER)) || fs.existsSync(path.join(dir, MANIFEST_JSON))) return 'composition';
+  if (fs.existsSync(path.join(dir, MANIFEST_JSON))) return 'composition';
   return null;
 }
