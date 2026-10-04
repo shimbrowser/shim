@@ -223,6 +223,8 @@ for (const [label, source] of [
   ['a module with helpers', 'const K = 1;\nmodule.exports = function notes() { return K; };\n'],
   ['a computed export', 'module.exports = (() => function notes() {})();\n'],
   ['module["exports"]', 'module["exports"] = function notes() {};\n'],
+  ['Object.defineProperty(module, "exports")', 'Object.defineProperty(module, "exports", { value: function notes() {} });\n'],
+  ['Object.assign(module, { exports })', 'Object.assign(module, { exports: function notes() {} });\n'],
   ['an element of an array literal', 'module.exports = [function notes() {}][0];\n'],
   ['a member of an object literal', 'module.exports = { notes() {} }.notes;\n'],
   ['a choice between object members', 'module.exports = {}.x ? {}.y : { f() {} }.f;\n'],

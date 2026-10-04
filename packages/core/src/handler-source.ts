@@ -89,8 +89,14 @@ function wholeLiteral(expression: string): string | null {
   return null;
 }
 
-// `module.exports` (or `module['exports']`) as written anywhere in a module.
-const MODULE_EXPORTS_RE = /\bmodule\s*(?:\.\s*exports\b|\[\s*(['"`])exports\1\s*\])/;
+// Any reference to `module`. A module with none can't change
+// `module.exports` (`exports` and `this` are the original object), so it
+// certainly exports no function. The test is deliberately loose: one that
+// looked for a `module.exports = ...` assignment would refuse
+// `Object.defineProperty(module, 'exports', ...)` or
+// `Object.assign(module, { exports })`, which import accepts, and a regex
+// can't see past comments and strings either way.
+const MODULE_REF_RE = /\bmodule\b/;
 
 /**
  * Why a handler module can't give the browser a function, or null when
@@ -98,7 +104,8 @@ const MODULE_EXPORTS_RE = /\bmodule\s*(?:\.\s*exports\b|\[\s*(['"`])exports\1\s*
  * `(function (module, exports) { <source> })` and requires
  * `module.exports` to be a function after it runs (import's
  * assertHandlersBound). Core never runs handler code, so this is the static
- * part of that check: a syntax error, a module that never assigns
+ * part of that check, and it never refuses a module import would accept: a
+ * syntax error, a module that never refers to `module` and so can't assign
  * `module.exports` (a bare `function notes() {}`), or one that exports a
  * literal (`module.exports = 42;`, `= {}`, `= []`). An export only known at
  * run time (a call's result, a variable) passes here and is the browser's to
@@ -108,7 +115,7 @@ export function handlerModuleProblem(moduleSource: string): string | null {
   if (!moduleSource.trim()) return 'is empty';
   const syntax = syntaxProbe(`(function (module, exports) {\n${moduleSource}\n});`);
   if (!syntax.ok) return `does not parse as JavaScript: ${syntax.error ?? 'syntax error'}`;
-  if (!MODULE_EXPORTS_RE.test(moduleSource)) {
+  if (!MODULE_REF_RE.test(moduleSource)) {
     return 'never assigns module.exports — a handler file is `module.exports = function (ctx) { ... };`';
   }
   const expression = exportedExpression(moduleSource)?.trim();
