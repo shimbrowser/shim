@@ -69,6 +69,26 @@ const PRIMITIVE_LITERAL_RE = new RegExp([
   String.raw`^\x60(?:\\[\s\S]|[^\x60\\$]|\$(?!\{))*\x60$`,
 ].join('|'), 'i');
 
+// 'an object' / 'an array' when a whole expression is one object or array
+// literal (never a function), else null. An expression starting with `{` or
+// `[` opens a literal, and no prefix of it parses until that literal closes,
+// so the first closing bracket at which the prefix parses is the literal's
+// own: the literal is the whole expression only if that is the last
+// character. (`[fn][0]` or `{}.constructor` close earlier, so they pass.) The
+// parser does the bracket matching, so strings, comments, templates and
+// regexes that hold brackets can't fool it.
+function wholeLiteral(expression: string): string | null {
+  const open = expression[0];
+  const close = open === '{' ? '}' : open === '[' ? ']' : null;
+  if (!close) return null;
+  for (let end = expression.indexOf(close); end !== -1; end = expression.indexOf(close, end + 1)) {
+    if (!syntaxProbe(`(${expression.slice(0, end + 1)}\n)`).ok) continue;
+    if (end !== expression.length - 1) return null;
+    return open === '{' ? 'an object' : 'an array';
+  }
+  return null;
+}
+
 // `module.exports` (or `module['exports']`) as written anywhere in a module.
 const MODULE_EXPORTS_RE = /\bmodule\s*(?:\.\s*exports\b|\[\s*(['"`])exports\1\s*\])/;
 
@@ -80,8 +100,8 @@ const MODULE_EXPORTS_RE = /\bmodule\s*(?:\.\s*exports\b|\[\s*(['"`])exports\1\s*
  * assertHandlersBound). Core never runs handler code, so this is the static
  * part of that check: a syntax error, a module that never assigns
  * `module.exports` (a bare `function notes() {}`), or one that exports a
- * primitive literal (`module.exports = 42;`). An export only known at run
- * time (a call's result, an object) passes here and is the browser's to
+ * literal (`module.exports = 42;`, `= {}`, `= []`). An export only known at
+ * run time (a call's result, a variable) passes here and is the browser's to
  * check.
  */
 export function handlerModuleProblem(moduleSource: string): string | null {
@@ -91,11 +111,13 @@ export function handlerModuleProblem(moduleSource: string): string | null {
   if (!MODULE_EXPORTS_RE.test(moduleSource)) {
     return 'never assigns module.exports — a handler file is `module.exports = function (ctx) { ... };`';
   }
-  const expression = exportedExpression(moduleSource);
-  if (expression !== null && PRIMITIVE_LITERAL_RE.test(expression.trim())) {
-    return `exports ${expression.trim()}, not a function — a handler file is \`module.exports = function (ctx) { ... };\``;
-  }
-  return null;
+  const expression = exportedExpression(moduleSource)?.trim();
+  if (expression === undefined) return null;
+  const literal = PRIMITIVE_LITERAL_RE.test(expression)
+    ? (expression.length > 40 ? `${expression.slice(0, 37)}...` : expression)
+    : wholeLiteral(expression);
+  if (literal === null) return null;
+  return `exports ${literal}, not a function — a handler file is \`module.exports = function (ctx) { ... };\``;
 }
 
 /**

@@ -210,6 +210,12 @@ rejects('a script handler module exporting a string', 'malformed-shim-folder',
   () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = "notes"' }), 'not a function');
 rejects('a script handler file that is a bare function declaration', 'malformed-shim-folder',
   () => packShim({ ...good(), 'handlers/notes.js': 'function notes({ anchor }) { anchor.dataset.n = "1"; }\n' }), 'handlers/notes.js never assigns module.exports');
+rejects('a script handler module exporting an object', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = {};\n' }), 'handlers/notes.js exports an object, not a function');
+rejects('…an object of handlers', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = {\n  notes({ anchor }) { anchor.title = "}"; },\n};\n' }), 'exports an object');
+rejects('…or an array', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = [function notes() {}, "]"];\n' }), 'exports an array');
 rejects('an empty script handler file', 'malformed-shim-folder',
   () => packShim({ ...good(), 'handlers/notes.js': '  \n' }), 'handlers/notes.js is empty');
 for (const [label, source] of [
@@ -217,6 +223,9 @@ for (const [label, source] of [
   ['a module with helpers', 'const K = 1;\nmodule.exports = function notes() { return K; };\n'],
   ['a computed export', 'module.exports = (() => function notes() {})();\n'],
   ['module["exports"]', 'module["exports"] = function notes() {};\n'],
+  ['an element of an array literal', 'module.exports = [function notes() {}][0];\n'],
+  ['a member of an object literal', 'module.exports = { notes() {} }.notes;\n'],
+  ['a choice between object members', 'module.exports = {}.x ? {}.y : { f() {} }.f;\n'],
 ] as const) {
   let ok = true;
   try { packShim({ ...good(), 'handlers/notes.js': source }); } catch (err) { ok = false; console.error(err); }
@@ -230,7 +239,7 @@ let all: ShimFolderError | null = null;
 try { packShim({ 'README.md': '', 'handlers/x.y.js': '' }); } catch (err) { if (err instanceof ShimFolderError) all = err; }
 check('every problem is reported at once', (all?.problems.length ?? 0) >= 3, all?.problems.join(' | '));
 
-console.log('handler names that differ only in case');
+console.log('handler names that differ only in case, or are Windows device names');
 const caseSpec = {
   id: 'k', match: { hosts: ['example.com'] },
   rules: [
@@ -241,6 +250,17 @@ const caseSpec = {
 rejects('a folder with handlers/Foo.js and handlers/foo.js', 'malformed-shim-folder',
   () => readShimFolder({ [SHIM_JSON]: JSON.stringify(caseSpec), 'handlers/Foo.js': expressionToModule('function a() {}'), 'handlers/foo.js': expressionToModule('function b() {}') }),
   'handler names "Foo" and "foo" differ only in case');
+for (const device of ['CON', 'nul', 'Com1', 'LPT9', 'aux', 'prn']) {
+  rejects(`a handlers/${device}.js file (a Windows device name)`, 'malformed-shim-folder',
+    () => readShimFolder({ [SHIM_JSON]: JSON.stringify({ id: 'd', match: { hosts: ['example.com'] }, rules: [] }), [`handlers/${device}.js`]: expressionToModule('function d() {}') }),
+    `"${device}" is not a valid handler name`);
+}
+rejects('a .shim whose handlers map names CON', 'malformed-shim-file',
+  () => unpackShim({ format: 'shim/1', name: 'd', spec: { id: 'd', match: { hosts: ['example.com'] }, rules: [] }, handlers: { CON: expressionToModule('function d() {}') } }),
+  'handler name "CON" can\'t be a file name');
+check('names that only start like a device name are fine', (() => {
+  try { readShimFolder({ [SHIM_JSON]: JSON.stringify({ id: 'd', match: { hosts: ['example.com'] }, rules: [] }), 'handlers/console.js': 'module.exports = function c() {};', 'handlers/com10.js': 'module.exports = function c() {};', 'handlers/nul_check.js': 'module.exports = function c() {};' }); return true; } catch { return false; }
+})());
 rejects('a .shim whose handlers map has Foo and foo', 'malformed-shim-file',
   () => unpackShim({ format: 'shim/1', name: 'k', spec: caseSpec, handlers: { Foo: expressionToModule('function a() {}'), foo: expressionToModule('function b() {}') } }),
   'differ only in case');
