@@ -17,7 +17,9 @@
 //     noMatch, console, changes), `partial` for an unsupported-api use and
 //     for a component-identity witness, the source-scan warning, witnesses
 //     captured but never in the evidence or the checkout;
-//   - the page-away guard (the start host plus the shim's declared hosts),
+//   - the page-away guard (the start host on its start port, plus the
+//     shim's declared hosts), a stored handler named after an
+//     Object.prototype property still inlined,
 //     and reload_page returning to the start URL, re-applying every live
 //     preview before it settles, and re-applying nothing when the load did
 //     not finish;
@@ -522,6 +524,46 @@ async function main(): Promise<void> {
     check('…nor a wildcard\'s apex', (await tool()).includes('page-away'));
     host.setUrl('https://elsewhere.test/');
     check('…nor an undeclared host', (await tool()).includes('page-away'));
+    await r.control.closeAll();
+  }
+
+  console.log('the start host holds to its port');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'ported.shim');
+    fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'Ported', handlers: {}, spec: { id: 'shim-ported', match: { hosts: ['elsewhere.test'] }, rules: [] } }));
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url: 'http://localhost:5173/app' }, agent: 'a', intent: 'x', shimFile });
+    check('a session opens on an explicit port', opened.ok === true, opened);
+    const id = String(opened.sessionId);
+    const host = r.hosts[0] as FakeHost;
+    const tool = async (): Promise<string> => {
+      const out = await req(r, 'POST', `/sessions/${id}/call`, { name: 'inspect_element', input: { selector: 'body' } });
+      return typeof out.result === 'string' ? out.result : '';
+    };
+    host.setUrl('http://localhost:5173/other');
+    check('another path on the start host:port is on the site', !(await tool()).includes('page-away'));
+    host.setUrl('http://localhost:9090/');
+    check('…but the start host on another port is away', (await tool()).includes('page-away'));
+    host.setUrl('http://localhost/');
+    check('…and so is its default port', (await tool()).includes('page-away'));
+    await r.control.closeAll();
+  }
+
+  console.log('a stored handler named after an Object.prototype property');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'ctor.shim');
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'Ctor',
+      spec: { id: 'shim-ctor', match: { hosts: ['site.test'] }, rules: [{ id: 'c', anchor: css('.track'), mutations: [{ kind: 'script', handler: 'constructor' }] }] },
+      handlers: { constructor: 'module.exports = function constructor({ anchor }) { anchor.dataset.c = "1"; };\n' },
+    }));
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('the session opens', opened.ok === true, opened);
+    const ruleHandlers = (r.hosts[0] as FakeHost | undefined)?.applied[0]?.rule.handlers;
+    const inlined: unknown = ruleHandlers !== undefined ? Object.getOwnPropertyDescriptor(ruleHandlers, 'constructor')?.value : undefined;
+    check('its stored module is inlined for the page, not skipped via the prototype',
+      typeof inlined === 'string' && !inlined.startsWith('module.exports'), ruleHandlers);
     await r.control.closeAll();
   }
 
