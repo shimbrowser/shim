@@ -56,10 +56,11 @@ const vmCompileProbe: CompileProbe = (code) => {
 // Statically reject the cases that can never work: a CJS source with no
 // top-level `module.exports =` assignment, or whose LAST one assigns an
 // obvious non-function (object/array/literal) — directly or through a
-// variable statically holding one (`const h = {}; module.exports = h`) — and
-// a bare expression that is one. Anything dynamic (a call — e.g. an IIFE
-// returning the function — a reassigned identifier, a conditional) is
-// allowed: it may well yield a function, and transformLiteral's fault
+// variable statically holding one at that point (`const h = {}; module.exports
+// = h`, or a function variable overwritten by a top-level `h = {}`) — and a
+// bare expression that is one. Anything dynamic (a call — e.g. an IIFE
+// returning the function — an identifier written somewhere the in-order scan
+// can't follow, a conditional) is allowed: it may well yield a function, and transformLiteral's fault
 // isolation keeps a bad one to its own rule. Static on purpose: lint runs in
 // main on import content, which must never be executed here.
 function isModuleExportsRef(node: acorn.Node): boolean {
@@ -76,74 +77,92 @@ const NON_FUNCTION_EXPRESSIONS = new Set(['ObjectExpression', 'ArrayExpression',
 // 'none' when the source has no top-level `module.exports =` assignment (or
 // doesn't parse as a script — an anonymous `function (…) {}` doesn't);
 // 'dynamic' when the assigned value can't be judged statically.
-function moduleExportsShape(source: string): 'function' | 'non-function' | 'dynamic' | 'none' {
+function moduleExportsShape(source: string): ExportShape | 'none' {
   let ast: acorn.Program;
   try {
     ast = acorn.parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
   } catch {
     return 'none';
   }
-  // Judged in execution order. Function declarations are hoisted with their
-  // value, so they count from the top; a variable only counts once its
-  // declaration has run — before that a `const`/`let`/`class` binding is in
-  // its temporal dead zone (the export throws) and a `var` is `undefined`.
-  const hoistedFns = new Set<string>();
-  const laterBindings = new Set<string>();
+  // Judged in execution order over the top-level statements, tracking what
+  // each top-level name statically holds. A name written anywhere other than
+  // a top-level `name = …` statement (inside a function, a block, a loop, by
+  // `+=`/`++`/destructuring) can change behind the scan's back, so once its
+  // declaration has run it only ever reads as 'dynamic'.
+  const elsewhere = writtenNames(ast, topLevelSimpleAssignments(ast));
+  const held = new Map<string, ExportShape>();
+  // Hoisting: a function declaration holds its function from the top. Before
+  // its declaration runs, a `const`/`let`/`class` binding is in its temporal
+  // dead zone (reading it throws) and a `var` is `undefined` — unless
+  // something elsewhere may have assigned the var first.
   for (const stmt of ast.body) {
-    if (stmt.type === 'FunctionDeclaration') hoistedFns.add(stmt.id.name);
-    else if (stmt.type === 'ClassDeclaration') laterBindings.add(stmt.id.name);
-    else if (stmt.type === 'VariableDeclaration') {
-      for (const d of stmt.declarations) if (d.id.type === 'Identifier') laterBindings.add(d.id.name);
+    if (stmt.type === 'FunctionDeclaration') {
+      held.set(stmt.id.name, elsewhere.has(stmt.id.name) ? 'dynamic' : 'function');
+    } else if (stmt.type === 'ClassDeclaration') {
+      held.set(stmt.id.name, 'non-function');
+    } else if (stmt.type === 'VariableDeclaration') {
+      for (const d of stmt.declarations) {
+        if (d.id.type !== 'Identifier' || held.has(d.id.name)) continue;
+        held.set(d.id.name, stmt.kind === 'var' && elsewhere.has(d.id.name) ? 'dynamic' : 'non-function');
+      }
     }
   }
-  const fnVars = new Set<string>();
-  // A variable whose value is statically a non-function (`const h = {}`).
-  // Only trusted while it can't have changed by export time: a `const` never
-  // can; a `let`/`var` only if nothing anywhere in the source writes the name.
-  const nonFnVars = new Set<string>();
-  const written = writtenNames(ast);
-  let shape: 'function' | 'non-function' | 'dynamic' | 'none' = 'none';
+  const valueShape = (value: acorn.Expression): ExportShape => {
+    // `a = b = fn` — the value is the innermost right side.
+    while (value.type === 'AssignmentExpression' && value.operator === '=') value = value.right;
+    if (value.type === 'FunctionExpression' || value.type === 'ArrowFunctionExpression') return 'function';
+    if (value.type === 'Identifier') return held.get(value.name) ?? 'dynamic';
+    return NON_FUNCTION_EXPRESSIONS.has(value.type) ? 'non-function' : 'dynamic';
+  };
+  const assign = (name: string, shape: ExportShape): void => {
+    held.set(name, elsewhere.has(name) ? 'dynamic' : shape);
+  };
+  let shape: ExportShape | 'none' = 'none';
   for (const stmt of ast.body) {
     if (stmt.type === 'ClassDeclaration') {
-      laterBindings.delete(stmt.id.name);
+      // A class is typeof 'function' but throws when called without `new`.
+      held.set(stmt.id.name, 'dynamic');
     } else if (stmt.type === 'VariableDeclaration') {
       for (const d of stmt.declarations) {
         if (d.id.type !== 'Identifier') continue;
-        laterBindings.delete(d.id.name);
-        // A `var` redeclaration replaces whatever the name held before.
-        fnVars.delete(d.id.name);
-        nonFnVars.delete(d.id.name);
-        if (d.init && (d.init.type === 'FunctionExpression' || d.init.type === 'ArrowFunctionExpression')) {
-          fnVars.add(d.id.name);
-        } else if (d.init && NON_FUNCTION_EXPRESSIONS.has(d.init.type)
-          && (stmt.kind === 'const' || !written.has(d.id.name))) {
-          nonFnVars.add(d.id.name);
-        }
+        // A `const` can never be reassigned, so its initializer is final.
+        if (d.init && stmt.kind === 'const') held.set(d.id.name, valueShape(d.init));
+        else if (d.init) assign(d.id.name, valueShape(d.init));
+        // `let x;` holds undefined; a bare `var x;` redeclaration keeps the value.
+        else if (stmt.kind !== 'var') assign(d.id.name, 'non-function');
       }
     } else if (stmt.type === 'ExpressionStatement'
       && stmt.expression.type === 'AssignmentExpression'
-      && stmt.expression.operator === '='
-      && isModuleExportsRef(stmt.expression.left)) {
-      // `module.exports = exports = fn` — the value is the innermost right side.
-      let value: acorn.Expression = stmt.expression.right;
-      while (value.type === 'AssignmentExpression' && value.operator === '=') value = value.right;
-      if (value.type === 'FunctionExpression' || value.type === 'ArrowFunctionExpression') shape = 'function';
-      else if (value.type === 'Identifier') {
-        if (hoistedFns.has(value.name) || fnVars.has(value.name)) shape = 'function';
-        else if (laterBindings.has(value.name) || nonFnVars.has(value.name)) shape = 'non-function';
-        else shape = 'dynamic';
-      } else shape = NON_FUNCTION_EXPRESSIONS.has(value.type) ? 'non-function' : 'dynamic';
+      && stmt.expression.operator === '=') {
+      const { left, right } = stmt.expression;
+      if (isModuleExportsRef(left)) shape = valueShape(right);
+      else if (left.type === 'Identifier') assign(left.name, valueShape(right));
     }
   }
   return shape;
 }
 
+type ExportShape = 'function' | 'non-function' | 'dynamic';
+
+// The top-level `name = …` statements moduleExportsShape follows in order.
+function topLevelSimpleAssignments(ast: acorn.Program): Set<acorn.Node> {
+  const nodes = new Set<acorn.Node>();
+  for (const stmt of ast.body) {
+    if (stmt.type === 'ExpressionStatement' && stmt.expression.type === 'AssignmentExpression'
+      && stmt.expression.operator === '=' && stmt.expression.left.type === 'Identifier') {
+      nodes.add(stmt.expression);
+    }
+  }
+  return nodes;
+}
+
 // Every identifier the source assigns anywhere (`x = …`, `x += …`, `x++`,
-// destructuring targets, `for (x of …)`) — at any depth, so a write inside a
-// function that might run before the export still counts. Over-inclusive on
-// purpose (a shadowing inner binding of the same name counts too): a name in
-// here is merely judged 'dynamic', never wrongly rejected.
-function writtenNames(ast: acorn.Program): Set<string> {
+// destructuring targets, `for (x of …)`) except the `skip` assignments — at
+// any depth, so a write inside a function that might run before the export
+// still counts. Over-inclusive on purpose (a shadowing inner binding of the
+// same name counts too): a name in here is merely judged 'dynamic', never
+// wrongly rejected.
+function writtenNames(ast: acorn.Program, skip: Set<acorn.Node>): Set<string> {
   const names = new Set<string>();
   const addPattern = (node: acorn.Node | null | undefined): void => {
     if (!node) return;
@@ -161,7 +180,9 @@ function writtenNames(ast: acorn.Program): Set<string> {
     }
   };
   walk.full(ast, (node) => {
-    if (node.type === 'AssignmentExpression') addPattern((node as acorn.AssignmentExpression).left);
+    if (node.type === 'AssignmentExpression') {
+      if (!skip.has(node)) addPattern((node as acorn.AssignmentExpression).left);
+    }
     else if (node.type === 'UpdateExpression') addPattern((node as acorn.UpdateExpression).argument);
     else if (node.type === 'ForInStatement' || node.type === 'ForOfStatement') {
       const left = (node as acorn.ForInStatement | acorn.ForOfStatement).left;
