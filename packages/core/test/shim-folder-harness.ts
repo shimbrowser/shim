@@ -11,7 +11,7 @@
 import * as vm from 'vm';
 import {
   unpackShim, packShim, checkoutShim, readShimFolder, anchorDigest, stableStringify,
-  ShimFolderError, SHIM_JSON, SHIM_STATE_FILE,
+  ShimFolderError, SHIM_JSON, SHIM_STATE_FILE, referencedHandlerNames,
 } from '../src/shim-folder';
 import type { FolderInput, ShimState, ShimFolderErrorCode } from '../src/shim-folder';
 import { moduleToExpression, expressionToModule, moduleForExpression } from '../src/handler-source';
@@ -171,6 +171,18 @@ const protoSpec: Spec = {
 };
 const protoCheckout = checkoutShim({ spec: protoSpec, handlers: { constructor: 'module.exports = function constructor() {};\n' } });
 check('a stored handler named constructor is checked out', protoCheckout['handlers/constructor.js'] === 'module.exports = function constructor() {};\n', Object.keys(protoCheckout).join(','));
+// A hand-written shim.json can carry any JSON in a rule's mutations: a
+// non-array is a reported folder problem, never a thrown TypeError.
+{
+  let err: unknown = null;
+  try {
+    readShimFolder({ [SHIM_JSON]: JSON.stringify({ id: 'm', match: { hosts: ['a.test'] }, rules: [{ id: 'r', anchor: { primary: { kind: 'css', value: '.x' } }, mutations: {} }] }) });
+  } catch (e) { err = e; }
+  check('a non-array "mutations" is a folder problem, not a crash',
+    err instanceof ShimFolderError && err.problems.some((p) => /"mutations" must be an array/.test(p)), String(err));
+  check('referencedHandlerNames tolerates a non-array mutations value',
+    referencedHandlerNames({ id: 'r', mutations: {} } as unknown as Parameters<typeof referencedHandlerNames>[0]).length === 0);
+}
 const protoRead = readShimFolder(protoCheckout);
 const CTOR: string = 'constructor';
 check('…and reads back as that handler', protoRead.handlers[CTOR] === 'module.exports = function constructor() {};\n');
