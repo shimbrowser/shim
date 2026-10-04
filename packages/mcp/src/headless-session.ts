@@ -119,9 +119,10 @@ export interface HeadlessHandle {
   source: HeadlessShimSource;
   page: HeadlessSessionPage;
   host: PageHost;
-  /** The page's host when the session began: the page-away guard's reference. */
+  /** The page's host and port ('' = the scheme's default) when the session began: the page-away guard's reference. */
   startUrl: string;
   startHost: string;
+  startPort: string;
   /** The spec as of the latest applied revision (rules carry witnesses; changed rules carry handlers inline). */
   working: Spec;
   /** Module-form sources for handlers a working rule names without carrying them inline. */
@@ -174,6 +175,14 @@ function hostnameOf(url: string): string {
   }
 }
 
+function portOf(url: string): string {
+  try {
+    return new URL(url).port;
+  } catch {
+    return '';
+  }
+}
+
 /**
  * Whether a match.hosts pattern covers `url` — the browser registry's
  * semantics (src/main/patches/host-match.ts): a pattern without a port
@@ -214,8 +223,10 @@ function previewRule(rule: Rule, stored: Record<string, string>): Rule {
   const names = referencedHandlerNames(rule);
   const handlers: Record<string, string> = { ...(rule.handlers || {}) };
   for (const name of names) {
-    const module = stored[name];
-    if (handlers[name] === undefined && typeof module === 'string') handlers[name] = moduleToExpression(module);
+    const module = Object.hasOwn(stored, name) ? stored[name] : undefined;
+    // Own properties only: a handler named `constructor` or `toString` must
+    // not resolve through Object.prototype and skip its stored module.
+    if (!Object.hasOwn(handlers, name) && typeof module === 'string') handlers[name] = moduleToExpression(module);
   }
   return Object.keys(handlers).length ? { ...rule, handlers } : { ...rule };
 }
@@ -232,12 +243,14 @@ function writeAtomic(file: string, content: string): void {
 // witnessed against the wrong document. The site is the host the session
 // started on plus every host the shim declares (match.hosts, the registry's
 // pattern semantics), as in the Shim browser: a multi-host or wildcard shim
-// can be worked on across its declared sites.
+// can be worked on across its declared sites. The start host holds to the
+// start port (the browser's turnPort), so a session begun on localhost:5173
+// can't follow the page to another local service on localhost:9090.
 function pageAway(handle: HeadlessHandle): { error: string; detail: string } | null {
   if (handle.host.isClosed()) return { error: 'page-closed', detail: 'the session\'s page closed — end the session and open a new one' };
   const url = handle.host.url();
   const now = hostnameOf(url);
-  if (now && now === handle.startHost) return null;
+  if (now && now === handle.startHost && portOf(url) === handle.startPort) return null;
   if (onDeclaredHost(handle.working, url)) return null;
   return {
     error: 'page-away',
@@ -654,6 +667,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         host,
         startUrl,
         startHost: hostnameOf(startUrl),
+        startPort: portOf(startUrl),
         working: clone(source.spec),
         storedHandlers: { ...source.handlers },
         version: typeof source.spec.version === 'number' ? source.spec.version : 1,
