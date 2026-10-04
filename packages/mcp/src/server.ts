@@ -55,7 +55,7 @@ import type { LaunchOutcome } from './launch';
 import {
   FolderError, readWorkingCopy, readCompositionWorkingCopy, writeCheckout, writeCompositionCheckout, checkoutKind, folderKind, type WorkingCopyKind,
 } from './folder';
-import { toMcpContent, fitToBudget, type McpContent } from './results';
+import { toMcpContent, fitToBudget, fitText, estimateTokens, type McpContent } from './results';
 
 export const SERVER_NAME = 'shim';
 
@@ -170,9 +170,14 @@ function withApiMapHint(result: unknown): unknown {
   return hint ? { ...result, hint } : result;
 }
 
-function failureResult(code: string, detail: string, mode: ServerMode = 'attach'): CallToolResult {
+// An error answer is held to the same output budget as a success: a detail
+// listing hundreds of bad folder paths would otherwise be dropped whole by
+// Claude Code. The detail gives way; the code and the hint always survive.
+function failureResult(code: string, detail: string, maxTokens: number, mode: ServerMode = 'attach'): CallToolResult {
   const hint = (mode === 'auto' ? AUTO_HINTS[code] : undefined) ?? HINTS[code];
-  return { isError: true, content: [{ type: 'text', text: `${code}: ${detail}${hint ? `\n${hint}` : ''}` }] };
+  const tail = hint ? `\n${hint}` : '';
+  const head = fitText(`${code}: ${detail}`, Math.max(0, maxTokens - estimateTokens({ type: 'text', text: tail })));
+  return { isError: true, content: [{ type: 'text', text: `${head}${tail}` }] };
 }
 
 function text(value: unknown): McpContent {
@@ -302,14 +307,18 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
 
   async function checkout(id: string, dir: string): Promise<Record<string, unknown>> {
     const reply = await control(modeOf(id), 'GET', sessionPath(id, 'checkout'));
+    const state = stateOf(id);
+    // Decoded under the session's own limits, known before the files are:
+    // a composition may carry far more than a shim (50 MiB vs 8). A session
+    // this process didn't open decodes under the larger bound, then its
+    // files say which kind it is.
     let files;
     try {
-      files = decodeWorkingCopy(reply.files);
+      files = decodeWorkingCopy(reply.files, state.kind === 'shim' ? SHIM_WIRE_LIMITS : COMPOSITION_WIRE_LIMITS);
     } catch (e) {
       if (e instanceof WorkingCopyWireError) throw new ToolFailure(e.code, e.problems.join('; '));
       throw e;
     }
-    const state = stateOf(id);
     const kind = state.kind ?? checkoutKind(files);
     state.kind = kind;
     const written = kind === 'composition' ? writeCompositionCheckout(dir, files) : writeCheckout(dir, files);
@@ -520,9 +529,11 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           try {
             out.checkout = await checkout(id, dir);
           } catch (e) {
+            // Any failure, including a native fs error (an unwritable dir, a
+            // full disk), is the checkout's, never the open's.
             if (e instanceof ToolFailure) out.checkout = { error: e.code, detail: e.detail };
             else if (e instanceof FolderError) out.checkout = { error: e.code, detail: e.message };
-            else throw e;
+            else out.checkout = { error: 'checkout-failed', detail: e instanceof Error ? e.message : String(e) };
             out.hint = 'The session is open, but the checkout failed: call shim_checkout with an empty folder.';
           }
         }
@@ -601,7 +612,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       else if (isApiMapToolName(name)) content = await apiMapTool(sessionId(input), name, input);
       else if (isDataToolName(name)) content = await pageTool(sessionId(input), name, input);
       else if (isCompositionSessionToolName(name)) content = await pageTool(sessionId(input), name, input);
-      else return failureResult('unknown-tool', `no tool named "${name}"`);
+      else return failureResult('unknown-tool', `no tool named "${name}"`, deps.maxOutputTokens);
       return { content: fitToBudget(content, deps.maxOutputTokens) };
     } catch (e) {
       if (e instanceof ToolFailure) {
@@ -609,10 +620,10 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           const id = str(input, 'sessionId') ?? current;
           if (id) forget(id);
         }
-        return failureResult(e.code, e.detail, serverMode);
+        return failureResult(e.code, e.detail, deps.maxOutputTokens, serverMode);
       }
-      if (e instanceof FolderError) return failureResult(e.code, e.message);
-      return failureResult('internal-error', e instanceof Error ? e.message : String(e));
+      if (e instanceof FolderError) return failureResult(e.code, e.message, deps.maxOutputTokens);
+      return failureResult('internal-error', e instanceof Error ? e.message : String(e), deps.maxOutputTokens);
     }
   });
 

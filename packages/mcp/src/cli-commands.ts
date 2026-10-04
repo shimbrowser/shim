@@ -23,7 +23,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
-  packShim, unpackShim, readShimFolder, ShimFolderError, SHIM_JSON, SHIM_STATE_FILE, SHIM_FILE_FORMAT,
+  packShim, unpackShim, readShimFolder, matchHostsProblem, ShimFolderError, SHIM_STATE_FILE, SHIM_FILE_FORMAT,
   type FolderInput, type ShimFile, type RuleState,
 } from '@shimbrowser/core/shim-folder';
 import { lintSpec } from '@shimbrowser/core/spec-lint';
@@ -97,7 +97,10 @@ export function readFolderWithState(dir: string): FolderInput {
   try {
     files = readWorkingCopy(abs);
   } catch (e) {
-    asCliError(e);
+    // A refused folder keeps its own code; anything else (an unreadable
+    // file or subfolder) is the user's environment, so it exits 2.
+    if (e instanceof FolderError || e instanceof ShimFolderError) asCliError(e);
+    throw new CliError('read-failed', `could not read ${abs}: ${errMessage(e)}`);
   }
   const statePath = path.join(abs, SHIM_STATE_FILE);
   if (fs.existsSync(statePath)) {
@@ -118,7 +121,11 @@ export function defaultShimFileFor(dir: string): string {
 /** The folder a `.shim` unpacks into by default: its path without the extension. */
 export function defaultFolderFor(file: string): string {
   const abs = path.resolve(file);
-  if (!abs.endsWith('.shim') || abs.length === '.shim'.length) {
+  // The basename, not the resolved path: a file literally named `.shim` has
+  // no stem, and stripping the extension from its path would unpack into
+  // its parent folder (the current directory, say).
+  const base = path.basename(abs);
+  if (!base.endsWith('.shim') || base.length === '.shim'.length) {
     throw new CliError('invalid-arguments', `${abs} has no .shim extension: name the folder to unpack into with --out`);
   }
   return abs.slice(0, -'.shim'.length);
@@ -171,7 +178,11 @@ export function unpackFile(file: string, out?: string): UnpackResult {
   try {
     return writeCheckout(dir, files);
   } catch (e) {
-    asCliError(e);
+    // A refused folder (not a working copy, a symlink) is the user's
+    // arguments; any other failure (unwritable folder, full disk, a stale
+    // handler that won't delete) is their environment. Both exit 2.
+    if (e instanceof FolderError || e instanceof ShimFolderError) asCliError(e);
+    throw new CliError('write-failed', `could not write ${dir}: ${errMessage(e)}`);
   }
 }
 
@@ -220,9 +231,8 @@ export function lintTarget(target: string, opts: { headless?: boolean } = {}): L
     report.errors.push(...e.problems);
     return report;
   }
-  if (!isRecord(spec.match) || !Array.isArray(spec.match.hosts)) {
-    report.errors.push(`${SHIM_JSON}: "match.hosts" must be an array of host patterns`);
-  }
+  const hostsProblem = matchHostsProblem(spec);
+  if (hostsProblem) report.errors.push(hostsProblem);
   // The handler modules ride as the spec-level map, as pack lints them.
   const lint = lintSpec({ ...spec, handlers });
   report.errors.push(...lint.errors);
@@ -320,10 +330,25 @@ export async function previewFolder(opts: PreviewOptions, deps: PreviewDeps): Pr
     throw new CliError('invalid-arguments', `"${opts.url}" is not an http(s) url`);
   }
 
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-preview-'));
+  // The throwaway file the session opens. A temp folder that can't be made
+  // or written is the user's environment (exit 2), and is never left behind.
+  let tmp: string;
+  try {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-preview-'));
+  } catch (e) {
+    throw new CliError('write-failed', `could not create a temporary folder in ${os.tmpdir()}: ${errMessage(e)}`);
+  }
+  const removeTmp = (): void => {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort: it is in the temp folder */ }
+  };
   const shimFile = path.join(tmp, 'preview.shim');
   const base = { ...JSON.parse(JSON.stringify(spec)) as Spec, rules: [] };
-  fs.writeFileSync(shimFile, JSON.stringify({ format: SHIM_FILE_FORMAT, name: packed.name, spec: base, handlers: {} }));
+  try {
+    fs.writeFileSync(shimFile, JSON.stringify({ format: SHIM_FILE_FORMAT, name: packed.name, spec: base, handlers: {} }));
+  } catch (e) {
+    removeTmp();
+    throw new CliError('write-failed', `could not write ${shimFile}: ${errMessage(e)}`);
+  }
 
   // Set by openPage below; a holder, so the narrowing survives the awaits.
   const held: { page: PreviewPage | null } = { page: null };
@@ -404,7 +429,7 @@ export async function previewFolder(opts: PreviewOptions, deps: PreviewDeps): Pr
     return outcome;
   } finally {
     await control.closeAll();
-    fs.rmSync(tmp, { recursive: true, force: true });
+    removeTmp();
   }
 }
 

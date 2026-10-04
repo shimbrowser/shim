@@ -223,6 +223,7 @@ rejects('an absolute path', 'malformed-shim-folder', () => packShim({ ...good(),
 rejects('a handler file name that isn\'t a handler name', 'malformed-shim-folder', () => packShim({ ...good(), 'handlers/a.b.js': '' }), 'not a valid handler name');
 rejects('a handler file that isn\'t UTF-8', 'malformed-shim-folder', () => packShim({ ...good(), 'handlers/notes.js': new Uint8Array([0xff, 0xfe, 0x00]) }), 'not valid UTF-8');
 rejects('match.hosts missing at pack', 'malformed-shim-folder', () => packShim(edit((spec) => { delete spec.match; })), 'match.hosts');
+rejects('a non-string host at pack', 'malformed-shim-folder', () => packShim(edit((spec) => { (spec as unknown as { match: unknown }).match = { hosts: [42] }; })), 'match.hosts');
 rejects('a lint error at pack', 'spec-lint', () => packShim(edit((spec) => { spec.rules?.push({ id: 'x', mutations: [{ kind: 'cspRelax' }] }); })), 'unknown mutation kind "cspRelax"');
 rejects('a transform that does not parse', 'spec-lint', () => packShim({ ...good(), 'handlers/strip.js': 'module.exports = function (b) { return b;' }), 'does not parse as JavaScript');
 rejects('a corrupt state file', 'malformed-shim-state', () => packShim({ ...good(), [SHIM_STATE_FILE]: '{' }), 'not valid JSON');
@@ -238,6 +239,31 @@ rejects('another format', 'malformed-shim-file', () => unpackShim({ ...EXPORT, f
 rejects('no spec', 'malformed-shim-file', () => unpackShim({ format: 'shim/1' }), '"spec" is missing');
 rejects('a non-string handler', 'malformed-shim-file', () => unpackShim({ ...EXPORT, handlers: { notes: 1 } }), 'not a source string');
 rejects('a handler name that can\'t be a file', 'malformed-shim-file', () => unpackShim({ ...EXPORT, handlers: { ...EXPORT.handlers, '../evil': 'x' } }), 'can\'t be a file name');
+rejects('handler names that differ only in case', 'malformed-shim-file', () => unpackShim({ ...EXPORT, handlers: { ...EXPORT.handlers, Notes: NOTES_MODULE } }), 'differ only in case');
+rejects('a Windows-reserved handler name', 'malformed-shim-file', () => unpackShim({ ...EXPORT, handlers: { ...EXPORT.handlers, Aux: 'x' } }), 'reserved file name');
+
+console.log('portable handler file names');
+// On the default macOS / Windows filesystems foo.js and Foo.js are one file:
+// a checkout that emitted both would silently keep only the last one.
+const caseSpec: Spec = {
+  id: 'case', match: { hosts: ['example.com'] },
+  rules: [
+    { id: 'a', anchor: { primary: { kind: 'css', value: '.a' } }, mutations: [{ kind: 'script', handler: 'mark' }], handlers: { mark: 'function mark() {}' } },
+    { id: 'b', anchor: { primary: { kind: 'css', value: '.b' } }, mutations: [{ kind: 'script', handler: 'Mark' }], handlers: { Mark: 'function Mark() {}' } },
+  ],
+};
+rejects('a checkout refuses handler names that differ only in case', 'malformed-shim-folder', () => checkoutShim({ spec: caseSpec }), '"mark" and "Mark" differ only in case');
+const reservedSpec: Spec = {
+  id: 'reserved', match: { hosts: ['example.com'] },
+  rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.a' } }, mutations: [{ kind: 'script', handler: 'con' }], handlers: { con: 'function con() {}' } }],
+};
+rejects('a checkout refuses a Windows device name', 'malformed-shim-folder', () => checkoutShim({ spec: reservedSpec }), '"con" is a reserved file name');
+rejects('a folder read from a case-sensitive disk refuses both', 'malformed-shim-folder',
+  () => readShimFolder({ ...good(), 'handlers/NOTES.js': NOTES_MODULE }), 'differ only in case');
+check('distinct names that only share a prefix still check out', (() => {
+  const files = checkoutShim({ spec: { ...caseSpec, rules: [caseSpec.rules?.[0] as Rule, { ...(caseSpec.rules?.[1] as Rule), mutations: [{ kind: 'script', handler: 'markAll' }], handlers: { markAll: 'function markAll() {}' } }] } });
+  return typeof files['handlers/mark.js'] === 'string' && typeof files['handlers/markAll.js'] === 'string';
+})());
 const inline = JSON.parse(JSON.stringify(EXPORT)) as typeof EXPORT & { spec: Spec };
 const inlineRule = inline.spec.rules?.[1];
 if (inlineRule) inlineRule.handlers = { notes: 'function other() {}' };

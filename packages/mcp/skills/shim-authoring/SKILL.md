@@ -122,12 +122,24 @@ Rules of the folder:
   (`rewrite-response`) or `wrap` (`intercept`). Each file is `module.exports = <function>;`.
   Helper functions may sit above the export in the same file.
 - **Handler names are unique across the shim** and are file names: letters, digits, `_`,
-  `$`, `-`, not starting with `-`. Two rules can share one handler by naming it.
+  `$`, `-`, not starting with `-`. Two rules can share one handler by naming it. Names must
+  also be portable file names: `__proto__` and the Windows device names (`con`, `prn`,
+  `aux`, `nul`, `com0`–`com9`, `lpt0`–`lpt9`, in any case) are refused, and two names that
+  differ only in case (`markPlayed` and `markplayed`) count as the same name.
 - **Rule ids** are short kebab-case slugs, unique within the shim (`hide-sidebar`,
   `teal-underline-h1`).
 - **What you may change:** `rules`, and the declarations `intent`, `settings`,
   `permissions`, `storage`, `connections`. `id` and `match` are fixed for a session; changing
   them is refused as `not-editable`.
+- **On a global shim** (`"global": true`), you may also change `sharedHandlers`: an object
+  of function sources (`{ "<name>": "function <name>(…) { … }" }`, never `__proto__`) that
+  every site's handlers call as `api.shared.<name>(…)`. It is the one piece of code every
+  site shares, so it evolves carefully: **add** a new function for new common logic rather
+  than changing an existing one; when you edit one, keep its inputs and outputs the same
+  (a parameter-list change draws a warning); when one site needs different behavior, wrap
+  the shared function in that site's own handler instead of editing it. Removing or
+  renaming a shared function that any site's handlers still call is refused at commit. On
+  any other shim `sharedHandlers` is `not-editable`.
 - **What never goes in the folder:** `version`, `bundleHash`, anchor `witness` fields and
   inline `handlers` maps — Shim manages those. Writing one is refused as a malformed
   folder. Hidden files (`.git`, `.shim-state.json`, editor swap files) are ignored; any

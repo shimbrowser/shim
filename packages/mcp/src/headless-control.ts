@@ -20,7 +20,8 @@
 //     never the Shim browser's persist:user).
 //   - The artifact is a `.shim` file the session loads (if it exists) and
 //     commits to, not a row in Shim's library. Its path is the lease key, so
-//     two sessions can't hold one file.
+//     two sessions can't hold one file — and a `<file>.lock` beside it
+//     (file-lock.ts) extends that across shim-mcp processes.
 //   - Compositions, Shim's tabs, the shim library, the API map, the
 //     composition session tools and the browser-only page tools answer
 //     `requires-shim-browser`.
@@ -30,6 +31,7 @@ import * as path from 'path';
 import { createSessionRegistry, LEASE_TIMEOUT, type SessionLease, type SessionLeases, type SessionRegistry, type Timers } from '@shimbrowser/core/session-registry';
 import { unpackShim, ShimFolderError, type ShimFile } from '@shimbrowser/core/shim-folder';
 import { preflightSpec } from '@shimbrowser/core/capability-preflight';
+import { lintSpec } from '@shimbrowser/core/spec-lint';
 import type { Spec } from '@shimbrowser/core/types';
 import { isApiMapToolName } from '@shimbrowser/core/api-map-tools';
 import { isCompositionSessionToolName } from '@shimbrowser/core/composition-session-tools';
@@ -39,8 +41,9 @@ import type { HeadlessStorage } from './playwright-page-host';
 import { HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER } from './playwright-page-host';
 import { fileStorage } from './file-storage';
 import { HeadlessUnavailableError, PLAYWRIGHT_MISSING } from './playwright-launch';
+import { tryLockFile, type FileLock, type FileLockOptions } from './file-lock';
 import {
-  createHeadlessShimBackend, newShimId, newShimSpec, unsupportedEvidence, BROWSER_ONLY_PAGE_TOOLS,
+  createHeadlessShimBackend, hostPatternMatches, newShimId, newShimSpec, unsupportedEvidence, BROWSER_ONLY_PAGE_TOOLS,
   type HeadlessSessionPage, type HeadlessShimSource, type HeadlessTarget, type HeadlessBackendOptions,
 } from './headless-session';
 
@@ -60,6 +63,8 @@ export interface HeadlessControlOptions {
   timers?: Timers;
   newId?(): string;
   newShimId?(): string;
+  /** The cross-process file lock's process identity (tests stand in other processes). */
+  fileLock?: FileLockOptions;
 }
 
 /** The control client, plus ending every open session (the server shutting down). */
@@ -101,10 +106,12 @@ function errMessage(e: unknown): string {
 }
 
 // One holder per key, never queued: a second session on the same `.shim`
-// file is busy at once (the registry answers artifact-busy).
-function exclusiveLeases(): SessionLeases {
+// file is busy at once (the registry answers artifact-busy). `onRelease` runs
+// as a lease frees its key (dropping the file's cross-process lock).
+function exclusiveLeases(onRelease: (key: string) => void): SessionLeases & { isHeld(key: string): boolean } {
   const held = new Set<string>();
   return {
+    isHeld: (key) => held.has(key),
     async acquire(key) {
       if (held.has(key)) throw new Error(LEASE_TIMEOUT);
       held.add(key);
@@ -116,12 +123,19 @@ function exclusiveLeases(): SessionLeases {
           if (released) return;
           released = true;
           held.delete(key);
+          onRelease(key);
         },
       };
       return lease;
     },
   };
 }
+
+// The browser's control route bounds (src/main/control/router.ts): the
+// registry keeps every successful commitId as a retry key, and a summary
+// lands in the .shim's authoring history.
+export const MAX_COMMIT_ID_LENGTH = 256;
+export const MAX_SUMMARY_LENGTH = 10_000;
 
 /** The `.shim` file a headless session starts from, or a refusal. */
 export function loadShimFile(file: string): { ok: true; source: Omit<HeadlessShimSource, 'shimFile'> } | { ok: false; error: string; detail: string } {
@@ -140,6 +154,14 @@ export function loadShimFile(file: string): { ok: true; source: Omit<HeadlessShi
   }
   const parsed = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as ShimFile;
   const spec = parsed.spec as Spec & { handlers?: Record<string, string> };
+  // unpackShim leaves match to import; the session reads match.hosts from
+  // its first reply on (the page-away guard, the match warning) and commit
+  // requires it, so a file without a usable list is refused before anything
+  // opens.
+  const match: unknown = (spec as { match?: unknown }).match;
+  if (!isRecord(match) || !Array.isArray(match.hosts) || !match.hosts.every((h) => typeof h === 'string')) {
+    return { ok: false, error: 'malformed-shim-file', detail: 'spec.match.hosts must be an array of host patterns (strings)' };
+  }
   // Handlers ride as the file's top-level module map; a non-canonical file's
   // inline sources stay on their rules (previews inline either way).
   const handlers: Record<string, string> = {};
@@ -151,6 +173,17 @@ export function loadShimFile(file: string): { ok: true; source: Omit<HeadlessShi
   }
   const specOnly = { ...spec };
   delete specOnly.handlers;
+  // The commit-time lint a preview and a commit run (packShim's), before
+  // anything opens: unpackShim checks the envelope, not the rules, so a
+  // hand-edited file could otherwise reach preflight (which would throw on a
+  // malformed rule) or the page (where it would silently misapply). Lint
+  // throws on a structurally broken rule (a non-array `mutations`).
+  try {
+    const { errors } = lintSpec({ ...specOnly, handlers });
+    if (errors.length) return { ok: false, error: 'spec-lint', detail: errors.join('; ') };
+  } catch (e) {
+    return { ok: false, error: 'malformed-shim-file', detail: `the shim's rules are malformed: ${errMessage(e)}` };
+  }
   const envelope: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(parsed)) {
     if (key !== 'format' && key !== 'name' && key !== 'spec' && key !== 'handlers') envelope[key] = value;
@@ -172,17 +205,7 @@ export function finalPageUrl(current: string, requested: URL): URL {
   return requested;
 }
 
-/**
- * Whether a match.hosts pattern covers `url` — the browser registry's
- * semantics (src/main/patches/host-match.ts): a pattern without a port
- * matches any port, an exact host or a `*.` subdomain wildcard; a pattern
- * with a port matches only that exact host:port.
- */
-export function hostPatternMatches(pattern: string, url: URL): boolean {
-  if (pattern.includes(':')) return pattern === (url.port ? `${url.hostname}:${url.port}` : url.hostname);
-  if (pattern === url.hostname) return true;
-  return pattern.startsWith('*.') && url.hostname.endsWith(pattern.slice(1));
-}
+export { hostPatternMatches };
 
 export function defaultStorageFile(shimFile: string): string {
   return `${shimFile}.storage.json`;
@@ -201,8 +224,20 @@ function browserOnlySessionTool(name: string): string | undefined {
 
 export function createHeadlessControl(options: HeadlessControlOptions): HeadlessControl {
   const backend = createHeadlessShimBackend(options.backend);
+  // This process's cross-process locks, by file: taken before the file is
+  // read, handed to the session's lease, dropped when that lease is.
+  const fileLocks = new Map<string, FileLock>();
+  const dropFileLock = (key: string): void => {
+    fileLocks.get(key)?.release();
+    fileLocks.delete(key);
+  };
+  const leases = exclusiveLeases(dropFileLock);
+  // Files an open is in flight for: claimed before the file is read, so the
+  // source a session starts from can't go stale under it (another session
+  // committing and ending while this one's page loads).
+  const opening = new Set<string>();
   const sessions = createSessionRegistry({
-    leases: { shim: exclusiveLeases() },
+    leases: { shim: leases },
     backends: { shim: backend },
     ...(options.idleTimeoutMs !== undefined ? { idleTimeoutMs: options.idleTimeoutMs } : {}),
     ...(options.timers ? { timers: options.timers } : {}),
@@ -244,6 +279,38 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
     const intent = typeof body.intent === 'string' ? body.intent : '';
     const createName = isRecord(body.create) && typeof body.create.name === 'string' ? body.create.name.trim() : '';
 
+    // Claim the file before reading it. The registry's lease is only taken
+    // once the page is open, so without the claim a second open could read
+    // the file, wait on its page while the holder commits and ends, then
+    // take the freed lease with pre-commit contents and overwrite that
+    // commit on its own.
+    if (opening.has(shimFile) || leases.isHeld(shimFile)) {
+      return refuse('artifact-busy', `another session holds ${shimFile}: end it first`);
+    }
+    // Then claim it from every other shim-mcp process: each has its own
+    // leases, and two holders would both commit, the last rename silently
+    // dropping the other's work.
+    let locked;
+    try {
+      locked = tryLockFile(shimFile, options.fileLock);
+    } catch (e) {
+      return refuse('invalid-request', `could not lock ${shimFile}: ${errMessage(e)}`);
+    }
+    if (!locked.ok) return refuse('artifact-busy', locked.detail);
+    fileLocks.set(shimFile, locked.lock);
+    opening.add(shimFile);
+    try {
+      return await openClaimed({ shimFile, parsedUrl, agent, intent, createName });
+    } finally {
+      opening.delete(shimFile);
+      // A session that opened holds the lock until its lease frees it.
+      if (!leases.isHeld(shimFile)) dropFileLock(shimFile);
+    }
+  }
+
+  async function openClaimed({ shimFile, parsedUrl, agent, intent, createName }: {
+    shimFile: string; parsedUrl: URL; agent: string; intent: string; createName: string;
+  }): Promise<ControlReply> {
     let loadedSource: Omit<HeadlessShimSource, 'shimFile'> | null = null;
     if (fs.existsSync(shimFile)) {
       if (createName) {
@@ -286,17 +353,23 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
       await page.close().catch(() => undefined);
       return reply({ ...opened });
     }
-    const hosts = source.spec.match?.hosts ?? [];
-    const matches = hosts.some((h) => hostPatternMatches(h, landed));
-    const where = landed.port ? `${landed.hostname}:${landed.port}` : landed.hostname;
-    return reply({
-      ok: true,
-      sessionId: opened.sessionId,
-      artifactId: source.spec.id,
-      shimFile,
-      url: page.host.url(),
-      ...(matches ? {} : { warnings: [`the shim's match.hosts (${hosts.join(', ') || 'none'}) doesn't include ${where}: in Shim it would not run on this page`] }),
-    });
+    try {
+      const hosts = source.spec.match?.hosts ?? [];
+      const matches = hosts.some((h) => hostPatternMatches(h, landed));
+      const where = landed.port ? `${landed.hostname}:${landed.port}` : landed.hostname;
+      return reply({
+        ok: true,
+        sessionId: opened.sessionId,
+        artifactId: source.spec.id,
+        shimFile,
+        url: page.host.url(),
+        ...(matches ? {} : { warnings: [`the shim's match.hosts (${hosts.join(', ') || 'none'}) doesn't include ${where}: in Shim it would not run on this page`] }),
+      });
+    } catch (e) {
+      // The caller never learns this session's id: don't leave it holding the file.
+      await sessions.end(opened.sessionId, 'ended');
+      throw e;
+    }
   }
 
   function segments(url: string): string[] | null {
@@ -362,8 +435,12 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
         if (m !== 'POST') return refuse('method-not-allowed');
         if (!isRecord(body)) return refuse('invalid-request', 'the body must be a JSON object');
         if (typeof body.revision !== 'number') return refuse('invalid-request', 'revision is required');
-        if (typeof body.commitId !== 'string') return refuse('invalid-request', 'commitId is required');
-        if (typeof body.summary !== 'string') return refuse('invalid-request', 'summary is required');
+        if (typeof body.commitId !== 'string' || body.commitId === '' || body.commitId.length > MAX_COMMIT_ID_LENGTH) {
+          return refuse('invalid-request', `commitId is required (at most ${MAX_COMMIT_ID_LENGTH} characters)`);
+        }
+        if (typeof body.summary !== 'string' || body.summary.length > MAX_SUMMARY_LENGTH) {
+          return refuse('invalid-request', `summary must be a string of at most ${MAX_SUMMARY_LENGTH} characters`);
+        }
         return reply({ ...(await sessions.commit(id, { revision: body.revision, commitId: body.commitId, summary: body.summary })) });
       }
       default:

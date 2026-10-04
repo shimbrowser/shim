@@ -184,10 +184,31 @@ function authoredSpec(spec: Spec, dropFields: readonly string[]): Spec {
   return out;
 }
 
+// Windows reserves these device names in any case and with any extension:
+// handlers/con.js can't be created there.
+const RESERVED_FILE_NAME_RE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
+
+// Every handler name must be its own portable file: a valid name, not a
+// reserved device name, and unique ignoring case — on the default macOS and
+// Windows filesystems `foo` and `Foo` are one handlers/foo.js, and writing
+// both would silently keep only the last.
 function checkHandlerNames(names: Iterable<string>, problems: string[]): void {
+  const byFolded = new Map<string, string>();
   for (const name of names) {
     if (!HANDLER_NAME_RE.test(name)) {
       problems.push(`handler name "${name}" can't be a file name (use letters, digits, _, $ and -)`);
+      continue;
+    }
+    if (RESERVED_FILE_NAME_RE.test(name)) {
+      problems.push(`handler name "${name}" is a reserved file name on Windows — rename the handler`);
+      continue;
+    }
+    const folded = name.toLowerCase();
+    const other = byFolded.get(folded);
+    if (other !== undefined) {
+      problems.push(`handler names "${other}" and "${name}" differ only in case — they would be the same file on macOS and Windows; rename one`);
+    } else {
+      byFolded.set(folded, name);
     }
   }
 }
@@ -367,6 +388,9 @@ export function readShimFolder(input: FolderInput): ShimFolderContents {
     }
     problems.push(`unexpected file ${path} — a shim folder holds ${SHIM_JSON} and ${HANDLERS_DIR}/<name>.js only`);
   }
+  // Names that passed the per-file check, held to the same portability rules
+  // a checkout or unpack writes by (a case-sensitive disk can hold both).
+  checkHandlerNames(Object.keys(handlers), problems);
 
   let spec: Spec | null = null;
   if (!sawSpec) problems.push(`${SHIM_JSON} is missing`);
@@ -445,6 +469,19 @@ function parseState(text: string): ShimState {
 }
 
 /**
+ * Why a spec's `match.hosts` is unusable, or null: it must be an array of
+ * host-pattern strings — what import and a headless session require — so
+ * pack and lint never bless a folder whose file those then refuse.
+ */
+export function matchHostsProblem(spec: { match?: unknown }): string | null {
+  const match = spec.match;
+  if (!isRecord(match) || !Array.isArray(match.hosts) || !match.hosts.every((h: unknown) => typeof h === 'string')) {
+    return `${SHIM_JSON}: "match.hosts" must be an array of host patterns (strings)`;
+  }
+  return null;
+}
+
+/**
  * Pack a folder into a `shim/1` file. Restores `version` / `bundleHash` and
  * each witness whose anchor digest still matches from .shim-state.json (when
  * present), checks `match.hosts` as import does, and runs spec-lint — a lint
@@ -461,9 +498,8 @@ export function packShim(input: FolderInput): ShimFile {
     rule.anchor = { ...rule.anchor, witness: clone(entry.witness) };
   }
 
-  const problems: string[] = [];
-  if (!isRecord(spec.match) || !Array.isArray(spec.match.hosts)) problems.push(`${SHIM_JSON}: "match.hosts" must be an array of host patterns`);
-  if (problems.length) throw new ShimFolderError('malformed-shim-folder', problems);
+  const hostsProblem = matchHostsProblem(spec);
+  if (hostsProblem) throw new ShimFolderError('malformed-shim-folder', [hostsProblem]);
   // The handler modules ride as the spec-level map, so a rewrite transform
   // or intercept wrap resolves its name the way it will after import.
   const { errors } = lintSpec({ ...spec, handlers });

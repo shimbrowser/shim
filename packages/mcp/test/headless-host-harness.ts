@@ -30,7 +30,7 @@ import vm from 'vm';
 import { BUILTIN_KINDS } from '@shimbrowser/core/spec-lint';
 import { coveredCapabilities } from '@shimbrowser/core/page-host-conformance';
 import {
-  HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER, memoryStorage, netErrorCode, readEngineBundle,
+  HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER, memoryStorage, netErrorCode, readEngineBundle, remoteObjectValue,
 } from '../src/playwright-page-host';
 import { pageRuntimeSource } from '../src/headless-page-runtime';
 import {
@@ -109,6 +109,12 @@ async function main(): Promise<void> {
 
   console.log('net errors');
   check('refused', netErrorCode('net::ERR_CONNECTION_REFUSED') === -102);
+  console.log('evaluate results CDP cannot put in JSON');
+  check('a plain value passes through', remoteObjectValue({ value: { a: 1 } }) !== undefined && remoteObjectValue({ value: 3 }) === 3);
+  check('NaN', Number.isNaN(remoteObjectValue({ unserializableValue: 'NaN' })));
+  check('±Infinity', remoteObjectValue({ unserializableValue: 'Infinity' }) === Infinity && remoteObjectValue({ unserializableValue: '-Infinity' }) === -Infinity);
+  check('-0', Object.is(remoteObjectValue({ unserializableValue: '-0' }), -0));
+  check('a bigint', remoteObjectValue({ unserializableValue: '12345678901234567890n' }) === 12345678901234567890n);
   check('aborted', netErrorCode('net::ERR_ABORTED') === -3);
   check('name not resolved', netErrorCode('net::ERR_NAME_NOT_RESOLVED') === -105);
   check('unknown reads as ERR_FAILED', netErrorCode('net::ERR_SOMETHING_NEW') === -2 && netErrorCode('') === -2);

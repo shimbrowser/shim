@@ -236,7 +236,7 @@ async function main(): Promise<void> {
     const dir2 = path.join(tmp, 'again');
     const re = json(await call('shim_open_session', { url: `${origin}/`, intent: 'Keep going', shimFile, dir: dir2 }));
     check('the committed .shim reopens', typeof re.sessionId === 'string' && re.shimId === fspec.id, re);
-    await new Promise((r) => setTimeout(r, 500));
+    // No wait: opening settles after applying the committed rules.
     check('its rules run on the page right away', await evalInPage(`getComputedStyle(document.querySelector('.promo')).display`) === 'none');
     const spec2 = fs.readFileSync(path.join(dir2, 'shim.json'), 'utf8');
     check('the checkout carries no witness, version or bundleHash', !spec2.includes('witness') && !spec2.includes('bundleHash') && !spec2.includes('"version"'));
@@ -245,7 +245,7 @@ async function main(): Promise<void> {
     await call('shim_end_session', {});
 
     // --- a .shim declaring an unsupported kind can't open --------------------------
-    const bad = { ...file, spec: { ...fspec, rules: [...frules, { id: 'icpt', anchor: { primary: { kind: 'css', value: 'body' } }, mutations: [{ kind: 'intercept', module: 'm', wrap: 'w' }] }] } };
+    const bad = { ...file, spec: { ...fspec, rules: [...frules, { id: 'icpt', anchor: { primary: { kind: 'css', value: 'body' } }, mutations: [{ kind: 'intercept', module: { loader: 'amd', id: 'm' }, wrap: 'w' }], handlers: { w: 'function w(mod) { return mod; }' } }] } };
     const badFile = path.join(tmp, 'bad.shim');
     fs.writeFileSync(badFile, JSON.stringify(bad));
     const refusedOpen = await call('shim_open_session', { url: `${origin}/`, intent: 'x', shimFile: badFile });
