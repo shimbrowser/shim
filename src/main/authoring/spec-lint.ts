@@ -21,6 +21,7 @@
 // it's read through the real patch-engine types.
 
 import * as vm from 'vm';
+import * as acorn from 'acorn';
 import { referencesApiAi, apiDbConnectionNames } from './capability-refs';
 import type { Spec, Rule, Mutation, AnchorSpec } from '../../patch-engine/types';
 import { RESHAPE_ALIGN, RESHAPE_JUSTIFY } from '../../patch-engine/layout-kinds';
@@ -42,6 +43,68 @@ const vmCompileProbe: CompileProbe = (code) => {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 };
+
+// A module-form transform / wrap (`module.exports = …` CJS source — what an
+// export writes and an import carries) is evaluated by transformLiteral, which
+// keeps module.exports only if it is a function: anything else (`module.exports
+// = {};`, no assignment at all) parses fine and then leaves the rule silently
+// inactive. Statically confirm the source's LAST top-level `module.exports =`
+// assignment is a function — a function/arrow expression, or the name of a
+// top-level function declared in the same source. Static on purpose: lint runs
+// in main on import content, which must never be executed here.
+function isModuleExportsRef(node: acorn.Node): boolean {
+  if (node.type !== 'MemberExpression') return false;
+  const m = node as acorn.MemberExpression;
+  if (m.object.type !== 'Identifier' || m.object.name !== 'module') return false;
+  if (!m.computed) return m.property.type === 'Identifier' && m.property.name === 'exports';
+  return m.property.type === 'Literal' && m.property.value === 'exports';
+}
+
+function moduleExportsFunction(source: string): boolean {
+  let ast: acorn.Program;
+  try {
+    ast = acorn.parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
+  } catch {
+    return false;
+  }
+  const fnNames = new Set<string>();
+  let exported: acorn.Expression | null = null;
+  for (const stmt of ast.body) {
+    if (stmt.type === 'FunctionDeclaration') {
+      fnNames.add(stmt.id.name);
+    } else if (stmt.type === 'VariableDeclaration') {
+      for (const d of stmt.declarations) {
+        if (d.id.type === 'Identifier' && d.init
+          && (d.init.type === 'FunctionExpression' || d.init.type === 'ArrowFunctionExpression')) {
+          fnNames.add(d.id.name);
+        }
+      }
+    } else if (stmt.type === 'ExpressionStatement'
+      && stmt.expression.type === 'AssignmentExpression'
+      && stmt.expression.operator === '='
+      && isModuleExportsRef(stmt.expression.left)) {
+      // `module.exports = exports = fn` — the value is the innermost right side.
+      let value: acorn.Expression = stmt.expression.right;
+      while (value.type === 'AssignmentExpression' && value.operator === '=') value = value.right;
+      exported = value;
+    }
+  }
+  if (!exported) return false;
+  if (exported.type === 'FunctionExpression' || exported.type === 'ArrowFunctionExpression') return true;
+  return exported.type === 'Identifier' && fnNames.has(exported.name);
+}
+
+// Shared tail of the transform / wrap syntax check: `null` when the bound
+// source is usable, otherwise the reason it is not.
+function boundSourceProblem(source: string): string | null {
+  const syntax = detectTransformForm(source, vmCompileProbe);
+  if (syntax.form === null) return `does not parse as JavaScript: ${syntax.error}`;
+  if (syntax.form === 'module' && !moduleExportsFunction(source)) {
+    return 'is module-form source that does not assign a function to module.exports, so the rule would never run. '
+      + 'Write it as `module.exports = function (…) { … };` (or a bare function expression).';
+  }
+  return null;
+}
 
 const BUILTIN_KINDS = new Set([
   'hide', 'restyle', 'script', 'remove', 'replace-root', 'mount-route', 'redirect',
@@ -406,9 +469,9 @@ function lintRewriteMutation(
   // install time — one bad rule's syntax error killed every rewrite rule
   // on the host. Rejecting it here, at emit/commit/import (every path runs
   // `assertNoSpecErrors`), closes that at the source.
-  const syntax = detectTransformForm(source, vmCompileProbe);
-  if (syntax.form === null) {
-    errors.push(`rule "${rid}": transform "${transformName}" does not parse as JavaScript: ${syntax.error}`);
+  const problem = boundSourceProblem(source);
+  if (problem !== null) {
+    errors.push(`rule "${rid}": transform "${transformName}" ${problem}`);
     return;
   }
 
@@ -476,9 +539,9 @@ function lintInterceptMutation(
     return;
   }
 
-  const syntax = detectTransformForm(source, vmCompileProbe);
-  if (syntax.form === null) {
-    errors.push(`rule "${rid}": wrap "${wrapName}" does not parse as JavaScript: ${syntax.error}`);
+  const problem = boundSourceProblem(source);
+  if (problem !== null) {
+    errors.push(`rule "${rid}": wrap "${wrapName}" ${problem}`);
     return;
   }
 
@@ -821,4 +884,4 @@ function assertNoSpecErrors(spec: unknown, carriedHandlers?: unknown): void {
   throw err;
 }
 
-export { lintSpec, assertNoSpecErrors, BUILTIN_KINDS, observerLoopWarning };
+export { lintSpec, assertNoSpecErrors, BUILTIN_KINDS, observerLoopWarning, moduleExportsFunction };

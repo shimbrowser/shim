@@ -383,12 +383,22 @@ export function transformLiteral(src: string, form: TransformForm): string {
   // (the hand-edited .shim import path can carry exactly this shape). With
   // the shell, the assignment evaluates to the function and both readings
   // agree; genuine expression sources never touch `module` and are unchanged.
+  //
+  // Every literal is fault-isolated: evaluating it runs the source's own
+  // top-level code (a module-form source's helper statements, an expr-form
+  // source's initializer), and these literals are object-property values in
+  // ONE shared install argument — a throw there would abort the install for
+  // every rule on the host. A throwing source yields `null` instead, which
+  // the wrapper already skips (`typeof fn !== 'function'`), so only its own
+  // rule goes inactive. spec-lint rejects a module-form source that leaves no
+  // function on module.exports up front; this is the runtime backstop.
   if (form === 'expr') {
-    return '(function () { var module = { exports: {} }; var exports = module.exports; return (' + src
-      + '\n); })()';
+    return '(function () { try { var module = { exports: {} }; var exports = module.exports; return (' + src
+      + '\n); } catch (e) { return null; } })()';
   }
-  return '(function () { var module = { exports: {} }; (function (module, exports) {\n' + src
-    + '\n})(module, module.exports); return typeof module.exports === "function" ? module.exports : null; })()';
+  return '(function () { try { var module = { exports: {} }; (function (module, exports) {\n' + src
+    + '\n})(module, module.exports); return typeof module.exports === "function" ? module.exports : null; }'
+    + ' catch (e) { return null; } })()';
 }
 
 // The once-guarded main-world IIFE: installs (and, on a live update, re-
