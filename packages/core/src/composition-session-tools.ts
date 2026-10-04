@@ -97,7 +97,7 @@ export const SESSION_COMPOSITION_TOOLS: Record<CompositionSessionToolName, ToolD
       'has it — how a key embedded in a site\'s JS bundle is found. Two ways to send it: `header` (+ optional ' +
       '`scheme`, e.g. "Bearer") or `query` (a query parameter name, e.g. "client_id"). No redirects are ' +
       'followed. Optionally confirm the token authenticates against `testEndpoint`, a read-only endpoint on the ' +
-      'mint host\'s site. Never returns the token or any body — only whether extraction worked (with `detail` ' +
+      'mint host, or on a host granted to this session, declared and allowed. Never returns the token or any body — only whether extraction worked (with `detail` ' +
       'when it did not) and, if tested, the status. Use probe_request to find where the token is.',
     input_schema: {
       type: 'object',
@@ -136,7 +136,7 @@ export const SESSION_COMPOSITION_TOOLS: Record<CompositionSessionToolName, ToolD
         },
         testEndpoint: {
           type: 'object',
-          description: 'Optional: a read-only endpoint on the mint host\'s site to call with the minted token, to confirm it authenticates.',
+          description: 'Optional: a read-only endpoint to call with the minted token, to confirm it authenticates — on the mint host, or on a host granted to this session (request_sources), declared in manifest.json and allowed.',
           properties: {
             host: { type: 'string' },
             method: { type: 'string' },
