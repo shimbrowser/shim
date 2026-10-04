@@ -142,6 +142,8 @@ async function main(): Promise<void> {
     check('ShimCore is not visible in the page\'s main world', (await host.evaluate('typeof window.ShimCore', 'main')) === 'undefined');
     check('the engine runtime is not visible in the page\'s main world', (await host.evaluate('typeof window.__shimCoreRuntime', 'main')) === 'undefined');
     check('the engine world has the engine', (await host.evaluate('typeof ShimCore.run', 'engine')) === 'function');
+    check('evaluate answers values JSON can\'t carry (NaN, -0, a bigint)', Number.isNaN(await host.evaluate('NaN', 'main'))
+      && Object.is(await host.evaluate('-0', 'main'), -0) && (await host.evaluate('2n ** 70n', 'main')) === 2n ** 70n);
     check('capabilities: the D15 headless set', !HEADLESS_CAPABILITIES.iframeRules && !HEADLESS_CAPABILITIES.componentIdentity
       && HEADLESS_CAPABILITIES.apiMembers.length === 0 && host.inspection === undefined);
 
@@ -221,8 +223,28 @@ async function main(): Promise<void> {
       host.applyPreview({ patchId: 'conformance', ruleKey: 'preview:conformance:detach-inject', rule: { id: 'detach-inject', anchor: { primary: { kind: 'css', value: '#html-target' } }, mutations: [{ kind: 'inject-html', placement: 'append', html: '<em id="detach-injected">x</em>' }] } });
       const applied = await until(async () => (await host.evaluate(`getComputedStyle(document.querySelector('#ad')).display === 'none' && !!document.querySelector('#detach-injected')`, 'main')) === true ? true : null);
       check('both previews applied before detach', applied === true);
+      // Playwright's Page is an event emitter at runtime; its public type omits listenerCount.
+      const listenerCount = (name: string): number => {
+        const emitter: unknown = page;
+        if (typeof emitter === 'object' && emitter !== null && 'listenerCount' in emitter && typeof emitter.listenerCount === 'function') {
+          const n: unknown = emitter.listenerCount(name);
+          if (typeof n === 'number') return n;
+        }
+        return -1;
+      };
+      const listenersBefore = { load: listenerCount('load'), requestfailed: listenerCount('requestfailed'), close: listenerCount('close') };
+      // A load wait nothing will finish: detach must settle it now, not at its timeout.
+      let pendingOutcome: string | null = null;
+      void host.waitForLoad({ timeoutMs: 60000 }).then((o) => { pendingOutcome = o.kind; });
+      check('a pending load wait holds page listeners before detach', listenersBefore.load >= 0 && listenerCount('load') === listenersBefore.load + 1);
       await host.detach();
+      await new Promise((r) => setImmediate(r));
+      check('detach settles a pending load wait as destroyed', pendingOutcome === 'destroyed', pendingOutcome);
+      const listenersAfter = { load: listenerCount('load'), requestfailed: listenerCount('requestfailed'), close: listenerCount('close') };
+      check('…and removes its page listeners', JSON.stringify(listenersAfter) === JSON.stringify(listenersBefore), { listenersBefore, listenersAfter });
+      check('a load wait begun after detach settles at once as destroyed', (await host.waitForLoad({ timeoutMs: 60000 })).kind === 'destroyed');
       check('a detached host reads as closed', host.isClosed());
+      check('…with no URL', host.url() === '');
       check('…the page itself stays open', !page.isClosed());
       const after = await page.evaluate(() => ({
         adDisplay: getComputedStyle(document.querySelector('#ad') as Element).display,

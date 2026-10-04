@@ -251,6 +251,14 @@ async function main(): Promise<void> {
     const plain = path.join(tmp, 'plain.json');
     fs.copyFileSync(exportedFile, plain);
     check('unpack of a file without .shim needs --out', (await cli(r, 'unpack', plain)) === EXIT_USAGE && /--out/.test(r.err[0] ?? ''));
+    // A file literally named `.shim` has no stem: stripping the extension
+    // from its path would unpack into its parent folder.
+    const bareDir = path.join(tmp, 'bare');
+    fs.mkdirSync(bareDir);
+    const bare = path.join(bareDir, '.shim');
+    fs.copyFileSync(exportedFile, bare);
+    check('unpack of a file named just .shim needs --out, writing nothing beside it', (await cli(r, 'unpack', bare)) === EXIT_USAGE
+      && /--out/.test(r.err[0] ?? '') && fs.readdirSync(bareDir).join(',') === '.shim', fs.readdirSync(bareDir));
     const pack = path.join(tmp, 'pack.shim');
     fs.writeFileSync(pack, json({ format: 'shim-pack/1', name: 'p', shims: [] }));
     check('unpack refuses another .shim format', (await cli(r, 'unpack', pack, '-o', path.join(tmp, 'pack-out'))) === EXIT_PROBLEM
@@ -260,6 +268,24 @@ async function main(): Promise<void> {
     fs.writeFileSync(blocker, 'a file');
     check('a pack it cannot write exits 2 (write-failed), no temp file left', (await cli(r, 'pack', unpacked, '--out', path.join(blocker, 'x.shim'))) === EXIT_USAGE
       && /write-failed/.test(r.err[0] ?? '') && fs.readFileSync(blocker, 'utf8') === 'a file', r.err);
+    check('an unpack it cannot write exits 2 (write-failed)', (await cli(r, 'unpack', exportedFile, '-o', path.join(blocker, 'sub'))) === EXIT_USAGE
+      && /write-failed/.test(r.err[0] ?? '') && fs.readFileSync(blocker, 'utf8') === 'a file', r.err);
+    const numericHosts = writeFolder(path.join(tmp, 'numeric-hosts'), { ...BASE_SPEC, match: { hosts: [42] } }, { markTracks: MARK });
+    check('pack exits 1 on a non-string host and writes nothing', (await cli(r, 'pack', numericHosts)) === EXIT_PROBLEM
+      && /match\.hosts/.test(r.err.join('\n')) && !fs.existsSync(`${numericHosts}.shim`), r.err);
+
+    // An unreadable file in the folder is the environment, not the shim (root reads anything).
+    if (process.getuid?.() !== 0) {
+      const unreadable = writeFolder(path.join(tmp, 'unreadable'), BASE_SPEC, { markTracks: MARK });
+      const locked = path.join(unreadable, 'handlers', 'markTracks.js');
+      fs.chmodSync(locked, 0o000);
+      try {
+        check('a folder with an unreadable file exits 2 (read-failed) for pack and lint', (await cli(r, 'pack', unreadable)) === EXIT_USAGE
+          && /read-failed/.test(r.err[0] ?? '') && (await cli(r, 'lint', unreadable)) === EXIT_USAGE && /read-failed/.test(r.err[0] ?? ''), r.err);
+      } finally {
+        fs.chmodSync(locked, 0o644);
+      }
+    }
 
     const bad = writeFolder(path.join(tmp, 'bad'), { ...BASE_SPEC, rules: [{ id: 'x', anchor: css('.x'), mutations: [{ kind: 'sparkle' }] }] });
     check('pack exits 1 on a lint error and writes nothing', (await cli(r, 'pack', bad)) === EXIT_PROBLEM
@@ -282,6 +308,9 @@ async function main(): Promise<void> {
     check('an invented kind exits 1', (await cli(r, 'lint', bad)) === EXIT_PROBLEM && /^error: .*sparkle/m.test(r.out[0] ?? ''), r.out);
     const noHosts = writeFolder(path.join(tmp, 'lint-hosts'), { id: 'h', rules: [] });
     check('a missing match.hosts is an error', (await cli(r, 'lint', noHosts)) === EXIT_PROBLEM && /match\.hosts/.test(r.out[0] ?? ''));
+    const numericHosts = writeFolder(path.join(tmp, 'lint-numeric-hosts'), { ...BASE_SPEC, match: { hosts: [42] } }, { markTracks: MARK });
+    check('a non-string host is an error, as a headless session would refuse it', (await cli(r, 'lint', numericHosts)) === EXIT_PROBLEM
+      && /match\.hosts/.test(r.out[0] ?? ''), r.out);
 
     const redirect = writeFolder(path.join(tmp, 'lint-redirect'), {
       ...BASE_SPEC,
@@ -381,6 +410,18 @@ async function main(): Promise<void> {
     check('a url outside match.hosts is a warning, not a failure', other === EXIT_OK && /warning: .*doesn't include elsewhere\.test/.test(r.out[0] ?? ''), r.out);
 
     check('a non-http url exits 2', (await cli(r, 'preview', dir, '--url', 'file:///etc/hosts')) === EXIT_USAGE);
+    const savedTmp = process.env.TMPDIR;
+    const notATempDir = path.join(tmp, 'tmp-is-a-file');
+    fs.writeFileSync(notATempDir, 'x');
+    process.env.TMPDIR = notATempDir;
+    let tmpCode: number;
+    try {
+      tmpCode = await cli(r, 'preview', dir, '--url', 'https://site.test/');
+    } finally {
+      if (savedTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = savedTmp;
+    }
+    check('a temp folder it cannot create exits 2 (write-failed)', tmpCode === EXIT_USAGE && /write-failed/.test(r.err[0] ?? ''), r.err);
     check('a malformed folder exits 1', (await cli(r, 'preview', path.join(tmp, 'broken'), '--url', 'https://site.test/')) === EXIT_PROBLEM);
     const opened = r.pages.length;
     const hostless = writeFolder(path.join(tmp, 'preview-hostless'), { id: 'demo-tracks', rules: BASE_SPEC.rules }, { markTracks: MARK });

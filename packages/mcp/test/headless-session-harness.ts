@@ -11,14 +11,25 @@
 //     declaring an unsupported feature refused before any page opens, a page
 //     that fails to open, one session per .shim file;
 //   - begin applies the committed shim (handlers inlined; behind the deploy
-//     baseline only where a witness exists);
+//     baseline only where a witness exists) and settles before it answers;
 //   - preview: preflight is atomic (nothing applied, no revision), lint
 //     refuses, the evidence shape (rules with status + verification, errors,
 //     noMatch, console, changes), `partial` for an unsupported-api use and
 //     for a component-identity witness, the source-scan warning, witnesses
 //     captured but never in the evidence or the checkout;
-//   - the page-away guard, and reload_page returning to the start URL and
-//     re-applying every live preview;
+//   - the page-away guard (the start host plus the shim's declared hosts),
+//     and reload_page returning to the start URL, re-applying every live
+//     preview before it settles, and re-applying nothing when the load did
+//     not finish;
+//   - a second open on a file claimed before the file is read (no stale
+//     source when the holder commits and ends while its page loads);
+//   - the cross-process file lock (file-lock.ts): another shim-mcp process
+//     is busy before any page opens, ending or a failed open drops the lock,
+//     a dead process's lock (or a file that isn't one) is taken over, one
+//     from another machine never is, and a takeover only removes the lock it
+//     judged stale (under the takeover mutex, itself recovered from a dead
+//     holder);
+//   - a .shim whose match.hosts isn't a list of strings refused at open;
 //   - commit: the .shim written once per commitId, version + deploy baseline +
 //     witnesses + history, the session continuing from it;
 //   - ending tears every preview down, closes the page and frees the file.
@@ -32,14 +43,15 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type {
-  PageHost, PreviewRule, PageRuntimeEvent, PageConsoleMessage, PageLoadOutcome,
+  PageHost, PreviewRule, PageRuntimeEvent, PageConsoleMessage, PageLoadOutcome, LoadWaitOptions,
 } from '@shimbrowser/core/page-host';
 import { decodeWorkingCopy, encodeWorkingCopy } from '@shimbrowser/core/working-copy-wire';
 import type { FolderInput } from '@shimbrowser/core/shim-folder';
 import { fileStorage, HEADLESS_STORAGE_FORMAT } from '../src/file-storage';
-import { createHeadlessControl, hostPatternMatches, type HeadlessControl } from '../src/headless-control';
+import { createHeadlessControl, hostPatternMatches, MAX_COMMIT_ID_LENGTH, MAX_SUMMARY_LENGTH, type HeadlessControl } from '../src/headless-control';
 import { HEADLESS_CAPABILITIES, type HeadlessStorage } from '../src/playwright-page-host';
 import { cliMode } from '../src/cli';
+import { lockFileFor, tryLockFile, type FileLockOptions } from '../src/file-lock';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: unknown): void {
@@ -60,8 +72,12 @@ interface FakeHost extends PageHost {
   applied: PreviewRule[];
   removed: string[];
   reloads: Array<string | undefined>;
+  loadWaits: LoadWaitOptions[];
+  loadOutcome: PageLoadOutcome;
   closed: boolean;
   setUrl(url: string): void;
+  // A full-document navigation: a new document, so a fresh engine world.
+  navigate(url: string): void;
   emit(event: PageRuntimeEvent): void;
   log(message: PageConsoleMessage): void;
   // Runs on every applyPreview: what the "engine" reports for it.
@@ -72,11 +88,15 @@ function fakeHost(startUrl: string): FakeHost {
   const runtime = new Set<(e: PageRuntimeEvent) => void>();
   const consoleL = new Set<(m: PageConsoleMessage) => void>();
   let url = startUrl;
+  // The engine world's globals: one set per document.
+  let world: Record<string, unknown> = {};
   const host: FakeHost = {
     capabilities: HEADLESS_CAPABILITIES,
     applied: [],
     removed: [],
     reloads: [],
+    loadWaits: [],
+    loadOutcome: { kind: 'finished' },
     closed: false,
     onApply: (p, h) => {
       h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 1, matchedVia: 'primary', box: { x: 0, y: 0, w: 10, h: 20 } });
@@ -85,10 +105,15 @@ function fakeHost(startUrl: string): FakeHost {
     url: () => url,
     isClosed: () => host.closed,
     setUrl(next) { url = next; },
+    navigate(next) { url = next; world = {}; },
     emit(e) { for (const l of [...runtime]) l(e); },
     log(m) { for (const l of [...consoleL]) l(m); },
     async evaluate(code) {
       if (code.includes('deployIdForDocument')) return 'deploy-2';
+      const write = /^globalThis\["(\w+)"\] = (".*")$/.exec(code);
+      if (write?.[1] && write[2]) { world[write[1]] = JSON.parse(write[2]) as unknown; return world[write[1]]; }
+      const read = /^globalThis\["(\w+)"\] \?\? null$/.exec(code);
+      if (read?.[1]) return world[read[1]] ?? null;
       return null;
     },
     async screenshot() { return { error: 'the fake host takes no screenshots' }; },
@@ -96,8 +121,8 @@ function fakeHost(startUrl: string): FakeHost {
     removePreview(key) { host.removed.push(key); },
     onRuntimeEvent(l) { runtime.add(l); return () => { runtime.delete(l); }; },
     onConsole(l) { consoleL.add(l); return () => { consoleL.delete(l); }; },
-    reload(u) { host.reloads.push(u); if (u) url = u; },
-    async waitForLoad(): Promise<PageLoadOutcome> { return { kind: 'finished' }; },
+    reload(u) { host.reloads.push(u); if (u) url = u; world = {}; },
+    async waitForLoad(o): Promise<PageLoadOutcome> { host.loadWaits.push(o); return host.loadOutcome; },
   };
   return host;
 }
@@ -108,19 +133,27 @@ interface Rig {
   storages: HeadlessStorage[];
   writes: string[];
   failOpen: boolean;
+  // When set, opening a page waits for it (a slow page load).
+  gate: Promise<void> | null;
+  // How many previews every host had applied at each settle.
+  appliedAtSettle: number[];
   // Where opening a url lands (a redirect); the url itself by default.
   redirect: (url: string) => string;
 }
 
-function rig(): Rig {
-  const r: Rig = { control: null as unknown as HeadlessControl, hosts: [], storages: [], writes: [], failOpen: false, redirect: (u) => u };
+function rig(fileLock?: FileLockOptions): Rig {
+  const r: Rig = {
+    control: null as unknown as HeadlessControl, hosts: [], storages: [], writes: [], failOpen: false, gate: null, appliedAtSettle: [], redirect: (u) => u,
+  };
   let ids = 0;
   r.control = createHeadlessControl({
     version: 'test',
     newShimId: () => `shim-new-${++ids}`,
     newId: () => `sess${++ids}`,
+    ...(fileLock ? { fileLock } : {}),
     async openPage(url, storage) {
       if (r.failOpen) throw new Error('net::ERR_CONNECTION_REFUSED');
+      if (r.gate) await r.gate;
       const host = fakeHost(r.redirect(url));
       r.hosts.push(host);
       r.storages.push(storage);
@@ -128,6 +161,10 @@ function rig(): Rig {
     },
     backend: {
       settleMs: 5,
+      sleep: async () => {
+        r.appliedAtSettle.push(r.hosts.reduce((n, h) => n + h.applied.length, 0));
+        await new Promise<void>((resolve) => setTimeout(resolve, 1));
+      },
       writeShimFile: (file, content) => {
         r.writes.push(file);
         fs.writeFileSync(file, content);
@@ -261,9 +298,10 @@ async function main(): Promise<void> {
     check('every committed rule runs as a preview', host.applied.map((p) => p.ruleKey).join() === 'preview:shim-tracks:hide-promo,preview:shim-tracks:row,preview:shim-tracks:mark');
     check('a rule with a witness runs behind the deploy baseline; one without does not',
       host.applied[0]?.bundleHash === 'deploy-1' && host.applied[2]?.bundleHash === undefined);
+    check('opening settles after applying the committed rules, so the first view sees them', r.appliedAtSettle[0] === 3, r.appliedAtSettle);
     check('stored handler modules are inlined for the page', typeof host.applied[2]?.rule.handlers?.mark === 'string' && !host.applied[2].rule.handlers.mark.startsWith('module.exports'));
     const busy = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'x', intent: 'x', shimFile });
-    check('a second session on the same file is busy (and its page closed)', busy.error === 'artifact-busy' && (r.hosts[1]?.closed ?? false), busy);
+    check('a second session on the same file is busy, before any page opens', busy.error === 'artifact-busy' && r.hosts.length === 1, busy);
 
     const co = await req(r, 'GET', `/sessions/${id}/checkout`);
     const files = decodeWorkingCopy(co.files);
@@ -340,16 +378,41 @@ async function main(): Promise<void> {
     const awayPreview = await preview(r, id, { ...next, 'shim.json': json({ ...JSON.parse(next['shim.json'] ?? '{}') as object, intent: 'x' }) });
     check('a preview refuses too, applying nothing', awayPreview.applied === false && isRecord(awayPreview.evidence) && awayPreview.evidence.error === 'page-away');
     const liveBefore = host.applied.length;
+    const settlesBefore = r.appliedAtSettle.length;
     const reload = await req(r, 'POST', `/sessions/${id}/call`, { name: 'reload_page', input: {} });
     const reloaded = typeof reload.result === 'string' ? JSON.parse(reload.result) as Record<string, unknown> : {};
     check('reload_page goes back to the start URL, never elsewhere', host.reloads[host.reloads.length - 1] === url && reloaded.ok === true, reloaded);
     check('…and re-applies every live preview', reloaded.reapplied === 5 && host.applied.length === liveBefore + 5, reloaded);
+    check('…before it settles, so the reply never races the previews', r.appliedAtSettle.length === settlesBefore + 1
+      && r.appliedAtSettle[settlesBefore] === liveBefore + 5, r.appliedAtSettle);
+    check('…waiting on the main frame\'s load only (a broken iframe doesn\'t end the wait)', host.loadWaits[host.loadWaits.length - 1]?.failures === 'main-frame');
+    host.loadOutcome = { kind: 'failed', code: -105, description: 'net::ERR_NAME_NOT_RESOLVED' };
+    const failedAt = host.applied.length;
+    const failedReload = await req(r, 'POST', `/sessions/${id}/call`, { name: 'reload_page', input: {} });
+    const failedOut = typeof failedReload.result === 'string' ? JSON.parse(failedReload.result) as Record<string, unknown> : {};
+    check('a reload that did not finish is an error, re-applying nothing', failedOut.ok === undefined
+      && String(failedOut.error).includes('ERR_NAME_NOT_RESOLVED') && host.applied.length === failedAt, failedOut);
+    host.loadOutcome = { kind: 'finished' };
+    // Bring the page back to a finished document with every preview on it.
+    await req(r, 'POST', `/sessions/${id}/call`, { name: 'reload_page', input: {} });
+
+    // The page navigates itself (a link, a form) to a new document on the site.
+    host.navigate(url);
+    const navAt = host.applied.length;
+    await req(r, 'POST', `/sessions/${id}/call`, { name: 'view_page', input: {} });
+    check('a full navigation on the site re-applies every live preview before a page tool runs', host.applied.length === navAt + 5, host.applied.length - navAt);
+    await req(r, 'POST', `/sessions/${id}/call`, { name: 'view_page', input: {} });
+    check('…once: the same document is not re-applied again', host.applied.length === navAt + 5, host.applied.length - navAt);
 
     // Commit.
     host.setUrl('https://elsewhere.test/');
     const awayCommit = await req(r, 'POST', `/sessions/${id}/commit`, { revision: 1, commitId: 'one', summary: 'Restyled rows; added two rules.' });
     check('a commit refuses once the page left the site, writing nothing', awayCommit.error === 'page-away' && r.writes.length === 0, awayCommit);
     host.setUrl(url);
+    const longId = await req(r, 'POST', `/sessions/${id}/commit`, { revision: 1, commitId: 'x'.repeat(MAX_COMMIT_ID_LENGTH + 1), summary: 's' });
+    const longSummary = await req(r, 'POST', `/sessions/${id}/commit`, { revision: 1, commitId: 'long', summary: 'x'.repeat(MAX_SUMMARY_LENGTH + 1) });
+    check('an oversized commitId or summary is refused before the registry, writing nothing', longId.error === 'invalid-request'
+      && longSummary.error === 'invalid-request' && r.writes.length === 0, { longId, longSummary });
     const c1 = await req(r, 'POST', `/sessions/${id}/commit`, { revision: 1, commitId: 'one', summary: 'Restyled rows; added two rules.' });
     check('the commit answers the new version', c1.ok === true && c1.versionId === 5 && c1.revision === 1, c1);
     const again = await req(r, 'POST', `/sessions/${id}/commit`, { revision: 1, commitId: 'one', summary: 'Restyled rows; added two rules.' });
@@ -373,6 +436,11 @@ async function main(): Promise<void> {
       && history[1]?.content === 'Tidy up' && history[1]?.agent === 'Claude Code' && history[2]?.versionId === 5, history);
     const nothing = await req(r, 'POST', `/sessions/${id}/commit`, { revision: 1, commitId: 'three', summary: 's' });
     check('committing the committed revision again is nothing-to-commit', nothing.error === 'nothing-to-commit');
+
+    host.navigate(url);
+    const navPreviewAt = host.applied.length;
+    const navPreview = await preview(r, id, { ...next, 'shim.json': json({ ...JSON.parse(next['shim.json'] ?? '{}') as object, intent: 'after a navigation' }) });
+    check('a preview after a full navigation re-applies the live set first', host.applied.length === navPreviewAt + 5 && isRecord(navPreview.evidence), host.applied.length - navPreviewAt);
 
     // End.
     const live = new Set(host.applied.map((p) => p.ruleKey));
@@ -430,6 +498,174 @@ async function main(): Promise<void> {
       && !hostPatternMatches('site.test:8080', u('http://site.test:9090/')) && !hostPatternMatches('site.test:8080', u('http://site.test/')));
     check('a wildcard matches subdomains, not the apex', hostPatternMatches('*.site.test', u('https://www.site.test/'))
       && !hostPatternMatches('*.site.test', u('https://site.test/')));
+  }
+
+  console.log('a shim declaring several hosts');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'multi.shim');
+    fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'Multi', handlers: {}, spec: { id: 'shim-multi', match: { hosts: ['site.test', '*.other.test', 'local.test:8080'] }, rules: [] } }));
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    const id = String(opened.sessionId);
+    const host = r.hosts[0] as FakeHost;
+    const tool = async (): Promise<string> => {
+      const out = await req(r, 'POST', `/sessions/${id}/call`, { name: 'inspect_element', input: { selector: 'body' } });
+      return typeof out.result === 'string' ? out.result : '';
+    };
+    host.setUrl('https://app.other.test/inbox');
+    check('a page on a wildcard-declared host is on the site', !(await tool()).includes('page-away'));
+    host.setUrl('http://local.test:8080/');
+    check('…and one on a declared host:port', !(await tool()).includes('page-away'));
+    host.setUrl('http://local.test:9090/');
+    check('…but not the same host on another port', (await tool()).includes('page-away'));
+    host.setUrl('https://other.test/');
+    check('…nor a wildcard\'s apex', (await tool()).includes('page-away'));
+    host.setUrl('https://elsewhere.test/');
+    check('…nor an undeclared host', (await tool()).includes('page-away'));
+    await r.control.closeAll();
+  }
+
+  console.log('two opens racing for one file');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'race.shim');
+    fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'Race', handlers: {}, spec: { id: 'shim-race', version: 1, match: { hosts: ['site.test'] }, rules: [] } }));
+    let release: () => void = () => undefined;
+    r.gate = new Promise<void>((resolve) => { release = resolve; });
+    const first = req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    // Bounded: an open that read the file and is waiting on its own page
+    // would otherwise hang here instead of failing.
+    const second = await Promise.race([
+      req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'b', intent: 'y', shimFile }),
+      new Promise<Record<string, unknown>>((resolve) => setTimeout(() => resolve({ error: 'still waiting on its page' }), 500)),
+    ]);
+    check('a second open while the first one\'s page loads is busy at once, reading nothing', second.error === 'artifact-busy' && r.hosts.length === 0, second);
+    r.gate = null;
+    release();
+    const opened = await first;
+    check('the first open goes on to hold the file', opened.ok === true, opened);
+    await req(r, 'DELETE', `/sessions/${String(opened.sessionId)}`);
+    const third = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'c', intent: 'z', shimFile });
+    check('once it ends the file opens again', third.ok === true, third);
+    await r.control.closeAll();
+  }
+
+  console.log('two shim-mcp processes on one file');
+  {
+    const shimFile = path.join(tmp, 'shared.shim');
+    fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'Shared', handlers: {}, spec: { id: 'shim-shared', version: 1, match: { hosts: ['site.test'] }, rules: [] } }));
+    const lockFile = lockFileFor(shimFile);
+    const a = rig({ pid: 1001, isAlive: () => true });
+    const b = rig({ pid: 1002, isAlive: () => true });
+    const first = await req(a, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('the first process opens the file and locks it', first.ok === true && fs.existsSync(lockFile), first);
+    const other = await req(b, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'b', intent: 'y', shimFile });
+    check('another process is busy, before any page opens', other.error === 'artifact-busy' && b.hosts.length === 0 && String(other.detail).includes('pid 1001'), other);
+    await req(a, 'DELETE', `/sessions/${String(first.sessionId)}`);
+    check('ending the session drops the lock', !fs.existsSync(lockFile));
+    const now = await req(b, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'b', intent: 'y', shimFile });
+    check('…and the other process opens it', now.ok === true, now);
+    await b.control.closeAll();
+    check('closing every session drops its locks', !fs.existsSync(lockFile));
+
+    a.failOpen = true;
+    const failed = await req(a, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('an open that fails leaves no lock behind', failed.error === 'page-open-failed' && !fs.existsSync(lockFile), failed);
+
+    // A process that crashed holding the file.
+    const hostname = os.hostname();
+    fs.writeFileSync(lockFile, JSON.stringify({ format: 'shim-mcp-lock/1', pid: 4242, hostname, token: 'dead', at: 1 }));
+    const c = rig({ pid: 1003, isAlive: (pid) => pid !== 4242 });
+    const takeover = await req(c, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'c', intent: 'z', shimFile });
+    check('a dead process\'s lock is taken over', takeover.ok === true && !fs.readFileSync(lockFile, 'utf8').includes('"dead"'), takeover);
+    await c.control.closeAll();
+
+    fs.writeFileSync(lockFile, 'not a lock');
+    const d = rig({ pid: 1004, isAlive: () => true });
+    const junk = await req(d, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'd', intent: 'z', shimFile });
+    check('a file that isn\'t a lock is taken over', junk.ok === true, junk);
+    await d.control.closeAll();
+
+    fs.writeFileSync(lockFile, JSON.stringify({ format: 'shim-mcp-lock/1', pid: 4242, hostname: `${hostname}-elsewhere`, token: 'remote', at: 1 }));
+    const e = rig({ pid: 1005, isAlive: () => false });
+    const remote = await req(e, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'e', intent: 'z', shimFile });
+    check('a lock from another machine is never judged stale', remote.error === 'artifact-busy' && e.hosts.length === 0 && fs.readFileSync(lockFile, 'utf8').includes('remote'), remote);
+    fs.unlinkSync(lockFile);
+
+    // Two processes recovering one stale lock: the other one wins between
+    // this one judging the lock stale and removing it.
+    const deadLock = JSON.stringify({ format: 'shim-mcp-lock/1', pid: 4242, hostname, token: 'dead', at: 1 });
+    const fresh = JSON.stringify({ format: 'shim-mcp-lock/1', pid: 5151, hostname, token: 'winner', at: 2 });
+    fs.writeFileSync(lockFile, deadLock);
+    const raced = tryLockFile(shimFile, {
+      pid: 1006,
+      isAlive: (pid) => {
+        if (pid === 4242) {
+          fs.writeFileSync(lockFile, fresh); // the other recoverer took over first
+          return false;
+        }
+        return true;
+      },
+    });
+    check('a stale lock another process took over first is never removed', !raced.ok && raced.holder?.pid === 5151 && fs.readFileSync(lockFile, 'utf8').includes('winner'), raced);
+    check('…and the takeover mutex is released', !fs.existsSync(`${lockFile}.takeover`));
+
+    fs.writeFileSync(lockFile, deadLock);
+    fs.writeFileSync(`${lockFile}.takeover`, JSON.stringify({ format: 'shim-mcp-lock/1', pid: 6161, hostname, token: 'busy', at: 3 }));
+    const blocked = tryLockFile(shimFile, { pid: 1007, isAlive: (pid) => pid !== 4242 });
+    check('while a live process holds the takeover mutex, a stale lock is not touched', !blocked.ok && fs.readFileSync(lockFile, 'utf8').includes('"dead"'), blocked);
+    const recovered = tryLockFile(shimFile, { pid: 1008, isAlive: (pid) => pid !== 4242 && pid !== 6161 });
+    check('a mutex its dead holder left behind is recovered', recovered.ok && !fs.existsSync(`${lockFile}.takeover`), recovered);
+    if (recovered.ok) recovered.lock.release();
+    check('…and its lock released', !fs.existsSync(lockFile));
+    check('no temp files are left beside the lock', fs.readdirSync(tmp).every((f) => !f.endsWith('.tmp')), fs.readdirSync(tmp));
+  }
+
+  console.log('a .shim whose match.hosts is unusable');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'nohosts.shim');
+    fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'No hosts', handlers: {}, spec: { id: 'shim-nohosts', version: 1, match: { hosts: 'site.test' }, rules: [] } }));
+    const bad = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('is refused before any page opens', bad.error === 'malformed-shim-file' && r.hosts.length === 0, bad);
+    check('…holding nothing', !fs.existsSync(lockFileFor(shimFile)) && r.control.sessions.list().length === 0);
+    fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'No hosts', handlers: {}, spec: { id: 'shim-nohosts', version: 1, rules: [] } }));
+    const none = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('…as is one with no match at all', none.error === 'malformed-shim-file' && r.hosts.length === 0, none);
+  }
+
+  console.log('a hand-edited .shim with malformed rules');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'badrules.shim');
+    const rule = (mutations: unknown): Record<string, unknown> => ({ id: 'r1', anchor: { primary: { kind: 'css', value: '.x' } }, mutations });
+    fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'Bad', handlers: {}, spec: { id: 'shim-bad', version: 1, match: { hosts: ['site.test'] }, rules: [rule({ kind: 'hide' })] } }));
+    const shape = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('a rule whose mutations is an object is refused before preflight or any page (not internal-error)', shape.error === 'malformed-shim-file' && r.hosts.length === 0, shape);
+    fs.writeFileSync(shimFile, json({ format: 'shim/1', name: 'Bad', handlers: {}, spec: { id: 'shim-bad', version: 1, match: { hosts: ['site.test'] }, rules: [rule([{ kind: 'explode' }])] } }));
+    const kind = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('an invented mutation kind is refused by the commit-time lint', kind.error === 'spec-lint' && r.hosts.length === 0, kind);
+    check('…holding nothing', !fs.existsSync(lockFileFor(shimFile)) && r.control.sessions.list().length === 0);
+  }
+
+  console.log('a rule whose id is __proto__ keeps its witness through a commit');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'proto.shim');
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile, create: { name: 'Proto' } });
+    const pid = String(opened.sessionId);
+    const co = await req(r, 'GET', `/sessions/${pid}/checkout`);
+    const folder = decodeWorkingCopy(co.files);
+    const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown>;
+    spec.rules = [JSON.parse('{"id":"__proto__","anchor":{"primary":{"kind":"css","value":".promo"}},"mutations":[{"kind":"hide"}]}') as unknown];
+    const pv = await preview(r, pid, { ...folder, 'shim.json': json(spec) } as Record<string, string>);
+    check('the __proto__ rule previews', pv.applied === true, pv);
+    const cm = await req(r, 'POST', `/sessions/${pid}/commit`, { revision: 1, commitId: 'p1', summary: 's' });
+    check('…and commits', cm.ok === true, cm);
+    const saved = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { rules: Array<{ id: string; anchor?: { witness?: unknown } }> } };
+    check('…with its captured witness on the committed rule', isRecord(saved.spec.rules.find((x) => x.id === '__proto__')?.anchor?.witness), saved.spec.rules);
+    await req(r, 'DELETE', `/sessions/${pid}`);
   }
 }
 

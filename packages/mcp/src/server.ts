@@ -45,7 +45,7 @@ import type { HeadlessReadiness } from './playwright-launch';
 import { ControlTransportError, type ControlClient, type ControlReply } from './control-client';
 import type { LaunchOutcome } from './launch';
 import { FolderError, readWorkingCopy, writeCheckout } from './folder';
-import { toMcpContent, fitToBudget, type McpContent } from './results';
+import { toMcpContent, fitToBudget, fitText, estimateTokens, type McpContent } from './results';
 
 export const SERVER_NAME = 'shim';
 
@@ -135,9 +135,14 @@ const AUTO_HINTS: Record<string, string> = {
   'requires-shim-browser': 'This needs the Shim browser: open the session on a Shim tab instead (shim_launch, shim_list_tabs, then shim_open_session with tabId).',
 };
 
-function failureResult(code: string, detail: string, mode: ServerMode = 'attach'): CallToolResult {
+// An error answer is held to the same output budget as a success: a detail
+// listing hundreds of bad folder paths would otherwise be dropped whole by
+// Claude Code. The detail gives way; the code and the hint always survive.
+function failureResult(code: string, detail: string, maxTokens: number, mode: ServerMode = 'attach'): CallToolResult {
   const hint = (mode === 'auto' ? AUTO_HINTS[code] : undefined) ?? HINTS[code];
-  return { isError: true, content: [{ type: 'text', text: `${code}: ${detail}${hint ? `\n${hint}` : ''}` }] };
+  const tail = hint ? `\n${hint}` : '';
+  const head = fitText(`${code}: ${detail}`, Math.max(0, maxTokens - estimateTokens({ type: 'text', text: tail })));
+  return { isError: true, content: [{ type: 'text', text: `${head}${tail}` }] };
 }
 
 function text(value: unknown): McpContent {
@@ -449,9 +454,11 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           try {
             out.checkout = await checkout(id, dir);
           } catch (e) {
+            // Any failure, including a native fs error (an unwritable dir, a
+            // full disk), is the checkout's, never the open's.
             if (e instanceof ToolFailure) out.checkout = { error: e.code, detail: e.detail };
             else if (e instanceof FolderError) out.checkout = { error: e.code, detail: e.message };
-            else throw e;
+            else out.checkout = { error: 'checkout-failed', detail: e instanceof Error ? e.message : String(e) };
             out.hint = 'The session is open, but the checkout failed: call shim_checkout with an empty folder.';
           }
         }
@@ -526,7 +533,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       let content: McpContent[];
       if (isSessionToolName(name)) content = await runSessionTool(name, input);
       else if (isPageToolName(name)) content = await pageTool(sessionId(input), name, input);
-      else return failureResult('unknown-tool', `no tool named "${name}"`);
+      else return failureResult('unknown-tool', `no tool named "${name}"`, deps.maxOutputTokens);
       return { content: fitToBudget(content, deps.maxOutputTokens) };
     } catch (e) {
       if (e instanceof ToolFailure) {
@@ -534,10 +541,10 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           const id = str(input, 'sessionId') ?? current;
           if (id) forget(id);
         }
-        return failureResult(e.code, e.detail, serverMode);
+        return failureResult(e.code, e.detail, deps.maxOutputTokens, serverMode);
       }
-      if (e instanceof FolderError) return failureResult(e.code, e.message);
-      return failureResult('internal-error', e instanceof Error ? e.message : String(e));
+      if (e instanceof FolderError) return failureResult(e.code, e.message, deps.maxOutputTokens);
+      return failureResult('internal-error', e instanceof Error ? e.message : String(e), deps.maxOutputTokens);
     }
   });
 
