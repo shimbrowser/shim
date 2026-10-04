@@ -106,6 +106,13 @@ const RUNTIME_SPEC_FIELDS = ['priority', '__cssPriority'] as const;
 // spec's plain `handlers` objects (nor of the browser's stored-handler bag,
 // which would drop it on import).
 const HANDLER_NAME_RE = /^(?!__proto__$)[A-Za-z0-9_$][A-Za-z0-9_$-]*$/;
+// Windows device names, reserved in any case and with any extension
+// (`handlers/CON.js` can't be created there).
+const WINDOWS_DEVICE_NAME_RE = /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
+
+function isHandlerName(name: string): boolean {
+  return HANDLER_NAME_RE.test(name) && !WINDOWS_DEVICE_NAME_RE.test(name);
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -183,8 +190,8 @@ function authoredSpec(spec: Spec, dropFields: readonly string[]): Spec {
 function checkHandlerNames(names: Iterable<string>, problems: string[]): void {
   const list = [...names];
   for (const name of list) {
-    if (!HANDLER_NAME_RE.test(name)) {
-      problems.push(`handler name "${name}" can't be a file name (use letters, digits, _, $ and -)`);
+    if (!isHandlerName(name)) {
+      problems.push(`handler name "${name}" can't be a file name (use letters, digits, _, $ and -; not a Windows device name like CON or NUL)`);
     }
   }
   checkCaseCollisions(list, problems);
@@ -372,7 +379,7 @@ export function readShimFolder(input: FolderInput): ShimFolderContents {
     const handler = /^handlers\/([^/]+)\.js$/.exec(path);
     const name = handler?.[1];
     if (name !== undefined) {
-      if (!HANDLER_NAME_RE.test(name)) { problems.push(`${path}: "${name}" is not a valid handler name (use letters, digits, _, $ and -)`); continue; }
+      if (!isHandlerName(name)) { problems.push(`${path}: "${name}" is not a valid handler name (use letters, digits, _, $ and -; not a Windows device name like CON or NUL)`); continue; }
       const text = decode(path, content, problems);
       if (text !== null) handlers[name] = text;
       continue;
