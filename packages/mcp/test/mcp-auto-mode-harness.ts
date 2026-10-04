@@ -164,6 +164,14 @@ async function main(): Promise<void> {
     world.shimAnswers = false;
     s = json(await call(client, 'shim_status'));
     check('a live pid whose endpoint does not answer: attach unavailable, with why', rec(s.attach).available === false && /did not answer/.test(String(rec(s.attach).reason)), JSON.stringify(s.attach));
+    check('…next names the install command while Playwright is missing', String(s.next).includes(PLAYWRIGHT_INSTALL_COMMAND), String(s.next));
+
+    world.readiness = FOUND;
+    s = json(await call(client, 'shim_status'));
+    check('a live but silent Shim with headless ready: next asks for mode: "headless", never a bare url',
+      /mode: "headless"/.test(String(s.next)) && !/with url opens a headless session/.test(String(s.next)), String(s.next));
+    const bare = await call(client, 'shim_open_session', { url: 'https://site.test/', intent: 'x', newShimName: 'Site', shimFile: '/tmp/x.shim' });
+    check('…because a bare url is refused shim-running there (what next steers around)', bare.isError === true && /shim-running/.test(JSON.stringify(bare.content)), JSON.stringify(bare.content));
     await client.close();
   }
 

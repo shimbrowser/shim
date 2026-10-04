@@ -24,7 +24,7 @@ export const PLAYWRIGHT_MISSING =
   'Or point SHIM_PLAYWRIGHT_DIR at a folder whose node_modules has it.';
 
 /** Why headless mode can't open a page right now, with the command that fixes it. */
-export type HeadlessProblem = 'playwright-missing' | 'chromium-missing';
+export type HeadlessProblem = 'playwright-missing' | 'chromium-missing' | 'system-deps-missing';
 
 export class HeadlessUnavailableError extends Error {
   readonly code: HeadlessProblem;
@@ -164,6 +164,11 @@ export function chromiumInstallCommand(packageDir: string | null): string {
   return packageDir ? `node "${path.join(packageDir, 'cli.js')}" install chromium` : 'npx playwright install chromium';
 }
 
+/** The command that installs the system libraries Chromium needs (Linux), from the same Playwright CLI. */
+export function systemDepsInstallCommand(packageDir: string | null): string {
+  return packageDir ? `node "${path.join(packageDir, 'cli.js')}" install-deps chromium` : 'npx playwright install-deps chromium';
+}
+
 /** Find Playwright in the first place that has it, or throw a HeadlessUnavailableError (playwright-missing). */
 export function locatePlaywright(options: LoadPlaywrightOptions = {}): FoundPlaywright {
   const requireFrom = options.requireFrom ?? defaultRequireFrom;
@@ -229,12 +234,29 @@ export function headlessReadiness(locate: () => FoundPlaywright = processPlaywri
   }
 }
 
+// Playwright's own wording for a downloaded browser whose host libraries are
+// missing (Linux). Checked first: its message also says `playwright install-deps`,
+// which the download pattern below must not claim.
+const MISSING_SYSTEM_DEPS = /Host system is missing dependencies|playwright install-deps/i;
 // Playwright's own wording for a browser that was never downloaded.
-const MISSING_BROWSER = /Executable doesn't exist|playwright install|browserType\.launch: .*not found/i;
+const MISSING_BROWSER = /Executable doesn't exist|playwright install(?!-deps)|browserType\.launch: .*not found/i;
 
-/** A launch failure as what to do about it: a missing download is chromium-missing, with the command; anything else stays an error. */
+/**
+ * A launch failure as what to do about it: missing host libraries are
+ * system-deps-missing and a missing download chromium-missing, each with the
+ * command that fixes it; anything else stays an error.
+ */
 export function launchFailure(err: unknown, packageDir: string | null): Error {
   const message = err instanceof Error ? err.message : String(err);
+  if (MISSING_SYSTEM_DEPS.test(message)) {
+    const install = systemDepsInstallCommand(packageDir);
+    return new HeadlessUnavailableError(
+      'system-deps-missing',
+      `Chromium is downloaded but this system is missing libraries it needs: run \`${install}\` (it may need sudo).`,
+      install,
+      { cause: err },
+    );
+  }
   if (MISSING_BROWSER.test(message)) {
     const install = chromiumInstallCommand(packageDir);
     return new HeadlessUnavailableError(
