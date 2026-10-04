@@ -38,6 +38,11 @@ eq('bare layer keyword is unsupported', leadingImports('@import "a.css" layer;')
 eq('supports(…) import is unsupported', leadingImports('@import "a.css" supports(display: grid);'), { imports: [], unsupported: 1 });
 eq('comment between @import and url()', leadingImports("@import /* generated */ url('/shim.css');"), only(['/shim.css', '']));
 eq('comments around a bare string and inside a quoted url()', leadingImports('@import/*a*/"a.css"/*b*/ print;@import url( "b.css" /*c*/ );'), only(['a.css', 'print'], ['b.css', '']));
+eq('a { inside a comment after the url does not end the import block', leadingImports('@import url(\'/shim.css\') /* build {id} */;@import "b.css";'), only(['/shim.css', ''], ['b.css', '']));
+eq('a ; inside a comment does not end the statement early', leadingImports('@import "a.css" /* x; y */ print;'), only(['a.css', 'print']));
+eq('comments inside @charset / @layer statements are skipped', leadingImports('@layer a /* {b} */, c;@import url(a.css);'), only(['a.css', '']));
+eq('an unquoted url() body is raw: /* and ; are URL characters', leadingImports('@import url(/a/*;b.css);@import "c.css";'), only(['/a/*;b.css', ''], ['c.css', '']));
+eq('an unclosed comment ends the import block', leadingImports('@import "a.css" /* never closed;'), only());
 eq('@importer is not @import', leadingImports('@importer url(a.css);'), only());
 eq('unterminated import is dropped', leadingImports('@import url(a.css)'), only());
 eq('malformed prelude skipped, later import kept', leadingImports('@import foo;@import "b.css";'), only(['b.css', '']));

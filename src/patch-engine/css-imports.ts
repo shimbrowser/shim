@@ -38,7 +38,24 @@ function skipTrivia(css: string, i: number): number {
   }
 }
 
-// Index just past the `;` ending the statement at `i` (quote- and
+// At an unquoted `url(` token starting at `i`: the index of its closing `)`
+// (escape-aware). Its body is raw — `/*`, `;` and `{` there are URL
+// characters, not comments or delimiters (CSS Syntax 4.3.6). -1 when `i`
+// isn't such a token (a quoted `url("…")` is an ordinary function).
+function unquotedUrlEnd(css: string, i: number): number {
+  if (css.slice(i, i + 4).toLowerCase() !== 'url(') return -1;
+  if (i > 0 && /[\w-]/.test(css.charAt(i - 1))) return -1;
+  let j = i + 4;
+  while (j < css.length && /\s/.test(css.charAt(j))) j++;
+  if (css[j] === '"' || css[j] === "'") return -1;
+  for (; j < css.length; j++) {
+    if (css[j] === '\\') j++;
+    else if (css[j] === ')') return j;
+  }
+  return css.length;
+}
+
+// Index just past the `;` ending the statement at `i` (quote-, comment- and
 // paren-aware), or -1 when a `{` comes first / the text ends — i.e. the
 // at-rule is a block, not a statement.
 function statementEnd(css: string, i: number): number {
@@ -49,6 +66,17 @@ function statementEnd(css: string, i: number): number {
     if (quote) {
       if (c === '\\') i++;
       else if (c === quote) quote = '';
+      continue;
+    }
+    if (c === '/' && css[i + 1] === '*') {
+      const close = css.indexOf('*/', i + 2);
+      if (close < 0) return -1;
+      i = close + 1;
+      continue;
+    }
+    const urlClose = unquotedUrlEnd(css, i);
+    if (urlClose >= 0) {
+      i = urlClose;
       continue;
     }
     if (c === '"' || c === "'") quote = c;
