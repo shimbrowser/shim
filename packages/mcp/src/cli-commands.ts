@@ -51,6 +51,16 @@ function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+// Node's errno codes for a path that can't be written. A screenshot that
+// fails for any other reason (no such selector, page closed) is not one.
+const FILE_SYSTEM_CODES = new Set(['EACCES', 'EPERM', 'EROFS', 'ENOSPC', 'EDQUOT', 'EISDIR', 'ENOTDIR', 'ENOENT', 'ENAMETOOLONG', 'EEXIST']);
+
+function isFileSystemError(e: unknown): boolean {
+  if (typeof e !== 'object' || e === null || !('code' in e)) return false;
+  const code: unknown = e.code;
+  return typeof code === 'string' && FILE_SYSTEM_CODES.has(code);
+}
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
@@ -414,14 +424,22 @@ export async function previewFolder(opts: PreviewOptions, deps: PreviewDeps): Pr
     const current = held.page;
     if (opts.screenshot && current) {
       const file = path.resolve(opts.screenshot);
+      // A file the CLI can't write is a usage problem (exit 2), like pack and
+      // unpack; a page or selector that can't be captured is a preview
+      // problem (exit 1).
       try {
         fs.mkdirSync(path.dirname(file), { recursive: true });
+      } catch (e) {
+        throw new CliError('write-failed', `could not write ${file}: ${errMessage(e)}`);
+      }
+      try {
         await current.screenshot(file, {
           ...(opts.selector ? { selector: opts.selector } : {}),
           ...(opts.fullPage ? { fullPage: true } : {}),
         });
         outcome.screenshot = { file };
       } catch (e) {
+        if (isFileSystemError(e)) throw new CliError('write-failed', `could not write ${file}: ${errMessage(e)}`);
         outcome.screenshot = { error: errMessage(e) };
         outcome.ok = false;
       }
