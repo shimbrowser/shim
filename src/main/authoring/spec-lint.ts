@@ -31,7 +31,7 @@ import {
 import { validateRewriteMutation, detectTransformForm } from '../../patch-engine/rewrite-response';
 import type { CompileProbe } from '../../patch-engine/rewrite-response';
 import { validateInterceptMutation } from '../../patch-engine/intercept';
-import { handlerModuleSource } from '../../shared/handler-source';
+import { handlerModuleSource, handlerExpressionSource } from '../../shared/handler-source';
 
 // vm.Script-backed compile probe for `detectTransformForm` — main-process
 // counterpart to rewrite-install.ts's identical-shaped probe (Node/Electron-
@@ -44,14 +44,22 @@ const vmCompileProbe: CompileProbe = (code) => {
   }
 };
 
-// A module-form transform / wrap (`module.exports = …` CJS source — what an
-// export writes and an import carries) is evaluated by transformLiteral, which
-// keeps module.exports only if it is a function: anything else (`module.exports
-// = {};`, no assignment at all) parses fine and then leaves the rule silently
-// inactive. Statically confirm the source's LAST top-level `module.exports =`
-// assignment is a function — a function/arrow expression, or the name of a
-// top-level function declared in the same source. Static on purpose: lint runs
-// in main on import content, which must never be executed here.
+// A transform / wrap is kept by transformLiteral only if it evaluates to a
+// function; anything else parses fine and then leaves the rule silently
+// inactive (the wrapper skips non-functions). Two shapes reach it:
+//   - CJS source (`module.exports = …` — what an export writes and an import
+//     carries). With a trailing `;` the dual-form probe calls it 'module';
+//     WITHOUT one it parses as an assignment EXPRESSION and is called 'expr',
+//     so the module.exports check below runs whatever the form.
+//   - A bare function expression (the authoring convention).
+// Statically reject the cases that can never work: a CJS source with no
+// top-level `module.exports =` assignment, or whose LAST one assigns an
+// obvious non-function (object/array/literal), and a bare expression that is
+// one. Anything dynamic (a call — e.g. an IIFE returning the function — an
+// identifier, a conditional) is allowed: it may well yield a function, and
+// transformLiteral's fault isolation keeps a bad one to its own rule. Static
+// on purpose: lint runs in main on import content, which must never be
+// executed here.
 function isModuleExportsRef(node: acorn.Node): boolean {
   if (node.type !== 'MemberExpression') return false;
   const m = node as acorn.MemberExpression;
@@ -60,12 +68,18 @@ function isModuleExportsRef(node: acorn.Node): boolean {
   return m.property.type === 'Literal' && m.property.value === 'exports';
 }
 
-function moduleExportsFunction(source: string): boolean {
+// A bare expression that can never be a function.
+const NON_FUNCTION_EXPRESSIONS = new Set(['ObjectExpression', 'ArrayExpression', 'Literal', 'TemplateLiteral']);
+
+// 'none' when the source has no top-level `module.exports =` assignment (or
+// doesn't parse as a script — an anonymous `function (…) {}` doesn't);
+// 'dynamic' when the assigned value can't be judged statically.
+function moduleExportsShape(source: string): 'function' | 'non-function' | 'dynamic' | 'none' {
   let ast: acorn.Program;
   try {
     ast = acorn.parse(source, { ecmaVersion: 'latest', sourceType: 'script' });
   } catch {
-    return false;
+    return 'none';
   }
   const fnNames = new Set<string>();
   let exported: acorn.Expression | null = null;
@@ -89,19 +103,43 @@ function moduleExportsFunction(source: string): boolean {
       exported = value;
     }
   }
-  if (!exported) return false;
-  if (exported.type === 'FunctionExpression' || exported.type === 'ArrowFunctionExpression') return true;
-  return exported.type === 'Identifier' && fnNames.has(exported.name);
+  if (!exported) return 'none';
+  if (exported.type === 'FunctionExpression' || exported.type === 'ArrowFunctionExpression') return 'function';
+  if (exported.type === 'Identifier' && fnNames.has(exported.name)) return 'function';
+  return NON_FUNCTION_EXPRESSIONS.has(exported.type) ? 'non-function' : 'dynamic';
 }
+
+// True unless the source's module.exports is statically known not to be a
+// function (or never assigned).
+function moduleExportsFunction(source: string): boolean {
+  const shape = moduleExportsShape(source);
+  return shape === 'function' || shape === 'dynamic';
+}
+function exprIsNonFunction(source: string): boolean {
+  let ast: acorn.Program;
+  try {
+    ast = acorn.parse(handlerExpressionSource(source), { ecmaVersion: 'latest', sourceType: 'script' });
+  } catch {
+    return false;
+  }
+  if (ast.body.length !== 1) return false;
+  const [stmt] = ast.body;
+  return stmt !== undefined && stmt.type === 'ExpressionStatement' && NON_FUNCTION_EXPRESSIONS.has(stmt.expression.type);
+}
+
+const NOT_A_FUNCTION_EXPORT = 'is module-form source that does not assign a function to module.exports, so the rule would never run. '
+  + 'Write it as `module.exports = function (…) { … };` (or a bare function expression).';
 
 // Shared tail of the transform / wrap syntax check: `null` when the bound
 // source is usable, otherwise the reason it is not.
 function boundSourceProblem(source: string): string | null {
   const syntax = detectTransformForm(source, vmCompileProbe);
   if (syntax.form === null) return `does not parse as JavaScript: ${syntax.error}`;
-  if (syntax.form === 'module' && !moduleExportsFunction(source)) {
-    return 'is module-form source that does not assign a function to module.exports, so the rule would never run. '
-      + 'Write it as `module.exports = function (…) { … };` (or a bare function expression).';
+  const exportsShape = moduleExportsShape(source);
+  if (exportsShape === 'non-function') return NOT_A_FUNCTION_EXPORT;
+  if (syntax.form === 'module' && exportsShape === 'none') return NOT_A_FUNCTION_EXPORT;
+  if (syntax.form === 'expr' && exportsShape === 'none' && exprIsNonFunction(source)) {
+    return 'does not evaluate to a function, so the rule would never run. Write it as a function expression: `function (…) { … }`.';
   }
   return null;
 }
