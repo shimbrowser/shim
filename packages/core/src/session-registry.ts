@@ -105,6 +105,7 @@ export type SessionErrorCode =
   | 'nothing-to-commit'
   | 'artifact-busy'
   | 'begin-failed'
+  | 'target-changed'
   | 'invalid-request';
 
 // A backend's begin throws this when the artifact is busy with something the
@@ -114,6 +115,16 @@ export class ArtifactBusyError extends Error {
   constructor(detail: string) {
     super(detail);
     this.name = 'ArtifactBusyError';
+  }
+}
+
+// A backend's begin throws this when the target no longer matches the scope
+// the human approved (`approvedScope`): open() answers 'target-changed', so
+// the caller asks again for the new target.
+export class TargetChangedError extends Error {
+  constructor(detail: string) {
+    super(detail);
+    this.name = 'TargetChangedError';
   }
 }
 
@@ -129,39 +140,28 @@ export interface OpenRequest {
   // The page the session works against (a tab), passed through to the
   // backend; its shape is the backend's.
   target?: unknown;
+  // The consent scope the human approved for this session (the shim's host,
+  // `composition:<uid>`). begin runs after the lease wait, so the target may
+  // have moved since it was approved: a backend binding to something else
+  // throws TargetChangedError.
+  approvedScope?: string;
   // Who is driving (shown on Shim's cards), and what they set out to do.
   agent: string;
   intent: string;
   // The artifact was created for this session (after its attach consent):
   // the backend's finish removes it again when nothing was committed.
   created?: boolean;
-  // The scope the human allowed on the attach card (a shim session's host).
-  // begin refuses a target that no longer shows it — the tab can navigate
-  // while open() waits for the lease.
-  scope?: string;
-}
-
-// A begin that refuses for a reason the agent can act on: answered as its
-// own error code rather than 'begin-failed'.
-export class BeginRefusal extends Error {
-  readonly code: string;
-  constructor(code: string, message: string) {
-    super(message);
-    this.name = 'BeginRefusal';
-    this.code = code;
-  }
 }
 
 export interface BeginArgs<L extends SessionLease = SessionLease> {
   sessionId: string;
   artifactId: string;
   target: unknown;
+  approvedScope?: string;
   agent: string;
   intent: string;
   // See OpenRequest.created.
   created: boolean;
-  // See OpenRequest.scope; null when the caller consented to no scope.
-  scope: string | null;
   // The artifact's 'turn' lease, held for the session's life.
   lease: L;
   // Aborts when the session ends, for any reason.
@@ -195,7 +195,8 @@ export interface FinishInfo {
 export interface SessionBackend<H = unknown, L extends SessionLease = SessionLease> {
   // Sets up exactly what an internal turn sets up (the kind's "begin"),
   // under the already-held lease. A throw fails open() with 'begin-failed'
-  // ('artifact-busy' for an ArtifactBusyError).
+  // ('artifact-busy' for an ArtifactBusyError, 'target-changed' for a
+  // TargetChangedError).
   begin(args: BeginArgs<L>): Promise<H>;
   // The session's working copy as files (design D10), as of the latest
   // applied revision. Optional: a kind without one answers
@@ -548,13 +549,14 @@ export function createSessionRegistry<L extends SessionLease = SessionLease>(opt
     try {
       handle = await backend.begin({
         sessionId, artifactId: req.artifactId, target: req.target, agent: req.agent, intent: req.intent,
-        created: req.created === true, scope: req.scope ?? null, lease, signal: controller.signal,
+        ...(req.approvedScope !== undefined ? { approvedScope: req.approvedScope } : {}),
+        created: req.created === true, lease, signal: controller.signal,
       });
     } catch (e) {
       lease.signal.removeEventListener('abort', onEarlyAbort);
       lease.release();
       if (e instanceof ArtifactBusyError) return { ok: false, error: 'artifact-busy', detail: e.message };
-      if (e instanceof BeginRefusal) return { ok: false, error: e.code, detail: e.message };
+      if (e instanceof TargetChangedError) return { ok: false, error: 'target-changed', detail: e.message };
       return { ok: false, error: 'begin-failed', detail: e instanceof Error ? e.message : String(e) };
     }
     lease.signal.removeEventListener('abort', onEarlyAbort);

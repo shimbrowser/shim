@@ -17,12 +17,14 @@
 //     `[]`, intent is normalizeIntent'd), so applying the ops always yields a
 //     state the same folder diffs against to no ops — re-syncing an unchanged
 //     folder never emits an op (and a commit) again.
-//   - a global shim's `sharedHandlers` (its `api.shared` code-space) → one
-//     `set-shared-handler` per added or changed entry and one
-//     `remove-shared-handler` per dropped one. The evolution contract (a
-//     still-referenced function can't be removed) is enforced at commit, as
-//     for an internal turn. On a non-global shim it stays not-editable — an
-//     internal turn never adds a shared code-space there either.
+//   - a global shim's shared code space (`sharedHandlers`, name → raw
+//     function-expression source) → one `set-shared-handler` per added or
+//     changed name and one `remove-shared-handler` per dropped one. An absent
+//     map is `{}`, the form applyDelta leaves once the last name is removed.
+//     The evolution contract (a still-referenced function can't be removed)
+//     is enforced at commit, as for an internal turn. On a non-global shim it
+//     stays not-editable — an internal turn never adds a shared code space
+//     there either.
 //   - any other spec field (id, match, css, …) has no op, so changing it is
 //     a ShimFolderError('not-editable') rather than a silent drop.
 //
@@ -59,6 +61,8 @@ export interface WorkingCopyDiff {
 const DECLARATION_FIELDS = ['settings', 'permissions', 'intent', 'storage', 'connections'] as const;
 type DeclarationField = (typeof DECLARATION_FIELDS)[number];
 // Never in the folder, never compared: tool-managed or stamped at runtime.
+// (On a global shim `sharedHandlers` is compared, per name, by
+// sharedHandlerOps; on any other shim it's a field no op can carry.)
 const UNCOMPARED_FIELDS = new Set(['rules', 'handlers', 'version', 'bundleHash', 'priority', '__cssPriority']);
 
 // One rule's handler modules as the previous state stored them: its own
@@ -95,31 +99,29 @@ function canonicalDeclaration(field: DeclarationField, value: unknown): unknown 
   return value;
 }
 
-// A global shim's shared code-space, diffed entry by entry: an absent map and
-// an empty one are the same, so re-syncing never emits an op.
-function sharedHandlerOps(before: unknown, after: unknown, problems: string[]): DeltaOp[] {
-  if (after !== undefined && !isStringMap(after)) {
-    problems.push('"sharedHandlers" must be an object of function sources');
-    return [];
-  }
-  const prev: Record<string, string> = isStringMap(before) ? before : {};
-  const next: Record<string, string> = after ?? {};
-  const ops: DeltaOp[] = [];
-  for (const [name, source] of Object.entries(next)) {
-    // A plain-object assignment of "__proto__" hits the prototype setter
-    // instead of storing the entry, so the preview would silently drop it.
-    if (name === '__proto__') { problems.push('"sharedHandlers" cannot name a function "__proto__"'); continue; }
-    if (!Object.hasOwn(prev, name) || prev[name] !== source) ops.push({ op: 'set-shared-handler', name, source });
-  }
-  for (const name of Object.keys(prev)) {
-    if (!Object.hasOwn(next, name)) ops.push({ op: 'remove-shared-handler', name });
-  }
-  return ops;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isStringMap(value: unknown): value is Record<string, string> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    && Object.values(value).every((v) => typeof v === 'string');
+// The shared code space's per-name ops: set every name the folder adds or
+// changes (in its order), remove every name it dropped. applyDelta upserts
+// into a plain object, where a `__proto__` key would never land, so that
+// name is refused rather than re-emitted on every sync.
+function sharedHandlerOps(before: unknown, after: unknown, problems: string[]): DeltaOp[] {
+  if (after !== undefined && !isRecord(after)) { problems.push('"sharedHandlers" must be an object of name → function source'); return []; }
+  const prevMap = isRecord(before) ? before : {};
+  const nextMap = after ?? {};
+  const ops: DeltaOp[] = [];
+  for (const [name, source] of Object.entries(nextMap)) {
+    if (name === '__proto__') { problems.push('"sharedHandlers": "__proto__" is not a valid shared handler name'); continue; }
+    if (typeof source !== 'string') { problems.push(`"sharedHandlers.${name}" must be a function source string`); continue; }
+    const previous = Object.hasOwn(prevMap, name) ? prevMap[name] : undefined;
+    if (previous !== source) ops.push({ op: 'set-shared-handler', name, source });
+  }
+  for (const name of Object.keys(prevMap)) {
+    if (!Object.hasOwn(nextMap, name)) ops.push({ op: 'remove-shared-handler', name });
+  }
+  return ops;
 }
 
 function declarationOp(field: DeclarationField, value: unknown, problems: string[]): DeltaOp | null {
