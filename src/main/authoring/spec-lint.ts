@@ -81,16 +81,30 @@ function moduleExportsShape(source: string): 'function' | 'non-function' | 'dyna
   } catch {
     return 'none';
   }
-  const fnNames = new Set<string>();
-  let exported: acorn.Expression | null = null;
+  // Judged in execution order. Function declarations are hoisted with their
+  // value, so they count from the top; a variable only counts once its
+  // declaration has run — before that a `const`/`let`/`class` binding is in
+  // its temporal dead zone (the export throws) and a `var` is `undefined`.
+  const hoistedFns = new Set<string>();
+  const laterBindings = new Set<string>();
   for (const stmt of ast.body) {
-    if (stmt.type === 'FunctionDeclaration') {
-      fnNames.add(stmt.id.name);
+    if (stmt.type === 'FunctionDeclaration') hoistedFns.add(stmt.id.name);
+    else if (stmt.type === 'ClassDeclaration') laterBindings.add(stmt.id.name);
+    else if (stmt.type === 'VariableDeclaration') {
+      for (const d of stmt.declarations) if (d.id.type === 'Identifier') laterBindings.add(d.id.name);
+    }
+  }
+  const fnVars = new Set<string>();
+  let shape: 'function' | 'non-function' | 'dynamic' | 'none' = 'none';
+  for (const stmt of ast.body) {
+    if (stmt.type === 'ClassDeclaration') {
+      laterBindings.delete(stmt.id.name);
     } else if (stmt.type === 'VariableDeclaration') {
       for (const d of stmt.declarations) {
-        if (d.id.type === 'Identifier' && d.init
-          && (d.init.type === 'FunctionExpression' || d.init.type === 'ArrowFunctionExpression')) {
-          fnNames.add(d.id.name);
+        if (d.id.type !== 'Identifier') continue;
+        laterBindings.delete(d.id.name);
+        if (d.init && (d.init.type === 'FunctionExpression' || d.init.type === 'ArrowFunctionExpression')) {
+          fnVars.add(d.id.name);
         }
       }
     } else if (stmt.type === 'ExpressionStatement'
@@ -100,13 +114,15 @@ function moduleExportsShape(source: string): 'function' | 'non-function' | 'dyna
       // `module.exports = exports = fn` — the value is the innermost right side.
       let value: acorn.Expression = stmt.expression.right;
       while (value.type === 'AssignmentExpression' && value.operator === '=') value = value.right;
-      exported = value;
+      if (value.type === 'FunctionExpression' || value.type === 'ArrowFunctionExpression') shape = 'function';
+      else if (value.type === 'Identifier') {
+        if (hoistedFns.has(value.name) || fnVars.has(value.name)) shape = 'function';
+        else if (laterBindings.has(value.name)) shape = 'non-function';
+        else shape = 'dynamic';
+      } else shape = NON_FUNCTION_EXPRESSIONS.has(value.type) ? 'non-function' : 'dynamic';
     }
   }
-  if (!exported) return 'none';
-  if (exported.type === 'FunctionExpression' || exported.type === 'ArrowFunctionExpression') return 'function';
-  if (exported.type === 'Identifier' && fnNames.has(exported.name)) return 'function';
-  return NON_FUNCTION_EXPRESSIONS.has(exported.type) ? 'non-function' : 'dynamic';
+  return shape;
 }
 
 // True unless the source's module.exports is statically known not to be a
