@@ -104,6 +104,29 @@ if (fs.existsSync(apiTypes)) {
     }
   }
 }
+// The supabase builder is part of that inventory too: every method its chain
+// and table builder expose must be named, or a supported write or filter reads
+// as unavailable.
+const supabaseBuilder = path.join(ROOT, '..', '..', 'src', 'preload', 'db-supabase-builder.ts');
+if (fs.existsSync(supabaseBuilder)) {
+  const source = fs.readFileSync(supabaseBuilder, 'utf8').replace(/\r\n/g, '\n');
+  const methods = new Set<string>();
+  for (const iface of ['SupabaseChain', 'SupabaseTableBuilder', 'SupabaseHandlerBuilder']) {
+    const body = new RegExp(`\\n(?:export )?interface ${iface}\\b[^{]*\\{\\n([\\s\\S]*?)\\n\\}`).exec(source)?.[1];
+    check(`the builder declares ${iface}`, body !== undefined);
+    for (const m of (body ?? '').matchAll(/^ {2}(\w+)(?:<[^>]*>)?\(/gm)) {
+      if (m[1] && !['then', 'catch', 'finally'].includes(m[1])) methods.add(m[1]);
+    }
+  }
+  check('the builder exposes its write verbs', ['insert', 'upsert', 'update', 'delete'].every((v) => methods.has(v)));
+  for (const method of methods) {
+    check(`the guide names supabase .${method}(`, skill.includes(`.${method}(`) || new RegExp(`\`\\.${method}\``).test(skill));
+  }
+}
+// The preview bucket is one per site and never cleared — the guide must not
+// promise it is discarded, and must warn that it may hold earlier keys.
+check('does not claim preview storage is gone after commit', !/preview stores is gone/.test(skill));
+check('says the preview bucket is shared per site and never cleared', /shared by every preview there/.test(skill) && /never cleared/.test(skill));
 check('makes visual verification a duty', /Visual intents require visual verification/.test(skill) && /view_page \{ selector \}/.test(skill));
 check('says previews act on the real site', /Your previews act on the real site/.test(skill));
 check('says previews run on a preview api (scratch storage, no settings / ai / db)', /handlers get a preview `api`, not the shim's/.test(skill) && /scratch bucket/.test(skill));

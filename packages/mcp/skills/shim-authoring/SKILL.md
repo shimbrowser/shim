@@ -480,8 +480,11 @@ Handlers get `api`. Every call that can fail resolves `{ ok: false, error }` ins
 throwing — always branch on it and render a usable state.
 
 **While previewing, handlers get a preview `api`, not the shim's.** `api.storage` reads and
-writes a scratch bucket apart from the shim's saved data — what a preview stores is gone
-after commit, and what the shim already saved isn't visible — `api.settings` has no values,
+writes a scratch bucket apart from the shim's saved data: what the shim already saved isn't
+visible, and what a preview stores never reaches the shim. That bucket is one per site,
+shared by every preview there (other shims' and earlier sessions' too) and never cleared,
+so it may already hold keys — don't read a value you didn't just write as evidence, and
+prefer keys unique to this shim. `api.settings` has no values,
 `api.ai` calls answer `{ ok: false }`, and `api.db`, `api.storage.pack`,
 `api.storage.global` and `api.shared` are absent. Handlers must render a usable state in
 every one of those cases anyway; check the data path after commit (open the session again
@@ -524,8 +527,21 @@ if you need to), and say in your summary what you could only verify that way.
   (`postgres | mysql | mariadb | mssql | sqlite-remote | supabase`) names a database the
   user already runs; they paste its URL into the shim's Settings, never you. Reach it with
   `api.db.connection("warehouse").query(…)` / `.run(…)`; unconfigured, calls answer
-  `not-configured`. `supabase` takes a supabase-js-like builder
-  (`.from("notes").select("*").eq(…)`), answering `{ ok, rows, changes }`. A new
+  `not-configured`. A `supabase` connection instead takes a supabase-js-like builder;
+  only this subset of it exists:
+  - start: `.from(table)` then one of `.select(columns?)`, `.insert(row | rows)`,
+    `.upsert(row | rows, { onConflict? })`, `.update(patch)`, `.delete()`;
+  - filters: `.eq` `.neq` `.gt` `.gte` `.lt` `.lte` `.like` `.ilike` `(column, value)`,
+    `.in(column, values)`, `.is(column, value)`, `.not(column, op, value)`, `.or("a.eq.1,b.gt.2")`;
+  - read modifiers: `.order(column, { ascending? })`, `.limit(n)`, `.range(from, to)`,
+    `.single()`, `.maybeSingle()`; after a write, `.select(columns?)` returns the
+    affected rows. Writes take at most 1,000 rows.
+
+  Columns are plain names (or `*`) — no embedded relations, `->` or `::`. A read answers
+  `{ ok, rows, truncated? }`; a write `{ ok, changes }`, plus `rows` when it ends in
+  `.select()` — never supabase-js's `{ data, error }`. Row-level security can filter a
+  write to nothing and still answer `ok` with `changes: 0`, so check `changes`. An
+  `update`/`delete` with no filter waits on the user's approval. A new
   connection asks the user at commit. Treat remote data as shared: additive changes only,
   and say so before writing.
 - **`api.settings`** — values the user supplies (API keys, preferences). Declare the fields
