@@ -517,7 +517,10 @@ if you need to), and say in your summary what you could only verify that way.
 
   Names are lowercase `snake_case`; types `text | integer | real | blob`. Additive changes
   apply on commit. Then `await api.db.query(sql, params)` (reads only; `{ ok, rows,
-  truncated? }`, capped at 5,000 rows / 1 MB) and `await api.db.run(sql, params)` (writes
+  truncated? }`, capped by default at 5,000 rows / 1 MB; a shim that really needs bigger
+  reads raises its own caps with `"storage": { "limits": { "maxRows": 20000,
+  "maxResultBytes": 5000000 }, "tables": [...] }`, up to 100,000 rows / 20 MB — prefer
+  `LIMIT`/`OFFSET` paging or an aggregate first) and `await api.db.run(sql, params)` (writes
   and DDL; `{ ok, changes, lastInsertRowid }`). Parameterized (`?`) only, one statement per
   call. Destructive DDL waits on the user's approval. Errors to handle: `not-declared`,
   `approval-required`, `denied`, `classification: …`, `rejected: …`, `sqlite: …`,
@@ -572,8 +575,11 @@ if you need to), and say in your summary what you could only verify that way.
   field (or in `api.storage`) rather than a `text`, `number`, `boolean` or `select` one.
 - **`api.fetch(url, { method, headers, body })`** — a request from Shim's main process,
   outside the page's CSP and CORS: `{ ok, status, url, headers, text, truncated }` (no
-  `.json()` — `JSON.parse(res.text)`). Cookie-less: public content only. For the site's own
-  authenticated endpoints, use the page's `fetch(url, { credentials: 'include' })`.
+  `.json()` — `JSON.parse(res.text)`). It sends no cookies, but it does send the headers
+  you pass, so a third-party API authenticated by a key works: read the key from a `secret`
+  setting and pass it as `Authorization` or the API's key header. Only for the site's own
+  endpoints that need the user's logged-in session, use the page's
+  `fetch(url, { credentials: 'include' })`.
 - **`api.ai.complete({ prompt | messages, system?, model?, maxTokens? })`** — Claude, on the
   user's own Anthropic key, which the shim never sees: `{ ok, text }`. Requires
   `"permissions": ["ai"]`; the user grants it in Shim after the commit, and until then calls

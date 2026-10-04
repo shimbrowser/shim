@@ -142,6 +142,19 @@ check('says a supabase connection\'s storage creates nothing but still allowlist
 // includeSettings) — only secret values never travel.
 check('does not claim setting values never travel', !/Values never travel with the shim/.test(skill));
 check('says non-secret setting values ride a pack export', /`secret` values never do, but non-secret\s+values ride along when the user exports a pack/.test(skill));
+// api.fetch omits cookies but forwards the caller's headers (capabilities/
+// fetch.ts), so key-authenticated third-party APIs work through it.
+check('does not restrict api.fetch to public content', !/public content only/.test(skill));
+check('says api.fetch sends the headers you pass (key-authenticated APIs work)', /does send the headers\s+you pass/.test(skill) && /`secret`\s+setting and pass it as `Authorization`/.test(skill));
+// The local read caps are defaults a shim can raise via storage.limits, up to
+// the transport's hard ceilings (shim-db/transport-sqlite.ts, schema.ts).
+check('documents storage.limits and its ceilings', /"limits": \{ "maxRows": \d+,\s+"maxResultBytes": \d+ \}/.test(skill) && /up to 100,000 rows \/ 20 MB/.test(skill));
+const sqliteTransport = path.join(ROOT, '..', '..', 'src', 'main', 'shim-db', 'transport-sqlite.ts');
+if (fs.existsSync(sqliteTransport)) {
+  const source = fs.readFileSync(sqliteTransport, 'utf8');
+  check('the guide\'s ceilings match the transport\'s', /HARD_MAX_ROWS = 100_000;/.test(source) && /HARD_MAX_RESULT_BYTES = 20_000_000;/.test(source));
+  check('the guide\'s defaults match the transport\'s', /\bMAX_ROWS = 5000;/.test(source) && /\bMAX_RESULT_BYTES = 1_000_000;/.test(source) && /5,000 rows \/ 1 MB/.test(skill));
+}
 // The preview bucket is one per site and never cleared — the guide must not
 // promise it is discarded, and must warn that it may hold earlier keys.
 check('does not claim preview storage is gone after commit', !/preview stores is gone/.test(skill));
