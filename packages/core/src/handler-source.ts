@@ -46,9 +46,56 @@ const WRAPPED_EXPRESSION_RE = /^\s*module\.exports\s*=\s*([\s\S]*?)\s*;?\s*$/;
  * <expr>;` can carry.
  */
 export function moduleToExpression(moduleSource: string): string {
+  return exportedExpression(moduleSource) ?? `${MODULE_IIFE_PREFIX}${moduleSource}${MODULE_IIFE_SUFFIX}`;
+}
+
+/**
+ * `<expr>` when a module is nothing but `module.exports = <expr>;` (give or
+ * take whitespace and the semicolon) and `<expr>` parses as one expression;
+ * null for any other module.
+ */
+export function exportedExpression(moduleSource: string): string | null {
   const inner = exactWrappedExpression(moduleSource) ?? WRAPPED_EXPRESSION_RE.exec(moduleSource)?.[1];
-  if (inner && syntaxProbe(`(${inner}\n)`).ok) return inner;
-  return `${MODULE_IIFE_PREFIX}${moduleSource}${MODULE_IIFE_SUFFIX}`;
+  return inner && syntaxProbe(`(${inner}\n)`).ok ? inner : null;
+}
+
+// A whole expression that is a primitive literal: a number, a keyword value,
+// or a plain string / template without substitutions. Never a function.
+const PRIMITIVE_LITERAL_RE = new RegExp([
+  String.raw`^[-+]?(?:0[xob][\da-f_]+|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:e[-+]?\d+)?)n?$`,
+  String.raw`^(?:null|undefined|true|false|NaN|Infinity)$`,
+  String.raw`^'(?:\\[\s\S]|[^'\\\n])*'$`,
+  String.raw`^"(?:\\[\s\S]|[^"\\\n])*"$`,
+  String.raw`^\x60(?:\\[\s\S]|[^\x60\\$]|\$(?!\{))*\x60$`,
+].join('|'), 'i');
+
+// `module.exports` (or `module['exports']`) as written anywhere in a module.
+const MODULE_EXPORTS_RE = /\bmodule\s*(?:\.\s*exports\b|\[\s*(['"`])exports\1\s*\])/;
+
+/**
+ * Why a handler module can't give the browser a function, or null when
+ * nothing static rules it out. The browser compiles a module as
+ * `(function (module, exports) { <source> })` and requires
+ * `module.exports` to be a function after it runs (import's
+ * assertHandlersBound). Core never runs handler code, so this is the static
+ * part of that check: a syntax error, a module that never assigns
+ * `module.exports` (a bare `function notes() {}`), or one that exports a
+ * primitive literal (`module.exports = 42;`). An export only known at run
+ * time (a call's result, an object) passes here and is the browser's to
+ * check.
+ */
+export function handlerModuleProblem(moduleSource: string): string | null {
+  if (!moduleSource.trim()) return 'is empty';
+  const syntax = syntaxProbe(`(function (module, exports) {\n${moduleSource}\n});`);
+  if (!syntax.ok) return `does not parse as JavaScript: ${syntax.error ?? 'syntax error'}`;
+  if (!MODULE_EXPORTS_RE.test(moduleSource)) {
+    return 'never assigns module.exports — a handler file is `module.exports = function (ctx) { ... };`';
+  }
+  const expression = exportedExpression(moduleSource);
+  if (expression !== null && PRIMITIVE_LITERAL_RE.test(expression.trim())) {
+    return `exports ${expression.trim()}, not a function — a handler file is \`module.exports = function (ctx) { ... };\``;
+  }
+  return null;
 }
 
 /**

@@ -17,6 +17,8 @@
 //   packShim      folder → `shim/1` .shim file. A witness comes back only when
 //                 its rule's anchor digest still matches — an edited anchor
 //                 loses it and the engine re-captures one on the next apply.
+//                 A script handler module that can't export a function is
+//                 refused, as import would refuse the file.
 // unpack → pack is lossless for a canonical export (deep-equal file). A file
 // whose rules still carry inline `handlers` is folded into handlers/ on
 // unpack, so it packs back in canonical form.
@@ -26,7 +28,7 @@
 
 import type { Spec, Rule, Anchor, Witness } from './types';
 import { sha256Hex } from './sha256';
-import { moduleForExpression } from './handler-source';
+import { moduleForExpression, handlerModuleProblem } from './handler-source';
 import { lintSpec, canonicalModule, HANDLER_REF_FIELDS } from './spec-lint';
 
 export const SHIM_JSON = 'shim.json';
@@ -179,10 +181,26 @@ function authoredSpec(spec: Spec, dropFields: readonly string[]): Spec {
 }
 
 function checkHandlerNames(names: Iterable<string>, problems: string[]): void {
-  for (const name of names) {
+  const list = [...names];
+  for (const name of list) {
     if (!HANDLER_NAME_RE.test(name)) {
       problems.push(`handler name "${name}" can't be a file name (use letters, digits, _, $ and -)`);
     }
+  }
+  checkCaseCollisions(list, problems);
+}
+
+// Handler names are case-sensitive, but the default macOS and Windows
+// filesystems are not: `Foo` and `foo` would be one handlers/ file, so one
+// source would overwrite the other. Names are ASCII (HANDLER_NAME_RE), so
+// lower-casing is the filesystem's folding.
+function checkCaseCollisions(names: readonly string[], problems: string[]): void {
+  const byFolded = new Map<string, string>();
+  for (const name of names) {
+    const folded = name.toLowerCase();
+    const other = byFolded.get(folded);
+    if (other === undefined) byFolded.set(folded, name);
+    else problems.push(`handler names "${other}" and "${name}" differ only in case — on a case-insensitive filesystem they'd be one file (${handlerPath(name)})`);
   }
 }
 
@@ -361,6 +379,9 @@ export function readShimFolder(input: FolderInput): ShimFolderContents {
     }
     problems.push(`unexpected file ${path} — a shim folder holds ${SHIM_JSON} and ${HANDLERS_DIR}/<name>.js only`);
   }
+  // A case-sensitive filesystem can hold both; it couldn't be unpacked or
+  // checked out again on a case-insensitive one.
+  checkCaseCollisions(Object.keys(handlers), problems);
 
   let spec: Spec | null = null;
   if (!sawSpec) problems.push(`${SHIM_JSON} is missing`);
@@ -411,6 +432,30 @@ function checkAuthoredSpec(raw: Record<string, unknown>, handlers: Record<string
   return raw as unknown as Spec;
 }
 
+// Import (parseShimFile → assertHandlersBound) compiles and runs every
+// `script` mutation's handler module and refuses the file unless it exports a
+// function; lint only syntax-checks transforms and wraps. So pack refuses
+// what can be told without running the code (handlerModuleProblem) rather
+// than write a file the browser won't import.
+function checkScriptModules(spec: Spec, handlers: Record<string, string>): void {
+  const problems: string[] = [];
+  const checked = new Set<string>();
+  for (const rule of spec.rules || []) {
+    for (const mutation of rule.mutations || []) {
+      if (!isRecord(mutation) || mutation.kind !== 'script') continue;
+      const name = mutation.handler;
+      if (typeof name !== 'string' || !name || checked.has(name)) continue;
+      checked.add(name);
+      // readShimFolder already refused a named handler with no file.
+      const source = Object.hasOwn(handlers, name) ? handlers[name] : undefined;
+      if (source === undefined) continue;
+      const problem = handlerModuleProblem(source);
+      if (problem) problems.push(`${handlerPath(name)} ${problem}`);
+    }
+  }
+  if (problems.length) throw new ShimFolderError('malformed-shim-folder', problems);
+}
+
 function parseState(text: string): ShimState {
   let parsed: unknown;
   try {
@@ -442,7 +487,9 @@ function parseState(text: string): ShimState {
  * Pack a folder into a `shim/1` file. Restores `version` / `bundleHash` and
  * each witness whose anchor digest still matches from .shim-state.json (when
  * present), checks `match.hosts` as import does, and runs spec-lint — a lint
- * error is a ShimFolderError('spec-lint').
+ * error is a ShimFolderError('spec-lint'). A `script` handler module that
+ * can't export a function (handlerModuleProblem) is a
+ * ShimFolderError('malformed-shim-folder').
  */
 export function packShim(input: FolderInput): ShimFile {
   const { spec: authored, handlers, state } = readShimFolder(input);
@@ -462,6 +509,7 @@ export function packShim(input: FolderInput): ShimFile {
   // or intercept wrap resolves its name the way it will after import.
   const { errors } = lintSpec({ ...spec, handlers });
   if (errors.length) throw new ShimFolderError('spec-lint', errors);
+  checkScriptModules(spec, handlers);
 
   const file: ShimFile = {
     format: SHIM_FILE_FORMAT,

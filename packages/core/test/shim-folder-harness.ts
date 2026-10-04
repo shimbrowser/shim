@@ -200,12 +200,53 @@ rejects('a handler file that isn\'t UTF-8', 'malformed-shim-folder', () => packS
 rejects('match.hosts missing at pack', 'malformed-shim-folder', () => packShim(edit((spec) => { delete spec.match; })), 'match.hosts');
 rejects('a lint error at pack', 'spec-lint', () => packShim(edit((spec) => { spec.rules?.push({ id: 'x', mutations: [{ kind: 'cspRelax' }] }); })), 'unknown mutation kind "cspRelax"');
 rejects('a transform that does not parse', 'spec-lint', () => packShim({ ...good(), 'handlers/strip.js': 'module.exports = function (b) { return b;' }), 'does not parse as JavaScript');
+// The script handler modules import would refuse (assertHandlersBound runs
+// them and wants a function at module.exports).
+rejects('a script handler module that does not parse', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = function (ctx) {' }), 'handlers/notes.js does not parse as JavaScript');
+rejects('a script handler module exporting a number', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = 42;\n' }), 'handlers/notes.js exports 42, not a function');
+rejects('a script handler module exporting a string', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = "notes"' }), 'not a function');
+rejects('a script handler file that is a bare function declaration', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': 'function notes({ anchor }) { anchor.dataset.n = "1"; }\n' }), 'handlers/notes.js never assigns module.exports');
+rejects('an empty script handler file', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': '  \n' }), 'handlers/notes.js is empty');
+for (const [label, source] of [
+  ['an arrow', 'module.exports = ({ anchor }) => { anchor.hidden = true; };\n'],
+  ['a module with helpers', 'const K = 1;\nmodule.exports = function notes() { return K; };\n'],
+  ['a computed export', 'module.exports = (() => function notes() {})();\n'],
+  ['module["exports"]', 'module["exports"] = function notes() {};\n'],
+] as const) {
+  let ok = true;
+  try { packShim({ ...good(), 'handlers/notes.js': source }); } catch (err) { ok = false; console.error(err); }
+  check(`a script handler that exports a function packs (${label})`, ok);
+}
+
 rejects('a corrupt state file', 'malformed-shim-state', () => packShim({ ...good(), [SHIM_STATE_FILE]: '{' }), 'not valid JSON');
 rejects('a state file of another format', 'malformed-shim-state', () => packShim({ ...good(), [SHIM_STATE_FILE]: '{"format":"x"}' }), 'not a shim-state/1 file');
 rejects('a state rule without a digest', 'malformed-shim-state', () => packShim({ ...good(), [SHIM_STATE_FILE]: JSON.stringify({ format: 'shim-state/1', rules: { a: { witness: {} } } }) }), 'anchorDigest');
 let all: ShimFolderError | null = null;
 try { packShim({ 'README.md': '', 'handlers/x.y.js': '' }); } catch (err) { if (err instanceof ShimFolderError) all = err; }
 check('every problem is reported at once', (all?.problems.length ?? 0) >= 3, all?.problems.join(' | '));
+
+console.log('handler names that differ only in case');
+const caseSpec = {
+  id: 'k', match: { hosts: ['example.com'] },
+  rules: [
+    { id: 'a', anchor: { primary: { kind: 'css', value: '.a' } }, mutations: [{ kind: 'script', handler: 'Foo', mount: { strategy: 'portal' } }] },
+    { id: 'b', anchor: { primary: { kind: 'css', value: '.b' } }, mutations: [{ kind: 'script', handler: 'foo', mount: { strategy: 'portal' } }] },
+  ],
+};
+rejects('a folder with handlers/Foo.js and handlers/foo.js', 'malformed-shim-folder',
+  () => readShimFolder({ [SHIM_JSON]: JSON.stringify(caseSpec), 'handlers/Foo.js': expressionToModule('function a() {}'), 'handlers/foo.js': expressionToModule('function b() {}') }),
+  'handler names "Foo" and "foo" differ only in case');
+rejects('a .shim whose handlers map has Foo and foo', 'malformed-shim-file',
+  () => unpackShim({ format: 'shim/1', name: 'k', spec: caseSpec, handlers: { Foo: expressionToModule('function a() {}'), foo: expressionToModule('function b() {}') } }),
+  'differ only in case');
+rejects('checking out a spec whose rules define Foo and foo', 'malformed-shim-folder',
+  () => checkoutShim({ spec: { ...caseSpec, rules: caseSpec.rules.map((r, i) => ({ ...r, handlers: { [i ? 'foo' : 'Foo']: 'function h() {}' } })) } as unknown as Spec }),
+  'differ only in case');
 
 console.log('malformed .shim files');
 rejects('not JSON', 'malformed-shim-file', () => unpackShim('{'), 'not valid JSON');
