@@ -167,7 +167,7 @@ export function loadShimFile(file: string): { ok: true; source: Omit<HeadlessShi
     if (typeof source === 'string') handlers[name] = source;
   }
   for (const [name, source] of Object.entries(isRecord(spec.handlers) ? spec.handlers : {})) {
-    if (typeof source === 'string' && !(name in handlers)) handlers[name] = source;
+    if (typeof source === 'string' && !Object.hasOwn(handlers, name)) handlers[name] = source;
   }
   const specOnly = { ...spec };
   delete specOnly.handlers;
