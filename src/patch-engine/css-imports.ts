@@ -82,9 +82,11 @@ function readString(s: string): [string, string] | null {
   return null;
 }
 
-// The prelude of one `@import` (between the keyword and the `;`).
+// The prelude of one `@import` (between the keyword and the `;`). Comments
+// are whitespace to the CSS parser, so they're skipped between components —
+// but not inside an unquoted `url(…)`, which is one token (CSS Syntax 4.3.6).
 function parsePrelude(prelude: string): CssImport | 'unsupported' | null {
-  let s = prelude.trim();
+  let s = prelude.slice(skipTrivia(prelude, 0));
   let href: string;
   const asString = readString(s);
   if (asString) {
@@ -94,7 +96,7 @@ function parsePrelude(prelude: string): CssImport | 'unsupported' | null {
     const inner = readString(s);
     if (inner) {
       [href, s] = inner;
-      s = s.trim();
+      s = s.slice(skipTrivia(s, 0));
       if (s[0] !== ')') return null;
       s = s.slice(1);
     } else {

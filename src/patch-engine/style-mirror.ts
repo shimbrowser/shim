@@ -35,12 +35,13 @@
 // <style> — a `<link>` passes the same `style-src` check the `@import` would
 // have. A document `<link>` alone would cascade before EVERY adopted mirror,
 // though, letting an earlier mirrored <style> beat a later one's import; so
-// once the link loads, its rules are copied into a constructed sheet (based
-// at the link's URL, so relative `url()`s still resolve) adopted right before
-// its importing mirror — the slot the `@import` had — and the link is
-// disabled. When the loaded sheet can't be copied (cross-origin without CORS,
-// or it has nested `@import`s a copy would drop again) the link keeps applying
-// from its document slot. `layer(…)` / `supports(…)` imports can't be
+// once the links load, their rules are copied into constructed sheets (based
+// at each link's URL, so relative `url()`s still resolve) adopted right before
+// the importing mirror — the slot the `@import`s had — and the links are
+// disabled. That is all-or-none per element: if any import can't be copied
+// (cross-origin without CORS, or nested `@import`s a copy would drop again),
+// every link keeps applying from its document slot, since mixing the two
+// would reverse the imports' source order. `layer(…)` / `supports(…)` imports can't be
 // expressed on a `<link>` and are skipped (css-imports.ts).
 
 import { leadingImports } from './css-imports';
@@ -54,11 +55,14 @@ interface Mirror {
   // serialized import list they were built from (rebuilt only on change).
   links: HTMLLinkElement[];
   importKey: string;
-  // Constructed copies of the loaded imports, index-aligned with `links`
-  // (null until that link loads, or when it can't be copied). Adopted just
-  // before `sheet`.
-  importCopies: Array<CSSStyleSheet | null>;
+  // Per-link load outcome, index-aligned with `links`: a constructed copy,
+  // or why there is none. See slotCopies for how they're adopted.
+  importCopies: ImportState[];
 }
+
+// 'failed': the link didn't load — a failed @import contributes nothing
+// either. 'uncopyable': loaded, but its rules can't be read or copied whole.
+type ImportState = CSSStyleSheet | 'pending' | 'failed' | 'uncopyable';
 
 // Source element → its mirror. Only populated on pages that refused a sheet.
 const mirrors = new Map<HTMLStyleElement, Mirror>();
@@ -101,22 +105,44 @@ function removeLinks(m: Mirror): void {
   m.importKey = '';
 }
 
-// A link finished loading: move its rules into the mirror's cascade slot.
-function adoptImportCopy(style: HTMLStyleElement, m: Mirror, link: HTMLLinkElement, idx: number, media: string): void {
+// The import copies to adopt in the mirror's slot — all or none. Null while
+// any import is pending or uncopyable: the links then keep applying from
+// their document slot, in their own source order.
+function slotCopies(m: Mirror): CSSStyleSheet[] | null {
+  const out: CSSStyleSheet[] = [];
+  for (const st of m.importCopies) {
+    if (st instanceof CSSStyleSheet) out.push(st);
+    else if (st !== 'failed') return null;
+  }
+  return out;
+}
+
+function copyLoaded(link: HTMLLinkElement, media: string): ImportState {
   try {
-    if (mirrors.get(style) !== m || m.links[idx] !== link) return; // superseded
     const loaded = link.sheet;
-    if (!loaded) return;
+    if (!loaded) return 'uncopyable';
     const rules = Array.from(loaded.cssRules); // SecurityError: cross-origin without CORS
-    if (rules.some((r) => r instanceof CSSImportRule)) return;
+    if (rules.some((r) => r instanceof CSSImportRule)) return 'uncopyable';
     const copy = new CSSStyleSheet(media ? { baseURL: link.href, media } : { baseURL: link.href });
     copy.replaceSync(rules.map((r) => r.cssText).join('\n'));
     ownSheets.add(copy);
-    m.importCopies[idx] = copy;
-    link.disabled = true;
+    return copy;
+  } catch {
+    return 'uncopyable';
+  }
+}
+
+// A link loaded or failed. Once every import of the element has settled and
+// all are copyable, the copies take the mirror's slot and the links go quiet.
+function settleImport(style: HTMLStyleElement, m: Mirror, link: HTMLLinkElement, idx: number, state: () => ImportState): void {
+  try {
+    if (mirrors.get(style) !== m || m.links[idx] !== link) return; // superseded
+    m.importCopies[idx] = state();
+    if (!slotCopies(m)) return;
+    for (const l of m.links) l.disabled = true;
     reconcile(m.root);
   } catch {
-    /* uncopyable: the link keeps applying from its document slot */
+    /* a fallback must never break the page or the engine */
   }
 }
 
@@ -134,10 +160,11 @@ function syncImportLinks(style: HTMLStyleElement, m: Mirror, cssText: string): v
     link.setAttribute('data-shim-import', style.getAttribute('data-shim') || '');
     link.href = imp.href;
     if (imp.media) link.media = imp.media;
-    link.addEventListener('load', () => adoptImportCopy(style, m, link, idx, imp.media), { once: true });
+    link.addEventListener('load', () => settleImport(style, m, link, idx, () => copyLoaded(link, imp.media)), { once: true });
+    link.addEventListener('error', () => settleImport(style, m, link, idx, () => 'failed'), { once: true });
     style.before(link);
     m.links.push(link);
-    m.importCopies.push(null);
+    m.importCopies.push('pending');
   });
   m.importKey = key;
 }
@@ -147,13 +174,13 @@ function documentOrder(a: HTMLStyleElement, b: HTMLStyleElement): number {
 }
 
 // Rewrite `root.adoptedStyleSheets` to [page's own sheets…, our mirrors in
-// document order, each preceded by its loaded import copies]. Assigns only
+// document order, each preceded by its import copies (slotCopies)]. Assigns only
 // when something changed, so a no-op sync never churns the page's style recalc.
 function reconcile(root: StyleRoot): void {
   const ours = [...mirrors.entries()]
     .filter(([, m]) => m.root === root)
     .sort(([a], [b]) => documentOrder(a, b))
-    .flatMap(([, m]) => [...m.importCopies.filter((c): c is CSSStyleSheet => c !== null), m.sheet]);
+    .flatMap(([, m]) => [...(slotCopies(m) ?? []), m.sheet]);
   const current = root.adoptedStyleSheets;
   const desired = [...current.filter((s) => !ownSheets.has(s)), ...ours];
   if (desired.length === current.length && desired.every((s, i) => s === current[i])) return;

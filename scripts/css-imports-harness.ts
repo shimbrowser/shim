@@ -36,6 +36,8 @@ eq('quoted ; and ) inside the url', leadingImports('@import url("a;b).css");@imp
 eq('layer(…) import is unsupported', leadingImports('@import url(a.css) layer(x);@import url(b.css);'), { imports: [{ href: 'b.css', media: '' }], unsupported: 1 });
 eq('bare layer keyword is unsupported', leadingImports('@import "a.css" layer;'), { imports: [], unsupported: 1 });
 eq('supports(…) import is unsupported', leadingImports('@import "a.css" supports(display: grid);'), { imports: [], unsupported: 1 });
+eq('comment between @import and url()', leadingImports("@import /* generated */ url('/shim.css');"), only(['/shim.css', '']));
+eq('comments around a bare string and inside a quoted url()', leadingImports('@import/*a*/"a.css"/*b*/ print;@import url( "b.css" /*c*/ );'), only(['a.css', 'print'], ['b.css', '']));
 eq('@importer is not @import', leadingImports('@importer url(a.css);'), only());
 eq('unterminated import is dropped', leadingImports('@import url(a.css)'), only());
 eq('malformed prelude skipped, later import kept', leadingImports('@import foo;@import "b.css";'), only(['b.css', '']));
