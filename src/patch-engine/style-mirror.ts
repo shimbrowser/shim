@@ -27,12 +27,28 @@
 // On a page that accepts the <style> (no strict CSP) `sheet` is non-null, so
 // this module never constructs anything and the page is byte-for-byte what it
 // was before. Nothing here may throw into the engine.
+//
+// `@import`: `replaceSync()` drops every `@import` rule, so a whole-patch
+// `spec.css` that opens with one would lose the imported sheet on exactly the
+// pages this fallback serves. The mirror carries each leading import over as
+// a `<link rel="stylesheet" data-shim-import>` inserted just before the
+// refused <style> — the same document position, so the imported rules still
+// cascade before the importing sheet's own (the mirror is adopted, i.e. after
+// every document sheet). A `<link>` passes the same `style-src` check the
+// `@import` would have. `layer(…)` / `supports(…)` imports can't be expressed
+// on a `<link>` and are skipped (css-imports.ts).
+
+import { leadingImports } from './css-imports';
 
 type StyleRoot = Document | ShadowRoot;
 
 interface Mirror {
   sheet: CSSStyleSheet;
   root: StyleRoot;
+  // The `<link>`s standing in for the element's leading `@import`s, and the
+  // serialized import list they were built from (rebuilt only on change).
+  links: HTMLLinkElement[];
+  importKey: string;
 }
 
 // Source element → its mirror. Only populated on pages that refused a sheet.
@@ -69,6 +85,32 @@ function construct(cssText: string): CSSStyleSheet {
   return sheet;
 }
 
+function removeLinks(m: Mirror): void {
+  for (const link of m.links) link.remove();
+  m.links = [];
+  m.importKey = '';
+}
+
+// Bring the mirror's import `<link>`s in line with the element's current
+// leading `@import`s. Rebuilt only when the list changed, so an in-place
+// text update elsewhere in the sheet never reloads an imported stylesheet.
+function syncImportLinks(style: HTMLStyleElement, m: Mirror, cssText: string): void {
+  const { imports } = leadingImports(cssText);
+  const key = JSON.stringify(imports);
+  if (key === m.importKey && m.links.every((l) => l.isConnected)) return;
+  removeLinks(m);
+  for (const imp of imports) {
+    const link = style.ownerDocument.createElement('link');
+    link.rel = 'stylesheet';
+    link.setAttribute('data-shim-import', style.getAttribute('data-shim') || '');
+    link.href = imp.href;
+    if (imp.media) link.media = imp.media;
+    style.before(link);
+    m.links.push(link);
+  }
+  m.importKey = key;
+}
+
 function documentOrder(a: HTMLStyleElement, b: HTMLStyleElement): number {
   return a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
 }
@@ -98,6 +140,7 @@ export function syncStyleMirror(style: HTMLStyleElement): void {
     const touched = new Set<StyleRoot>();
     for (const [el, m] of mirrors) {
       if (!el.isConnected) {
+        removeLinks(m);
         mirrors.delete(el);
         touched.add(m.root);
       }
@@ -106,14 +149,22 @@ export function syncStyleMirror(style: HTMLStyleElement): void {
     const existing = mirrors.get(style);
     if (root && isRefused(style)) {
       const text = style.textContent || '';
+      let mirror: Mirror;
       if (existing && existing.root === root) {
         existing.sheet.replaceSync(text);
+        mirror = existing;
       } else {
-        if (existing) touched.add(existing.root);
-        mirrors.set(style, { sheet: construct(text), root });
+        if (existing) {
+          removeLinks(existing);
+          touched.add(existing.root);
+        }
+        mirror = { sheet: construct(text), root, links: [], importKey: '' };
+        mirrors.set(style, mirror);
       }
+      syncImportLinks(style, mirror, text);
       touched.add(root);
     } else if (existing) {
+      removeLinks(existing);
       mirrors.delete(style);
       touched.add(existing.root);
     }
