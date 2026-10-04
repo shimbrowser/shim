@@ -354,10 +354,10 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
     const content = files[rel];
     if (content === undefined) continue;
     fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.writeFileSync(abs, content);
+    replaceFile(abs, content);
     written.push(rel);
   }
-  fs.writeFileSync(path.join(root, COMPOSITION_MARKER), `${JSON.stringify({ format: MARKER_FORMAT, hidden })}\n`);
+  replaceFile(path.join(root, COMPOSITION_MARKER), `${JSON.stringify({ format: MARKER_FORMAT, hidden })}\n`);
   return { dir: root, written, removed };
 }
 
