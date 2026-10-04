@@ -17,7 +17,7 @@ export type {
   BackendPreview, BackendCheckout, BackendCommit, FinishInfo, SessionInfo, OpenResult, CheckoutResult,
   PreviewResult, CallResult, CommitResult, EndResult, CommitRequest, Timers, SessionRegistry,
 } from '@shimbrowser/core/session-registry';
-export { IDLE_TIMEOUT_MS, OPEN_LEASE_TIMEOUT_MS, END_SETTLE_TIMEOUT_MS, ArtifactBusyError, BeginRefusal } from '@shimbrowser/core/session-registry';
+export { IDLE_TIMEOUT_MS, OPEN_LEASE_TIMEOUT_MS, END_SETTLE_TIMEOUT_MS, ArtifactBusyError, TargetChangedError } from '@shimbrowser/core/session-registry';
 
 export type BeginArgs = core.BeginArgs<Lease>;
 export type SessionBackend<H = unknown> = core.SessionBackend<H, Lease>;
