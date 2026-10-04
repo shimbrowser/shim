@@ -30,8 +30,13 @@
 //     symlink (a crafted or stale folder could otherwise redirect a write
 //     or a removal outside it). A composition holding a file named like the
 //     marker can't be checked out (the checkout would overwrite it) and says so.
+//   - A file is replaced, never written in place: the content goes to a new
+//     hidden temp file that is renamed over the entry, so a target that is a
+//     hard link to a file outside the folder only loses its link here — the
+//     shared inode is never truncated or rewritten.
 
 import * as fs from 'fs';
+import { randomBytes } from 'crypto';
 import * as path from 'path';
 import { workingCopyPathProblem, SHIM_WIRE_LIMITS, type WireLimits } from '@shimbrowser/core/working-copy-wire';
 import type { FolderInput } from '@shimbrowser/core/shim-folder';
@@ -173,6 +178,25 @@ function refuseSymlinksBelow(root: string, abs: string): void {
   }
 }
 
+// Replaces the directory entry at `abs` with a fresh file. The temp file is
+// created exclusively (so nothing already at that name, link or not, is
+// followed) next to the target (so the rename never crosses a device), and is
+// hidden (so a leftover from a crash never reads as part of the working copy).
+function replaceFile(abs: string, content: string | Uint8Array): void {
+  const temp = path.join(path.dirname(abs), `.${path.basename(abs)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
+  fs.writeFileSync(temp, content, { flag: 'wx' });
+  try {
+    fs.renameSync(temp, abs);
+  } catch (err) {
+    try {
+      fs.unlinkSync(temp);
+    } catch {
+      // Already gone: nothing to clean up.
+    }
+    throw err;
+  }
+}
+
 function visibleEntries(dir: string): string[] {
   try {
     return fs.readdirSync(dir).filter((n) => !isHidden(n));
@@ -221,7 +245,7 @@ export function writeCheckout(dir: string, files: FolderInput): CheckoutWrite {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     const content = files[rel];
     if (content === undefined) continue;
-    fs.writeFileSync(abs, content);
+    replaceFile(abs, content);
     written.push(rel);
   }
   return { dir: root, written, removed };
@@ -330,10 +354,10 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
     const content = files[rel];
     if (content === undefined) continue;
     fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.writeFileSync(abs, content);
+    replaceFile(abs, content);
     written.push(rel);
   }
-  fs.writeFileSync(path.join(root, COMPOSITION_MARKER), `${JSON.stringify({ format: MARKER_FORMAT, hidden })}\n`);
+  replaceFile(path.join(root, COMPOSITION_MARKER), `${JSON.stringify({ format: MARKER_FORMAT, hidden })}\n`);
   return { dir: root, written, removed };
 }
 
