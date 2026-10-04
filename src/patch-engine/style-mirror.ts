@@ -30,13 +30,18 @@
 //
 // `@import`: `replaceSync()` drops every `@import` rule, so a whole-patch
 // `spec.css` that opens with one would lose the imported sheet on exactly the
-// pages this fallback serves. The mirror carries each leading import over as
-// a `<link rel="stylesheet" data-shim-import>` inserted just before the
-// refused <style> — the same document position, so the imported rules still
-// cascade before the importing sheet's own (the mirror is adopted, i.e. after
-// every document sheet). A `<link>` passes the same `style-src` check the
-// `@import` would have. `layer(…)` / `supports(…)` imports can't be expressed
-// on a `<link>` and are skipped (css-imports.ts).
+// pages this fallback serves. The mirror loads each leading import through a
+// `<link rel="stylesheet" data-shim-import>` inserted just before the refused
+// <style> — a `<link>` passes the same `style-src` check the `@import` would
+// have. A document `<link>` alone would cascade before EVERY adopted mirror,
+// though, letting an earlier mirrored <style> beat a later one's import; so
+// once the link loads, its rules are copied into a constructed sheet (based
+// at the link's URL, so relative `url()`s still resolve) adopted right before
+// its importing mirror — the slot the `@import` had — and the link is
+// disabled. When the loaded sheet can't be copied (cross-origin without CORS,
+// or it has nested `@import`s a copy would drop again) the link keeps applying
+// from its document slot. `layer(…)` / `supports(…)` imports can't be
+// expressed on a `<link>` and are skipped (css-imports.ts).
 
 import { leadingImports } from './css-imports';
 
@@ -49,6 +54,10 @@ interface Mirror {
   // serialized import list they were built from (rebuilt only on change).
   links: HTMLLinkElement[];
   importKey: string;
+  // Constructed copies of the loaded imports, index-aligned with `links`
+  // (null until that link loads, or when it can't be copied). Adopted just
+  // before `sheet`.
+  importCopies: Array<CSSStyleSheet | null>;
 }
 
 // Source element → its mirror. Only populated on pages that refused a sheet.
@@ -88,7 +97,27 @@ function construct(cssText: string): CSSStyleSheet {
 function removeLinks(m: Mirror): void {
   for (const link of m.links) link.remove();
   m.links = [];
+  m.importCopies = [];
   m.importKey = '';
+}
+
+// A link finished loading: move its rules into the mirror's cascade slot.
+function adoptImportCopy(style: HTMLStyleElement, m: Mirror, link: HTMLLinkElement, idx: number, media: string): void {
+  try {
+    if (mirrors.get(style) !== m || m.links[idx] !== link) return; // superseded
+    const loaded = link.sheet;
+    if (!loaded) return;
+    const rules = Array.from(loaded.cssRules); // SecurityError: cross-origin without CORS
+    if (rules.some((r) => r instanceof CSSImportRule)) return;
+    const copy = new CSSStyleSheet(media ? { baseURL: link.href, media } : { baseURL: link.href });
+    copy.replaceSync(rules.map((r) => r.cssText).join('\n'));
+    ownSheets.add(copy);
+    m.importCopies[idx] = copy;
+    link.disabled = true;
+    reconcile(m.root);
+  } catch {
+    /* uncopyable: the link keeps applying from its document slot */
+  }
 }
 
 // Bring the mirror's import `<link>`s in line with the element's current
@@ -99,15 +128,17 @@ function syncImportLinks(style: HTMLStyleElement, m: Mirror, cssText: string): v
   const key = JSON.stringify(imports);
   if (key === m.importKey && m.links.every((l) => l.isConnected)) return;
   removeLinks(m);
-  for (const imp of imports) {
+  imports.forEach((imp, idx) => {
     const link = style.ownerDocument.createElement('link');
     link.rel = 'stylesheet';
     link.setAttribute('data-shim-import', style.getAttribute('data-shim') || '');
     link.href = imp.href;
     if (imp.media) link.media = imp.media;
+    link.addEventListener('load', () => adoptImportCopy(style, m, link, idx, imp.media), { once: true });
     style.before(link);
     m.links.push(link);
-  }
+    m.importCopies.push(null);
+  });
   m.importKey = key;
 }
 
@@ -116,13 +147,13 @@ function documentOrder(a: HTMLStyleElement, b: HTMLStyleElement): number {
 }
 
 // Rewrite `root.adoptedStyleSheets` to [page's own sheets…, our mirrors in
-// document order]. Assigns only when something changed, so a no-op sync never
-// churns the page's style recalc.
+// document order, each preceded by its loaded import copies]. Assigns only
+// when something changed, so a no-op sync never churns the page's style recalc.
 function reconcile(root: StyleRoot): void {
   const ours = [...mirrors.entries()]
     .filter(([, m]) => m.root === root)
     .sort(([a], [b]) => documentOrder(a, b))
-    .map(([, m]) => m.sheet);
+    .flatMap(([, m]) => [...m.importCopies.filter((c): c is CSSStyleSheet => c !== null), m.sheet]);
   const current = root.adoptedStyleSheets;
   const desired = [...current.filter((s) => !ownSheets.has(s)), ...ours];
   if (desired.length === current.length && desired.every((s, i) => s === current[i])) return;
@@ -158,7 +189,7 @@ export function syncStyleMirror(style: HTMLStyleElement): void {
           removeLinks(existing);
           touched.add(existing.root);
         }
-        mirror = { sheet: construct(text), root, links: [], importKey: '' };
+        mirror = { sheet: construct(text), root, links: [], importKey: '', importCopies: [] };
         mirrors.set(style, mirror);
       }
       syncImportLinks(style, mirror, text);
