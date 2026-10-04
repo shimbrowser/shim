@@ -85,11 +85,11 @@ function moduleExportsShape(source: string): ExportShape | 'none' {
     return 'none';
   }
   // Judged in execution order over the top-level statements, tracking what
-  // each top-level name statically holds. A name written anywhere other than
-  // a top-level `name = …` statement (inside a function, a block, a loop, by
-  // `+=`/`++`/destructuring) can change behind the scan's back, so once its
-  // declaration has run it only ever reads as 'dynamic'.
-  const elsewhere = writtenNames(ast, topLevelSimpleAssignments(ast));
+  // module.exports and each top-level name statically hold. A name written
+  // anywhere other than a top-level `name <op>= …` / `name++` statement
+  // (inside a function, a block, a loop, by destructuring) can change behind
+  // the scan's back, so once its declaration has run it only reads 'dynamic'.
+  const elsewhere = writtenNames(ast, topLevelNameWrites(ast));
   const held = new Map<string, ExportShape>();
   // Hoisting: a function declaration holds its function from the top. Before
   // its declaration runs, a `const`/`let`/`class` binding is in its temporal
@@ -131,12 +131,19 @@ function moduleExportsShape(source: string): ExportShape | 'none' {
         // `let x;` holds undefined; a bare `var x;` redeclaration keeps the value.
         else if (stmt.kind !== 'var') assign(d.id.name, 'non-function');
       }
-    } else if (stmt.type === 'ExpressionStatement'
-      && stmt.expression.type === 'AssignmentExpression'
-      && stmt.expression.operator === '=') {
-      const { left, right } = stmt.expression;
-      if (isModuleExportsRef(left)) shape = valueShape(right);
-      else if (left.type === 'Identifier') assign(left.name, valueShape(right));
+    } else if (stmt.type === 'ExpressionStatement' && stmt.expression.type === 'AssignmentExpression') {
+      const { left, right, operator } = stmt.expression;
+      if (isModuleExportsRef(left)) {
+        // module.exports starts as `{}` (a truthy non-function).
+        shape = writeShape(operator, shape === 'none' ? 'non-function' : shape, valueShape(right));
+      } else if (left.type === 'Identifier') {
+        assign(left.name, writeShape(operator, held.get(left.name) ?? 'dynamic', valueShape(right)));
+      }
+    } else if (stmt.type === 'ExpressionStatement' && stmt.expression.type === 'UpdateExpression') {
+      // `x++` / `x--` always leaves a number (or throws).
+      const { argument } = stmt.expression;
+      if (isModuleExportsRef(argument)) shape = 'non-function';
+      else if (argument.type === 'Identifier') assign(argument.name, 'non-function');
     }
   }
   return shape;
@@ -144,20 +151,37 @@ function moduleExportsShape(source: string): ExportShape | 'none' {
 
 type ExportShape = 'function' | 'non-function' | 'dynamic';
 
-// The top-level `name = …` statements moduleExportsShape follows in order.
-function topLevelSimpleAssignments(ast: acorn.Program): Set<acorn.Node> {
+// What a target holds after `target <operator> value`, given what it held
+// before (`current`) and what the right side is (`value`). A function is
+// truthy and never nullish, which settles the logical operators when the
+// target held one; every arithmetic/bitwise/string compound operator yields a
+// primitive (or throws).
+function writeShape(operator: string, current: ExportShape, value: ExportShape): ExportShape {
+  if (operator === '=') return value;
+  if (operator === '&&=' || operator === '||=' || operator === '??=') {
+    if (current === 'function') return operator === '&&=' ? value : 'function';
+    return current === 'non-function' && value === 'non-function' ? 'non-function' : 'dynamic';
+  }
+  return 'non-function';
+}
+
+// The top-level `name <op>= …` / `name++` statements moduleExportsShape
+// follows in order.
+function topLevelNameWrites(ast: acorn.Program): Set<acorn.Node> {
   const nodes = new Set<acorn.Node>();
   for (const stmt of ast.body) {
-    if (stmt.type === 'ExpressionStatement' && stmt.expression.type === 'AssignmentExpression'
-      && stmt.expression.operator === '=' && stmt.expression.left.type === 'Identifier') {
-      nodes.add(stmt.expression);
+    if (stmt.type !== 'ExpressionStatement') continue;
+    const e = stmt.expression;
+    if ((e.type === 'AssignmentExpression' && e.left.type === 'Identifier')
+      || (e.type === 'UpdateExpression' && e.argument.type === 'Identifier')) {
+      nodes.add(e);
     }
   }
   return nodes;
 }
 
 // Every identifier the source assigns anywhere (`x = …`, `x += …`, `x++`,
-// destructuring targets, `for (x of …)`) except the `skip` assignments — at
+// destructuring targets, `for (x of …)`) except the `skip` writes — at
 // any depth, so a write inside a function that might run before the export
 // still counts. Over-inclusive on purpose (a shadowing inner binding of the
 // same name counts too): a name in here is merely judged 'dynamic', never
@@ -183,7 +207,9 @@ function writtenNames(ast: acorn.Program, skip: Set<acorn.Node>): Set<string> {
     if (node.type === 'AssignmentExpression') {
       if (!skip.has(node)) addPattern((node as acorn.AssignmentExpression).left);
     }
-    else if (node.type === 'UpdateExpression') addPattern((node as acorn.UpdateExpression).argument);
+    else if (node.type === 'UpdateExpression') {
+      if (!skip.has(node)) addPattern((node as acorn.UpdateExpression).argument);
+    }
     else if (node.type === 'ForInStatement' || node.type === 'ForOfStatement') {
       const left = (node as acorn.ForInStatement | acorn.ForOfStatement).left;
       if (left.type !== 'VariableDeclaration') addPattern(left);
