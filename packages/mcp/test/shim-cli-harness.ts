@@ -66,7 +66,7 @@ const matchOne: OnApply = (p, emit) => {
   emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 1, matchedVia: 'primary', box: { x: 0, y: 0, w: 10, h: 20 } });
 };
 
-function fakePage(startUrl: string, onApply: OnApply): FakePage {
+function fakePage(startUrl: string, onApply: OnApply, shotError: () => Error | null = () => null): FakePage {
   const runtime = new Set<(e: PageRuntimeEvent) => void>();
   const consoleL = new Set<(m: PageConsoleMessage) => void>();
   const emit = (e: PageRuntimeEvent): void => { for (const l of [...runtime]) l(e); };
@@ -77,6 +77,8 @@ function fakePage(startUrl: string, onApply: OnApply): FakePage {
     host: null as unknown as PageHost,
     async close() { page.closed = true; },
     async screenshot(file, opts) {
+      const fail = shotError();
+      if (fail) throw fail;
       page.shots.push({ file, ...opts });
       fs.writeFileSync(file, 'PNG');
     },
@@ -108,6 +110,8 @@ interface Rig {
   mcp: string[][];
   launchOutcome: LaunchOutcome;
   onApply: OnApply;
+  // When set, the fake page's screenshot throws this instead of writing.
+  shotError: Error | null;
 }
 
 function rig(): Rig {
@@ -121,13 +125,14 @@ function rig(): Rig {
     mcp: [],
     launchOutcome: { ok: false, error: 'launch-unavailable', detail: 'no way to start Shim' },
     onApply: matchOne,
+    shotError: null,
   };
   r.ctx = {
     out: (t) => r.out.push(t),
     err: (t) => r.err.push(t),
     async launch(opts) { r.launches.push(opts); return r.launchOutcome; },
     async openPreviewPage(url, storage) {
-      const page = fakePage(url, r.onApply);
+      const page = fakePage(url, r.onApply, () => r.shotError);
       r.pages.push(page);
       r.storages.push(storage);
       return page;
@@ -377,6 +382,21 @@ async function main(): Promise<void> {
     check('the screenshot was written', o.screenshot?.file === shot && fs.existsSync(shot) && page?.shots[0]?.file === shot);
     check('the page is closed afterwards', page?.closed === true);
     check('no temp files are left behind', JSON.stringify(tempPreviewDirs()) === JSON.stringify(tempBefore), tempPreviewDirs());
+
+    // A screenshot path the CLI can't write exits 2 (like pack / unpack);
+    // a capture the page can't make stays a preview problem (exit 1).
+    const blocker = path.join(tmp, 'shots-blocker');
+    fs.writeFileSync(blocker, 'a file, not a folder');
+    check('a screenshot whose folder cannot be created exits 2',
+      (await cli(r, 'preview', dir, '--url', 'https://site.test/tracks', '--screenshot', path.join(blocker, 'page.png'))) === EXIT_USAGE
+      && /could not write/.test(r.err.join('\n')), r.err);
+    r.shotError = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    check('a screenshot file the CLI cannot write exits 2',
+      (await cli(r, 'preview', dir, '--url', 'https://site.test/tracks', '--screenshot', shot)) === EXIT_USAGE, r.err);
+    r.shotError = new Error('no element matches .missing');
+    check('a capture the page cannot make exits 1',
+      (await cli(r, 'preview', dir, '--url', 'https://site.test/tracks', '--screenshot', shot, '--selector', '.missing')) === EXIT_PROBLEM, r.out);
+    r.shotError = null;
 
     const textCode = await cli(r, 'preview', dir, '--url', 'https://site.test/tracks');
     check('the text report lists each rule', textCode === EXIT_OK && /hide-promo \[full\]: matched 1/.test(r.out[0] ?? '') && /^ {4}mark \[full\]/m.test(r.out[0] ?? ''), r.out);

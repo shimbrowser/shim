@@ -155,7 +155,11 @@ export function anchorDigest(anchor: Anchor | undefined): string {
 /** The handler names a rule's mutations reference (handler / transform / wrap). */
 export function referencedHandlerNames(rule: Rule): string[] {
   const names: string[] = [];
-  for (const mutation of rule.mutations || []) {
+  // A hand-written shim.json can carry any JSON here; a non-array is reported
+  // by the folder check, never thrown from here.
+  const mutations: unknown = rule.mutations;
+  if (!Array.isArray(mutations)) return names;
+  for (const mutation of mutations) {
     if (!isRecord(mutation)) continue;
     for (const field of HANDLER_REF_FIELDS) {
       const name = mutation[field];
@@ -433,6 +437,10 @@ function checkAuthoredSpec(raw: Record<string, unknown>, handlers: Record<string
     }
     if (isRecord(ruleValue.anchor) && 'witness' in ruleValue.anchor) {
       problems.push(`rule "${id}": anchor "witness" is managed by Shim — remove it`);
+    }
+    if (ruleValue.mutations !== undefined && !Array.isArray(ruleValue.mutations)) {
+      problems.push(`rule "${id}": "mutations" must be an array`);
+      return;
     }
     for (const name of referencedHandlerNames(ruleValue as unknown as Rule)) {
       if (!Object.hasOwn(handlers, name)) problems.push(`rule "${id}" names handler "${name}" but ${handlerPath(name)} is missing`);
