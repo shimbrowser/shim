@@ -106,6 +106,61 @@ if (fs.existsSync(apiTypes)) {
     }
   }
 }
+// The supabase builder is part of that inventory too: every method its chain
+// and table builder expose must be named, or a supported write or filter reads
+// as unavailable.
+const supabaseBuilder = path.join(ROOT, '..', '..', 'src', 'preload', 'db-supabase-builder.ts');
+if (fs.existsSync(supabaseBuilder)) {
+  const source = fs.readFileSync(supabaseBuilder, 'utf8').replace(/\r\n/g, '\n');
+  const methods = new Set<string>();
+  for (const iface of ['SupabaseChain', 'SupabaseTableBuilder', 'SupabaseHandlerBuilder']) {
+    const body = new RegExp(`\\n(?:export )?interface ${iface}\\b[^{]*\\{\\n([\\s\\S]*?)\\n\\}`).exec(source)?.[1];
+    check(`the builder declares ${iface}`, body !== undefined);
+    for (const m of (body ?? '').matchAll(/^ {2}(\w+)(?:<[^>]*>)?\(/gm)) {
+      if (m[1] && !['then', 'catch', 'finally'].includes(m[1])) methods.add(m[1]);
+    }
+  }
+  check('the builder exposes its write verbs', ['insert', 'upsert', 'update', 'delete'].every((v) => methods.has(v)));
+  for (const method of methods) {
+    check(`the guide names supabase .${method}(`, skill.includes(`.${method}(`) || new RegExp(`\`\\.${method}\``).test(skill));
+  }
+}
+// A remote connection's nested `storage` is how its tables get created and
+// what its allowlist reads — the guide must show the shape, and that a
+// supabase connection's creates nothing but still allowlists.
+const connBlock = /```json\n\s*("connections": \[[\s\S]*?)\n\s*```/.exec(skill)?.[1];
+function showsConnectionStorage(block: string | undefined): boolean {
+  try {
+    const parsed = JSON.parse(`{${block ?? ''}}`) as { connections?: { engine?: string; storage?: { tables?: unknown[] } }[] };
+    return (parsed.connections ?? []).some((c) => c.engine !== 'supabase' && (c.storage?.tables?.length ?? 0) > 0);
+  } catch {
+    return false;
+  }
+}
+check('shows a remote connection with a nested storage declaration', showsConnectionStorage(connBlock));
+check('says nested storage creates tables additively and is the table allowlist', /creates missing tables and columns/.test(skill) && /table allowlist/.test(skill));
+check('says a supabase connection\'s storage creates nothing but still allowlists', /supabase connection's\s+`storage` creates nothing/.test(skill));
+// Non-secret setting values ride a pack export (packs/core.ts → exportToShim
+// includeSettings) — only secret values never travel.
+check('does not claim setting values never travel', !/Values never travel with the shim/.test(skill));
+check('says non-secret setting values ride a pack export', /`secret` values never do, but non-secret\s+values ride along when the user exports a pack/.test(skill));
+// api.fetch omits cookies but forwards the caller's headers (capabilities/
+// fetch.ts), so key-authenticated third-party APIs work through it.
+check('does not restrict api.fetch to public content', !/public content only/.test(skill));
+check('says api.fetch sends the headers you pass (key-authenticated APIs work)', /does send the headers\s+you pass/.test(skill) && /`secret`\s+setting and pass it as `Authorization`/.test(skill));
+// The local read caps are defaults a shim can raise via storage.limits, up to
+// the transport's hard ceilings (shim-db/transport-sqlite.ts, schema.ts).
+check('documents storage.limits and its ceilings', /"limits": \{ "maxRows": \d+,\s+"maxResultBytes": \d+ \}/.test(skill) && /up to 100,000 rows \/ 20 MB/.test(skill));
+const sqliteTransport = path.join(ROOT, '..', '..', 'src', 'main', 'shim-db', 'transport-sqlite.ts');
+if (fs.existsSync(sqliteTransport)) {
+  const source = fs.readFileSync(sqliteTransport, 'utf8');
+  check('the guide\'s ceilings match the transport\'s', /HARD_MAX_ROWS = 100_000;/.test(source) && /HARD_MAX_RESULT_BYTES = 20_000_000;/.test(source));
+  check('the guide\'s defaults match the transport\'s', /\bMAX_ROWS = 5000;/.test(source) && /\bMAX_RESULT_BYTES = 1_000_000;/.test(source) && /5,000 rows \/ 1 MB/.test(skill));
+}
+// The preview bucket is one per site and never cleared — the guide must not
+// promise it is discarded, and must warn that it may hold earlier keys.
+check('does not claim preview storage is gone after commit', !/preview stores is gone/.test(skill));
+check('says the preview bucket is shared per site and never cleared', /shared by every preview there/.test(skill) && /never cleared/.test(skill));
 check('makes visual verification a duty', /Visual intents require visual verification/.test(skill) && /view_page \{ selector \}/.test(skill));
 check('says previews act on the real site', /Your previews act on the real site/.test(skill));
 check('says previews run on a preview api (scratch storage, no settings / ai / db)', /handlers get a preview `api`, not the shim's/.test(skill) && /scratch bucket/.test(skill));
