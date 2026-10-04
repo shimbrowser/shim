@@ -20,7 +20,8 @@
 //     the working directory, CLAUDE_PROJECT_DIR, a global install, then
 //     `npm root -g`), not only beside the bundle; a miss is
 //     playwright-missing with the exact install command, a never-downloaded
-//     Chromium is chromium-missing with the command for the Playwright found.
+//     Chromium is chromium-missing with the command for the Playwright found,
+//     and missing Linux libraries are system-deps-missing (install-deps).
 //
 // The driver itself runs against a real Chromium in
 // playwright-conformance-harness.ts (its own CI job).
@@ -42,7 +43,7 @@ import { pageRuntimeSource } from '../src/headless-page-runtime';
 import type { PageRuntimeControl } from '../src/headless-page-runtime';
 import {
   PLAYWRIGHT_INSTALL_COMMAND, PLAYWRIGHT_MISSING, HeadlessUnavailableError, chromiumInstallCommand, globalPrefixDirs,
-  headlessReadiness, launchFailure, loadPlaywright, locatePlaywright, playwrightSearchDirs, type RequireFrom,
+  headlessReadiness, launchFailure, loadPlaywright, locatePlaywright, playwrightSearchDirs, systemDepsInstallCommand, type RequireFrom,
 } from '../src/playwright-launch';
 
 let failures = 0;
@@ -286,6 +287,21 @@ async function main(): Promise<void> {
     check('a never-downloaded Chromium is chromium-missing', missing instanceof HeadlessUnavailableError && missing.code === 'chromium-missing', missing.message);
     check('…with the found Playwright\'s own CLI (versions match)', missing instanceof HeadlessUnavailableError
       && missing.install === `node "${path.join('/pw/node_modules/playwright', 'cli.js')}" install chromium` && missing.message.includes(missing.install));
+    const depsMessage = 'browserType.launch: \n' +
+      '╔══════════════════════════════════════════════════════╗\n' +
+      '║ Host system is missing dependencies to run browsers. ║\n' +
+      '║ Please install them with the following command:      ║\n' +
+      '║     sudo npx playwright install-deps                 ║\n' +
+      '║ Alternatively, use apt:                              ║\n' +
+      '║     sudo apt-get install libnss3 libatk1.0-0         ║\n' +
+      '╚══════════════════════════════════════════════════════╝';
+    const deps = launchFailure(new Error(depsMessage), '/pw/node_modules/playwright');
+    check('missing Linux libraries are system-deps-missing, not chromium-missing', deps instanceof HeadlessUnavailableError && deps.code === 'system-deps-missing', deps.message);
+    check('…with install-deps from the found Playwright\'s CLI', deps instanceof HeadlessUnavailableError
+      && deps.install === `node "${path.join('/pw/node_modules/playwright', 'cli.js')}" install-deps chromium` && deps.message.includes(deps.install));
+    check('…and npx install-deps without a package folder', systemDepsInstallCommand(null) === 'npx playwright install-deps chromium');
+    const download = launchFailure(new Error("browserType.launch: Executable doesn't exist at /x\nPlease run the following command to download new browsers:\n    npx playwright install"), null);
+    check('a download hint alone still reads as chromium-missing', download instanceof HeadlessUnavailableError && download.code === 'chromium-missing', download.message);
     const other = launchFailure(new Error('spawn EACCES'), null);
     check('any other launch failure stays an error, never a misleading install hint', !(other instanceof HeadlessUnavailableError) && /spawn EACCES/.test(other.message));
     check('without a package folder the command is npx', chromiumInstallCommand(null) === 'npx playwright install chromium');

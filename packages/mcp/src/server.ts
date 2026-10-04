@@ -141,6 +141,7 @@ const HINTS: Record<string, string> = {
   'headless-unavailable': 'Restart the server without --attach (or with SHIM_MCP_MODE unset) to open headless sessions.',
   'playwright-missing': 'Run the install command above (once, in a terminal), then open the session again. Shim does not bundle Chromium.',
   'chromium-missing': 'Run the install command above (once, in a terminal), then open the session again. Shim does not bundle Chromium.',
+  'system-deps-missing': 'Run the install command above (once, in a terminal; it may need sudo), then open the session again.',
 };
 
 // What a refusal means differs in auto mode, where headless is one call away.
@@ -347,6 +348,10 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
   async function autoStatus(): Promise<Record<string, unknown>> {
     const probe = attachProbe();
     let attach: Record<string, unknown>;
+    // A live Shim whose endpoint does not answer: attach can't be used, yet a
+    // bare url is still refused (pickMode sees the live pid), so headless
+    // must be asked for by name.
+    let unresponsivePid: number | null = null;
     if (!probe.reachable) {
       attach = { available: false, reason: probe.reason, controlFile: deps.controlFile };
     } else {
@@ -357,6 +362,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         attach = { available: true, ...body };
       } catch (e) {
         if (!(e instanceof ControlTransportError) && !(e instanceof ToolFailure)) throw e;
+        unresponsivePid = probe.info.pid;
         attach = {
           available: false,
           reason: `Shim (process ${probe.info.pid}) has a discovery file but did not answer on its control endpoint: ${e.message}`,
@@ -374,6 +380,11 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
     const next = attach.available === true
       ? 'Shim is running: shim_list_tabs, then shim_open_session with tabId (the user\'s logins; commits go to Shim\'s library). ' +
         'To work on a fresh Chromium and a .shim file instead, pass url with mode: "headless".'
+      : unresponsivePid !== null
+        ? `Shim (process ${unresponsivePid}) is running but its control endpoint did not answer: ask the user to check Shim, or call shim_launch to reconnect. ` +
+          (headlessOk
+            ? 'For a headless session meanwhile, pass url with mode: "headless" (a url alone is refused while Shim runs).'
+            : `Headless needs Playwright, installed once: \`${String(headlessOut.install)}\`.`)
       : headlessOk
         ? 'No Shim browser: shim_open_session with url opens a headless session (a fresh Chromium, no logins; commits write a .shim file). ' +
           'If the user has Shim, shim_launch starts it instead.'

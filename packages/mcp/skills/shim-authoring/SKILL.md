@@ -900,7 +900,7 @@ are in, because what a commit saves differs. With Shim running, a bare `url` ans
 want a standalone `.shim` file, in which case pass `mode: "headless"`.
 
 Headless needs Playwright. If it is missing, opening answers `playwright-missing` (or
-`chromium-missing`) with the exact command to run. Give the user that command; don't run
+`chromium-missing`, or `system-deps-missing` on Linux) with the exact command to run. Give the user that command; don't run
 installs on their machine without asking.
 
 The loop is the same, with three differences:
