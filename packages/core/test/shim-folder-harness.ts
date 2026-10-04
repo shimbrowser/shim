@@ -226,12 +226,75 @@ rejects('match.hosts missing at pack', 'malformed-shim-folder', () => packShim(e
 rejects('a non-string host at pack', 'malformed-shim-folder', () => packShim(edit((spec) => { (spec as unknown as { match: unknown }).match = { hosts: [42] }; })), 'match.hosts');
 rejects('a lint error at pack', 'spec-lint', () => packShim(edit((spec) => { spec.rules?.push({ id: 'x', mutations: [{ kind: 'cspRelax' }] }); })), 'unknown mutation kind "cspRelax"');
 rejects('a transform that does not parse', 'spec-lint', () => packShim({ ...good(), 'handlers/strip.js': 'module.exports = function (b) { return b;' }), 'does not parse as JavaScript');
+// The script handler modules import would refuse (assertHandlersBound runs
+// them and wants a function at module.exports).
+rejects('a script handler module that does not parse', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = function (ctx) {' }), 'handlers/notes.js does not parse as JavaScript');
+rejects('a script handler module exporting a number', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = 42;\n' }), 'handlers/notes.js exports 42, not a function');
+rejects('a script handler module exporting a string', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = "notes"' }), 'not a function');
+rejects('a script handler file that is a bare function declaration', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': 'function notes({ anchor }) { anchor.dataset.n = "1"; }\n' }), 'handlers/notes.js never assigns module.exports');
+rejects('a script handler module exporting an object', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = {};\n' }), 'handlers/notes.js exports an object, not a function');
+rejects('…an object of handlers', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = {\n  notes({ anchor }) { anchor.title = "}"; },\n};\n' }), 'exports an object');
+rejects('…or an array', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = [function notes() {}, "]"];\n' }), 'exports an array');
+rejects('an empty script handler file', 'malformed-shim-folder',
+  () => packShim({ ...good(), 'handlers/notes.js': '  \n' }), 'handlers/notes.js is empty');
+for (const [label, source] of [
+  ['an arrow', 'module.exports = ({ anchor }) => { anchor.hidden = true; };\n'],
+  ['a module with helpers', 'const K = 1;\nmodule.exports = function notes() { return K; };\n'],
+  ['a computed export', 'module.exports = (() => function notes() {})();\n'],
+  ['module["exports"]', 'module["exports"] = function notes() {};\n'],
+  ['Object.defineProperty(module, "exports")', 'Object.defineProperty(module, "exports", { value: function notes() {} });\n'],
+  ['Object.assign(module, { exports })', 'Object.assign(module, { exports: function notes() {} });\n'],
+  ['an element of an array literal', 'module.exports = [function notes() {}][0];\n'],
+  ['a member of an object literal', 'module.exports = { notes() {} }.notes;\n'],
+  ['a choice between object members', 'module.exports = {}.x ? {}.y : { f() {} }.f;\n'],
+] as const) {
+  let ok = true;
+  try { packShim({ ...good(), 'handlers/notes.js': source }); } catch (err) { ok = false; console.error(err); }
+  check(`a script handler that exports a function packs (${label})`, ok);
+}
+
 rejects('a corrupt state file', 'malformed-shim-state', () => packShim({ ...good(), [SHIM_STATE_FILE]: '{' }), 'not valid JSON');
 rejects('a state file of another format', 'malformed-shim-state', () => packShim({ ...good(), [SHIM_STATE_FILE]: '{"format":"x"}' }), 'not a shim-state/1 file');
 rejects('a state rule without a digest', 'malformed-shim-state', () => packShim({ ...good(), [SHIM_STATE_FILE]: JSON.stringify({ format: 'shim-state/1', rules: { a: { witness: {} } } }) }), 'anchorDigest');
 let all: ShimFolderError | null = null;
 try { packShim({ 'README.md': '', 'handlers/x.y.js': '' }); } catch (err) { if (err instanceof ShimFolderError) all = err; }
 check('every problem is reported at once', (all?.problems.length ?? 0) >= 3, all?.problems.join(' | '));
+
+console.log('handler names that differ only in case, or are Windows device names');
+const caseSpec = {
+  id: 'k', match: { hosts: ['example.com'] },
+  rules: [
+    { id: 'a', anchor: { primary: { kind: 'css', value: '.a' } }, mutations: [{ kind: 'script', handler: 'Foo', mount: { strategy: 'portal' } }] },
+    { id: 'b', anchor: { primary: { kind: 'css', value: '.b' } }, mutations: [{ kind: 'script', handler: 'foo', mount: { strategy: 'portal' } }] },
+  ],
+};
+rejects('a folder with handlers/Foo.js and handlers/foo.js', 'malformed-shim-folder',
+  () => readShimFolder({ [SHIM_JSON]: JSON.stringify(caseSpec), 'handlers/Foo.js': expressionToModule('function a() {}'), 'handlers/foo.js': expressionToModule('function b() {}') }),
+  'handler names "Foo" and "foo" differ only in case');
+for (const device of ['CON', 'nul', 'Com1', 'LPT9', 'aux', 'prn']) {
+  rejects(`a handlers/${device}.js file (a Windows device name)`, 'malformed-shim-folder',
+    () => readShimFolder({ [SHIM_JSON]: JSON.stringify({ id: 'd', match: { hosts: ['example.com'] }, rules: [] }), [`handlers/${device}.js`]: expressionToModule('function d() {}') }),
+    `"${device}" is not a valid handler name`);
+}
+rejects('a .shim whose handlers map names CON', 'malformed-shim-file',
+  () => unpackShim({ format: 'shim/1', name: 'd', spec: { id: 'd', match: { hosts: ['example.com'] }, rules: [] }, handlers: { CON: expressionToModule('function d() {}') } }),
+  'handler name "CON" can\'t be a file name');
+check('names that only start like a device name are fine', (() => {
+  try { readShimFolder({ [SHIM_JSON]: JSON.stringify({ id: 'd', match: { hosts: ['example.com'] }, rules: [] }), 'handlers/console.js': 'module.exports = function c() {};', 'handlers/com10.js': 'module.exports = function c() {};', 'handlers/nul_check.js': 'module.exports = function c() {};' }); return true; } catch { return false; }
+})());
+rejects('a .shim whose handlers map has Foo and foo', 'malformed-shim-file',
+  () => unpackShim({ format: 'shim/1', name: 'k', spec: caseSpec, handlers: { Foo: expressionToModule('function a() {}'), foo: expressionToModule('function b() {}') } }),
+  'differ only in case');
+rejects('checking out a spec whose rules define Foo and foo', 'malformed-shim-folder',
+  () => checkoutShim({ spec: { ...caseSpec, rules: caseSpec.rules.map((r, i) => ({ ...r, handlers: { [i ? 'foo' : 'Foo']: 'function h() {}' } })) } as unknown as Spec }),
+  'differ only in case');
 
 console.log('malformed .shim files');
 rejects('not JSON', 'malformed-shim-file', () => unpackShim('{'), 'not valid JSON');
@@ -240,28 +303,28 @@ rejects('no spec', 'malformed-shim-file', () => unpackShim({ format: 'shim/1' })
 rejects('a non-string handler', 'malformed-shim-file', () => unpackShim({ ...EXPORT, handlers: { notes: 1 } }), 'not a source string');
 rejects('a handler name that can\'t be a file', 'malformed-shim-file', () => unpackShim({ ...EXPORT, handlers: { ...EXPORT.handlers, '../evil': 'x' } }), 'can\'t be a file name');
 rejects('handler names that differ only in case', 'malformed-shim-file', () => unpackShim({ ...EXPORT, handlers: { ...EXPORT.handlers, Notes: NOTES_MODULE } }), 'differ only in case');
-rejects('a Windows-reserved handler name', 'malformed-shim-file', () => unpackShim({ ...EXPORT, handlers: { ...EXPORT.handlers, Aux: 'x' } }), 'reserved file name');
+rejects('a Windows-reserved handler name', 'malformed-shim-file', () => unpackShim({ ...EXPORT, handlers: { ...EXPORT.handlers, Aux: 'x' } }), 'handler name "Aux" can\'t be a file name');
 
 console.log('portable handler file names');
 // On the default macOS / Windows filesystems foo.js and Foo.js are one file:
 // a checkout that emitted both would silently keep only the last one.
-const caseSpec: Spec = {
+const portableSpec: Spec = {
   id: 'case', match: { hosts: ['example.com'] },
   rules: [
     { id: 'a', anchor: { primary: { kind: 'css', value: '.a' } }, mutations: [{ kind: 'script', handler: 'mark' }], handlers: { mark: 'function mark() {}' } },
     { id: 'b', anchor: { primary: { kind: 'css', value: '.b' } }, mutations: [{ kind: 'script', handler: 'Mark' }], handlers: { Mark: 'function Mark() {}' } },
   ],
 };
-rejects('a checkout refuses handler names that differ only in case', 'malformed-shim-folder', () => checkoutShim({ spec: caseSpec }), '"mark" and "Mark" differ only in case');
+rejects('a checkout refuses handler names that differ only in case', 'malformed-shim-folder', () => checkoutShim({ spec: portableSpec }), '"mark" and "Mark" differ only in case');
 const reservedSpec: Spec = {
   id: 'reserved', match: { hosts: ['example.com'] },
   rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.a' } }, mutations: [{ kind: 'script', handler: 'con' }], handlers: { con: 'function con() {}' } }],
 };
-rejects('a checkout refuses a Windows device name', 'malformed-shim-folder', () => checkoutShim({ spec: reservedSpec }), '"con" is a reserved file name');
+rejects('a checkout refuses a Windows device name', 'malformed-shim-folder', () => checkoutShim({ spec: reservedSpec }), 'handler name "con" can\'t be a file name');
 rejects('a folder read from a case-sensitive disk refuses both', 'malformed-shim-folder',
   () => readShimFolder({ ...good(), 'handlers/NOTES.js': NOTES_MODULE }), 'differ only in case');
 check('distinct names that only share a prefix still check out', (() => {
-  const files = checkoutShim({ spec: { ...caseSpec, rules: [caseSpec.rules?.[0] as Rule, { ...(caseSpec.rules?.[1] as Rule), mutations: [{ kind: 'script', handler: 'markAll' }], handlers: { markAll: 'function markAll() {}' } }] } });
+  const files = checkoutShim({ spec: { ...portableSpec, rules: [portableSpec.rules?.[0] as Rule, { ...(portableSpec.rules?.[1] as Rule), mutations: [{ kind: 'script', handler: 'markAll' }], handlers: { markAll: 'function markAll() {}' } }] } });
   return typeof files['handlers/mark.js'] === 'string' && typeof files['handlers/markAll.js'] === 'string';
 })());
 const inline = JSON.parse(JSON.stringify(EXPORT)) as typeof EXPORT & { spec: Spec };
@@ -276,10 +339,11 @@ const folded = unpackShim(legacy);
 check('inline rule handlers fold into handlers/ (canonical on the way back)',
   folded['handlers/notes.js'] === expressionToModule('function notes() {}') && !folded[SHIM_JSON]?.includes('function notes'));
 
-console.log('handler names that are Object.prototype keys (prototype-free maps)');
-// `constructor` is a legal handler name; a plain-object map would see an
-// inherited `constructor` as present. `__proto__` is refused as a handler
-// name outright (HANDLER_NAME_RE), so a folder carrying one is malformed.
+console.log('handler names that are Object.prototype keys');
+// `constructor` is a legal handler name (HANDLER_NAME_RE); a plain-object map
+// would see an inherited `constructor` as present. `__proto__` is refused as
+// a handler name: a plain object's assignment swallows it, so the browser's
+// stored-handler bag (and the spec's plain handlers maps) would drop it.
 {
   const protoSpec = {
     id: 'p', match: { hosts: ['example.com'] },
@@ -294,11 +358,8 @@ console.log('handler names that are Object.prototype keys (prototype-free maps)'
   rejects('a rule naming "constructor" with no file', 'malformed-shim-folder',
     () => readShimFolder({ [SHIM_JSON]: JSON.stringify(protoSpec) }),
     'handlers/constructor.js is missing');
-  rejects('a handlers/__proto__.js file', 'malformed-shim-folder',
-    () => readShimFolder({ ...protoFolder, 'handlers/__proto__.js': expressionToModule('function proto() {}') }),
-    '"__proto__" is not a valid handler name');
   const protoRead = readShimFolder(protoFolder);
-  check('the constructor handler file is read as an own entry', Object.keys(protoRead.handlers).join(',') === 'constructor'
+  check('the constructor handler file is read', Object.keys(protoRead.handlers).join(',') === 'constructor'
     && Object.getOwnPropertyDescriptor(protoRead.handlers, 'constructor')?.value === expressionToModule('function ctor() {}'));
   const protoPacked = packShim(protoFolder);
   check('…and packs as an own handler entry',
@@ -306,6 +367,12 @@ console.log('handler names that are Object.prototype keys (prototype-free maps)'
     && Object.getPrototypeOf(protoPacked.handlers) === Object.prototype);
   const protoUnpacked = unpackShim(JSON.parse(JSON.stringify(protoPacked)) as unknown);
   check('…and unpacks back to its file', protoUnpacked['handlers/constructor.js'] === expressionToModule('function ctor() {}'));
+  rejects('a handlers/__proto__.js file', 'malformed-shim-folder',
+    () => readShimFolder({ ...protoFolder, 'handlers/__proto__.js': expressionToModule('function proto() {}') }),
+    '"__proto__" is not a valid handler name');
+  rejects('a .shim whose handlers map names __proto__', 'malformed-shim-file',
+    () => unpackShim(JSON.parse('{"format":"shim/1","name":"n","spec":{"id":"e","match":{"hosts":["example.com"]},"rules":[]},"handlers":{"__proto__":"module.exports = function p() {};"}}') as unknown),
+    '__proto__');
   const protoEnvelope = JSON.parse('{"format":"shim/1","name":"n","spec":{"id":"e","match":{"hosts":["example.com"]},"rules":[]},"handlers":{},"__proto__":{"x":1}}') as unknown;
   const protoRepacked = packShim(unpackShim(protoEnvelope));
   check('an envelope field named __proto__ round-trips as a field',
