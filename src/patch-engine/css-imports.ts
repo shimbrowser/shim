@@ -1,5 +1,6 @@
-// Leading `@import` rules of a stylesheet's text, for the strict-CSP mirror
-// (style-mirror.ts). Pure and DOM-free — covered by scripts/css-imports-harness.
+// Leading `@import` rules of a stylesheet's text, and `url()` absolutizing for
+// copied rules, for the strict-CSP mirror (style-mirror.ts). Pure and
+// DOM-free — covered by scripts/css-imports-harness.
 //
 // The mirror re-creates a refused <style> as a constructable sheet, but
 // `replaceSync()` drops every `@import` rule (CSSOM: constructed sheets can't
@@ -162,4 +163,69 @@ export function leadingImports(css: string): LeadingImports {
     else if (parsed) out.imports.push(parsed);
     i = end;
   }
+}
+
+// Rewrite every relative `url(…)` in `css` to an absolute URL resolved
+// against `base` (the URL of the sheet the text came from). The mirror copies
+// an imported sheet's rules into constructed sheets, and Chromium resolves a
+// constructed sheet's `url()`s against the DOCUMENT — it ignores the
+// `baseURL` option — so a copied rule's relative URL would otherwise point
+// somewhere else. Strings and comments are skipped (a `url(` inside
+// `content: "…"` is text), fragment-only `url(#id)` references are left as
+// written (they name the current document), and anything that fails to
+// resolve is left untouched.
+export function absolutizeUrls(css: string, base: string): string {
+  let out = '';
+  let i = 0;
+  let from = 0;
+  while (i < css.length) {
+    const c = css[i];
+    if (c === '"' || c === "'") {
+      i++;
+      while (i < css.length && css[i] !== c) i += css[i] === '\\' ? 2 : 1;
+      i++;
+      continue;
+    }
+    if (c === '/' && css[i + 1] === '*') {
+      const close = css.indexOf('*/', i + 2);
+      i = close < 0 ? css.length : close + 2;
+      continue;
+    }
+    if (c === '\\') {
+      i += 2;
+      continue;
+    }
+    if (css.slice(i, i + 4).toLowerCase() !== 'url(' || (i > 0 && /[\w-]/.test(css.charAt(i - 1)))) {
+      i++;
+      continue;
+    }
+    const argStart = skipTrivia(css, i + 4);
+    let value: string;
+    let close: number;
+    const quoted = readString(css.slice(argStart));
+    if (quoted) {
+      value = quoted[0];
+      const after = css.length - quoted[1].length;
+      close = skipTrivia(css, after);
+      if (css[close] !== ')') { i = after; continue; }
+    } else {
+      close = unquotedUrlEnd(css, i);
+      if (close < 0 || close >= css.length) break;
+      value = unescapeCss(css.slice(argStart, close).trim());
+    }
+    let resolved: string | null = null;
+    if (value && !value.startsWith('#')) {
+      try {
+        resolved = new URL(value, base).href;
+      } catch {
+        resolved = null;
+      }
+    }
+    if (resolved !== null && resolved !== value) {
+      out += `${css.slice(from, i)}url(${JSON.stringify(resolved)})`;
+      from = close + 1;
+    }
+    i = close + 1;
+  }
+  return out + css.slice(from);
 }

@@ -35,16 +35,27 @@
 // <style> — a `<link>` passes the same `style-src` check the `@import` would
 // have. A document `<link>` alone would cascade before EVERY adopted mirror,
 // though, letting an earlier mirrored <style> beat a later one's import; so
-// once the links load, their rules are copied into constructed sheets (based
-// at each link's URL, so relative `url()`s still resolve) adopted right before
+// once the links load, their rules are copied into constructed sheets (with
+// relative `url()`s made absolute against the imported sheet's URL — Chromium
+// resolves a constructed sheet's URLs against the document and ignores its
+// `baseURL` option) adopted right before
 // the importing mirror — the slot the `@import`s had — and the links are
-// disabled. That is all-or-none per element: if any import can't be copied
-// (cross-origin without CORS, or nested `@import`s a copy would drop again),
+// disabled. A loaded sheet's own nested `@import`s are copied too, each into
+// its own run of sheets (URLs resolved against its own URL, its media / layer / supports
+// conditions re-expressed as wrapping at-rules) in rule order. A cross-origin
+// import is first requested with CORS (`crossorigin="anonymous"`) so its rules
+// are readable when the server allows it; if that load fails it is retried
+// without, as an `@import` would have loaded it. That is all-or-none per
+// element: if any import still can't be read (cross-origin without CORS),
 // every link keeps applying from its document slot, since mixing the two
-// would reverse the imports' source order. `layer(…)` / `supports(…)` imports can't be
-// expressed on a `<link>` and are skipped (css-imports.ts).
+// would reverse the imports' source order. That sheet then cascades before
+// every mirror — the one ordering a page script cannot restore, because no
+// API exposes the rules of an opaque cross-origin sheet. `layer(…)` /
+// `supports(…)` top-level imports can't be expressed on a `<link>` and are
+// skipped (css-imports.ts).
 
-import { leadingImports } from './css-imports';
+import { absolutizeUrls, leadingImports } from './css-imports';
+import type { CssImport } from './css-imports';
 
 type StyleRoot = Document | ShadowRoot;
 
@@ -55,14 +66,16 @@ interface Mirror {
   // serialized import list they were built from (rebuilt only on change).
   links: HTMLLinkElement[];
   importKey: string;
-  // Per-link load outcome, index-aligned with `links`: a constructed copy,
-  // or why there is none. See slotCopies for how they're adopted.
+  // Per-link load outcome, index-aligned with `links`: its constructed
+  // copies, or why there are none. See slotCopies for how they're adopted.
   importCopies: ImportState[];
 }
 
-// 'failed': the link didn't load — a failed @import contributes nothing
-// either. 'uncopyable': loaded, but its rules can't be read or copied whole.
-type ImportState = CSSStyleSheet | 'pending' | 'failed' | 'uncopyable';
+// A loaded import's copies (one or more sheets, see copySheet), or why there
+// are none. 'failed': the link didn't load — a failed @import contributes
+// nothing either. 'uncopyable': loaded, but its rules can't be read or copied
+// whole.
+type ImportState = CSSStyleSheet[] | 'pending' | 'failed' | 'uncopyable';
 
 // Source element → its mirror. Only populated on pages that refused a sheet.
 const mirrors = new Map<HTMLStyleElement, Mirror>();
@@ -111,22 +124,77 @@ function removeLinks(m: Mirror): void {
 function slotCopies(m: Mirror): CSSStyleSheet[] | null {
   const out: CSSStyleSheet[] = [];
   for (const st of m.importCopies) {
-    if (st instanceof CSSStyleSheet) out.push(st);
+    if (Array.isArray(st)) out.push(...st);
     else if (st !== 'failed') return null;
   }
   return out;
+}
+
+// Nested-import depth past which a sheet counts as uncopyable (the browser
+// stops cycles itself; this only bounds our recursion).
+const MAX_IMPORT_DEPTH = 16;
+
+// `@import url(…) layer(x) supports(c) m` → the at-rules that wrap the
+// imported rules to the same effect, outermost first.
+function importWrappers(rule: CSSImportRule): string[] {
+  const out: string[] = [];
+  if (rule.supportsText) out.push(`@supports (${rule.supportsText})`);
+  const media = rule.media.mediaText;
+  if (media && media !== 'all') out.push(`@media ${media}`);
+  if (rule.layerName !== null) out.push(rule.layerName ? `@layer ${rule.layerName}` : '@layer');
+  return out;
+}
+
+function wrap(text: string, wrappers: string[]): string {
+  return wrappers.reduceRight((inner, w) => `${w} {\n${inner}\n}`, text);
+}
+
+// Copy `sheet` into constructed sheets appended to `out`, in rule order: the
+// rules between nested `@import`s go into one sheet, and each nested import
+// recurses — its rules' relative `url()`s resolve against its own URL, so
+// each level absolutizes against its own `baseURL`. `media` is the top-level
+// link's media (applied to every copy as the sheet's own condition). False
+// when anything can't be read (SecurityError on an opaque cross-origin sheet)
+// or expressed.
+function copySheet(sheet: CSSStyleSheet, baseURL: string, media: string, wrappers: string[], out: CSSStyleSheet[], depth: number): boolean {
+  if (depth > MAX_IMPORT_DEPTH) return false;
+  const rules = Array.from(sheet.cssRules); // SecurityError: cross-origin without CORS
+  let buf: string[] = [];
+  const flush = (): void => {
+    if (!buf.length) return;
+    const copy = new CSSStyleSheet(media ? { media } : {});
+    copy.replaceSync(wrap(buf.join('\n'), wrappers));
+    ownSheets.add(copy);
+    out.push(copy);
+    buf = [];
+  };
+  for (const rule of rules) {
+    if (rule instanceof CSSImportRule) {
+      flush();
+      const nested = rule.styleSheet;
+      if (!nested) continue; // didn't load: contributes nothing, as natively
+      if (!copySheet(nested, nested.href || rule.href, media, [...wrappers, ...importWrappers(rule)], out, depth + 1)) return false;
+      continue;
+    }
+    // `@namespace` is only valid at a sheet's top level, never inside a block,
+    // and its url() is a namespace name, not a resource to resolve.
+    if (rule instanceof CSSNamespaceRule) {
+      if (wrappers.length) return false;
+      buf.push(rule.cssText);
+      continue;
+    }
+    buf.push(absolutizeUrls(rule.cssText, baseURL));
+  }
+  flush();
+  return true;
 }
 
 function copyLoaded(link: HTMLLinkElement, media: string): ImportState {
   try {
     const loaded = link.sheet;
     if (!loaded) return 'uncopyable';
-    const rules = Array.from(loaded.cssRules); // SecurityError: cross-origin without CORS
-    if (rules.some((r) => r instanceof CSSImportRule)) return 'uncopyable';
-    const copy = new CSSStyleSheet(media ? { baseURL: link.href, media } : { baseURL: link.href });
-    copy.replaceSync(rules.map((r) => r.cssText).join('\n'));
-    ownSheets.add(copy);
-    return copy;
+    const out: CSSStyleSheet[] = [];
+    return copySheet(loaded, link.href, media, [], out, 0) ? out : 'uncopyable';
   } catch {
     return 'uncopyable';
   }
@@ -146,6 +214,45 @@ function settleImport(style: HTMLStyleElement, m: Mirror, link: HTMLLinkElement,
   }
 }
 
+function isCrossOrigin(style: HTMLStyleElement, href: string): boolean {
+  try {
+    return new URL(href, style.baseURI).origin !== new URL(style.ownerDocument.URL).origin;
+  } catch {
+    return false;
+  }
+}
+
+// One import's `<link>`. `cors`: request it with `crossorigin="anonymous"` so
+// a cross-origin sheet's rules are readable (copyable) when the server allows
+// it; if that load fails, the link is replaced by a plain one — how the
+// `@import` itself would have loaded it — which may then only apply from its
+// document slot.
+function importLink(style: HTMLStyleElement, m: Mirror, imp: CssImport, idx: number, cors: boolean): HTMLLinkElement {
+  const link = style.ownerDocument.createElement('link');
+  link.rel = 'stylesheet';
+  link.setAttribute('data-shim-import', style.getAttribute('data-shim') || '');
+  if (cors) link.crossOrigin = 'anonymous';
+  link.href = imp.href;
+  if (imp.media) link.media = imp.media;
+  link.addEventListener('load', () => settleImport(style, m, link, idx, () => copyLoaded(link, imp.media)), { once: true });
+  link.addEventListener('error', () => {
+    if (cors) retryWithoutCors(style, m, link, imp, idx);
+    else settleImport(style, m, link, idx, () => 'failed');
+  }, { once: true });
+  return link;
+}
+
+function retryWithoutCors(style: HTMLStyleElement, m: Mirror, failed: HTMLLinkElement, imp: CssImport, idx: number): void {
+  try {
+    if (mirrors.get(style) !== m || m.links[idx] !== failed) return; // superseded
+    const link = importLink(style, m, imp, idx, false);
+    m.links[idx] = link;
+    failed.replaceWith(link);
+  } catch {
+    /* a fallback must never break the page or the engine */
+  }
+}
+
 // Bring the mirror's import `<link>`s in line with the element's current
 // leading `@import`s. Rebuilt only when the list changed, so an in-place
 // text update elsewhere in the sheet never reloads an imported stylesheet.
@@ -155,16 +262,10 @@ function syncImportLinks(style: HTMLStyleElement, m: Mirror, cssText: string): v
   if (key === m.importKey && m.links.every((l) => l.isConnected)) return;
   removeLinks(m);
   imports.forEach((imp, idx) => {
-    const link = style.ownerDocument.createElement('link');
-    link.rel = 'stylesheet';
-    link.setAttribute('data-shim-import', style.getAttribute('data-shim') || '');
-    link.href = imp.href;
-    if (imp.media) link.media = imp.media;
-    link.addEventListener('load', () => settleImport(style, m, link, idx, () => copyLoaded(link, imp.media)), { once: true });
-    link.addEventListener('error', () => settleImport(style, m, link, idx, () => 'failed'), { once: true });
-    style.before(link);
+    const link = importLink(style, m, imp, idx, isCrossOrigin(style, imp.href));
     m.links.push(link);
     m.importCopies.push('pending');
+    style.before(link);
   });
   m.importKey = key;
 }

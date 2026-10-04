@@ -1,10 +1,12 @@
-// Harness for src/patch-engine/css-imports.ts `leadingImports` — the parser the
-// strict-CSP style mirror uses to carry a refused sheet's `@import`s over as
-// `<link>`s (constructable sheets drop `@import`; style-mirror.ts). Bare node.
+// Harness for src/patch-engine/css-imports.ts: `leadingImports` — the parser
+// the strict-CSP style mirror uses to carry a refused sheet's `@import`s over
+// as `<link>`s (constructable sheets drop `@import`; style-mirror.ts) — and
+// `absolutizeUrls`, which keeps a copied import's relative url()s pointing at
+// the imported sheet's directory. Bare node.
 //
 //   node out/scripts/css-imports-harness.js
 
-import { leadingImports } from '../src/patch-engine/css-imports';
+import { absolutizeUrls, leadingImports } from '../src/patch-engine/css-imports';
 import type { LeadingImports } from '../src/patch-engine/css-imports';
 
 let failures = 0;
@@ -46,6 +48,21 @@ eq('an unclosed comment ends the import block', leadingImports('@import "a.css" 
 eq('@importer is not @import', leadingImports('@importer url(a.css);'), only());
 eq('unterminated import is dropped', leadingImports('@import url(a.css)'), only());
 eq('malformed prelude skipped, later import kept', leadingImports('@import foo;@import "b.css";'), only(['b.css', '']));
+
+function eqText(label: string, actual: string, expected: string): void {
+  const ok = actual === expected;
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}${ok ? '' : `\n      got      ${actual}\n      expected ${expected}`}`);
+  if (!ok) failures++;
+}
+const BASE = 'https://cdn.example/css/nested/leaf.css';
+eqText('absolutize: quoted relative url', absolutizeUrls('.a { background: url("pixel.png"); }', BASE), '.a { background: url("https://cdn.example/css/nested/pixel.png"); }');
+eqText('absolutize: unquoted, parent-relative and root-relative', absolutizeUrls(".a { b: url(../x.png), url( /y.png ); }", BASE), '.a { b: url("https://cdn.example/css/x.png"), url("https://cdn.example/y.png"); }');
+eqText('absolutize: single quotes with an escaped quote', absolutizeUrls(".a { b: url('it\\'s.png'); }", BASE), '.a { b: url("https://cdn.example/css/nested/it\'s.png"); }');
+eqText('absolutize: absolute, data: and fragment urls untouched', absolutizeUrls('.a { b: url("https://o.example/z.png"), url(data:image/png;base64,AA==), url(#f); }', BASE), '.a { b: url("https://o.example/z.png"), url(data:image/png;base64,AA==), url(#f); }');
+eqText('absolutize: url( inside a string is text', absolutizeUrls('.a::before { content: "url(x.png)"; }', BASE), '.a::before { content: "url(x.png)"; }');
+eqText('absolutize: an ident ending in url( is not a url token', absolutizeUrls('.a { b: myurl(x.png); }', BASE), '.a { b: myurl(x.png); }');
+eqText('absolutize: @font-face src, uppercase URL(', absolutizeUrls('@font-face { src: URL(f.woff2) format("woff2"); }', BASE), '@font-face { src: url("https://cdn.example/css/nested/f.woff2") format("woff2"); }');
+eqText('absolutize: unterminated url left as is', absolutizeUrls('.a { b: url(x.png', BASE), '.a { b: url(x.png');
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`);
 process.exit(failures === 0 ? 0 : 1);
