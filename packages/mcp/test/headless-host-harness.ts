@@ -10,6 +10,10 @@
 //     bundler helper would only fail inside the page);
 //   - memoryStorage keeps the browser's api.storage semantics, per shim and
 //     origin;
+//   - the page runtime rejects an api call the driver's store failed;
+//   - over a scripted CDP session: detach does not wait out queued previews
+//     when no engine world exists, and a failing store rejects the page's
+//     call instead of answering undefined;
 //   - load failures map to Chromium's net error codes;
 //   - the engine bundle the driver injects is the built page bundle.
 //
@@ -21,10 +25,13 @@
 import vm from 'vm';
 import { BUILTIN_KINDS } from '@shimbrowser/core/spec-lint';
 import { coveredCapabilities } from '@shimbrowser/core/page-host-conformance';
+import type { Page } from 'playwright';
 import {
-  HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER, memoryStorage, netErrorCode, readEngineBundle, remoteObjectValue,
+  HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER, attachPlaywrightPageHost, memoryStorage, netErrorCode, readEngineBundle, remoteObjectValue,
 } from '../src/playwright-page-host';
+import type { HeadlessStorage } from '../src/playwright-page-host';
 import { pageRuntimeSource } from '../src/headless-page-runtime';
+import type { PageRuntimeControl } from '../src/headless-page-runtime';
 import { PLAYWRIGHT_MISSING } from '../src/playwright-launch';
 
 let failures = 0;
@@ -32,6 +39,53 @@ function check(label: string, cond: boolean, detail?: string): void {
   if (cond) console.log(`  ✓ ${label}`);
   else { failures++; console.error(`  ✗ ${label}${detail ? ` — ${detail}` : ''}`); }
 }
+
+
+// A scripted Page + CDP session: enough of each for attachPlaywrightPageHost
+// to attach, queue previews, answer api calls and detach, with every CDP
+// send recorded. `world: false` makes the engine world never appear.
+interface FakeCdp {
+  sends: Array<{ method: string; params: Record<string, unknown> }>;
+  emit(event: string, payload: unknown): void;
+}
+function fakePage(world: boolean): { page: Page; cdp: FakeCdp } {
+  const listeners = new Map<string, Array<(p: unknown) => void>>();
+  const sends: FakeCdp['sends'] = [];
+  const session = {
+    on(event: string, fn: (p: unknown) => void) {
+      const list = listeners.get(event) ?? [];
+      list.push(fn);
+      listeners.set(event, list);
+    },
+    send(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+      sends.push({ method, params });
+      if (method === 'Page.getFrameTree') return Promise.resolve({ frameTree: { frame: { id: 'main' } } });
+      if (method === 'Page.addScriptToEvaluateOnNewDocument') return Promise.resolve({ identifier: 's1' });
+      if (method === 'Page.createIsolatedWorld') {
+        return world ? Promise.resolve({ executionContextId: 7 }) : Promise.reject(new Error('no world'));
+      }
+      if (method === 'Runtime.evaluate') return Promise.resolve({ result: { type: 'undefined' } });
+      return Promise.resolve({});
+    },
+    detach: () => Promise.resolve(),
+  };
+  const page = {
+    context: () => ({ newCDPSession: () => Promise.resolve(session) }),
+    isClosed: () => false,
+    url: () => 'https://x.test/',
+    on() { /* no page events */ },
+    off() { /* no page events */ },
+  };
+  return {
+    page: page as unknown as Page,
+    cdp: {
+      sends,
+      emit(event, payload) { for (const fn of listeners.get(event) ?? []) fn(payload); },
+    },
+  };
+}
+
+const tick = (ms = 20): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 async function main(): Promise<void> {
   console.log('capabilities (D15)');
@@ -94,6 +148,102 @@ async function main(): Promise<void> {
     check('delete answers true for a row', (await s.delete(a, 'k')) === true);
     check('delete answers false when nothing was there', (await s.delete(a, 'k')) === false);
     check('undefined stores as null', (await s.set(a, 'u', undefined)) === undefined && (await s.get(a, 'u')) === null);
+  }
+
+  console.log('page runtime api calls');
+  {
+    // The runtime over a stand-in engine: just enough ShimCore to boot, with
+    // the api a preview gets captured from run().
+    const posted: Array<Record<string, unknown>> = [];
+    interface PreviewApi { storage: { set(k: string, v: unknown): Promise<unknown>; get(k: string): Promise<unknown> } }
+    const captured: { api: PreviewApi | null } = { api: null };
+    const sandbox: Record<string, unknown> = {
+      location: { origin: 'https://x.test', pathname: '/', hostname: 'x.test', href: 'https://x.test/' },
+      document: { readyState: 'complete', addEventListener() { /* unused */ } },
+      addEventListener() { /* unused */ },
+      fetch: () => Promise.resolve(null),
+      console,
+      b: (payload: string) => { posted.push(JSON.parse(payload) as Record<string, unknown>); },
+      ShimCore: {
+        run: (_spec: unknown, api: PreviewApi) => {
+          captured.api = api;
+          return { applyExtraRule() { /* no-op */ }, teardownAll() { /* no-op */ } };
+        },
+        createFetchBudget: () => ({ take: () => ({ delayMs: 0, throttled: false }) }),
+        deployIdForDocument: () => null,
+        sameRegistrableDomain: () => true,
+      },
+    };
+    sandbox.window = sandbox;
+    sandbox.top = sandbox;
+    sandbox.globalThis = sandbox;
+    vm.runInNewContext(pageRuntimeSource({ binding: 'b', globalName: 'g', unsupportedError: REQUIRES_SHIM_BROWSER }), sandbox);
+    const control = sandbox.g as PageRuntimeControl | undefined;
+    check('the runtime boots over a stand-in engine', control !== undefined);
+    if (control) {
+      control.apply('shim-a', { id: 'r', anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] }, 'rk', null);
+      const api = captured.api;
+      check('a preview gets an api', api !== null);
+      if (api) {
+        const write = api.storage.set('k', 1);
+        const writeCall = posted.find((m) => m.type === 'call' && m.method === 'storage.set');
+        check('a storage write posts a call to the driver', typeof writeCall?.id === 'number');
+        control.reject(Number(writeCall?.id), 'storage.set failed: disk full');
+        let rejected: unknown = null;
+        try { await write; } catch (e) { rejected = e; }
+        check('a call the driver rejects rejects the handler\'s promise with its message',
+          rejected !== null && (rejected as { message?: unknown }).message === 'storage.set failed: disk full', String(rejected));
+        const read = api.storage.get('k');
+        const readCall = posted.find((m) => m.type === 'call' && m.method === 'storage.get');
+        control.resolve(Number(readCall?.id), 'v');
+        check('a call the driver resolves still resolves with its value', (await read) === 'v');
+        check('a settled call cannot be settled again', !control.reject(Number(readCall?.id), 'late'));
+      }
+    }
+  }
+
+  console.log('driver over a scripted CDP session');
+  {
+    // Previews queued while no engine world exists: detach must not wait out
+    // each one's world wait in turn.
+    const { page } = fakePage(false);
+    const host = await attachPlaywrightPageHost(page, { engineBundle: '', worldWaitMs: 1500 });
+    for (const n of [1, 2, 3]) {
+      host.applyPreview({ patchId: 'p', ruleKey: `preview:p:${n}`, rule: { id: `r${n}`, anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] } });
+    }
+    await tick();
+    const started = Date.now();
+    await host.detach();
+    const took = Date.now() - started;
+    check('detach with queued previews and no world returns at once', took < 500, `${took}ms`);
+  }
+  {
+    const failing: HeadlessStorage = {
+      get: () => Promise.resolve('stored'),
+      set: () => Promise.reject(new Error('disk full')),
+      delete: () => Promise.resolve(false),
+      list: () => Promise.resolve({}),
+    };
+    const { page, cdp } = fakePage(true);
+    const host = await attachPlaywrightPageHost(page, { engineBundle: '', storage: failing });
+    const call = (id: number, method: string, args: unknown[]): void => {
+      cdp.emit('Runtime.bindingCalled', {
+        name: '__shimCoreHost',
+        executionContextId: 7,
+        payload: JSON.stringify({ type: 'call', id, method, patchId: 'p', origin: 'https://x.test', args }),
+      });
+    };
+    call(1, 'storage.set', ['k', 1]);
+    call(2, 'storage.get', ['k']);
+    await tick();
+    const answers = cdp.sends
+      .filter((s) => s.method === 'Runtime.evaluate' && s.params.contextId === 7)
+      .map((s) => String(s.params.expression));
+    const answer1 = answers.find((e) => /\.(resolve|reject)\(1,/.test(e)) ?? '';
+    const answer2 = answers.find((e) => /\.(resolve|reject)\(2,/.test(e)) ?? '';
+    check('a store that fails rejects the page\'s call, naming the failure', answer1.includes('.reject(1,') && answer1.includes('disk full'), answer1);
+    check('a store that answers resolves it with the value', answer2.includes('.resolve(2, "stored")'), answer2);
+    await host.detach();
   }
 
   console.log('net errors');

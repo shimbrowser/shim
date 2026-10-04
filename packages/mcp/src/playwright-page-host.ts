@@ -243,6 +243,9 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
     for (const w of waiters) w(id);
   };
   const waitForWorld = (ms: number): Promise<number | null> => {
+    // A detached host has no world to wait for: a queued step that starts
+    // after detach gives up at once instead of holding detach's `await queue`.
+    if (detached) return Promise.resolve(null);
     if (worldContextId !== null) return Promise.resolve(worldContextId);
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -309,27 +312,28 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
     });
   });
 
-  // The api's answering leg: run the store call, resolve the page's promise
-  // in the context that asked. A context that went away drops the answer.
+  // The api's answering leg: run the store call, settle the page's promise
+  // in the context that asked. A store that fails rejects it, as the
+  // browser's IPC invoke does, so a handler never reads a failed write as
+  // done. A context that went away drops the answer.
   async function answerCall(contextId: number, id: number, method: string, patchId: unknown, origin: unknown, rawArgs: unknown): Promise<void> {
     const args = Array.isArray(rawArgs) ? rawArgs : [];
     const scope: StorageScope = { patchId: typeof patchId === 'string' ? patchId : '', origin: typeof origin === 'string' ? origin : '' };
     const key = typeof args[0] === 'string' ? args[0] : String(args[0]);
-    let value: unknown;
+    let expression: string;
     try {
+      let value: unknown;
       if (method === 'storage.get') value = await storage.get(scope, key);
       else if (method === 'storage.set') value = await storage.set(scope, key, args[1]);
       else if (method === 'storage.delete') value = await storage.delete(scope, key);
       else if (method === 'storage.list') value = await storage.list(scope);
       else value = undefined;
-    } catch {
-      value = undefined;
+      const literal = value === undefined ? 'undefined' : JSON.stringify(value);
+      expression = `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].resolve(${id}, ${literal})`;
+    } catch (err) {
+      expression = `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].reject(${id}, ${JSON.stringify(`${method} failed: ${errText(err)}`)})`;
     }
-    const literal = value === undefined ? 'undefined' : JSON.stringify(value);
-    await cdp.send('Runtime.evaluate', {
-      expression: `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].resolve(${id}, ${literal})`,
-      contextId,
-    }).catch(() => { /* the document went away */ });
+    await cdp.send('Runtime.evaluate', { expression, contextId }).catch(() => { /* the document went away */ });
   }
 
   // --- setup ---
