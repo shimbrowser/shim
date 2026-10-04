@@ -239,6 +239,46 @@ rejects('a __proto__ handler file is refused (the browser\'s stored-handler bag 
   () => diffWorkingCopy(state, { ...checkout(), 'handlers/__proto__.js': expressionToModule('function proto() {}') }),
   '"__proto__" is not a valid handler name');
 
+console.log('a global shim\'s shared code space');
+const GLOBAL: Spec = {
+  ...WORKING, global: true,
+  sharedHandlers: { fmt: 'function fmt(s) { return s.trim(); }', old: 'function old() {}' },
+};
+const globalState: WorkingState = { spec: GLOBAL };
+const globalCheckout = (): FolderInput => checkoutShim(globalState);
+result = diffWorkingCopy(globalState, globalCheckout());
+check('an untouched checkout with shared handlers diffs to no ops', result.ops.length === 0, kinds(result.ops));
+const sharedEdit = withSpec((spec) => {
+  spec.sharedHandlers = { fmt: 'function fmt(s) { return s.trim().toLowerCase(); }', added: 'function added() { return 1; }' };
+}, globalCheckout());
+applied = expectApplied('change one, add one, drop one shared handler', sharedEdit, globalState);
+check('one set per changed / added name, one remove per dropped name',
+  applied.ops.map((o) => `${o.op}:${o.name ?? ''}`).join(' ') === 'set-shared-handler:fmt set-shared-handler:added remove-shared-handler:old',
+  applied.ops.map((o) => `${o.op}:${o.name ?? ''}`).join(' '));
+check('the set op carries the folder\'s source', applied.ops[0]?.source === 'function fmt(s) { return s.trim().toLowerCase(); }');
+check('re-diffing the same folder against the applied state is no ops',
+  diffWorkingCopy({ spec: applied.next }, sharedEdit).ops.length === 0);
+// applyDelta leaves `{}` once the last name goes, which the differ reads as
+// the folder's absent map (so this one is not a byte-for-byte checkout).
+const noShared = withSpec((spec) => { delete spec.sharedHandlers; }, globalCheckout());
+const dropAll = diffWorkingCopy(globalState, noShared);
+check('deleting the whole map removes every shared handler',
+  dropAll.ops.map((o) => `${o.op}:${o.name ?? ''}`).join(' ') === 'remove-shared-handler:fmt remove-shared-handler:old', kinds(dropAll.ops));
+const emptied = applyDelta(GLOBAL, dropAll.ops);
+check('…leaving an empty map that a folder without one diffs to no ops',
+  stableStringify(emptied.sharedHandlers) === '{}' && diffWorkingCopy({ spec: emptied }, noShared).ops.length === 0);
+rejects('a non-object sharedHandlers', 'malformed-shim-folder',
+  () => diffWorkingCopy(globalState, withSpec((spec) => { (spec as unknown as Record<string, unknown>).sharedHandlers = ['x']; }, globalCheckout())),
+  '"sharedHandlers" must be an object');
+rejects('a non-string shared handler', 'malformed-shim-folder',
+  () => diffWorkingCopy(globalState, withSpec((spec) => { (spec as unknown as Record<string, unknown>).sharedHandlers = { fmt: 1 }; }, globalCheckout())),
+  '"sharedHandlers.fmt" must be a function source string');
+const protoShared = checkoutShim(globalState);
+protoShared[SHIM_JSON] = String(protoShared[SHIM_JSON]).replace('"sharedHandlers": {', '"sharedHandlers": {\n    "__proto__": "function p() {}",');
+rejects('a shared handler named __proto__ (applyDelta\'s plain map would drop it)', 'malformed-shim-folder',
+  () => diffWorkingCopy(globalState, protoShared),
+  '"__proto__" is not a valid shared handler name');
+
 if (failures) {
   console.error(`\n${failures} failure(s)`);
   process.exit(1);
