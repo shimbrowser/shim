@@ -40,7 +40,9 @@
 // resolves a constructed sheet's URLs against the document and ignores its
 // `baseURL` option) adopted right before
 // the importing mirror — the slot the `@import`s had — and the links are
-// disabled. A loaded sheet's own nested `@import`s are copied too, each into
+// disabled. The element's `@layer` order statements that precede its imports
+// go into a sheet adopted ahead of the copies, so the layer order they fix
+// still holds. A loaded sheet's own nested `@import`s are copied too, each into
 // its own run of sheets (URLs resolved against its own URL, its media / layer / supports
 // conditions re-expressed as wrapping at-rules) in rule order. A cross-origin
 // import is first requested with CORS (`crossorigin="anonymous"`) so its rules
@@ -69,6 +71,9 @@ interface Mirror {
   // Per-link load outcome, index-aligned with `links`: its constructed
   // copies, or why there are none. See slotCopies for how they're adopted.
   importCopies: ImportState[];
+  // The element's `@layer` statements that precede its imports, adopted
+  // ahead of the import copies (null when there are none, or no imports).
+  layerSheet: CSSStyleSheet | null;
 }
 
 // A loaded import's copies (one or more sheets, see copySheet), or why there
@@ -116,6 +121,7 @@ function removeLinks(m: Mirror): void {
   m.links = [];
   m.importCopies = [];
   m.importKey = '';
+  m.layerSheet = null;
 }
 
 // The import copies to adopt in the mirror's slot — all or none. Null while
@@ -257,10 +263,14 @@ function retryWithoutCors(style: HTMLStyleElement, m: Mirror, failed: HTMLLinkEl
 // leading `@import`s. Rebuilt only when the list changed, so an in-place
 // text update elsewhere in the sheet never reloads an imported stylesheet.
 function syncImportLinks(style: HTMLStyleElement, m: Mirror, cssText: string): void {
-  const { imports } = leadingImports(cssText);
-  const key = JSON.stringify(imports);
+  const { imports, layerStatements } = leadingImports(cssText);
+  const key = JSON.stringify([imports, layerStatements]);
   if (key === m.importKey && m.links.every((l) => l.isConnected)) return;
   removeLinks(m);
+  // `@layer b, a; @import "x.css";` fixes b before a even when x.css declares
+  // a first. The statements stay in the mirror too, but the copies are
+  // adopted before it, so they'd establish the order first without this.
+  if (imports.length && layerStatements.length) m.layerSheet = construct(layerStatements.join('\n'));
   imports.forEach((imp, idx) => {
     const link = importLink(style, m, imp, idx, isCrossOrigin(style, imp.href));
     m.links.push(link);
@@ -275,13 +285,14 @@ function documentOrder(a: HTMLStyleElement, b: HTMLStyleElement): number {
 }
 
 // Rewrite `root.adoptedStyleSheets` to [page's own sheets…, our mirrors in
-// document order, each preceded by its import copies (slotCopies)]. Assigns only
+// document order, each preceded by its leading `@layer` statements and its
+// import copies (slotCopies)]. Assigns only
 // when something changed, so a no-op sync never churns the page's style recalc.
 function reconcile(root: StyleRoot): void {
   const ours = [...mirrors.entries()]
     .filter(([, m]) => m.root === root)
     .sort(([a], [b]) => documentOrder(a, b))
-    .flatMap(([, m]) => [...(slotCopies(m) ?? []), m.sheet]);
+    .flatMap(([, m]) => [...(m.layerSheet ? [m.layerSheet] : []), ...(slotCopies(m) ?? []), m.sheet]);
   const current = root.adoptedStyleSheets;
   const desired = [...current.filter((s) => !ownSheets.has(s)), ...ours];
   if (desired.length === current.length && desired.every((s, i) => s === current[i])) return;
@@ -317,7 +328,7 @@ export function syncStyleMirror(style: HTMLStyleElement): void {
           removeLinks(existing);
           touched.add(existing.root);
         }
-        mirror = { sheet: construct(text), root, links: [], importKey: '', importCopies: [] };
+        mirror = { sheet: construct(text), root, links: [], importKey: '', importCopies: [], layerSheet: null };
         mirrors.set(style, mirror);
       }
       syncImportLinks(style, mirror, text);

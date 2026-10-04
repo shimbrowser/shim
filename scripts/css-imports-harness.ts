@@ -18,7 +18,9 @@ function eq(label: string, actual: LeadingImports, expected: LeadingImports): vo
   if (!ok) failures++;
 }
 const only = (...imports: Array<[string, string]>): LeadingImports =>
-  ({ imports: imports.map(([href, media]) => ({ href, media })), unsupported: 0 });
+  ({ imports: imports.map(([href, media]) => ({ href, media })), unsupported: 0, layerStatements: [] });
+const withLayers = (layerStatements: string[], ...imports: Array<[string, string]>): LeadingImports =>
+  ({ ...only(...imports), layerStatements });
 
 eq('no imports', leadingImports('.a { color: red; }'), only());
 eq('empty text', leadingImports(''), only());
@@ -29,20 +31,25 @@ eq('media query kept', leadingImports('@import url(a.css) screen and (min-width:
 eq('several, with comments and whitespace between',
   leadingImports('/* fonts */\n  @import url(a.css);\n/* x */ @IMPORT "b.css" print;\n.a{}'),
   only(['a.css', ''], ['b.css', 'print']));
-eq('@charset and @layer statements may precede',
+eq('@charset and @layer statements may precede (layer statements reported)',
   leadingImports('@charset "utf-8";\n@layer base, shim;\n@import url(a.css);'),
-  only(['a.css', '']));
+  withLayers(['@layer base, shim;'], ['a.css', '']));
+eq('a @layer statement after an @import ends the import block (as Chromium parses it)',
+  leadingImports('@layer x;\n@import "a.css";\n@layer y;\n@import "b.css";'),
+  withLayers(['@layer x;'], ['a.css', '']));
 eq('a @layer block ends the import block', leadingImports('@layer shim { .a{} }\n@import url(a.css);'), only());
 eq('an @import after a style rule is invalid and ignored', leadingImports('.a{}\n@import url(a.css);'), only());
 eq('quoted ; and ) inside the url', leadingImports('@import url("a;b).css");@import url(c.css);'), only(['a;b).css', ''], ['c.css', '']));
-eq('layer(…) import is unsupported', leadingImports('@import url(a.css) layer(x);@import url(b.css);'), { imports: [{ href: 'b.css', media: '' }], unsupported: 1 });
-eq('bare layer keyword is unsupported', leadingImports('@import "a.css" layer;'), { imports: [], unsupported: 1 });
-eq('supports(…) import is unsupported', leadingImports('@import "a.css" supports(display: grid);'), { imports: [], unsupported: 1 });
+eq('layer(…) import is unsupported', leadingImports('@import url(a.css) layer(x);@import url(b.css);'), { imports: [{ href: 'b.css', media: '' }], unsupported: 1, layerStatements: [] });
+eq('bare layer keyword is unsupported', leadingImports('@import "a.css" layer;'), { imports: [], unsupported: 1, layerStatements: [] });
+eq('supports(…) import is unsupported', leadingImports('@import "a.css" supports(display: grid);'), { imports: [], unsupported: 1, layerStatements: [] });
 eq('comment between @import and url()', leadingImports("@import /* generated */ url('/shim.css');"), only(['/shim.css', '']));
 eq('comments around a bare string and inside a quoted url()', leadingImports('@import/*a*/"a.css"/*b*/ print;@import url( "b.css" /*c*/ );'), only(['a.css', 'print'], ['b.css', '']));
 eq('a { inside a comment after the url does not end the import block', leadingImports('@import url(\'/shim.css\') /* build {id} */;@import "b.css";'), only(['/shim.css', ''], ['b.css', '']));
 eq('a ; inside a comment does not end the statement early', leadingImports('@import "a.css" /* x; y */ print;'), only(['a.css', 'print']));
-eq('comments inside @charset / @layer statements are skipped', leadingImports('@layer a /* {b} */, c;@import url(a.css);'), only(['a.css', '']));
+eq('comments inside @charset / @layer statements are skipped', leadingImports('@layer a /* {b} */, c;@import url(a.css);'), withLayers(['@layer a /* {b} */, c;'], ['a.css', '']));
+eq('hex escapes decode, consuming one trailing space', leadingImports('@import url("\\66 oo.css");@import "\\62 ar.css";@import url(\\62 az.css);'), only(['foo.css', ''], ['bar.css', ''], ['baz.css', '']));
+eq('escaped ) inside an unquoted url', leadingImports('@import url(a\\).css) print;'), only(['a).css', 'print']));
 eq('an unquoted url() body is raw: /* and ; are URL characters', leadingImports('@import url(/a/*;b.css);@import "c.css";'), only(['/a/*;b.css', ''], ['c.css', '']));
 eq('an unclosed comment ends the import block', leadingImports('@import "a.css" /* never closed;'), only());
 eq('@importer is not @import', leadingImports('@importer url(a.css);'), only());
@@ -62,6 +69,8 @@ eqText('absolutize: absolute, data: and fragment urls untouched', absolutizeUrls
 eqText('absolutize: url( inside a string is text', absolutizeUrls('.a::before { content: "url(x.png)"; }', BASE), '.a::before { content: "url(x.png)"; }');
 eqText('absolutize: an ident ending in url( is not a url token', absolutizeUrls('.a { b: myurl(x.png); }', BASE), '.a { b: myurl(x.png); }');
 eqText('absolutize: @font-face src, uppercase URL(', absolutizeUrls('@font-face { src: URL(f.woff2) format("woff2"); }', BASE), '@font-face { src: url("https://cdn.example/css/nested/f.woff2") format("woff2"); }');
+eqText('absolutize: hex escapes decode before resolving', absolutizeUrls('.a { b: url("\\66 oo.png"), url(\\62 ar.png); }', BASE), '.a { b: url("https://cdn.example/css/nested/foo.png"), url("https://cdn.example/css/nested/bar.png"); }');
+eqText('absolutize: an escaped space and a line continuation', absolutizeUrls('.a { b: url("a\\ b.png"), url("c\\\nd.png"); }', BASE), '.a { b: url("https://cdn.example/css/nested/a%20b.png"), url("https://cdn.example/css/nested/cd.png"); }');
 eqText('absolutize: unterminated url left as is', absolutizeUrls('.a { b: url(x.png', BASE), '.a { b: url(x.png');
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) FAILED.`);

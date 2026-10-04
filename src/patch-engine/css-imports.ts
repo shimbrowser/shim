@@ -9,9 +9,12 @@
 // `<link rel="stylesheet">` — subject to the same `style-src` check the
 // `@import` itself would have been. This module only finds them.
 //
-// Grammar followed (CSS Cascade 5): `@import` rules must precede every other
-// rule except `@charset` and `@layer` *statements*; anything else ends the
-// import block, and a later `@import` is invalid CSS the browser ignores too.
+// Grammar followed (CSS Cascade 5, as Chromium parses it): `@charset` and
+// `@layer` *statements* may precede the `@import`s; anything else — including
+// a `@layer` statement after an `@import` — ends the import block, and a later
+// `@import` is invalid CSS the browser ignores too. The leading `@layer`
+// statements are returned as well: they fix the order of layers the imported
+// sheets then declare, so the mirror must keep them ahead of its copies.
 // A `<link>` can express a URL plus a media query list, but not the
 // `layer(…)` / `layer` or `supports(…)` conditions — those imports are
 // reported as `unsupported` rather than linked with the wrong semantics.
@@ -24,6 +27,8 @@ export interface CssImport {
 export interface LeadingImports {
   imports: CssImport[];
   unsupported: number;
+  // The `@layer a, b;` statements before the first `@import`, as written.
+  layerStatements: string[];
 }
 
 function skipTrivia(css: string, i: number): number {
@@ -49,6 +54,12 @@ function unquotedUrlEnd(css: string, i: number): number {
   let j = i + 4;
   while (j < css.length && /\s/.test(css.charAt(j))) j++;
   if (css[j] === '"' || css[j] === "'") return -1;
+  return rawUrlEnd(css, j);
+}
+
+// From inside an unquoted url token's body: the index of its closing `)`
+// (escape-aware), or `css.length` when it never closes.
+function rawUrlEnd(css: string, j: number): number {
   for (; j < css.length; j++) {
     if (css[j] === '\\') j++;
     else if (css[j] === ')') return j;
@@ -96,8 +107,37 @@ function atKeyword(css: string, i: number, name: string): boolean {
   return next === undefined || !/[\w-]/.test(next);
 }
 
+// Decode CSS escapes (CSS Syntax 4.3.7) in a string token's or url token's
+// body: `\` + 1–6 hex digits is that code point (one following whitespace is
+// part of the escape; 0, surrogates and > U+10FFFF become U+FFFD), `\` +
+// newline is a line continuation, and `\` + any other character is that
+// character.
 function unescapeCss(s: string): string {
-  return s.replace(/\\(.)/g, '$1');
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charAt(i);
+    if (c !== '\\') {
+      out += c;
+      continue;
+    }
+    const hex = /^[0-9a-fA-F]{1,6}/.exec(s.slice(i + 1));
+    if (hex) {
+      const cp = parseInt(hex[0], 16);
+      out += cp === 0 || (cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff ? '\uFFFD' : String.fromCodePoint(cp);
+      i += hex[0].length;
+      if (s.startsWith('\r\n', i + 1)) i += 2;
+      else if (/^[ \t\n\r\f]/.test(s.charAt(i + 1))) i += 1;
+      continue;
+    }
+    const next = s.charAt(i + 1);
+    if (next === '\r') i += s.charAt(i + 2) === '\n' ? 2 : 1;
+    else if (next === '\n' || next === '\f') i += 1;
+    else if (next) {
+      out += next;
+      i += 1;
+    }
+  }
+  return out;
 }
 
 // `"…"` / `'…'` at the start of `s` → [value, rest], else null.
@@ -129,8 +169,8 @@ function parsePrelude(prelude: string): CssImport | 'unsupported' | null {
       if (s[0] !== ')') return null;
       s = s.slice(1);
     } else {
-      const close = s.indexOf(')');
-      if (close < 0) return null;
+      const close = rawUrlEnd(s, 0);
+      if (close >= s.length) return null;
       href = unescapeCss(s.slice(0, close).trim());
       s = s.slice(close + 1);
     }
@@ -144,17 +184,21 @@ function parsePrelude(prelude: string): CssImport | 'unsupported' | null {
 }
 
 export function leadingImports(css: string): LeadingImports {
-  const out: LeadingImports = { imports: [], unsupported: 0 };
+  const out: LeadingImports = { imports: [], unsupported: 0, layerStatements: [] };
+  let seenImport = false;
   let i = 0;
   for (;;) {
     i = skipTrivia(css, i);
-    if (atKeyword(css, i, 'charset') || atKeyword(css, i, 'layer')) {
+    const layer = atKeyword(css, i, 'layer');
+    if (atKeyword(css, i, 'charset') || (layer && !seenImport)) {
       const end = statementEnd(css, i);
       if (end < 0) return out; // `@layer x { … }` block: imports are over
+      if (layer) out.layerStatements.push(css.slice(i, end));
       i = end;
       continue;
     }
     if (!atKeyword(css, i, 'import')) return out;
+    seenImport = true;
     const start = i + '@import'.length;
     const end = statementEnd(css, start);
     if (end < 0) return out;
