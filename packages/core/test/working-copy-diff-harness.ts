@@ -239,56 +239,67 @@ const protoRules = (spec: Spec): void => {
   );
 };
 rejects('a rule naming "constructor" with no file is a malformed folder, not a crash', 'malformed-shim-folder',
-  () => diffWorkingCopy(state, withSpec(protoRules, checkout())),
+  () => diffWorkingCopy(state, withSpec(protoRules)),
   'handlers/constructor.js is missing');
-rejects('a handlers/__proto__.js file is a malformed folder', 'malformed-shim-folder',
-  () => diffWorkingCopy(state, withSpec(protoRules, {
-    ...checkout(),
-    'handlers/constructor.js': expressionToModule('function ctor() {}'),
-    'handlers/__proto__.js': expressionToModule('function proto() {}'),
-  })),
-  '"__proto__" is not a valid handler name');
 applied = expectApplied('a rule using a constructor handler', withSpec(protoRules, {
   ...checkout(),
   'handlers/constructor.js': expressionToModule('function ctor() {}'),
 }));
 check('one add-rule', kinds(applied.ops) === 'add-rule:pc', kinds(applied.ops));
-const protoHandlers = applied.ops[0]?.rule?.handlers;
+const ctorHandlers = applied.ops[0]?.rule?.handlers;
 check('the constructor handler is an own entry of an ordinary object',
-  protoHandlers !== undefined && Object.hasOwn(protoHandlers, 'constructor')
-  && Object.getPrototypeOf(protoHandlers) === Object.prototype
-  && Object.getOwnPropertyDescriptor(protoHandlers, 'constructor')?.value === 'function ctor() {}');
+  ctorHandlers !== undefined && Object.hasOwn(ctorHandlers, 'constructor')
+  && Object.getPrototypeOf(ctorHandlers) === Object.prototype
+  && Object.getOwnPropertyDescriptor(ctorHandlers, 'constructor')?.value === 'function ctor() {}');
 check('re-diffing the applied state is a no-op',
   diffWorkingCopy({ spec: applied.next }, checkoutShim({ spec: applied.next })).ops.length === 0);
+rejects('a __proto__ handler file is refused (the browser\'s stored-handler bag would drop it)', 'malformed-shim-folder',
+  () => diffWorkingCopy(state, { ...checkout(), 'handlers/__proto__.js': expressionToModule('function proto() {}') }),
+  '"__proto__" is not a valid handler name');
 
-console.log('a global shim\'s shared code-space');
-const globalState: WorkingState = {
-  spec: { ...state.spec, global: true, sharedHandlers: { fmt: 'function fmt(x) { return String(x); }', keep: 'function keep() {}' } },
-  handlers: state.handlers,
+console.log('a global shim\'s shared code space');
+const GLOBAL: Spec = {
+  ...WORKING, global: true,
+  sharedHandlers: { fmt: 'function fmt(s) { return s.trim(); }', old: 'function old() {}' },
 };
+const globalState: WorkingState = { spec: GLOBAL };
 const globalCheckout = (): FolderInput => checkoutShim(globalState);
-check('an untouched global checkout diffs to no ops', diffWorkingCopy(globalState, globalCheckout()).ops.length === 0);
-const sharedKinds = (ops: DeltaOp[]): string => ops.map((op) => `${op.op}:${op.name ?? ''}`).join(' ');
-applied = expectApplied('a shared handler added, one edited, one removed', withSpec((spec) => {
-  spec.sharedHandlers = { fmt: 'function fmt(x) { return `#${x}`; }', total: 'function total(a) { return a.length; }' };
-}, globalCheckout()), globalState);
-check('one set per added / changed entry, one remove per dropped one',
-  sharedKinds(applied.ops) === 'set-shared-handler:fmt set-shared-handler:total remove-shared-handler:keep', sharedKinds(applied.ops));
-check('re-diffing the applied global state is a no-op',
-  diffWorkingCopy({ spec: applied.next }, checkoutShim({ spec: applied.next })).ops.length === 0);
-const emptied = applyDelta(globalState.spec, diffWorkingCopy(globalState, withSpec((spec) => { delete spec.sharedHandlers; }, globalCheckout())).ops);
-check('dropping the map removes every entry', JSON.stringify(emptied.sharedHandlers) === '{}');
-check('an emptied map against an absent one is no change',
-  diffWorkingCopy({ spec: emptied }, withSpec((spec) => { delete spec.sharedHandlers; }, checkoutShim({ spec: emptied }))).ops.length === 0);
+result = diffWorkingCopy(globalState, globalCheckout());
+check('an untouched checkout with shared handlers diffs to no ops', result.ops.length === 0, kinds(result.ops));
+const sharedEdit = withSpec((spec) => {
+  spec.sharedHandlers = { fmt: 'function fmt(s) { return s.trim().toLowerCase(); }', added: 'function added() { return 1; }' };
+}, globalCheckout());
+applied = expectApplied('change one, add one, drop one shared handler', sharedEdit, globalState);
+check('one set per changed / added name, one remove per dropped name',
+  applied.ops.map((o) => `${o.op}:${o.name ?? ''}`).join(' ') === 'set-shared-handler:fmt set-shared-handler:added remove-shared-handler:old',
+  applied.ops.map((o) => `${o.op}:${o.name ?? ''}`).join(' '));
+check('the set op carries the folder\'s source', applied.ops[0]?.source === 'function fmt(s) { return s.trim().toLowerCase(); }');
+check('re-diffing the same folder against the applied state is no ops',
+  diffWorkingCopy({ spec: applied.next }, sharedEdit).ops.length === 0);
+// applyDelta leaves `{}` once the last name goes, which the differ reads as
+// the folder's absent map (so this one is not a byte-for-byte checkout).
+const noShared = withSpec((spec) => { delete spec.sharedHandlers; }, globalCheckout());
+const dropAll = diffWorkingCopy(globalState, noShared);
+check('deleting the whole map removes every shared handler',
+  dropAll.ops.map((o) => `${o.op}:${o.name ?? ''}`).join(' ') === 'remove-shared-handler:fmt remove-shared-handler:old', kinds(dropAll.ops));
+const emptied = applyDelta(GLOBAL, dropAll.ops);
+check('…leaving an empty map that a folder without one diffs to no ops',
+  stableStringify(emptied.sharedHandlers) === '{}' && diffWorkingCopy({ spec: emptied }, noShared).ops.length === 0);
+rejects('a non-object sharedHandlers', 'malformed-shim-folder',
+  () => diffWorkingCopy(globalState, withSpec((spec) => { (spec as unknown as Record<string, unknown>).sharedHandlers = ['x']; }, globalCheckout())),
+  '"sharedHandlers" must be an object');
 rejects('a non-string shared handler', 'malformed-shim-folder',
   () => diffWorkingCopy(globalState, withSpec((spec) => { (spec as unknown as Record<string, unknown>).sharedHandlers = { fmt: 1 }; }, globalCheckout())),
-  '"sharedHandlers"');
+  '"sharedHandlers.fmt" must be a function source string');
+const protoShared = checkoutShim(globalState);
+protoShared[SHIM_JSON] = String(protoShared[SHIM_JSON]).replace('"sharedHandlers": {', '"sharedHandlers": {\n    "__proto__": "function p() {}",');
+rejects('a shared handler named __proto__ (applyDelta\'s plain map would drop it)', 'malformed-shim-folder',
+  () => diffWorkingCopy(globalState, protoShared),
+  '"__proto__" is not a valid shared handler name');
+
 rejects('shared handlers on a non-global shim', 'not-editable',
   () => diffWorkingCopy(state, withSpec((spec) => { spec.sharedHandlers = { fmt: 'function fmt() {}' }; })),
   '"sharedHandlers"');
-rejects('a "__proto__" shared handler (applyDelta would drop it)', 'malformed-shim-folder',
-  () => diffWorkingCopy(globalState, withSpec((spec) => { spec.sharedHandlers = JSON.parse('{"__proto__":"function p() {}"}') as Record<string, string>; }, globalCheckout())),
-  '"__proto__"');
 
 if (failures) {
   console.error(`\n${failures} failure(s)`);

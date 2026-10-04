@@ -17,6 +17,8 @@
 //   packShim      folder → `shim/1` .shim file. A witness comes back only when
 //                 its rule's anchor digest still matches — an edited anchor
 //                 loses it and the engine re-captures one on the next apply.
+//                 A script handler module that can't export a function is
+//                 refused, as import would refuse the file.
 // unpack → pack is lossless for a canonical export (deep-equal file). A file
 // whose rules still carry inline `handlers` is folded into handlers/ on
 // unpack, so it packs back in canonical form.
@@ -26,7 +28,7 @@
 
 import type { Spec, Rule, Anchor, Witness } from './types';
 import { sha256Hex } from './sha256';
-import { moduleForExpression } from './handler-source';
+import { moduleForExpression, handlerModuleProblem } from './handler-source';
 import { lintSpec, canonicalModule, HANDLER_REF_FIELDS } from './spec-lint';
 
 export const SHIM_JSON = 'shim.json';
@@ -101,14 +103,15 @@ const RUNTIME_SPEC_FIELDS = ['priority', '__cssPriority'] as const;
 // A handler name is its file name, so it must be a safe one: no separators,
 // no dots (so no `..` and no hidden files), not empty.
 // `__proto__` is excluded: as a key it can't be an own property of the
-// spec's plain `handlers` objects.
+// spec's plain `handlers` objects (nor of the browser's stored-handler bag,
+// which would drop it on import).
 const HANDLER_NAME_RE = /^(?!__proto__$)[A-Za-z0-9_$][A-Za-z0-9_$-]*$/;
+// Windows device names, reserved in any case and with any extension
+// (`handlers/CON.js` can't be created there).
+const WINDOWS_DEVICE_NAME_RE = /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
 
-// A handler-name → source map with no prototype: a valid handler name can be
-// `constructor`, `toString` or `__proto__`, and on a plain object `name in
-// map` / `map[name]` would find Object.prototype's member instead of a file.
-function handlerMap(): Record<string, string> {
-  return Object.create(null) as Record<string, string>;
+function isHandlerName(name: string): boolean {
+  return HANDLER_NAME_RE.test(name) && !WINDOWS_DEVICE_NAME_RE.test(name);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -184,32 +187,29 @@ function authoredSpec(spec: Spec, dropFields: readonly string[]): Spec {
   return out;
 }
 
-// Windows reserves these device names in any case and with any extension:
-// handlers/con.js can't be created there.
-const RESERVED_FILE_NAME_RE = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
-
 // Every handler name must be its own portable file: a valid name, not a
-// reserved device name, and unique ignoring case — on the default macOS and
-// Windows filesystems `foo` and `Foo` are one handlers/foo.js, and writing
-// both would silently keep only the last.
+// Windows device name, and unique ignoring case (checkCaseCollisions).
 function checkHandlerNames(names: Iterable<string>, problems: string[]): void {
+  const list = [...names];
+  for (const name of list) {
+    if (!isHandlerName(name)) {
+      problems.push(`handler name "${name}" can't be a file name (use letters, digits, _, $ and -; not a Windows device name like CON or NUL)`);
+    }
+  }
+  checkCaseCollisions(list, problems);
+}
+
+// Handler names are case-sensitive, but the default macOS and Windows
+// filesystems are not: `Foo` and `foo` would be one handlers/ file, so one
+// source would overwrite the other. Names are ASCII (HANDLER_NAME_RE), so
+// lower-casing is the filesystem's folding.
+function checkCaseCollisions(names: readonly string[], problems: string[]): void {
   const byFolded = new Map<string, string>();
   for (const name of names) {
-    if (!HANDLER_NAME_RE.test(name)) {
-      problems.push(`handler name "${name}" can't be a file name (use letters, digits, _, $ and -)`);
-      continue;
-    }
-    if (RESERVED_FILE_NAME_RE.test(name)) {
-      problems.push(`handler name "${name}" is a reserved file name on Windows — rename the handler`);
-      continue;
-    }
     const folded = name.toLowerCase();
     const other = byFolded.get(folded);
-    if (other !== undefined) {
-      problems.push(`handler names "${other}" and "${name}" differ only in case — they would be the same file on macOS and Windows; rename one`);
-    } else {
-      byFolded.set(folded, name);
-    }
+    if (other === undefined) byFolded.set(folded, name);
+    else problems.push(`handler names "${other}" and "${name}" differ only in case — on a case-insensitive filesystem they'd be one file (${handlerPath(name)})`);
   }
 }
 
@@ -222,7 +222,7 @@ function checkHandlerNames(names: Iterable<string>, problems: string[]): void {
 export function checkoutShim(input: { spec: Spec; handlers?: Record<string, string> }): FolderFiles {
   const { spec } = input;
   const stored = input.handlers || {};
-  const modules: Record<string, string> = handlerMap();
+  const modules = nameMap<string>();
   const problems: string[] = [];
   for (const rule of spec.rules || []) {
     for (const name of referencedHandlerNames(rule)) {
@@ -270,7 +270,7 @@ export function unpackShim(fileContent: string | unknown): FolderFiles {
   // Handler modules: the file's top-level map, then any inline rule source
   // (a non-canonical file) folded in. A name defined twice with different
   // source can't be one file — the same collision spec-lint rejects.
-  const modules: Record<string, string> = handlerMap();
+  const modules = nameMap<string>();
   const fileHandlers = parsed.handlers;
   if (fileHandlers !== undefined && !isRecord(fileHandlers)) problems.push('"handlers" is not an object');
   for (const [name, source] of Object.entries(isRecord(fileHandlers) ? fileHandlers : {})) {
@@ -371,7 +371,7 @@ export function readShimFolder(input: FolderInput): ShimFolderContents {
   let sawSpec = false;
   let specText: string | null = null;
   let stateText: string | null = null;
-  const handlers: Record<string, string> = handlerMap();
+  const handlers = nameMap<string>();
   for (const [rawPath, content] of Object.entries(input)) {
     const path = normalizePath(rawPath);
     if (path === null) { problems.push(`"${rawPath}" is not a relative path inside the folder`); continue; }
@@ -381,16 +381,16 @@ export function readShimFolder(input: FolderInput): ShimFolderContents {
     const handler = /^handlers\/([^/]+)\.js$/.exec(path);
     const name = handler?.[1];
     if (name !== undefined) {
-      if (!HANDLER_NAME_RE.test(name)) { problems.push(`${path}: "${name}" is not a valid handler name (use letters, digits, _, $ and -)`); continue; }
+      if (!isHandlerName(name)) { problems.push(`${path}: "${name}" is not a valid handler name (use letters, digits, _, $ and -; not a Windows device name like CON or NUL)`); continue; }
       const text = decode(path, content, problems);
       if (text !== null) handlers[name] = text;
       continue;
     }
     problems.push(`unexpected file ${path} — a shim folder holds ${SHIM_JSON} and ${HANDLERS_DIR}/<name>.js only`);
   }
-  // Names that passed the per-file check, held to the same portability rules
-  // a checkout or unpack writes by (a case-sensitive disk can hold both).
-  checkHandlerNames(Object.keys(handlers), problems);
+  // A case-sensitive filesystem can hold both; it couldn't be unpacked or
+  // checked out again on a case-insensitive one.
+  checkCaseCollisions(Object.keys(handlers), problems);
 
   let spec: Spec | null = null;
   if (!sawSpec) problems.push(`${SHIM_JSON} is missing`);
@@ -441,6 +441,30 @@ function checkAuthoredSpec(raw: Record<string, unknown>, handlers: Record<string
   return raw as unknown as Spec;
 }
 
+// Import (parseShimFile → assertHandlersBound) compiles and runs every
+// `script` mutation's handler module and refuses the file unless it exports a
+// function; lint only syntax-checks transforms and wraps. So pack refuses
+// what can be told without running the code (handlerModuleProblem) rather
+// than write a file the browser won't import.
+function checkScriptModules(spec: Spec, handlers: Record<string, string>): void {
+  const problems: string[] = [];
+  const checked = new Set<string>();
+  for (const rule of spec.rules || []) {
+    for (const mutation of rule.mutations || []) {
+      if (!isRecord(mutation) || mutation.kind !== 'script') continue;
+      const name = mutation.handler;
+      if (typeof name !== 'string' || !name || checked.has(name)) continue;
+      checked.add(name);
+      // readShimFolder already refused a named handler with no file.
+      const source = Object.hasOwn(handlers, name) ? handlers[name] : undefined;
+      if (source === undefined) continue;
+      const problem = handlerModuleProblem(source);
+      if (problem) problems.push(`${handlerPath(name)} ${problem}`);
+    }
+  }
+  if (problems.length) throw new ShimFolderError('malformed-shim-folder', problems);
+}
+
 function parseState(text: string): ShimState {
   let parsed: unknown;
   try {
@@ -485,7 +509,9 @@ export function matchHostsProblem(spec: { match?: unknown }): string | null {
  * Pack a folder into a `shim/1` file. Restores `version` / `bundleHash` and
  * each witness whose anchor digest still matches from .shim-state.json (when
  * present), checks `match.hosts` as import does, and runs spec-lint — a lint
- * error is a ShimFolderError('spec-lint').
+ * error is a ShimFolderError('spec-lint'). A `script` handler module that
+ * can't export a function (handlerModuleProblem) is a
+ * ShimFolderError('malformed-shim-folder').
  */
 export function packShim(input: FolderInput): ShimFile {
   const { spec: authored, handlers, state } = readShimFolder(input);
@@ -504,6 +530,7 @@ export function packShim(input: FolderInput): ShimFile {
   // or intercept wrap resolves its name the way it will after import.
   const { errors } = lintSpec({ ...spec, handlers });
   if (errors.length) throw new ShimFolderError('spec-lint', errors);
+  checkScriptModules(spec, handlers);
 
   const file: ShimFile = {
     format: SHIM_FILE_FORMAT,
