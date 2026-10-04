@@ -74,6 +74,7 @@ export type SessionErrorCode =
   | 'nothing-to-commit'
   | 'artifact-busy'
   | 'begin-failed'
+  | 'target-changed'
   | 'invalid-request';
 
 // A backend's begin throws this when the artifact is busy with something the
@@ -83,6 +84,16 @@ export class ArtifactBusyError extends Error {
   constructor(detail: string) {
     super(detail);
     this.name = 'ArtifactBusyError';
+  }
+}
+
+// A backend's begin throws this when the target no longer matches the scope
+// the human approved (`approvedScope`): open() answers 'target-changed', so
+// the caller asks again for the new target.
+export class TargetChangedError extends Error {
+  constructor(detail: string) {
+    super(detail);
+    this.name = 'TargetChangedError';
   }
 }
 
@@ -98,6 +109,11 @@ export interface OpenRequest {
   // The page the session works against (a tab), passed through to the
   // backend; its shape is the backend's.
   target?: unknown;
+  // The consent scope the human approved for this session (the shim's host,
+  // `composition:<uid>`). begin runs after the lease wait, so the target may
+  // have moved since it was approved: a backend binding to something else
+  // throws TargetChangedError.
+  approvedScope?: string;
   // Who is driving (shown on Shim's cards), and what they set out to do.
   agent: string;
   intent: string;
@@ -107,6 +123,7 @@ export interface BeginArgs {
   sessionId: string;
   artifactId: string;
   target: unknown;
+  approvedScope?: string;
   agent: string;
   intent: string;
   // The artifact's 'turn' lease, held for the session's life.
@@ -142,7 +159,8 @@ export interface FinishInfo {
 export interface SessionBackend<H = unknown> {
   // Sets up exactly what an internal turn sets up (the kind's "begin"),
   // under the already-held lease. A throw fails open() with 'begin-failed'
-  // ('artifact-busy' for an ArtifactBusyError).
+  // ('artifact-busy' for an ArtifactBusyError, 'target-changed' for a
+  // TargetChangedError).
   begin(args: BeginArgs): Promise<H>;
   // The session's working copy as files (design D10), as of the latest
   // applied revision. Optional: a kind without one answers
@@ -477,12 +495,14 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
     try {
       handle = await backend.begin({
         sessionId, artifactId: req.artifactId, target: req.target, agent: req.agent, intent: req.intent,
+        ...(req.approvedScope !== undefined ? { approvedScope: req.approvedScope } : {}),
         lease, signal: controller.signal,
       });
     } catch (e) {
       lease.signal.removeEventListener('abort', onEarlyAbort);
       lease.release();
       if (e instanceof ArtifactBusyError) return { ok: false, error: 'artifact-busy', detail: e.message };
+      if (e instanceof TargetChangedError) return { ok: false, error: 'target-changed', detail: e.message };
       return { ok: false, error: 'begin-failed', detail: e instanceof Error ? e.message : String(e) };
     }
     lease.signal.removeEventListener('abort', onEarlyAbort);
