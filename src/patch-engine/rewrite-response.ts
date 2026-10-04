@@ -123,7 +123,17 @@ export function detectTransformForm(src: string, tryCompile: CompileProbe): Dete
   const expr = tryCompile(handlerExpressionSource(src));
   if (expr.ok) return { form: 'expr' };
   const mod = tryCompile(src);
-  if (mod.ok) return { form: 'module' };
+  if (mod.ok) {
+    // Module source must also parse where it actually runs: inside
+    // transformLiteral's `(function (module, exports) { … })` wrapper. A
+    // top-level `const module = …` / `let exports` is fine on its own but a
+    // parse-time redeclaration error there — and that literal shares ONE
+    // generated install script with every other rule on the host, where a
+    // SyntaxError can't be caught by the literal's own try.
+    const wrapped = tryCompile(transformLiteral(src, 'module'));
+    if (wrapped.ok) return { form: 'module' };
+    return { form: null, error: wrapped.error ?? 'does not parse inside the module wrapper' };
+  }
   return { form: null, error: expr.error ?? mod.error ?? 'does not parse as JavaScript' };
 }
 

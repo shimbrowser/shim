@@ -22,6 +22,7 @@
 
 import * as vm from 'vm';
 import * as acorn from 'acorn';
+import * as walk from 'acorn-walk';
 import { referencesApiAi, apiDbConnectionNames } from './capability-refs';
 import type { Spec, Rule, Mutation, AnchorSpec } from '../../patch-engine/types';
 import { RESHAPE_ALIGN, RESHAPE_JUSTIFY } from '../../patch-engine/layout-kinds';
@@ -54,12 +55,13 @@ const vmCompileProbe: CompileProbe = (code) => {
 //   - A bare function expression (the authoring convention).
 // Statically reject the cases that can never work: a CJS source with no
 // top-level `module.exports =` assignment, or whose LAST one assigns an
-// obvious non-function (object/array/literal), and a bare expression that is
-// one. Anything dynamic (a call — e.g. an IIFE returning the function — an
-// identifier, a conditional) is allowed: it may well yield a function, and
-// transformLiteral's fault isolation keeps a bad one to its own rule. Static
-// on purpose: lint runs in main on import content, which must never be
-// executed here.
+// obvious non-function (object/array/literal) — directly or through a
+// variable statically holding one (`const h = {}; module.exports = h`) — and
+// a bare expression that is one. Anything dynamic (a call — e.g. an IIFE
+// returning the function — a reassigned identifier, a conditional) is
+// allowed: it may well yield a function, and transformLiteral's fault
+// isolation keeps a bad one to its own rule. Static on purpose: lint runs in
+// main on import content, which must never be executed here.
 function isModuleExportsRef(node: acorn.Node): boolean {
   if (node.type !== 'MemberExpression') return false;
   const m = node as acorn.MemberExpression;
@@ -95,6 +97,11 @@ function moduleExportsShape(source: string): 'function' | 'non-function' | 'dyna
     }
   }
   const fnVars = new Set<string>();
+  // A variable whose value is statically a non-function (`const h = {}`).
+  // Only trusted while it can't have changed by export time: a `const` never
+  // can; a `let`/`var` only if nothing anywhere in the source writes the name.
+  const nonFnVars = new Set<string>();
+  const written = writtenNames(ast);
   let shape: 'function' | 'non-function' | 'dynamic' | 'none' = 'none';
   for (const stmt of ast.body) {
     if (stmt.type === 'ClassDeclaration') {
@@ -103,8 +110,14 @@ function moduleExportsShape(source: string): 'function' | 'non-function' | 'dyna
       for (const d of stmt.declarations) {
         if (d.id.type !== 'Identifier') continue;
         laterBindings.delete(d.id.name);
+        // A `var` redeclaration replaces whatever the name held before.
+        fnVars.delete(d.id.name);
+        nonFnVars.delete(d.id.name);
         if (d.init && (d.init.type === 'FunctionExpression' || d.init.type === 'ArrowFunctionExpression')) {
           fnVars.add(d.id.name);
+        } else if (d.init && NON_FUNCTION_EXPRESSIONS.has(d.init.type)
+          && (stmt.kind === 'const' || !written.has(d.id.name))) {
+          nonFnVars.add(d.id.name);
         }
       }
     } else if (stmt.type === 'ExpressionStatement'
@@ -117,12 +130,45 @@ function moduleExportsShape(source: string): 'function' | 'non-function' | 'dyna
       if (value.type === 'FunctionExpression' || value.type === 'ArrowFunctionExpression') shape = 'function';
       else if (value.type === 'Identifier') {
         if (hoistedFns.has(value.name) || fnVars.has(value.name)) shape = 'function';
-        else if (laterBindings.has(value.name)) shape = 'non-function';
+        else if (laterBindings.has(value.name) || nonFnVars.has(value.name)) shape = 'non-function';
         else shape = 'dynamic';
       } else shape = NON_FUNCTION_EXPRESSIONS.has(value.type) ? 'non-function' : 'dynamic';
     }
   }
   return shape;
+}
+
+// Every identifier the source assigns anywhere (`x = …`, `x += …`, `x++`,
+// destructuring targets, `for (x of …)`) — at any depth, so a write inside a
+// function that might run before the export still counts. Over-inclusive on
+// purpose (a shadowing inner binding of the same name counts too): a name in
+// here is merely judged 'dynamic', never wrongly rejected.
+function writtenNames(ast: acorn.Program): Set<string> {
+  const names = new Set<string>();
+  const addPattern = (node: acorn.Node | null | undefined): void => {
+    if (!node) return;
+    switch (node.type) {
+      case 'Identifier': names.add((node as acorn.Identifier).name); break;
+      case 'ArrayPattern': for (const el of (node as acorn.ArrayPattern).elements) addPattern(el); break;
+      case 'ObjectPattern':
+        for (const p of (node as acorn.ObjectPattern).properties) {
+          addPattern(p.type === 'RestElement' ? p : p.value);
+        }
+        break;
+      case 'RestElement': addPattern((node as acorn.RestElement).argument); break;
+      case 'AssignmentPattern': addPattern((node as acorn.AssignmentPattern).left); break;
+      default: break;
+    }
+  };
+  walk.full(ast, (node) => {
+    if (node.type === 'AssignmentExpression') addPattern((node as acorn.AssignmentExpression).left);
+    else if (node.type === 'UpdateExpression') addPattern((node as acorn.UpdateExpression).argument);
+    else if (node.type === 'ForInStatement' || node.type === 'ForOfStatement') {
+      const left = (node as acorn.ForInStatement | acorn.ForOfStatement).left;
+      if (left.type !== 'VariableDeclaration') addPattern(left);
+    }
+  });
+  return names;
 }
 
 // True unless the source's module.exports is statically known not to be a
