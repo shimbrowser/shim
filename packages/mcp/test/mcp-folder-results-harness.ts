@@ -82,6 +82,51 @@ console.log('checkout:');
   check('…before anything was written', !fs.existsSync(safe) && !fs.existsSync(path.join(root, 'escape.js')));
   throwsCode('a file where the folder should be', 'not-a-working-copy', () => writeCheckout(path.join(project, 'package.json'), { 'shim.json': '{}' }));
 
+  // A target that is a hard link to a file outside the folder must lose only
+  // its link: writing through it would truncate the shared inode.
+  const hardOutside = path.join(root, 'hard-outside');
+  fs.mkdirSync(hardOutside);
+  fs.writeFileSync(path.join(hardOutside, 'spec.txt'), 'keep-spec');
+  fs.writeFileSync(path.join(hardOutside, 'handler.txt'), 'keep-handler');
+  const hardLinked = path.join(root, 'hard-linked');
+  fs.mkdirSync(path.join(hardLinked, 'handlers'), { recursive: true });
+  let canHardLink = true;
+  try {
+    fs.linkSync(path.join(hardOutside, 'spec.txt'), path.join(hardLinked, 'shim.json'));
+    fs.linkSync(path.join(hardOutside, 'handler.txt'), path.join(hardLinked, 'handlers', 'x.js'));
+  } catch {
+    canHardLink = false;
+    console.log('  - hard-link cases skipped: this system cannot create hard links');
+  }
+  if (canHardLink) {
+    const hw = writeCheckout(hardLinked, { 'shim.json': '{"b":1}', 'handlers/x.js': 'x-new' });
+    check('hard-linked targets are replaced in the folder', hw.written.length === 2
+      && fs.readFileSync(path.join(hardLinked, 'shim.json'), 'utf8') === '{"b":1}'
+      && fs.readFileSync(path.join(hardLinked, 'handlers', 'x.js'), 'utf8') === 'x-new');
+    check('…and the files they were linked to outside are untouched',
+      fs.readFileSync(path.join(hardOutside, 'spec.txt'), 'utf8') === 'keep-spec'
+      && fs.readFileSync(path.join(hardOutside, 'handler.txt'), 'utf8') === 'keep-handler');
+    check('…with no temp files left behind', fs.readdirSync(hardLinked).every((n) => !n.endsWith('.tmp'))
+      && fs.readdirSync(path.join(hardLinked, 'handlers')).every((n) => !n.endsWith('.tmp')));
+
+    // A composition checkout replaces its files and its marker the same way.
+    const markerJson = JSON.stringify({ format: 'shim-composition-checkout/1', hidden: [] });
+    fs.writeFileSync(path.join(hardOutside, 'page.txt'), 'keep-page');
+    fs.writeFileSync(path.join(hardOutside, 'marker.txt'), markerJson);
+    const compHard = path.join(root, 'comp-hard-linked');
+    fs.mkdirSync(compHard);
+    fs.linkSync(path.join(hardOutside, 'page.txt'), path.join(compHard, 'index.html'));
+    fs.linkSync(path.join(hardOutside, 'marker.txt'), path.join(compHard, COMPOSITION_MARKER));
+    const cw = writeCompositionCheckout(compHard, { 'manifest.json': '{"c":1}', 'index.html': 'page-new' });
+    check('a composition checkout replaces hard-linked files in the folder', cw.written.length === 2
+      && fs.readFileSync(path.join(compHard, 'index.html'), 'utf8') === 'page-new'
+      && JSON.parse(fs.readFileSync(path.join(compHard, COMPOSITION_MARKER), 'utf8')).format === 'shim-composition-checkout/1');
+    check('…leaving the files and marker they were linked to outside untouched',
+      fs.readFileSync(path.join(hardOutside, 'page.txt'), 'utf8') === 'keep-page'
+      && fs.readFileSync(path.join(hardOutside, 'marker.txt'), 'utf8') === markerJson);
+    check('…with no temp files left behind', fs.readdirSync(compHard).every((n) => !n.endsWith('.tmp')));
+  }
+
   // Symlinks in a crafted or stale folder must not carry a write or a removal
   // outside it. (Windows without Developer Mode can't create symlinks: skip.)
   let canLink = true;
