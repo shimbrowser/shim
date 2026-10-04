@@ -361,14 +361,23 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
   return { dir: root, written, removed };
 }
 
-/** Which kind of working copy a checkout's files are. */
+/**
+ * Which kind of working copy a checkout's files are. A composition always
+ * carries manifest.json and a shim checkout never does, while a composition
+ * may hold a file of its own named shim.json — so the manifest decides.
+ */
 export function checkoutKind(files: FolderInput): WorkingCopyKind {
-  return SHIM_JSON in files ? 'shim' : 'composition';
+  return MANIFEST_JSON in files ? 'composition' : 'shim';
 }
 
-/** Which kind of working copy a folder on disk holds (null: neither). */
+/**
+ * Which kind of working copy a folder on disk holds (null: neither). The
+ * composition marker comes first: a composition checkout may hold its own
+ * shim.json.
+ */
 export function folderKind(dir: string): WorkingCopyKind | null {
+  if (fs.existsSync(path.join(dir, COMPOSITION_MARKER))) return 'composition';
   if (fs.existsSync(path.join(dir, SHIM_JSON))) return 'shim';
-  if (fs.existsSync(path.join(dir, COMPOSITION_MARKER)) || fs.existsSync(path.join(dir, MANIFEST_JSON))) return 'composition';
+  if (fs.existsSync(path.join(dir, MANIFEST_JSON))) return 'composition';
   return null;
 }

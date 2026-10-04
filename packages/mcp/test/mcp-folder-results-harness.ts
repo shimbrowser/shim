@@ -14,7 +14,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { readWorkingCopy, writeCheckout, writeCompositionCheckout, COMPOSITION_MARKER, FolderError } from '../src/folder';
+import { readWorkingCopy, writeCheckout, writeCompositionCheckout, checkoutKind, folderKind, COMPOSITION_MARKER, FolderError } from '../src/folder';
 import { toMcpContent, imageSize, estimateTokens, fitToBudget, maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS } from '../src/results';
 
 let failures = 0;
@@ -191,6 +191,19 @@ console.log('checkout:');
     throwsCode('a marker that is a symlink is refused', 'unsafe-path', () => writeCompositionCheckout(linkedMarker, { 'manifest.json': '{}' }));
     check('…and its target is untouched', fs.readFileSync(path.join(outside, 'victim.txt'), 'utf8') === 'keep');
   }
+}
+
+console.log('kind:');
+{
+  check('a checkout with manifest.json is a composition, even holding a shim.json', checkoutKind({ 'manifest.json': '{}', 'shim.json': '{}' }) === 'composition');
+  check('a checkout with shim.json and no manifest is a shim', checkoutKind({ 'shim.json': '{}', 'handlers/a.js': 'x' }) === 'shim');
+  const comp = tmp();
+  writeCompositionCheckout(comp, { 'manifest.json': '{}', 'shim.json': '{}' });
+  check('a composition checkout holding a shim.json is a composition folder', folderKind(comp) === 'composition');
+  const shimDir = tmp();
+  fs.writeFileSync(path.join(shimDir, 'shim.json'), '{}');
+  check('a folder with shim.json is a shim folder', folderKind(shimDir) === 'shim');
+  check('an empty folder is neither', folderKind(tmp()) === null);
 }
 
 console.log('content:');
