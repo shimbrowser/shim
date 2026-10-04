@@ -13,6 +13,7 @@ import { applyRule } from './apply-rule';
 import { routeRule } from './route-rule';
 import { bridgeRule } from './bridge-rule';
 import type { RuntimeSpec, MutationRegistry, HandlerMap } from './engine-internal';
+import { setInlineHandlerRequire } from './engine-internal';
 import type { Spec, Rule } from './types';
 import type { ShimApiBase } from '../preload/shim-api-types';
 
@@ -211,5 +212,6 @@ function run(patch: PatchBundle, api: ShimApiBase): PatchControl {
 // `firstGreaterIndex` (css-priority-harness) and `isShimOwnedElement`
 // (engine-own-dom-harness) live in ./css-sheets and ./own-dom; re-exported here
 // so those harnesses' `from '../src/patch-engine/engine'` imports — and engine's
-// public surface — stay unchanged.
-export { run, firstGreaterIndex, isShimOwnedElement };
+// public surface — stay unchanged. `setInlineHandlerRequire` is how the page
+// preload hands inline handlers its own `require` (engine-internal.ts).
+export { run, firstGreaterIndex, isShimOwnedElement, setInlineHandlerRequire };
