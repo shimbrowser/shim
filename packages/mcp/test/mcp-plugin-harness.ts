@@ -172,6 +172,9 @@ check('never asks the agent to write witnesses', !/"witness"\s*:/.test(skill));
 // or an agent following them exactly is refused.
 check('states the portable handler-name exclusions (__proto__, device names, case)',
   skill.includes('`__proto__`') && skill.includes('`con`') && /differ only in case/.test(skill));
+check('says route and redirect rules do not install on a global shim', /Not on a global shim\.\*\* Route and redirect rules/.test(skill));
+check('documents the whole-export intercept wrap and its reload', /give `wrap` without `symbol`[\s\S]{0,200}reload/.test(skill));
+check('says api.fetch cannot reach the local network', /cannot reach the local network[\s\S]{0,200}blocked/.test(skill));
 check('documents sharedHandlers as editable on a global shim', /On a global shim[\s\S]{0,200}`sharedHandlers`/.test(skill) && skill.includes('api.shared.<name>'));
 
 console.log('the composition half:');
