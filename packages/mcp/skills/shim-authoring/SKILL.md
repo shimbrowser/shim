@@ -428,6 +428,10 @@ route that owns sub-paths, build the shell once and register
 `api.onRouteChange((match) => { …; return teardown; })` so inner navigation updates in
 place.
 
+**Not on a global shim.** Route and redirect rules in a `"global": true` shim's per-site
+rules preview but never install after commit (both are built from the shim's shared spec,
+which holds no rules). Use a regular shim for them.
+
 ### Network and module rules
 
 **`redirect`** — swap the host of top-level navigations before the page loads (no anchor,
@@ -441,7 +445,7 @@ no handler):
 `match.hosts` must include `from` (and `match` can't change in a session, so `from` must
 already be one of its hosts); `from` and `to` must share a registrable domain; only
 top-level navigations are redirected; path, query and hash are kept. Each new redirect
-target asks the user at commit.
+target asks the user at commit. Not on a global shim (see `mount-route` above).
 
 **`rewrite-response`** — reshape the JSON the site's own code fetches, before it reads it
 (the right tool for filtering a list the site loads, so its counts and pagination stay
@@ -466,7 +470,10 @@ when the site fetches again — reload before concluding a rewrite doesn't work.
 
 The wrap `(original, ctx) => replacement` runs in the main world at module registration
 (possibly many times — keep state in the returned function) and must call through to
-`original`. Omit `symbol` and `wrap` to only expose the module to
+`original`. To wrap the module's **whole export** (the export itself is the function, or
+you replace the export object), give `wrap` without `symbol`: it attaches only when the
+module registers, so if the page already loaded the module the user must reload — say so
+in your reply. Omit `symbol` and `wrap` to only expose the module to
 `api.modules.invoke(moduleId, fnPath, args)` from a `script` handler (`{ ok, result }`,
 never throws). List module ids with
 `evaluate_in_page('Object.keys(require.s.contexts._.defined)')`.
@@ -619,7 +626,10 @@ if you need to), and say in your summary what you could only verify that way.
   you pass, so a third-party API authenticated by a key works: read the key from a `secret`
   setting and pass it as `Authorization` or the API's key header. Only for the site's own
   endpoints that need the user's logged-in session, use the page's
-  `fetch(url, { credentials: 'include' })`.
+  `fetch(url, { credentials: 'include' })`. It **cannot reach the local network**: localhost,
+  LAN addresses and hostnames resolving to private or link-local addresses answer
+  `{ ok: false, error: 'blocked: …' }`. Previews don't exercise this path, so don't build
+  an integration with a local service on `api.fetch`.
 - **`api.ai.complete({ prompt | messages, system?, model?, maxTokens? })`** — Claude, on the
   user's own Anthropic key, which the shim never sees: `{ ok, text }`. Requires
   `"permissions": ["ai"]`; the user grants it in Shim after the commit, and until then calls
