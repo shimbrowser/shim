@@ -174,6 +174,19 @@ const evaluated: unknown = vm.runInNewContext(`(${iife})`);
 check('…that evaluates to the module\'s export', typeof evaluated === 'function');
 const assigned: unknown = vm.runInNewContext(`var module = { exports: {} }; ${expressionToModule(iife)} module.exports`);
 check('…and survives the module wrap the browser compiles', typeof assigned === 'function');
+// CommonJS runs a module with `this === module.exports`; the IIFE keeps that,
+// so a strict module that writes through `this` still works.
+{
+  const thisModule = '"use strict";\nconst self = this;\nself.helper = function helper() { return 7; };\nmodule.exports = function h() { return self.helper(); };\n';
+  const viaThis = moduleToExpression(thisModule);
+  let result: unknown;
+  try {
+    const fn = vm.runInNewContext(`(${viaThis})`) as unknown;
+    result = typeof fn === 'function' ? (fn as () => unknown)() : 'not a function';
+  } catch (e) { result = String(e); }
+  check('a module using top-level `this` keeps CommonJS semantics in the IIFE', result === 7, String(result));
+  check('…and still round-trips byte for byte', moduleForExpression(viaThis) === thisModule);
+}
 check('moduleForExpression undoes the IIFE byte for byte', moduleForExpression(iife) === ROUTE_MODULE);
 check('…and wraps any other expression', moduleForExpression(expr) === expressionToModule(expr));
 check('module.exports = a; extra(); is not a bare expression', moduleToExpression('module.exports = a;\nextra();\n').startsWith('(function () {'));
@@ -256,6 +269,16 @@ for (const device of ['CON', 'nul', 'Com1', 'LPT9', 'aux', 'prn']) {
   rejects(`a handlers/${device}.js file (a Windows device name)`, 'malformed-shim-folder',
     () => readShimFolder({ [SHIM_JSON]: JSON.stringify({ id: 'd', match: { hosts: ['example.com'] }, rules: [] }), [`handlers/${device}.js`]: expressionToModule('function d() {}') }),
     `"${device}" is not a valid handler name`);
+}
+// `<name>.js` must fit a 255-byte file-name component.
+{
+  const longest = 'h'.repeat(252);
+  check('a 252-character handler name is accepted', (() => {
+    try { readShimFolder({ [SHIM_JSON]: JSON.stringify({ id: 'l', match: { hosts: ['example.com'] }, rules: [] }), [`handlers/${longest}.js`]: expressionToModule('function l() {}') }); return true; } catch { return false; }
+  })());
+  rejects('a 253-character handler name', 'malformed-shim-folder',
+    () => readShimFolder({ [SHIM_JSON]: JSON.stringify({ id: 'l', match: { hosts: ['example.com'] }, rules: [] }), [`handlers/${longest}h.js`]: expressionToModule('function l() {}') }),
+    'at most 252 characters');
 }
 rejects('a .shim whose handlers map names CON', 'malformed-shim-file',
   () => unpackShim({ format: 'shim/1', name: 'd', spec: { id: 'd', match: { hosts: ['example.com'] }, rules: [] }, handlers: { CON: expressionToModule('function d() {}') } }),
