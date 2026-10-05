@@ -110,8 +110,12 @@ const HANDLER_NAME_RE = /^(?!__proto__$)[A-Za-z0-9_$][A-Za-z0-9_$-]*$/;
 // (`handlers/CON.js` can't be created there).
 const WINDOWS_DEVICE_NAME_RE = /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])$/i;
 
+// `<name>.js` must fit a file-name component: 255 bytes on common
+// filesystems, and names are ASCII, so 252 characters plus `.js`.
+export const MAX_HANDLER_NAME_CHARS = 252;
+
 function isHandlerName(name: string): boolean {
-  return HANDLER_NAME_RE.test(name) && !WINDOWS_DEVICE_NAME_RE.test(name);
+  return name.length <= MAX_HANDLER_NAME_CHARS && HANDLER_NAME_RE.test(name) && !WINDOWS_DEVICE_NAME_RE.test(name);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -193,7 +197,7 @@ function checkHandlerNames(names: Iterable<string>, problems: string[]): void {
   const list = [...names];
   for (const name of list) {
     if (!isHandlerName(name)) {
-      problems.push(`handler name "${name}" can't be a file name (use letters, digits, _, $ and -; not a Windows device name like CON or NUL)`);
+      problems.push(`handler name "${name}" can't be a file name (use letters, digits, _, $ and -, at most 252 characters; not a Windows device name like CON or NUL)`);
     }
   }
   checkCaseCollisions(list, problems);
@@ -381,7 +385,7 @@ export function readShimFolder(input: FolderInput): ShimFolderContents {
     const handler = /^handlers\/([^/]+)\.js$/.exec(path);
     const name = handler?.[1];
     if (name !== undefined) {
-      if (!isHandlerName(name)) { problems.push(`${path}: "${name}" is not a valid handler name (use letters, digits, _, $ and -; not a Windows device name like CON or NUL)`); continue; }
+      if (!isHandlerName(name)) { problems.push(`${path}: "${name}" is not a valid handler name (use letters, digits, _, $ and -, at most 252 characters; not a Windows device name like CON or NUL)`); continue; }
       const text = decode(path, content, problems);
       if (text !== null) handlers[name] = text;
       continue;

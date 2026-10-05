@@ -31,7 +31,9 @@ function exactWrappedExpression(moduleSource: string): string | null {
 // The IIFE moduleToExpression wraps a module in: runs it in its own
 // `(module, exports)` scope and evaluates to its `module.exports`.
 const MODULE_IIFE_PREFIX = '(function () {\nvar module = { exports: {} };\n(function (module, exports) {\n';
-const MODULE_IIFE_SUFFIX = '\n})(module, module.exports);\nreturn module.exports;\n})()';
+// `.call(module.exports, …)` keeps CommonJS's top-level `this` (the browser's
+// module compile runs a module with `this === module.exports`).
+const MODULE_IIFE_SUFFIX = '\n}).call(module.exports, module, module.exports);\nreturn module.exports;\n})()';
 
 const WRAPPED_EXPRESSION_RE = /^\s*module\.exports\s*=\s*([\s\S]*?)\s*;?\s*$/;
 
