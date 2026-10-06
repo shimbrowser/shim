@@ -63,7 +63,9 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
     name: 'shim_open_session',
     description:
       'Open an authoring session on one shim (against one of Shim\'s site tabs) or one composition. The user is ' +
-      'asked in Shim to allow it (up to two minutes); this call waits for the answer. Name an existing shim with ' +
+      'asked in Shim to allow it (up to two minutes); this call waits for the answer, and nothing shows here ' +
+      'meanwhile, so first tell the user to switch to Shim and allow the "coding agent wants to connect" card in ' +
+      'its sidebar. Name an existing shim with ' +
       'shimId, start a new one on the tab\'s site with newShimName, name a composition with compositionId, or ' +
       'start a new composition with newCompositionName (and optionally the mount you propose for its ' +
       'compose://<mount> address; the user can change it before allowing, and the answer says which they chose). ' +

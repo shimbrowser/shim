@@ -39,7 +39,9 @@ browser.
    - `intent` is one or two sentences of what you set out to do. The user sees it on the
      card in Shim and it is recorded in the shim's chat when you commit.
    - The user is asked in Shim to allow the session, and the call waits (up to two
-     minutes). If they decline, do not retry unless they ask you to.
+     minutes) with nothing on screen here. So **before** calling, tell the user in one
+     line to switch to Shim and allow the "coding agent wants to connect" card at the top
+     of its sidebar. If they decline, do not retry unless they ask you to.
    - With `dir` (an absolute path to an empty folder, or an earlier checkout) the shim is
      checked out at once. Otherwise call `shim_checkout { dir }`.
 4. **Edit the folder** (section 2): `shim.json` and `handlers/<name>.js`.
@@ -53,7 +55,9 @@ browser.
 7. **Commit.** `shim_commit { summary }` saves the latest preview as a new version of the
    shim. `summary` is what changed and why, in a few sentences — it becomes your reply in
    the shim's chat. If the work declares something sensitive (a redirect target, a remote
-   database connection) the user approves it in Shim first, and the call waits.
+   database connection) the user approves it in Shim first, and the call waits. Any call
+   that waits on a card in Shim (this one, the API map, a composition's hosts) shows
+   nothing here while it waits: when you expect a card, tell the user to look at Shim first.
 8. **End.** `shim_end_session`. Anything previewed after the last commit is discarded and
    the page returns to the shim as committed.
 
