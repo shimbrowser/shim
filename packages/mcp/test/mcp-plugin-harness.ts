@@ -174,6 +174,9 @@ check('states the portable handler-name exclusions (__proto__, device names, cas
 check('says route and redirect rules do not install on a global shim', /Not on a global shim\.\*\* Route and redirect rules/.test(skill));
 check('documents the whole-export intercept wrap and its reload', /give `wrap` without `symbol`[\s\S]{0,200}reload/.test(skill));
 check('says api.fetch cannot reach the local network', /cannot reach the local network[\s\S]{0,200}blocked/.test(skill));
+// A preview's api.fetch is the real broker (page-preload's makeApi), private-network block included.
+check('never claims a preview skips api.fetch', !/previews? (?:don't|do not|doesn't|does not|never) (?:exercise|use|reach|run)[^.]{0,60}(?:fetch|this path)/i.test(skill));
+check('says a preview makes the same real fetch requests', /preview makes the same real requests/.test(skill));
 check('documents sharedHandlers as editable on a global shim', /On a global shim[\s\S]{0,200}`sharedHandlers`/.test(skill) && skill.includes('api.shared.<name>'));
 
 console.log('the worked example:');

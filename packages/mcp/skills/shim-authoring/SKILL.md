@@ -588,8 +588,9 @@ if you need to), and say in your summary what you could only verify that way.
   endpoints that need the user's logged-in session, use the page's
   `fetch(url, { credentials: 'include' })`. It **cannot reach the local network**: localhost,
   LAN addresses and hostnames resolving to private or link-local addresses answer
-  `{ ok: false, error: 'blocked: …' }`. Previews don't exercise this path, so don't build
-  an integration with a local service on `api.fetch`.
+  `{ ok: false, error: 'blocked: …' }`. A preview makes the same real requests through
+  the same broker and block, so it shows you that answer; don't build an integration
+  with a local service on `api.fetch`.
 - **`api.ai.complete({ prompt | messages, system?, model?, maxTokens? })`** — Claude, on the
   user's own Anthropic key, which the shim never sees: `{ ok, text }`. Requires
   `"permissions": ["ai"]`; the user grants it in Shim after the commit, and until then calls
