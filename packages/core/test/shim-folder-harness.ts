@@ -226,6 +226,42 @@ check('…and survives the module wrap the browser compiles', typeof assigned ==
 }
 check('moduleForExpression undoes the IIFE byte for byte', moduleForExpression(iife) === ROUTE_MODULE);
 check('…and wraps any other expression', moduleForExpression(expr) === expressionToModule(expr));
+// A bare expression runs inline (the preload's `(<expr>)` compile) with no
+// CommonJS wrapper, so an export that uses one of its bindings keeps the IIFE,
+// and runs the way the module itself does.
+{
+  const selfRef = 'module.exports = function h() { return module.exports === h; };\n';
+  const asExpr = moduleToExpression(selfRef);
+  check('an export that reads `module` keeps the IIFE', asExpr.startsWith('(function () {'));
+  const inline = vm.runInNewContext(`(${asExpr})`) as unknown;
+  check('…and inline it sees its own module, as the module does', typeof inline === 'function' && (inline as () => unknown)() === true);
+  for (const binding of ['exports', 'this', 'arguments', 'require']) {
+    check(`an export that mentions \`${binding}\` keeps the IIFE`,
+      moduleToExpression(`module.exports = function h() { return typeof ${binding}; };\n`).startsWith('(function () {'));
+  }
+  const escaped = 'module.exports = function h() { return m\\u006fdule.\\u0065xports === h; };\n';
+  const asEscaped = moduleToExpression(escaped);
+  check('an export spelling `module` with an escape keeps the IIFE', asEscaped.startsWith('(function () {'));
+  const viaEscape = vm.runInNewContext(`(${asEscaped})`) as unknown;
+  check('…and inline it still sees its own module', typeof viaEscape === 'function' && (viaEscape as () => unknown)() === true);
+  // The browser's module compile passes (module, exports, require,
+  // __filename, __dirname); the IIFE forwards the same, in order, from the
+  // scope it is compiled in.
+  const viaArgs = moduleToExpression('module.exports = function h() { return [typeof arguments, h.length]; };\nconst grab = arguments;\nmodule.exports.args = grab;\n');
+  const fakeRequire = () => 'required';
+  const scoped = vm.runInNewContext(`(function (require, __filename, __dirname) { return ${viaArgs}; })`)(fakeRequire, 'shim://x/handlers/h.js', '') as { args?: unknown[] };
+  const args = Array.from((scoped.args ?? []) as ArrayLike<unknown>);
+  check('the IIFE passes the module compile\'s five arguments in its order',
+    args.length === 5 && args[2] === fakeRequire && args[3] === 'shim://x/handlers/h.js' && args[4] === '', JSON.stringify(args.map((a) => typeof a)));
+  const unscoped = vm.runInNewContext(`(${viaArgs})`) as { args?: unknown[] };
+  check('…and still compiles where no require is in scope', Array.from((unscoped.args ?? []) as ArrayLike<unknown>).length === 5);
+  const commented = 'module.exports = function h() { return 3; } // explanation\n';
+  const asCommented = moduleToExpression(commented);
+  check('an export ending in a // comment keeps the IIFE', asCommented.startsWith('(function () {'));
+  let compiled: unknown;
+  try { compiled = vm.runInNewContext(`(${asCommented})`); } catch (e) { compiled = String(e); }
+  check('…which compiles inline with the closer on the comment\'s line', typeof compiled === 'function' && (compiled as () => unknown)() === 3, String(compiled));
+}
 check('module.exports = a; extra(); is not a bare expression', moduleToExpression('module.exports = a;\nextra();\n').startsWith('(function () {'));
 
 console.log('malformed folders');
@@ -261,6 +297,15 @@ rejects('a script handler module exporting a string', 'malformed-shim-folder',
   () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = "notes"' }), 'not a function');
 rejects('a script handler file that is a bare function declaration', 'malformed-shim-folder',
   () => packShim({ ...good(), 'handlers/notes.js': 'function notes({ anchor }) { anchor.dataset.n = "1"; }\n' }), 'handlers/notes.js never assigns module.exports');
+for (const [label, src] of [
+  ['through the wrapper\'s arguments', 'arguments[0].exports = function notes() {};\n'],
+  ['through an escaped identifier', 'm\\u006fdule.exports = function notes() {};\n'],
+  ['through a direct eval', 'eval("module").exports = function notes() {};\n'],
+] as const) {
+  let packed: string;
+  try { packShim({ ...good(), 'handlers/notes.js': src }); packed = 'ok'; } catch (err) { packed = err instanceof Error ? err.message : String(err); }
+  check(`a module that assigns its export ${label} packs`, packed === 'ok', packed);
+}
 rejects('a script handler module exporting an object', 'malformed-shim-folder',
   () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = {};\n' }), 'handlers/notes.js exports an object, not a function');
 rejects('…an object of handlers', 'malformed-shim-folder',
