@@ -41,14 +41,29 @@ const WRAPPED_EXPRESSION_RE = /^\s*module\.exports\s*=\s*([\s\S]*?)\s*;?\s*$/;
  * The rule-local expression form of a handler module (a shim folder's
  * handlers/<name>.js going back onto `rule.handlers`). A module that is just
  * `module.exports = <expr>;` gives back `<expr>`, so expression → module →
- * expression is the identity. Anything else (helpers beside the export, a
- * leading comment) becomes an IIFE that runs the module in its own
+ * expression is the identity, as long as `<expr>` runs the same unwrapped
+ * (safeBareExpression). Anything else (helpers beside the export, a leading
+ * comment, an export that uses `module` / `this` / …) becomes an IIFE that runs the module in its own
  * `(module, exports)` scope and evaluates to its `module.exports` — the same
  * value the browser's module compile produces, in a form `module.exports =
  * <expr>;` can carry.
  */
 export function moduleToExpression(moduleSource: string): string {
-  return exportedExpression(moduleSource) ?? `${MODULE_IIFE_PREFIX}${moduleSource}${MODULE_IIFE_SUFFIX}`;
+  const inner = exportedExpression(moduleSource);
+  return inner !== null && safeBareExpression(inner) ? inner : `${MODULE_IIFE_PREFIX}${moduleSource}${MODULE_IIFE_SUFFIX}`;
+}
+
+// The names a module's code can only resolve inside its CommonJS wrapper
+// (and its receiver). A bare expression runs inline without that wrapper,
+// so one that mentions any of them keeps the IIFE, which binds them.
+const CJS_BINDING_RE = /\b(?:module|exports|require|arguments|this|__filename|__dirname|eval)\b/;
+
+// Whether an exported expression runs the same unwrapped: it uses none of the
+// wrapper's bindings, and it parses as `(<expr>)` with the closer on its last
+// line — inline compile puts it there, so a trailing `// comment` would
+// swallow it (the IIFE's closer sits on its own line).
+function safeBareExpression(expression: string): boolean {
+  return !CJS_BINDING_RE.test(expression) && syntaxProbe(`(${expression})`).ok;
 }
 
 /**

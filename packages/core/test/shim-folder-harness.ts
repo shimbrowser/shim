@@ -189,6 +189,26 @@ check('…and survives the module wrap the browser compiles', typeof assigned ==
 }
 check('moduleForExpression undoes the IIFE byte for byte', moduleForExpression(iife) === ROUTE_MODULE);
 check('…and wraps any other expression', moduleForExpression(expr) === expressionToModule(expr));
+// A bare expression runs inline (the preload's `(<expr>)` compile) with no
+// CommonJS wrapper, so an export that uses one of its bindings keeps the IIFE,
+// and runs the way the module itself does.
+{
+  const selfRef = 'module.exports = function h() { return module.exports === h; };\n';
+  const asExpr = moduleToExpression(selfRef);
+  check('an export that reads `module` keeps the IIFE', asExpr.startsWith('(function () {'));
+  const inline = vm.runInNewContext(`(${asExpr})`) as unknown;
+  check('…and inline it sees its own module, as the module does', typeof inline === 'function' && (inline as () => unknown)() === true);
+  for (const binding of ['exports', 'this', 'arguments', 'require']) {
+    check(`an export that mentions \`${binding}\` keeps the IIFE`,
+      moduleToExpression(`module.exports = function h() { return typeof ${binding}; };\n`).startsWith('(function () {'));
+  }
+  const commented = 'module.exports = function h() { return 3; } // explanation\n';
+  const asCommented = moduleToExpression(commented);
+  check('an export ending in a // comment keeps the IIFE', asCommented.startsWith('(function () {'));
+  let compiled: unknown;
+  try { compiled = vm.runInNewContext(`(${asCommented})`); } catch (e) { compiled = String(e); }
+  check('…which compiles inline with the closer on the comment\'s line', typeof compiled === 'function' && (compiled as () => unknown)() === 3, String(compiled));
+}
 check('module.exports = a; extra(); is not a bare expression', moduleToExpression('module.exports = a;\nextra();\n').startsWith('(function () {'));
 
 console.log('malformed folders');
