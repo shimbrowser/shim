@@ -10,13 +10,17 @@
 //     exits 1 with every problem, unpack never writes into a folder that
 //     isn't empty or a shim folder, a pack it can't write exits 2;
 //   - lint on a folder and on a .shim file, --json, and --headless adding
-//     D15's preflight (errors) and source scan (warnings);
+//     D15's preflight (errors) and source scan (warnings); a script handler
+//     module pack would refuse (invalid syntax, a non-function export) is a
+//     lint error for both;
 //   - launch: attached / launched / failed, --timeout, --json never printing
 //     the endpoint token;
 //   - mcp: forwards its two flags to the server, refuses anything else;
 //   - preview over a scripted PageHost: every rule's evidence, the
 //     screenshot written, exit 1 for handler errors / no match / an
-//     unsupported kind (nothing applied), a folder without rules, a folder
+//     unsupported kind (nothing applied), exit 1 for a rule the engine never
+//     reported a match for (a saved witness refused before its quarantine
+//     is reported), a folder without rules, a folder
 //     pack would refuse (no match.hosts, a lint error) refused before a page
 //     opens, .shim-state.json witnesses (and the deploy baseline) restored
 //     for unchanged anchors, --storage backing api.storage, and nothing left
@@ -339,6 +343,27 @@ async function main(): Promise<void> {
     fs.writeFileSync(notShim, '{ nope');
     check('a file that isn\'t JSON exits 1', (await cli(r, 'lint', notShim)) === EXIT_PROBLEM && /not valid JSON/.test(r.out[0] ?? ''));
     check('a missing target exits 2', (await cli(r, 'lint', path.join(tmp, 'gone'))) === EXIT_USAGE);
+
+    // The handler-module check pack runs: a `script` module that can't
+    // export a function is a lint error too, for a folder and a .shim file.
+    const badModules: Array<[string, string, RegExp]> = [
+      ['a non-function export', 'module.exports = 42;\n', /handlers\/markTracks\.js/],
+      ['invalid syntax', 'module.exports = function markTracks({ anchor ) {\n', /handlers\/markTracks\.js/],
+    ];
+    for (const [label, source, pattern] of badModules) {
+      const slug = label.replace(/\W+/g, '-');
+      const folder = writeFolder(path.join(tmp, `lint-module-${slug}`), BASE_SPEC, { markTracks: source });
+      const packCode = await cli(r, 'pack', folder);
+      check(`pack refuses ${label}`, packCode === EXIT_PROBLEM, r.err);
+      check(`lint reports ${label} in a folder as an error`, (await cli(r, 'lint', folder)) === EXIT_PROBLEM
+        && new RegExp(`^error: ${pattern.source}`, 'm').test(r.out[0] ?? ''), r.out);
+      check(`lint --headless reports ${label} too`, (await cli(r, 'lint', folder, '--headless')) === EXIT_PROBLEM
+        && new RegExp(`^error: ${pattern.source}`, 'm').test(r.out[0] ?? ''), r.out);
+      const file = path.join(tmp, `lint-module-${slug}.shim`);
+      fs.writeFileSync(file, json({ format: 'shim/1', name: 'demo', spec: BASE_SPEC, handlers: { markTracks: source } }));
+      check(`lint reports ${label} in a .shim file as an error`, (await cli(r, 'lint', file)) === EXIT_PROBLEM
+        && new RegExp(`^error: ${pattern.source}`, 'm').test(r.out[0] ?? ''), r.out);
+    }
   }
 
   console.log('launch');
@@ -485,6 +510,30 @@ async function main(): Promise<void> {
     check('a changed anchor previews without one', sent('mark') !== undefined && sent('mark')?.rule.anchor?.witness === undefined
       && sent('mark')?.bundleHash === undefined);
     check('the witness that no longer verifies quarantines: exit 1', wcode === EXIT_PROBLEM && /quarantined[^\n]*\n {4}hide-promo/.test(r.out[0] ?? ''), r.out);
+    // A saved witness the engine refuses before its quarantine is reported:
+    // the selector now resolves, the witness filters it to zero, and the
+    // reconciler's quarantine lands after the session settles. No error, no
+    // no-match, no quarantine yet: the preview still fails.
+    r.onApply = (p, emit) => {
+      if (p.rule.anchor?.witness) emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 0, matchedVia: 'primary' });
+      else matchOne(p, emit);
+    };
+    const early = await cli(r, 'preview', wdir, '--url', 'https://site.test/', '--json');
+    const eo = JSON.parse(r.out[0] ?? '{}') as { ok?: boolean; unapplied?: string[]; evidence?: { quarantined?: unknown } };
+    check('a rule that matched nothing, quarantine not yet reported, exits 1', early === EXIT_PROBLEM && eo.ok === false
+      && JSON.stringify(eo.unapplied) === '["hide-promo"]' && eo.evidence?.quarantined === undefined, r.out);
+    check('the text report names it', (await cli(r, 'preview', wdir, '--url', 'https://site.test/')) === EXIT_PROBLEM
+      && /not applied[^\n]*\n {4}hide-promo/.test(r.out[0] ?? ''), r.out);
+    // No status at all for a rule is not success either.
+    r.onApply = (p, emit) => { if (p.rule.id !== 'mark') matchOne(p, emit); };
+    check('a rule the engine never reported on exits 1', (await cli(r, 'preview', dir, '--url', 'https://site.test/')) === EXIT_PROBLEM
+      && /not applied[^\n]*\n {4}mark/.test(r.out[0] ?? ''), r.out);
+    // A rule that matched once (a remove, say) then dropped to 0 did apply.
+    r.onApply = (p, emit) => {
+      matchOne(p, emit);
+      emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 0, matchedVia: 'primary' });
+    };
+    check('a rule that matched and then lost its element still counts as applied', (await cli(r, 'preview', dir, '--url', 'https://site.test/')) === EXIT_OK, r.out);
     r.onApply = matchOne;
 
     const storageFile = path.join(tmp, 'store.json');

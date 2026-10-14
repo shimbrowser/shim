@@ -23,12 +23,13 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import {
-  packShim, unpackShim, readShimFolder, matchHostsProblem, ShimFolderError, SHIM_STATE_FILE, SHIM_FILE_FORMAT,
+  packShim, unpackShim, readShimFolder, matchHostsProblem, scriptModuleProblems, ShimFolderError, SHIM_STATE_FILE, SHIM_FILE_FORMAT,
   type FolderInput, type ShimFile, type RuleState,
 } from '@shimbrowser/core/shim-folder';
 import { lintSpec } from '@shimbrowser/core/spec-lint';
 import { preflightSpec, scanRuleHandlers } from '@shimbrowser/core/capability-preflight';
 import { encodeWorkingCopy } from '@shimbrowser/core/working-copy-wire';
+import { previewKey } from '@shimbrowser/core/preview-evidence';
 import type { Spec } from '@shimbrowser/core/types';
 import { readWorkingCopy, writeCheckout, FolderError } from './folder';
 import { createHeadlessControl } from './headless-control';
@@ -205,7 +206,8 @@ export interface LintReport {
 
 /**
  * Lint a shim folder or a `.shim` file: the folder format, `match.hosts`,
- * and spec-lint — exactly what `pack` (and a preview) would refuse — plus
+ * spec-lint and the `script` handler modules — exactly what `pack` (and a
+ * preview) would refuse — plus
  * spec-lint's warnings. With `headless`, also D15's preflight (as errors: a
  * headless preview would apply nothing) and its handler source scan (as
  * warnings: a heuristic).
@@ -247,6 +249,9 @@ export function lintTarget(target: string, opts: { headless?: boolean } = {}): L
   const lint = lintSpec({ ...spec, handlers });
   report.errors.push(...lint.errors);
   report.warnings.push(...lint.warnings);
+  // The handler-module check pack runs after spec-lint (a `script` module
+  // that can't export a function), so lint blesses nothing pack refuses.
+  report.errors.push(...scriptModuleProblems(spec, handlers));
   if (opts.headless) {
     const pre = preflightSpec(spec, HEADLESS_CAPABILITIES);
     if (!pre.ok) report.errors.push(...pre.unsupported.map((u) => `headless: ${u.message}`));
@@ -297,6 +302,12 @@ export interface PreviewOutcome {
   evidence?: Record<string, unknown>;
   /** Opening the session: e.g. match.hosts doesn't cover the url. */
   warnings: string[];
+  /**
+   * Rules the engine never reported on any element during the preview, and
+   * that no other evidence (noMatch, quarantined) already names. A preview
+   * with any is not ok.
+   */
+  unapplied?: string[];
   screenshot?: { file: string } | { error: string };
 }
 
@@ -362,12 +373,24 @@ export async function previewFolder(opts: PreviewOptions, deps: PreviewDeps): Pr
 
   // Set by openPage below; a holder, so the narrowing survives the awaits.
   const held: { page: PreviewPage | null } = { page: null };
+  // The most elements each rule's anchor resolved, from the engine's own
+  // rule-status events. Success needs positive evidence: the evidence lists
+  // a no-match or a quarantine only once the engine reports one, and a saved
+  // witness's quarantine lands after the session has already settled (the
+  // reconciler waits for the page to settle first). A rule that never
+  // reported a match did not apply, whatever the lists say.
+  const peakMatched = new Map<string, number>();
   const storageFile = opts.storageFile ? path.resolve(opts.storageFile) : null;
   const control = createHeadlessControl({
     version: deps.version,
     async openPage(url, storage) {
       const page = await deps.openPage(url, storage, { visible: opts.visible === true });
       held.page = page;
+      // Live for the page's life; closeAll closes the page.
+      page.host.onRuntimeEvent((e) => {
+        if (e.kind !== 'rule-status' || typeof e.specId !== 'string' || typeof e.matched !== 'number') return;
+        peakMatched.set(e.specId, Math.max(peakMatched.get(e.specId) ?? 0, e.matched));
+      });
       return page;
     },
     ...(storageFile ? { storageFileFor: () => storageFile } : {}),
@@ -416,9 +439,16 @@ export async function previewFolder(opts: PreviewOptions, deps: PreviewDeps): Pr
         if (why !== undefined) outcome.detail = why;
       }
     } else {
+      const named = new Set([...listOf(evidence.noMatch), ...listOf(evidence.quarantined)]
+        .filter(isRecord).map((x) => x.ruleId));
+      const unapplied = (spec.rules || [])
+        .filter((rule) => (peakMatched.get(previewKey(spec.id, rule.id)) ?? 0) === 0 && !named.has(rule.id))
+        .map((rule) => rule.id);
+      if (unapplied.length) outcome.unapplied = unapplied;
       outcome.ok = listOf(evidence.errors).length === 0
         && listOf(evidence.noMatch).length === 0
-        && listOf(evidence.quarantined).length === 0;
+        && listOf(evidence.quarantined).length === 0
+        && unapplied.length === 0;
     }
 
     const current = held.page;
@@ -489,6 +519,10 @@ export function formatPreview(o: PreviewOutcome): string {
   if (quarantined.length) {
     lines.push('  quarantined (the witness did not verify):');
     for (const q of quarantined) lines.push(`    ${String(q.ruleId)}`);
+  }
+  if (o.unapplied?.length) {
+    lines.push('  not applied (the engine never reported a matched element; a saved witness that no longer verifies reads this way too):');
+    for (const id of o.unapplied) lines.push(`    ${id}`);
   }
   for (const [label, key] of [['warnings', 'warnings'], ['notes', 'notes']] as const) {
     const items = listOf(ev[key]);

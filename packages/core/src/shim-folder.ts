@@ -458,7 +458,12 @@ function checkAuthoredSpec(raw: Record<string, unknown>, handlers: Record<string
 // function; lint only syntax-checks transforms and wraps. So pack refuses
 // what can be told without running the code (handlerModuleProblem) rather
 // than write a file the browser won't import.
-function checkScriptModules(spec: Spec, handlers: Record<string, string>): void {
+/**
+ * Every `script` handler module that can't export a function, one problem
+ * per file — what `packShim` refuses after spec-lint. `shim lint` reports
+ * the same list.
+ */
+export function scriptModuleProblems(spec: Spec, handlers: Record<string, string>): string[] {
   const problems: string[] = [];
   const checked = new Set<string>();
   for (const rule of spec.rules || []) {
@@ -474,6 +479,11 @@ function checkScriptModules(spec: Spec, handlers: Record<string, string>): void 
       if (problem) problems.push(`${handlerPath(name)} ${problem}`);
     }
   }
+  return problems;
+}
+
+function checkScriptModules(spec: Spec, handlers: Record<string, string>): void {
+  const problems = scriptModuleProblems(spec, handlers);
   if (problems.length) throw new ShimFolderError('malformed-shim-folder', problems);
 }
 
