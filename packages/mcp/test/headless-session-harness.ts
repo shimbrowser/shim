@@ -32,6 +32,29 @@
 //     judged stale (under the takeover mutex, itself recovered from a dead
 //     holder);
 //   - a .shim whose match.hosts isn't a list of strings refused at open;
+//   - a captured witness carried by every replay of its rule (reload_page,
+//     a followed navigation), so the replay can't attach to another match;
+//   - witnesses taken whenever the engine reports them (during begin, after
+//     a preview answered) and kept through replay and commit, but never
+//     from a replaced version of a rule (applyId) or a key no longer live;
+//   - a deploy recovery the engine reported but nothing applied keeps the
+//     committed baseline on commit (and says so), so a reopened shim still
+//     sees the deploy; updating the anchor lets the baseline advance;
+//   - a reload (in place, or back to the start URL) that lands off the
+//     site answers page-away, applying nothing there;
+//   - a commit after a navigation the rules never ran on keeps the
+//     committed baseline and says so; a preview there lets it advance;
+//   - a page that leaves the site during the replay wait: the preview and
+//     the page tools refuse with page-away, changing nothing;
+//   - a quarantined rule keeps the committed baseline on commit (and says
+//     so) until it resolves through its primary again;
+//   - shutdown (closeAll) refuses new opens and settles one in flight — a
+//     page still launching, a begin still settling — leaving no session,
+//     page or lock;
+//   - file storage: a failed write rejects and changes nothing, in memory
+//     or in the next write;
+//   - a .shim with a spec-level css block refused at open (D15: headless
+//     installs no whole-patch stylesheet);
 //   - commit: the .shim written once per commitId, version + deploy baseline +
 //     witnesses + history, the session continuing from it;
 //   - ending tears every preview down, closes the page and frees the file.
@@ -141,11 +164,15 @@ interface Rig {
   appliedAtSettle: number[];
   // Where opening a url lands (a redirect); the url itself by default.
   redirect: (url: string) => string;
+  // When set, every settle waits for it (a begin still settling).
+  settleGate: Promise<void> | null;
+  // When set, runs during the next settle's wait, then clears (the page doing something meanwhile).
+  duringSettle: (() => void) | null;
 }
 
 function rig(fileLock?: FileLockOptions): Rig {
   const r: Rig = {
-    control: null as unknown as HeadlessControl, hosts: [], storages: [], writes: [], failOpen: false, gate: null, appliedAtSettle: [], redirect: (u) => u,
+    control: null as unknown as HeadlessControl, hosts: [], storages: [], writes: [], failOpen: false, gate: null, appliedAtSettle: [], redirect: (u) => u, settleGate: null, duringSettle: null,
   };
   let ids = 0;
   r.control = createHeadlessControl({
@@ -165,6 +192,10 @@ function rig(fileLock?: FileLockOptions): Rig {
       settleMs: 5,
       sleep: async () => {
         r.appliedAtSettle.push(r.hosts.reduce((n, h) => n + h.applied.length, 0));
+        if (r.settleGate) await r.settleGate;
+        const during = r.duringSettle;
+        r.duringSettle = null;
+        during?.();
         await new Promise<void>((resolve) => setTimeout(resolve, 1));
       },
       writeShimFile: (file, content) => {
@@ -221,6 +252,34 @@ async function main(): Promise<void> {
     let rejected = false;
     try { await c.set(scope, 'k', 1); } catch { rejected = true; }
     check('a file that is not ours is refused, never overwritten', rejected && fs.readFileSync(foreign, 'utf8') === '{"not":"ours"}');
+  }
+
+  console.log('file storage: a failed write changes nothing');
+  {
+    const dir = path.join(tmp, 'store-fail');
+    const file = path.join(dir, 'data.json');
+    let fail = false;
+    const st = fileStorage(file, {
+      writeFile: (tmpFile, text) => {
+        if (fail) throw new Error('ENOSPC: disk full');
+        fs.writeFileSync(tmpFile, text);
+      },
+    });
+    const scope = { patchId: 'p', origin: 'https://a.test' };
+    await st.set(scope, 'kept', 1);
+    fail = true;
+    const outcome = async (p: Promise<unknown>): Promise<string> => p.then(() => 'resolved', (e: unknown) => (e instanceof Error ? e.message : String(e)));
+    check('a set whose write fails rejects', (await outcome(st.set(scope, 'lost', 2))).includes('disk full'));
+    check('…and reads never see it', (await st.get(scope, 'lost')) === null && JSON.stringify(await st.list(scope)) === JSON.stringify({ kept: 1 }));
+    check('a delete whose write fails rejects', (await outcome(st.delete(scope, 'kept'))).includes('disk full'));
+    check('…and the key reads as before', (await st.get(scope, 'kept')) === 1);
+    check('a set into a new bucket whose write fails leaves no bucket behind', (await outcome(st.set({ patchId: 'q', origin: 'https://b.test' }, 'k', 1))).includes('disk full')
+      && JSON.stringify(await st.list({ patchId: 'q', origin: 'https://b.test' })) === '{}');
+    check('…and no temp file is left behind', fs.readdirSync(dir).every((f) => !f.endsWith('.tmp')), fs.readdirSync(dir));
+    fail = false;
+    await st.set(scope, 'next', 3);
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf8')) as { buckets: Record<string, Record<string, Record<string, unknown>>> };
+    check('the next successful write persists none of the failed changes', JSON.stringify(onDisk.buckets) === JSON.stringify({ 'https://a.test': { p: { kept: 1, next: 3 } } }), onDisk.buckets);
   }
 
   console.log('cli mode');
@@ -704,6 +763,392 @@ async function main(): Promise<void> {
     const saved = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { rules: Array<{ id: string; anchor?: { witness?: unknown } }> } };
     check('…with its captured witness on the committed rule', isRecord(saved.spec.rules.find((x) => x.id === '__proto__')?.anchor?.witness), saved.spec.rules);
     await req(r, 'DELETE', `/sessions/${pid}`);
+  }
+
+  console.log('a captured witness rides every replay of its rule');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'witness-replay.shim');
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile, create: { name: 'Replay' } });
+    const wid = String(opened.sessionId);
+    const host = r.hosts[0] as FakeHost;
+    // A fake engine over two `.item` elements: on the first document the
+    // selector resolves "first"; on every later one "second" comes first, so
+    // only the witness keeps the rule off it.
+    let doc = 0;
+    const attached: string[] = [];
+    host.onApply = (p, h) => {
+      const witness = p.rule.anchor?.witness as { textStem?: string } | undefined;
+      const element = doc === 0 || witness?.textStem === 'first' ? 'first' : 'second';
+      attached.push(element);
+      h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 1 });
+      if (!witness) h.emit({ kind: 'rule-witness', specId: p.ruleKey, ruleId: p.rule.id, witness: { v: 1, tag: 'li', textStem: element } });
+    };
+    const folder = decodeWorkingCopy((await req(r, 'GET', `/sessions/${wid}/checkout`)).files);
+    const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown>;
+    spec.rules = [{ id: 'pick', anchor: css('.item'), mutations: [{ kind: 'hide' }] }];
+    const pv = await preview(r, wid, { ...folder, 'shim.json': json(spec) } as Record<string, string>);
+    check('the rule previews and captures its witness', pv.applied === true && attached.join() === 'first', { pv, attached });
+    const lastPick = (): PreviewRule | undefined => [...host.applied].reverse().find((p) => p.rule.id === 'pick');
+    const witnessStem = (): unknown => (lastPick()?.rule.anchor?.witness as { textStem?: string } | undefined)?.textStem;
+
+    doc = 1;
+    const reload = await req(r, 'POST', `/sessions/${wid}/call`, { name: 'reload_page', input: {} });
+    check('reload_page replays the rule with its captured witness', String(reload.result).includes('"ok":true') && witnessStem() === 'first', { reload, rule: lastPick()?.rule });
+    check('…so the replay attaches to the witnessed element, not the selector\'s new first match', attached.join() === 'first,first', attached);
+
+    doc = 2;
+    host.navigate(url);
+    await req(r, 'POST', `/sessions/${wid}/call`, { name: 'view_page', input: {} });
+    check('a followed navigation replays it with the witness too', witnessStem() === 'first' && attached.join() === 'first,first,first', attached);
+    check('…keeping the preview\'s deploy baseline (a new rule runs behind none)', lastPick()?.bundleHash === undefined);
+    await req(r, 'DELETE', `/sessions/${wid}`);
+  }
+
+  console.log('a witness the engine reports after the preview answered is still taken');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'late-witness.shim');
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'Late', handlers: {},
+      spec: { id: 'shim-late', version: 1, match: { hosts: ['site.test'] }, rules: [{ id: 'old', anchor: css('.old'), mutations: [{ kind: 'hide' }] }] },
+    }));
+    // The engine fingerprints `old` while begin applies it; every later
+    // apply only reports status (an element still being fetched).
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    const lid = String(opened.sessionId);
+    const host = r.hosts[0] as FakeHost;
+    host.onApply = (p, h) => { h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 0, applyId: p.applyId }); };
+    const folder = decodeWorkingCopy((await req(r, 'GET', `/sessions/${lid}/checkout`)).files);
+    const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown> & { rules: unknown[] };
+    const withRules = (rules: unknown[]): Record<string, string> => ({ ...folder, 'shim.json': json({ ...spec, rules }) } as Record<string, string>);
+    const late = { id: 'late', anchor: css('.late'), mutations: [{ kind: 'hide' }] };
+    const swap = { id: 'swap', anchor: css('.swap-a'), mutations: [{ kind: 'hide' }] };
+    const p1 = await preview(r, lid, withRules([...spec.rules, late, swap]));
+    check('the preview answers before either new rule matched', p1.applied === true, p1);
+    const keyOf = (rid: string): string => `preview:shim-late:${rid}`;
+    const lastOf = (rid: string): PreviewRule | undefined => [...host.applied].reverse().find((x) => x.rule.id === rid);
+    const swapV1 = lastOf('swap')?.applyId;
+    // The element arrives: the engine fingerprints `late` after the window.
+    host.emit({ kind: 'rule-witness', specId: keyOf('late'), ruleId: 'late', witness: { v: 1, tag: 'li', textStem: 'arrived' }, applyId: lastOf('late')?.applyId });
+    // `swap` is re-anchored, then a late witness from its first version lands.
+    const p2 = await preview(r, lid, withRules([...spec.rules, late, { ...swap, anchor: css('.swap-b') }]));
+    check('swap is re-anchored as a new version', p2.applied === true && typeof swapV1 === 'string' && lastOf('swap')?.applyId !== swapV1, p2);
+    host.emit({ kind: 'rule-witness', specId: keyOf('swap'), ruleId: 'swap', witness: { v: 1, tag: 'li', textStem: 'stale' }, applyId: swapV1 });
+    // And one for a rule key that is not live at all.
+    host.emit({ kind: 'rule-witness', specId: keyOf('ghost'), ruleId: 'ghost', witness: { v: 1, tag: 'li' } });
+
+    const stemOf = (p: PreviewRule | undefined): unknown => (p?.rule.anchor?.witness as { textStem?: string } | undefined)?.textStem;
+    const reload = await req(r, 'POST', `/sessions/${lid}/call`, { name: 'reload_page', input: {} });
+    check('reload_page replays the late-captured witness', String(reload.result).includes('"ok":true') && stemOf(lastOf('late')) === 'arrived', lastOf('late')?.rule);
+    check('…and the witness captured during begin', isRecord(lastOf('old')?.rule.anchor?.witness), lastOf('old')?.rule);
+    check('…but not a late witness from a version of the rule since replaced', lastOf('swap')?.rule.anchor?.witness === undefined, lastOf('swap')?.rule);
+    const cm = await req(r, 'POST', `/sessions/${lid}/commit`, { revision: 2, commitId: 'l1', summary: 's' });
+    check('the session commits', cm.ok === true, cm);
+    const saved = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { rules: Array<{ id: string; anchor?: { witness?: { textStem?: string } } }> } };
+    const savedRule = (rid: string): { anchor?: { witness?: { textStem?: string } } } | undefined => saved.spec.rules.find((x) => x.id === rid);
+    check('the commit keeps the witness captured after the preview answered', savedRule('late')?.anchor?.witness?.textStem === 'arrived', saved.spec.rules);
+    check('…and the one captured during begin', isRecord(savedRule('old')?.anchor?.witness), saved.spec.rules);
+    check('…and no stale one', savedRule('swap')?.anchor?.witness === undefined && !saved.spec.rules.some((x) => x.id === 'ghost'), saved.spec.rules);
+    await req(r, 'DELETE', `/sessions/${lid}`);
+  }
+
+  console.log('an unapplied deploy recovery keeps the committed baseline');
+  {
+    const shimFile = path.join(tmp, 'recover.shim');
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'Recover', handlers: {},
+      spec: {
+        id: 'shim-rec', version: 2, bundleHash: 'deploy-1', match: { hosts: ['site.test'] },
+        rules: [
+          { id: 'buy', anchor: { ...css('.buy-v1'), witness: { v: 1, tag: 'button', textStem: 'buy' } }, mutations: [{ kind: 'hide' }] },
+          { id: 'other', anchor: { ...css('.other'), witness: { v: 1, tag: 'div' } }, mutations: [{ kind: 'hide' }] },
+        ],
+      },
+    }));
+    // The page is on deploy-2: `.buy-v1` is dead, and the witness finds the
+    // button again — reported, not applied (rule-reconcile).
+    const engine = (p: PreviewRule, h: FakeHost): void => {
+      const dead = p.rule.anchor?.primary.value === '.buy-v1';
+      if (dead && p.bundleHash === 'deploy-1') {
+        h.emit({ kind: 'rule-rebase', specId: p.ruleKey, ruleId: p.rule.id, strategy: 'recover', via: 'witness', anchor: css('.buy-v2'), from: '.buy-v1', to: '.buy-v2', bundleHash: 'deploy-2', applyId: p.applyId });
+      }
+      h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: dead ? 0 : 1, applyId: p.applyId });
+    };
+    const open = async (): Promise<{ r: Rig; sid: string; host: FakeHost }> => {
+      const r = rig();
+      const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+      const host = r.hosts[0] as FakeHost;
+      return { r, sid: String(opened.sessionId), host };
+    };
+    const first = await open();
+    const begun = first.host.applied.find((p) => p.rule.id === 'buy');
+    check('the dead rule runs behind the committed baseline', begun?.bundleHash === 'deploy-1', begun);
+    first.host.onApply = engine;
+    // begin ran on the fake's default engine: replay as the deploy-2 page would.
+    const reload = await req(first.r, 'POST', `/sessions/${first.sid}/call`, { name: 'reload_page', input: {} });
+    check('the reload replays the committed rules', String(reload.result).includes('"ok":true'), reload);
+    const folder = decodeWorkingCopy((await req(first.r, 'GET', `/sessions/${first.sid}/checkout`)).files);
+    const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown> & { rules: Array<Record<string, unknown>> };
+    const edited = spec.rules.map((rule) => (rule.id === 'other' ? { ...rule, mutations: [{ kind: 'restyle', css: { opacity: '0.5' } }] } : rule));
+    const pv = await preview(first.r, first.sid, { ...folder, 'shim.json': json({ ...spec, rules: edited }) } as Record<string, string>);
+    const notes = isRecord(pv.evidence) && Array.isArray(pv.evidence.notes) ? pv.evidence.notes.map(String) : [];
+    check('the evidence says the recovery is not applied and what a commit does meanwhile', notes.some((n) => n.includes('rule "buy"')
+      && n.includes('.buy-v2') && n.includes('nothing applied') && n.includes('keeps the committed deploy baseline')), notes);
+    const c1 = await req(first.r, 'POST', `/sessions/${first.sid}/commit`, { revision: 1, commitId: 'r1', summary: 'restyled other' });
+    const saved1 = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { version: number; bundleHash?: string } };
+    check('an unrelated commit keeps the committed deploy baseline', c1.ok === true && saved1.spec.version === 3 && saved1.spec.bundleHash === 'deploy-1', saved1.spec);
+    await req(first.r, 'DELETE', `/sessions/${first.sid}`);
+
+    const second = await open();
+    const reopened = second.host.applied.find((p) => p.rule.id === 'buy');
+    check('reopened, the dead rule still runs behind deploy-1, so the deploy is still seen and recoverable', reopened?.bundleHash === 'deploy-1', reopened);
+    second.host.onApply = engine;
+    await req(second.r, 'POST', `/sessions/${second.sid}/call`, { name: 'reload_page', input: {} });
+    // The agent takes the recovery into the shim: the baseline may advance.
+    const folder2 = decodeWorkingCopy((await req(second.r, 'GET', `/sessions/${second.sid}/checkout`)).files);
+    const spec2 = JSON.parse(String(folder2['shim.json'])) as Record<string, unknown> & { rules: Array<Record<string, unknown>> };
+    const fixed = spec2.rules.map((rule) => (rule.id === 'buy' ? { ...rule, anchor: css('.buy-v2') } : rule));
+    const pv2 = await preview(second.r, second.sid, { ...folder2, 'shim.json': json({ ...spec2, rules: fixed }) } as Record<string, string>);
+    check('the re-anchored rule previews', pv2.applied === true, pv2);
+    const c2 = await req(second.r, 'POST', `/sessions/${second.sid}/commit`, { revision: 1, commitId: 'r2', summary: 're-anchored buy' });
+    const saved2 = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { bundleHash?: string } };
+    check('once the anchor is updated, a commit advances the baseline to this deploy', c2.ok === true && saved2.spec.bundleHash === 'deploy-2', saved2.spec);
+    await req(second.r, 'DELETE', `/sessions/${second.sid}`);
+  }
+
+  console.log('a quarantined rule keeps the committed baseline until it is healthy or re-anchored');
+  {
+    const shimFile = path.join(tmp, 'quarantine.shim');
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'Quarantine', handlers: {},
+      spec: {
+        id: 'shim-q', version: 2, bundleHash: 'deploy-1', match: { hosts: ['site.test'] },
+        rules: [
+          { id: 'buy', anchor: { ...css('.buy-v1'), witness: { v: 1, tag: 'button', textStem: 'buy' } }, mutations: [{ kind: 'hide' }] },
+          { id: 'other', anchor: { ...css('.other'), witness: { v: 1, tag: 'div' } }, mutations: [{ kind: 'hide' }] },
+        ],
+      },
+    }));
+    // deploy-2: `.buy-v1` resolves to nothing its witness accepts, and
+    // neither recovery scan finds the button — quarantined, no rule-rebase.
+    let buyHealthy = false;
+    const engine = (p: PreviewRule, h: FakeHost): void => {
+      const isBuy = p.rule.anchor?.primary.value === '.buy-v1';
+      if (isBuy && !buyHealthy) {
+        h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 0, matchedVia: null, applyId: p.applyId });
+        h.emit({ kind: 'rule-quarantined', specId: p.ruleKey, ruleId: p.rule.id, selector: '.buy-v1', applyId: p.applyId });
+        return;
+      }
+      h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 1, matchedVia: 'primary', applyId: p.applyId });
+    };
+    const openQ = async (): Promise<{ r: Rig; sid: string; host: FakeHost }> => {
+      const r = rig();
+      const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+      const host = r.hosts[0] as FakeHost;
+      host.onApply = engine;
+      await req(r, 'POST', `/sessions/${String(opened.sessionId)}/call`, { name: 'reload_page', input: {} });
+      return { r, sid: String(opened.sessionId), host };
+    };
+    const editOther = async (o: { r: Rig; sid: string }, opacity: string): Promise<Record<string, unknown>> => {
+      const folder = decodeWorkingCopy((await req(o.r, 'GET', `/sessions/${o.sid}/checkout`)).files);
+      const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown> & { rules: Array<Record<string, unknown>> };
+      const rules = spec.rules.map((rule) => (rule.id === 'other' ? { ...rule, mutations: [{ kind: 'restyle', css: { opacity } }] } : rule));
+      return preview(o.r, o.sid, { ...folder, 'shim.json': json({ ...spec, rules }) } as Record<string, string>);
+    };
+    const bundleOnDisk = (): unknown => (JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { bundleHash?: unknown } }).spec.bundleHash;
+
+    const first = await openQ();
+    const pv = await editOther(first, '0.5');
+    const notes = isRecord(pv.evidence) && Array.isArray(pv.evidence.notes) ? pv.evidence.notes.map(String) : [];
+    check('the evidence says the rule is quarantined and what a commit does meanwhile', notes.some((n) => n.includes('rule "buy" is quarantined')
+      && n.includes('keeps the committed deploy baseline')), notes);
+    const c1 = await req(first.r, 'POST', `/sessions/${first.sid}/commit`, { revision: 1, commitId: 'q1', summary: 'restyled other' });
+    check('an unrelated commit keeps the committed baseline over the quarantined rule', c1.ok === true && bundleOnDisk() === 'deploy-1', bundleOnDisk());
+    await req(first.r, 'DELETE', `/sessions/${first.sid}`);
+
+    const second = await openQ();
+    const buy = [...second.host.applied].reverse().find((p) => p.rule.id === 'buy');
+    check('reopened, the rule still runs behind deploy-1: the deploy and its quarantine path are still there', buy?.bundleHash === 'deploy-1', buy);
+    // The button comes back under its primary: healthy, so the baseline may advance.
+    buyHealthy = true;
+    await req(second.r, 'POST', `/sessions/${second.sid}/call`, { name: 'reload_page', input: {} });
+    await editOther(second, '0.6');
+    const c2 = await req(second.r, 'POST', `/sessions/${second.sid}/commit`, { revision: 1, commitId: 'q2', summary: 'again' });
+    check('once the rule resolves through its primary again, a commit advances the baseline', c2.ok === true && bundleOnDisk() === 'deploy-2', bundleOnDisk());
+    await req(second.r, 'DELETE', `/sessions/${second.sid}`);
+  }
+
+  console.log('shutdown settles opens in flight');
+  {
+    // A page still launching when shutdown begins.
+    const r = rig();
+    let release: () => void = () => undefined;
+    r.gate = new Promise<void>((resolve) => { release = resolve; });
+    const shimFile = path.join(tmp, 'shutdown-launch.shim');
+    const pending = req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile, create: { name: 'S' } });
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    check('the open holds the file lock while its page launches', fs.existsSync(lockFileFor(shimFile)));
+    const closed = r.control.closeAll();
+    const refusedNewAt = req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile: path.join(tmp, 'other.shim'), create: { name: 'O' } });
+    release();
+    await closed;
+    const refusedNew = await refusedNewAt;
+    check('a new open during shutdown is refused', refusedNew.error === 'shutting-down', refusedNew);
+    const answered = await pending;
+    check('closeAll waits for the launch, then the open answers shutting-down', answered.error === 'shutting-down', answered);
+    check('…its page closed, no session, no lock', r.hosts.length === 1 && r.hosts[0]?.closed === true
+      && r.control.sessions.list().length === 0 && !fs.existsSync(lockFileFor(shimFile)));
+  }
+  {
+    // A session whose begin is still settling when shutdown begins.
+    const r = rig();
+    const shimFile = path.join(tmp, 'shutdown-begin.shim');
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'B', handlers: {},
+      spec: { id: 'shim-b', version: 1, match: { hosts: ['site.test'] }, rules: [{ id: 'h', anchor: css('.ad'), mutations: [{ kind: 'hide' }] }] },
+    }));
+    let release: () => void = () => undefined;
+    r.settleGate = new Promise<void>((resolve) => { release = resolve; });
+    const pending = req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    check('begin is settling with the page open', r.hosts.length === 1 && r.hosts[0]?.closed === false);
+    const closed = r.control.closeAll();
+    release();
+    r.settleGate = null;
+    await closed;
+    const answered = await pending;
+    check('a session that registers after shutdown began is ended, and the open answers shutting-down', answered.error === 'shutting-down', answered);
+    check('…its page closed, no session, no lock', r.hosts[0]?.closed === true
+      && r.control.sessions.list().length === 0 && !fs.existsSync(lockFileFor(shimFile)));
+  }
+
+  console.log('a commit after a navigation the rules never ran on keeps the baseline');
+  {
+    const shimFile = path.join(tmp, 'nav-commit.shim');
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'Nav', handlers: {},
+      spec: { id: 'shim-nav', version: 1, bundleHash: 'deploy-1', match: { hosts: ['site.test'] }, rules: [{ id: 'h', anchor: { ...css('.ad'), witness: { v: 1, tag: 'div' } }, mutations: [{ kind: 'hide' }] }] },
+    }));
+    const r = rig();
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    const nid = String(opened.sessionId);
+    const host = r.hosts[0] as FakeHost;
+    const folder = decodeWorkingCopy((await req(r, 'GET', `/sessions/${nid}/checkout`)).files);
+    const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown> & { rules: unknown[] };
+    const withRule = (id: string): Record<string, string> => ({ ...folder, 'shim.json': json({ ...spec, rules: [...spec.rules, { id, anchor: css(`.${id}`), mutations: [{ kind: 'hide' }] }] }) } as Record<string, string>);
+    const pv = await preview(r, nid, withRule('n1'));
+    check('the preview verifies on the first document', pv.applied === true, pv);
+    // The page navigates itself on the site, to a document (and deploy) the rules never ran on.
+    host.navigate(`${url}?next`);
+    const c1 = await req(r, 'POST', `/sessions/${nid}/commit`, { revision: 1, commitId: 'n1', summary: 's' });
+    const bundleOnDisk = (): unknown => (JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { bundleHash?: unknown } }).spec.bundleHash;
+    check('the commit keeps the committed baseline', c1.ok === true && bundleOnDisk() === 'deploy-1', { c1, bundle: bundleOnDisk() });
+    check('…and says why', Array.isArray(c1.notes) && c1.notes.some((n) => String(n).includes('kept the committed deploy baseline')), c1);
+    await req(r, 'DELETE', `/sessions/${nid}`);
+    const r2 = rig();
+    await req(r2, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('reopened, the witnessed rule still runs behind deploy-1, so the deploy change is still seen',
+      r2.hosts[0]?.applied.find((p) => p.rule.id === 'h')?.bundleHash === 'deploy-1');
+    const s2 = String(r2.control.sessions.list()[0]?.sessionId);
+    const folder2 = decodeWorkingCopy((await req(r2, 'GET', `/sessions/${s2}/checkout`)).files);
+    const spec2 = JSON.parse(String(folder2['shim.json'])) as Record<string, unknown> & { rules: unknown[] };
+    await preview(r2, s2, { ...folder2, 'shim.json': json({ ...spec2, rules: [...spec2.rules, { id: 'n2', anchor: css('.n2'), mutations: [{ kind: 'hide' }] }] }) } as Record<string, string>);
+    const c2 = await req(r2, 'POST', `/sessions/${s2}/commit`, { revision: 1, commitId: 'n2', summary: 's' });
+    check('a commit on the document the rules ran on records its deploy', c2.ok === true && c2.notes === undefined && bundleOnDisk() === 'deploy-2', { c2, bundle: bundleOnDisk() });
+    await req(r2, 'DELETE', `/sessions/${s2}`);
+  }
+
+  console.log('a page that leaves the site during the replay wait is refused');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'replay-away.shim');
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile, create: { name: 'R' } });
+    const rid = String(opened.sessionId);
+    const host = r.hosts[0] as FakeHost;
+    const folder = decodeWorkingCopy((await req(r, 'GET', `/sessions/${rid}/checkout`)).files);
+    const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown>;
+    const withRules = (ids: string[]): Record<string, string> => ({ ...folder, 'shim.json': json({ ...spec, rules: ids.map((id) => ({ id, anchor: css(`.${id}`), mutations: [{ kind: 'hide' }] })) }) } as Record<string, string>);
+    check('a rule is live', (await preview(r, rid, withRules(['a']))).applied === true);
+    // A fresh document on the site, which script-redirects off it while the replay settles.
+    host.navigate(url);
+    r.duringSettle = () => host.navigate('https://elsewhere.test/');
+    const pv = await preview(r, rid, withRules(['a', 'b']));
+    check('the preview refuses with page-away', pv.applied === false && isRecord(pv.evidence) && pv.evidence.error === 'page-away', pv);
+    check('…applying nothing new to the off-site page', !host.applied.some((p) => p.rule.id === 'b'));
+    const co = decodeWorkingCopy((await req(r, 'GET', `/sessions/${rid}/checkout`)).files);
+    check('…and leaving the working state as it was', !String(co['shim.json']).includes('".b"'), String(co['shim.json']));
+    host.navigate(url);
+    r.duringSettle = () => host.navigate('https://elsewhere.test/');
+    const tool = await req(r, 'POST', `/sessions/${rid}/call`, { name: 'evaluate_in_page', input: { expression: 'document.title' } });
+    check('a page tool refuses too', String(tool.result).includes('page-away'), tool);
+    await req(r, 'DELETE', `/sessions/${rid}`);
+  }
+
+  console.log('a reload that lands off the site re-applies nothing');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'reload-away.shim');
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile, create: { name: 'Away' } });
+    const aid = String(opened.sessionId);
+    const host = r.hosts[0] as FakeHost;
+    const folder = decodeWorkingCopy((await req(r, 'GET', `/sessions/${aid}/checkout`)).files);
+    const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown>;
+    spec.rules = [{ id: 'mark', anchor: css('.track'), mutations: [{ kind: 'script', handler: 'mark' }] }];
+    const pv = await preview(r, aid, { ...folder, 'shim.json': json(spec), 'handlers/mark.js': 'module.exports = function mark({ anchor }) { anchor.dataset.m = "1"; };\n' } as Record<string, string>);
+    check('a script rule is live', pv.applied === true, pv);
+    // Every load lands where `landing` says, whatever the reload asked for.
+    let landing = 'https://login.other.test/sign-in';
+    host.reload = (u) => { host.reloads.push(u); host.navigate(landing); };
+    const call = async (): Promise<Record<string, unknown>> => {
+      const res = await req(r, 'POST', `/sessions/${aid}/call`, { name: 'reload_page', input: {} });
+      return typeof res.result === 'string' ? JSON.parse(res.result) as Record<string, unknown> : {};
+    };
+
+    let at = host.applied.length;
+    let settles = r.appliedAtSettle.length;
+    const inPlace = await call();
+    check('an in-place reload redirected off the site answers page-away', inPlace.error === 'page-away'
+      && inPlace.url === landing && host.reloads[host.reloads.length - 1] === undefined, inPlace);
+    check('…applying nothing to that page, and not settling', host.applied.length === at && r.appliedAtSettle.length === settles, host.applied.length - at);
+    const tool = await req(r, 'POST', `/sessions/${aid}/call`, { name: 'view_page', input: {} });
+    check('…and the page tools stay away from it too', String(tool.result).includes('page-away') && host.applied.length === at);
+
+    landing = 'http://localhost:9090/';
+    at = host.applied.length;
+    settles = r.appliedAtSettle.length;
+    const back = await call();
+    check('the way back to the start URL redirected off the site answers page-away', back.error === 'page-away'
+      && back.url === landing && host.reloads[host.reloads.length - 1] === url, back);
+    check('…applying nothing there either', host.applied.length === at && r.appliedAtSettle.length === settles, host.applied.length - at);
+
+    landing = url;
+    at = host.applied.length;
+    const home = await call();
+    check('a reload that lands on the site re-applies the live set kept through the detours', home.ok === true && home.reapplied === 1
+      && host.applied.length === at + 1 && host.applied[at]?.rule.id === 'mark', home);
+    await req(r, 'DELETE', `/sessions/${aid}`);
+  }
+
+  console.log('a .shim with a spec-level css block is refused before any page opens');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'spec-css.shim');
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'Styled', handlers: {},
+      spec: { id: 'shim-css', version: 1, match: { hosts: ['site.test'] }, css: '.promo { display: none }', rules: [{ id: 'h', anchor: css('.ad'), mutations: [{ kind: 'hide' }] }] },
+    }));
+    const res = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('the open answers unsupported, naming the css block', res.error === 'unsupported' && Array.isArray(res.unsupported)
+      && res.unsupported.length === 1 && String(res.unsupported[0]).includes('"css"'), res);
+    check('…before any page opened, holding nothing', r.hosts.length === 0 && r.control.sessions.list().length === 0 && !fs.existsSync(lockFileFor(shimFile)));
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'Styled', handlers: {},
+      spec: { id: 'shim-css', version: 1, match: { hosts: ['site.test'] }, css: ' \n', rules: [{ id: 'h', anchor: css('.ad'), mutations: [{ kind: 'hide' }] }] },
+    }));
+    const blank = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('a whitespace-only css block styles nothing, so the shim opens', blank.ok === true, blank);
+    if (blank.ok === true) await req(r, 'DELETE', `/sessions/${String(blank.sessionId)}`);
   }
 }
 
