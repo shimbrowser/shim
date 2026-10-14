@@ -99,6 +99,24 @@ function canonicalDeclaration(field: DeclarationField, value: unknown): unknown 
   return value;
 }
 
+// A non-editable field as checkout writes it. A global shim's promoted
+// default goes out without its rules' witnesses and inline handler source
+// (shim-folder.ts authoredSpec), so it is compared that way: the host keeps
+// those fields, and an untouched default reads as unchanged.
+function comparableField(key: string, value: unknown): unknown {
+  if (key !== 'default' || !isRecord(value) || !Array.isArray(value.rules)) return value;
+  return {
+    ...value,
+    rules: value.rules.map((rule: unknown) => {
+      if (!isRecord(rule)) return rule;
+      const { handlers: _handlers, ...rest } = rule;
+      if (!isRecord(rest.anchor)) return rest;
+      const { witness: _witness, ...anchor } = rest.anchor;
+      return { ...rest, anchor };
+    }),
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -166,7 +184,7 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
   if (sharedEditable) declarations.add('sharedHandlers');
   for (const key of new Set([...Object.keys(prevRecord), ...Object.keys(nextRecord)])) {
     if (UNCOMPARED_FIELDS.has(key) || declarations.has(key)) continue;
-    if (stableStringify(prevRecord[key]) !== stableStringify(nextRecord[key])) {
+    if (stableStringify(comparableField(key, prevRecord[key])) !== stableStringify(comparableField(key, nextRecord[key]))) {
       problems.push(`"${key}" can't be changed from the working copy`);
     }
   }
