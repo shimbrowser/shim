@@ -8,7 +8,9 @@
 // the value, `delete` whether a key went away, `list` the bucket as a record.
 //
 // Writes are serialized and atomic (temp file + rename), so a crash mid-write
-// leaves the previous file. A file that isn't ours (unparseable, wrong
+// leaves the previous file. A write stages its change on a copy and swaps it
+// in only once persisted: a failed write leaves reads, and the next write,
+// as they were. A file that isn't ours (unparseable, wrong
 // format) is never overwritten: every call on it rejects, and the host
 // answers the handler `undefined`.
 
@@ -41,6 +43,23 @@ function put<T>(target: Record<string, T>, key: string, value: T): T {
   return value;
 }
 
+// A copy a write can change without touching the current state: every layer
+// down to the rows is new; the values are shared (stored as JSON, never
+// mutated in place).
+function copyFile(file: StorageFile): StorageFile {
+  const buckets: StorageFile['buckets'] = {};
+  for (const [origin, shims] of Object.entries(file.buckets)) {
+    const byShim: Record<string, Record<string, unknown>> = {};
+    for (const [patchId, rows] of Object.entries(shims)) {
+      const copy: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(rows)) put(copy, k, v);
+      put(byShim, patchId, copy);
+    }
+    put(buckets, origin, byShim);
+  }
+  return { format: HEADLESS_STORAGE_FORMAT, buckets };
+}
+
 function parseFile(text: string, file: string): StorageFile {
   let parsed: unknown;
   try {
@@ -63,8 +82,14 @@ function parseFile(text: string, file: string): StorageFile {
   return { format: HEADLESS_STORAGE_FORMAT, buckets };
 }
 
+export interface FileStorageOptions {
+  /** Writes `text` to `tmp` (default: fs, mode 0600); tests inject a failure. */
+  writeFile?(tmp: string, text: string): void;
+}
+
 /** A HeadlessStorage persisted to `file` (created on the first write). */
-export function fileStorage(file: string): HeadlessStorage & { readonly file: string } {
+export function fileStorage(file: string, options: FileStorageOptions = {}): HeadlessStorage & { readonly file: string } {
+  const writeFile = options.writeFile ?? ((tmp: string, text: string) => fs.writeFileSync(tmp, text, { mode: 0o600 }));
   const target = path.resolve(file);
   let data: StorageFile | null = null;
   // One operation at a time: a read never sees a half-applied write, and
@@ -86,12 +111,27 @@ export function fileStorage(file: string): HeadlessStorage & { readonly file: st
   const save = (file: StorageFile): void => {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     const tmp = `${target}.${process.pid}.${Date.now().toString(36)}.tmp`;
-    fs.writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
-    fs.renameSync(tmp, target);
+    try {
+      writeFile(tmp, `${JSON.stringify(file, null, 2)}\n`);
+      fs.renameSync(tmp, target);
+    } catch (e) {
+      try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
+      throw e;
+    }
   };
 
-  const bucket = (scope: StorageScope, create: boolean): Record<string, unknown> | null => {
-    const file = load();
+  // Applies `change` to a copy, persists it, then makes it current.
+  const commit = <T>(change: (draft: StorageFile) => { result: T; changed: boolean }): T => {
+    const draft = copyFile(load());
+    const { result, changed } = change(draft);
+    if (changed) {
+      save(draft);
+      data = draft;
+    }
+    return result;
+  };
+
+  const bucket = (file: StorageFile, scope: StorageScope, create: boolean): Record<string, unknown> | null => {
     const own = <T>(rec: Record<string, T>, key: string): T | undefined =>
       (Object.prototype.hasOwnProperty.call(rec, key) ? rec[key] : undefined);
     const byShim = own(file.buckets, scope.origin) ?? (create ? put(file.buckets, scope.origin, {}) : null);
@@ -108,26 +148,26 @@ export function fileStorage(file: string): HeadlessStorage & { readonly file: st
   return {
     file: target,
     get: (scope, key) => run(() => {
-      const rows = bucket(scope, false);
+      const rows = bucket(load(), scope, false);
       return rows && Object.prototype.hasOwnProperty.call(rows, key) ? jsonValue(rows[key]) : null;
     }),
     set: (scope, key, value) => run(() => {
       const stored = jsonValue(value);
-      const rows = bucket(scope, true);
-      if (!rows) return value;
-      put(rows, key, stored);
-      save(load());
-      return value;
+      return commit((draft) => {
+        const rows = bucket(draft, scope, true);
+        if (!rows) return { result: value, changed: false };
+        put(rows, key, stored);
+        return { result: value, changed: true };
+      });
     }),
-    delete: (scope, key) => run(() => {
-      const rows = bucket(scope, false);
-      if (!rows || !Object.prototype.hasOwnProperty.call(rows, key)) return false;
+    delete: (scope, key) => run(() => commit((draft) => {
+      const rows = bucket(draft, scope, false);
+      if (!rows || !Object.prototype.hasOwnProperty.call(rows, key)) return { result: false, changed: false };
       delete rows[key];
-      save(load());
-      return true;
-    }),
+      return { result: true, changed: true };
+    })),
     list: (scope) => run(() => {
-      const rows = bucket(scope, false);
+      const rows = bucket(load(), scope, false);
       const out: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(rows ?? {})) put(out, k, jsonValue(v));
       return out;

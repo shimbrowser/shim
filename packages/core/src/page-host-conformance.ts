@@ -22,7 +22,7 @@
 // scripts/electron-conformance-harness.ts).
 
 import type { PageHost, PageRuntimeEvent, PageConsoleMessage, Unsubscribe } from './page-host';
-import type { Rule, Witness } from './types';
+import type { AnchorSpec, Rule, Witness } from './types';
 import { computeDeployId } from './deploy-id';
 import { viewPageOnHost, evaluateOnHost, MAX_SHOT_WIDTH } from './page-host-tools';
 import { errMessage } from './error';
@@ -327,6 +327,9 @@ function makeKit(ctx: ConformanceContext, checks: ConformanceCheck[], applied: S
 // --- shared bits for the cases ---------------------------------------------
 
 const css = (value: string): Rule['anchor'] => ({ primary: { kind: 'css', value } });
+// Every anchor kind the engine resolves (§5); a recovered anchor of any
+// other kind is a failed recovery.
+const ANCHOR_KINDS: ReadonlySet<string> = new Set<AnchorSpec['kind']>(['css', 'data-attr', 'aria', 'text']);
 
 // Handler source, authored as a shim would author it.
 const H = {
@@ -744,18 +747,34 @@ const deployCase: ConformanceCase = {
 
       const recovered = await kit.event((e) => e.kind === 'rule-rebase' && e.specId === recover, 8000);
       kit.check('rebase 3 (recover): the witness re-finds the renamed element', recovered?.strategy === 'recover' && recovered.via === 'witness', recovered);
-      const rAnchor = isRecord(recovered?.anchor) && isRecord(recovered.anchor.primary) ? recovered.anchor.primary : null;
+      // The recovered anchor must be one the engine can resolve, and the rule
+      // carrying it must land on the renamed button alone. The engine only
+      // reports the rebase (the host commits it), so the case applies the
+      // rebased rule as a host would on the new build: its hide, plus a
+      // marker restyle no other rule sets so the resolved set can be counted.
+      // Resolution is the engine's own, so every anchor kind is judged by
+      // core's resolver on every host.
+      const rRecord = isRecord(recovered?.anchor) ? recovered.anchor : null;
+      const rPrimary = rRecord && isRecord(rRecord.primary) ? rRecord.primary : null;
+      const rAnchor = rRecord && rPrimary && typeof rPrimary.kind === 'string' && ANCHOR_KINDS.has(rPrimary.kind)
+        ? rRecord as unknown as Rule['anchor'] : null;
+      kit.check('…with a recovered primary anchor of a supported kind', rAnchor !== null, recovered?.anchor);
       if (rAnchor) {
-        const resolves = await kit.read(`(() => {
-          const a = ${JSON.stringify(rAnchor)};
-          let els = [];
-          if (a.kind === 'css') els = Array.from(document.querySelectorAll(a.value));
-          else if (a.kind === 'data-attr') els = Array.from(document.querySelectorAll('[' + a.name + '="' + a.value + '"]'));
-          else if (a.kind === 'aria') els = Array.from(document.querySelectorAll(a.role ? '[role="' + a.role + '"]' : '*')).filter((e) => !a.label || e.getAttribute('aria-label') === a.label);
-          else return 'kind:' + a.kind;
-          return els.length === 1 && els[0].matches('button.buy-v2');
-        })()`);
-        kit.check('…and the recovered anchor resolves to that element only', resolves === true || (typeof resolves === 'string' && resolves.startsWith('kind:')), { rAnchor, resolves });
+        const rebased = kit.apply({ id: 'recover-rebased', anchor: rAnchor, mutations: [{ kind: 'hide' }, { kind: 'restyle', properties: { scrollMarginTop: '7.5px' } }] }, { bundleHash: b2 });
+        const status = await kit.event((e) => e.kind === 'rule-status' && e.specId === rebased && typeof e.matched === 'number' && e.matched > 0, 8000);
+        const marked = await kit.until(async () => {
+          const r = await kit.read(`(() => {
+            const els = Array.from(document.querySelectorAll('body *')).filter((e) => getComputedStyle(e).scrollMarginTop === '7.5px');
+            return els.length ? { count: els.length, buy: els.length === 1 && els[0].matches('button.buy-v2') } : null;
+          })()`);
+          return isRecord(r) ? r : null;
+        }, 8000);
+        kit.check('…and the recovered anchor resolves to that element only', status?.matched === 1 && marked?.count === 1 && marked.buy === true,
+          { rAnchor, matched: status?.matched, marked });
+        const display = await kit.read(`(() => { const b = document.querySelector('button.buy-v2'); return b ? getComputedStyle(b).display : null; })()`);
+        kit.check('…and the rebased rule\'s hide applies (the buy button is hidden)', display === 'none', display);
+        kit.check('…without quarantining', !kit.events.some((e) => e.kind === 'rule-quarantined' && e.specId === rebased));
+        kit.remove(rebased);
       }
 
       const quarantined = await kit.event((e) => e.kind === 'rule-quarantined' && e.specId === gone, 10000);
