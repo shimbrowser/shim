@@ -433,6 +433,17 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     }
   }
 
+  // Whether the page is still on the document the live previews were last
+  // applied to (markDocument).
+  async function onMarkedDocument(handle: HeadlessHandle): Promise<boolean> {
+    if (handle.docToken === null || handle.host.isClosed()) return false;
+    try {
+      return (await handle.host.evaluate(DOC_TOKEN_READ, 'engine')) === handle.docToken;
+    } catch {
+      return false;
+    }
+  }
+
   // An in-scope full navigation since the last check left a fresh document
   // with none of the live previews on it: re-apply them (as reload_page does)
   // before anything measures, screenshots or adds to the page.
@@ -488,6 +499,10 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     if (away) return refused(away);
     await followDocument(handle, signal);
     if (signal.aborted) return refused({ error: 'session-ended' });
+    // Again after the replay's wait: the fresh document may have sent the
+    // page off the site meanwhile (a script redirect).
+    const awayAfter = pageAway(handle);
+    if (awayAfter) return refused(awayAfter);
 
     const appliedAt = now();
     const emitKeys = new Map<string, Rule>();
@@ -579,7 +594,9 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       const away = pageAway(handle);
       if (away) return JSON.stringify(away);
       await followDocument(handle, signal);
-      return null;
+      // Again after the replay's wait: the page may have left the site meanwhile.
+      const awayAfter = pageAway(handle);
+      return awayAfter ? JSON.stringify(awayAfter) : null;
     };
     switch (name) {
       case 'view_page': {
@@ -682,13 +699,23 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     // A closed page has no document to read: the last baseline stands.
     const away = pageAway(handle);
     if (away && away.error === 'page-away') return { ok: false, error: away.error, detail: away.detail };
-    const deployId = away ? null : await currentDeployId(handle);
+    // The deploy id is only worth recording from the document the rules
+    // last ran on (marked when the live set was applied there): a document
+    // loaded since — possibly another deploy — never reconciled them, so
+    // its id would vouch for anchors nobody checked against it.
+    const reconciled = !away && await onMarkedDocument(handle);
+    const deployId = reconciled ? await currentDeployId(handle) : null;
     const version = handle.version + 1;
     // A rule left broken on this deploy (a recovery nothing applied, or a
     // quarantine) still has its dead anchor: stamping this deploy would hide
     // the deploy from Shim — a transient no-match instead of its recovery /
     // quarantine path, for good — so the committed baseline stands.
     const bundleHash = brokenRules(handle).length ? handle.bundleHash : (deployId ?? handle.bundleHash);
+    const notes: string[] = [];
+    if (!away && !reconciled) {
+      notes.push('the page loaded a new document since the rules last ran on it, so this commit kept the committed deploy baseline ' +
+        '(the rules were not checked against that document). Preview again, then commit, to record the page\'s deploy');
+    }
     const spec = clone(handle.working) as Spec & Record<string, unknown>;
     delete spec.version;
     delete spec.bundleHash;
@@ -737,7 +764,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     handle.envelope = { ...handle.envelope, authoringHistory: history };
     handle.storedHandlers = { ...file.handlers };
     handle.source = { ...handle.source, created: false };
-    return { ok: true, versionId: version };
+    return { ok: true, versionId: version, ...(notes.length ? { notes } : {}) };
   }
 
   return {
