@@ -403,9 +403,11 @@ no handler):
 ```
 
 `match.hosts` must include `from` (and `match` can't change in a session, so `from` must
-already be one of its hosts); `from` and `to` must share a registrable domain; only
-top-level navigations are redirected; path, query and hash are kept. Each new redirect
-target asks the user at commit. Not on a global shim (see `mount-route` above).
+already be one of its hosts); only top-level navigations are redirected; path, query and
+hash are kept. `to` may be any site, including another domain (twitter.com → x.com): the
+boundary is consent, not domain. Each new redirect target asks the user at commit, and a
+target they haven't allowed never redirects. Not on a global shim (see `mount-route`
+above).
 
 **`rewrite-response`** — reshape the JSON the site's own code fetches, before it reads it
 (the right tool for filtering a list the site loads, so its counts and pagination stay
