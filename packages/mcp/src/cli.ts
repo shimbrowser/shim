@@ -14,7 +14,7 @@ import { randomUUID } from 'crypto';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createShimMcpServer } from './server';
 import { defaultEnv, discoveryFilePath, readControlInfo, socketClient, type ControlInfo } from './control-client';
-import { attachOrLaunch, pidAlive, type LaunchCommand, type LaunchExit, type Launched } from './launch';
+import { attachOrLaunch, pidAlive, launchNeedsShell, type LaunchCommand, type LaunchExit, type Launched } from './launch';
 import { maxOutputTokens } from './results';
 import { createHeadlessControl } from './headless-control';
 import { loadPlaywright, openHeadlessPage } from './playwright-launch';
@@ -37,8 +37,7 @@ function spawnDetached(cmd: LaunchCommand): Launched {
     cwd: cmd.cwd,
     detached: true,
     stdio: 'ignore',
-    // npm on Windows is a .cmd shim.
-    shell: process.platform === 'win32',
+    shell: launchNeedsShell(cmd.command, process.platform),
   });
   let exit: LaunchExit | null = null;
   child.on('error', (e) => {
