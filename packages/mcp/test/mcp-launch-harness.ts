@@ -11,7 +11,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { attachOrLaunch, launchCommand, pidAlive, CONTROL_ENDPOINT_FLAG, type LaunchCommand, type LaunchDeps, type LaunchExit } from '../src/launch';
+import { attachOrLaunch, launchCommand, launchNeedsShell, pidAlive, CONTROL_ENDPOINT_FLAG, type LaunchCommand, type LaunchDeps, type LaunchExit } from '../src/launch';
 import { APP_DIR_NAME, discoveryFilePath, readControlInfo, userDataDir, type ControlInfo } from '../src/control-client';
 
 // The Shim app's package.json (the repo root), found from wherever this compiled file runs.
@@ -184,6 +184,12 @@ async function main(): Promise<void> {
     check('a dev checkout gets the longer wait', !r.ok && s.deps.now() - start >= 180_000);
   }
 }
+
+console.log('which launches go through a shell:');
+check('a Windows app path with a space is spawned directly (a shell would split it)', !launchNeedsShell('C:\\Program Files\\Shim\\Shim.exe', 'win32'));
+check('…and so is any native Windows executable', !launchNeedsShell('C:\\Shim\\Shim.exe', 'win32'));
+check('npm\'s Windows .cmd launcher needs the shell', launchNeedsShell('npm.cmd', 'win32') && launchNeedsShell('npm', 'win32'));
+check('nothing needs it elsewhere', !launchNeedsShell('npm', 'darwin') && !launchNeedsShell('open', 'darwin') && !launchNeedsShell('shim-browser', 'linux'));
 
 main().then(() => {
   if (failures) {
