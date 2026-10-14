@@ -403,9 +403,11 @@ no handler):
 ```
 
 `match.hosts` must include `from` (and `match` can't change in a session, so `from` must
-already be one of its hosts); `from` and `to` must share a registrable domain; only
-top-level navigations are redirected; path, query and hash are kept. Each new redirect
-target asks the user at commit. Not on a global shim (see `mount-route` above).
+already be one of its hosts); only top-level navigations are redirected; path, query and
+hash are kept. `to` may be any site, including another domain (twitter.com → x.com): the
+boundary is consent, not domain. Each new redirect target asks the user at commit, and a
+target they haven't allowed never redirects. Not on a global shim (see `mount-route`
+above).
 
 **`rewrite-response`** — reshape the JSON the site's own code fetches, before it reads it
 (the right tool for filtering a list the site loads, so its counts and pagination stay
@@ -588,8 +590,9 @@ if you need to), and say in your summary what you could only verify that way.
   endpoints that need the user's logged-in session, use the page's
   `fetch(url, { credentials: 'include' })`. It **cannot reach the local network**: localhost,
   LAN addresses and hostnames resolving to private or link-local addresses answer
-  `{ ok: false, error: 'blocked: …' }`. Previews don't exercise this path, so don't build
-  an integration with a local service on `api.fetch`.
+  `{ ok: false, error: 'blocked: …' }`. A preview makes the same real requests through
+  the same broker and block, so it shows you that answer; don't build an integration
+  with a local service on `api.fetch`.
 - **`api.ai.complete({ prompt | messages, system?, model?, maxTokens? })`** — Claude, on the
   user's own Anthropic key, which the shim never sees: `{ ok, text }`. Requires
   `"permissions": ["ai"]`; the user grants it in Shim after the commit, and until then calls
