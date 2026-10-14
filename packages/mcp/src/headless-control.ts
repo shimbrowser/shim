@@ -65,6 +65,11 @@ export interface HeadlessControlOptions {
 /** The control client, plus ending every open session (the server shutting down). */
 export interface HeadlessControl extends ControlClient {
   readonly sessions: SessionRegistry;
+  /**
+   * Shut down: refuse new opens, settle every open in flight (closing its
+   * page and freeing its file), then end every session. Nothing opened
+   * before it resolves outlives it.
+   */
   closeAll(): Promise<void>;
 }
 
@@ -78,6 +83,7 @@ const STATUS_BY_ERROR: Record<string, number> = {
   'stale-revision': 409,
   'nothing-to-commit': 409,
   'session-ended': 410,
+  'shutting-down': 503,
   'op-failed': 500,
   'internal-error': 500,
 };
@@ -220,6 +226,11 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
   // source a session starts from can't go stale under it (another session
   // committing and ending while this one's page loads).
   const opening = new Set<string>();
+  // Shutdown (closeAll): set first, so no open starts after it, and every
+  // open already under way, tracked here, finds it at each step it can stop.
+  let closing = false;
+  const inFlight = new Set<Promise<unknown>>();
+  const SHUTTING_DOWN = 'the headless server is shutting down';
   const sessions = createSessionRegistry({
     leases: { shim: leases },
     backends: { shim: backend },
@@ -233,6 +244,17 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
   const info: ControlInfo = { socketPath: '', token: '', pid: process.pid, appVersion: `${options.version} (headless)`, startedAt: Date.now() };
 
   async function openSession(body: unknown): Promise<ControlReply> {
+    if (closing) return refuse('shutting-down', SHUTTING_DOWN);
+    const work = openUnlessClosing(body);
+    inFlight.add(work);
+    try {
+      return await work;
+    } finally {
+      inFlight.delete(work);
+    }
+  }
+
+  async function openUnlessClosing(body: unknown): Promise<ControlReply> {
     if (!isRecord(body)) return refuse('invalid-request', 'the body must be a JSON object');
     if (body.kind !== 'shim') {
       return refuse(REQUIRES_SHIM_BROWSER, 'compositions run only in the Shim browser: author them in attach mode');
@@ -310,11 +332,18 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
       return refuse('invalid-request', `${shimFile} does not exist: pass newShimName to start a new shim there`);
     }
 
+    if (closing) return refuse('shutting-down', SHUTTING_DOWN);
     let page: HeadlessSessionPage;
     try {
       page = await options.openPage(parsedUrl.href, fileStorage(storageFileFor(shimFile)));
     } catch (e) {
       return refuse('page-open-failed', errMessage(e));
+    }
+    // A page launch can't be cancelled: one that arrives after shutdown
+    // began is closed unused (the caller's finally frees the file).
+    if (closing) {
+      await page.close().catch(() => undefined);
+      return refuse('shutting-down', SHUTTING_DOWN);
     }
     // The page the session works on is where the url ended up, after any
     // redirect (example.com → www.example.com, a sign-in host): a new shim
@@ -328,6 +357,12 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
     if (!opened.ok) {
       await page.close().catch(() => undefined);
       return reply({ ...opened });
+    }
+    // Shutdown began while begin settled: closeAll may already have read
+    // the registry's list without this session in it.
+    if (closing) {
+      await sessions.end(opened.sessionId, 'ended');
+      return refuse('shutting-down', SHUTTING_DOWN);
     }
     try {
       const hosts = source.spec.match?.hosts ?? [];
@@ -439,6 +474,8 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
       }
     },
     async closeAll() {
+      closing = true;
+      await Promise.allSettled([...inFlight]);
       await Promise.all(sessions.list().map((s) => sessions.end(s.sessionId, 'ended')));
     },
   };

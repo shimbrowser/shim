@@ -189,7 +189,8 @@ export type BackendCheckout =
   | { ok: false; error: string; detail?: string };
 
 export type BackendCommit =
-  | { ok: true; versionId: VersionId }
+  // `notes`: what the agent should know about what was written (passed through).
+  | { ok: true; versionId: VersionId; notes?: string[] }
   | { ok: false; error: string; detail?: string };
 
 export interface FinishInfo {
@@ -243,7 +244,7 @@ export type OpenResult = { ok: true; sessionId: string } | SessionError;
 export type CheckoutResult = { ok: true; revision: number; files: unknown } | SessionError;
 export type PreviewResult = { ok: true; applied: boolean; revision: number; evidence: unknown } | SessionError;
 export type CallResult = { ok: true; result: unknown } | SessionError;
-export type CommitResult = { ok: true; versionId: VersionId; revision: number } | SessionError;
+export type CommitResult = { ok: true; versionId: VersionId; revision: number; notes?: string[] } | SessionError;
 export type EndResult = { ok: true; reason: EndReason; versionId: VersionId | null } | SessionError;
 
 export interface CommitRequest {
@@ -688,7 +689,7 @@ export function createSessionRegistry<L extends SessionLease = SessionLease>(opt
       // Committed: recorded whatever happens to the session next.
       s.info.committedRevision = req.revision;
       s.info.lastVersionId = out.versionId;
-      return { ok: true, versionId: out.versionId, revision: req.revision };
+      return { ok: true, versionId: out.versionId, revision: req.revision, ...(out.notes?.length ? { notes: out.notes } : {}) };
     }).then((result) => {
       s.info.commitPending = false;
       changed();

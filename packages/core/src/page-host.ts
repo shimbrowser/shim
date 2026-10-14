@@ -79,6 +79,14 @@ export interface PreviewRule {
    * for a preview is evidence only; nothing is persisted.
    */
   bundleHash?: string;
+  /**
+   * An opaque tag for this version of the preview. A host that supports it
+   * stamps it as `applyId` on every runtime event the preview reports, so a
+   * consumer can tell a late event from a replaced version of the same
+   * `ruleKey` from one the current version caused. Optional both ways: a
+   * host may ignore it, and a consumer must accept events without it.
+   */
+  applyId?: string;
 }
 
 /**
@@ -153,6 +161,8 @@ export interface PageHostCapabilities {
   mutationKinds: readonly string[];
   /** Rules targeting a child frame (`anchor.iframe`). */
   iframeRules: boolean;
+  /** The spec-level `css` block (the engine's whole-patch stylesheet) is installed with the shim. */
+  specCss: boolean;
   /** Handler api members beyond the core set. */
   apiMembers: readonly PageHostApiMember[];
   /** Component identity in a witness is captured, verified and used for recovery. */
