@@ -1,13 +1,13 @@
-// Harness for src/patch-engine/css-imports.ts: `leadingImports` — the parser
+// Harness for packages/core/src/css-imports.ts: `leadingImports` — the parser
 // the strict-CSP style mirror uses to carry a refused sheet's `@import`s over
 // as `<link>`s (constructable sheets drop `@import`; style-mirror.ts) — and
 // `absolutizeUrls`, which keeps a copied import's relative url()s pointing at
 // the imported sheet's directory. Bare node.
 //
-//   node out/scripts/css-imports-harness.js
+//   node out/packages/core/test/css-imports-harness.js
 
-import { absolutizeUrls, leadingImports } from '../src/patch-engine/css-imports';
-import type { LeadingImports } from '../src/patch-engine/css-imports';
+import { absolutizeUrls, leadingImports } from '../src/css-imports';
+import type { LeadingImports } from '../src/css-imports';
 
 let failures = 0;
 function eq(label: string, actual: LeadingImports, expected: LeadingImports): void {
