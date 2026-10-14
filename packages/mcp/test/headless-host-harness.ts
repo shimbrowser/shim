@@ -203,6 +203,27 @@ async function main(): Promise<void> {
         control.resolve(Number(readCall?.id), 'v');
         check('a call the driver resolves still resolves with its value', (await read) === 'v');
         check('a settled call cannot be settled again', !control.reject(Number(readCall?.id), 'late'));
+        // Arguments JSON cannot carry: the call rejects at once and leaves
+        // nothing pending, rather than hanging the handler forever.
+        const settles = async (p: Promise<unknown>): Promise<unknown> => {
+          const timeout = Symbol('timeout');
+          const out = await Promise.race([p.then(() => 'resolved', (e: unknown) => e), tick(200).then(() => timeout)]);
+          return out === timeout ? 'pending' : out;
+        };
+        // The error comes from the runtime's realm: match on its message.
+        const failedWith = (e: unknown): boolean => typeof e === 'object' && e !== null
+          && /^storage\.set failed: /.test(String((e as { message?: unknown }).message));
+        const before = posted.length;
+        const cyclic: Record<string, unknown> = {};
+        cyclic.self = cyclic;
+        const cyc = await settles(api.storage.set('k', cyclic));
+        check('a circular value rejects the call', failedWith(cyc), String(cyc));
+        const big = await settles(api.storage.set('k', 10n));
+        check('a BigInt value rejects the call', failedWith(big), String(big));
+        check('…and neither reached the driver', posted.length === before);
+        // The two refused calls took the next two ids after the read.
+        const refusedIds = [Number(readCall?.id) + 1, Number(readCall?.id) + 2];
+        check('…nor left a pending entry behind', refusedIds.every((id) => !control.resolve(id, 'late')));
       }
     }
   }
@@ -247,7 +268,62 @@ async function main(): Promise<void> {
     const answer1 = answers.find((e) => /\.(resolve|reject)\(1,/.test(e)) ?? '';
     const answer2 = answers.find((e) => /\.(resolve|reject)\(2,/.test(e)) ?? '';
     check('a store that fails rejects the page\'s call, naming the failure', answer1.includes('.reject(1,') && answer1.includes('disk full'), answer1);
-    check('a store that answers resolves it with the value', answer2.includes('.resolve(2, "stored")'), answer2);
+    check('a store that answers resolves it with the value', answer2.includes('.resolve(2, JSON.parse("\\"stored\\""))'), answer2);
+    await host.detach();
+  }
+  {
+    // A reply is exact JSON in the page: an own `__proto__` key stays an own
+    // key (an object literal would make it a prototype setter), at the top
+    // level, nested, and inside a list reply.
+    const tricky = '{"__proto__":{"flag":true},"nested":{"__proto__":{"deep":1}}}';
+    const store: HeadlessStorage = {
+      get: () => Promise.resolve(JSON.parse(tricky) as unknown),
+      set: (_s, _k, v) => Promise.resolve(v),
+      delete: () => Promise.resolve(false),
+      list: () => Promise.resolve({ row: JSON.parse(tricky) as unknown }),
+    };
+    const { page, cdp } = fakePage(true);
+    const host = await attachPlaywrightPageHost(page, { engineBundle: '', storage: store });
+    const call = (id: number, method: string, args: unknown[]): void => {
+      cdp.emit('Runtime.bindingCalled', {
+        name: '__shimCoreHost',
+        executionContextId: 7,
+        payload: JSON.stringify({ type: 'call', id, method, patchId: 'p', origin: 'https://x.test', args }),
+      });
+    };
+    call(11, 'storage.get', ['k']);
+    call(12, 'storage.list', []);
+    call(13, 'storage.set', ['k', JSON.parse(tricky) as unknown]);
+    await tick();
+    // Run each answer the driver sent in a context standing in for the
+    // engine world, capturing what the page's promise would resolve with.
+    const settled = new Map<number, unknown>();
+    const world: Record<string, unknown> = {};
+    world.globalThis = world;
+    world.__shimCoreRuntime = {
+      resolve: (id: number, value: unknown) => { settled.set(id, value); return true; },
+      reject: () => false,
+    };
+    for (const s of cdp.sends) {
+      if (s.method !== 'Runtime.evaluate' || s.params.contextId !== 7) continue;
+      const expr = String(s.params.expression);
+      if (/\.resolve\(1[123],/.test(expr)) vm.runInNewContext(expr, world);
+    }
+    // Exact: `__proto__` is an own data key, nothing is inherited from it,
+    // and the prototype is still the realm's Object.prototype (whose own
+    // prototype is null).
+    const ownProtoKey = (v: unknown): v is Record<string, unknown> => {
+      if (typeof v !== 'object' || v === null) return false;
+      const proto: unknown = Object.getPrototypeOf(v);
+      return Object.prototype.hasOwnProperty.call(v, '__proto__')
+        && typeof proto === 'object' && proto !== null && Object.getPrototypeOf(proto) === null;
+    };
+    const isExact = (v: unknown): boolean => ownProtoKey(v) && !('flag' in v)
+      && ownProtoKey(v.nested) && !('deep' in v.nested);
+    check('a get reply keeps an own __proto__ key and its prototype', isExact(settled.get(11)), JSON.stringify(settled.get(11)));
+    const listed = settled.get(12) as Record<string, unknown> | undefined;
+    check('…so does a list reply', isExact(listed?.row), JSON.stringify(listed));
+    check('…and a set reply', isExact(settled.get(13)), JSON.stringify(settled.get(13)));
     await host.detach();
   }
 

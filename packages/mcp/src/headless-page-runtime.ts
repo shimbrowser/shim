@@ -60,6 +60,9 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
   const send = host[config.binding] as ((payload: string) => void) | undefined;
   if (!ShimCore || typeof ShimCore.run !== 'function' || typeof send !== 'function') return;
 
+  // Events are fire-and-forget: one that cannot be serialized, or a driver
+  // that went away, drops it. An api call goes through `call`, which rejects
+  // instead (see below).
   const post = (msg: Record<string, unknown>): void => {
     try { send(JSON.stringify(msg)); } catch (_) { /* driver gone or unserializable — drop */ }
   };
@@ -70,11 +73,27 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
   // --- api calls answered by the driver -------------------------------------
   const pending = new Map<number, { resolve: (value: unknown) => void; reject: (err: Error) => void }>();
   let seq = 0;
+  // A call whose request never reaches the driver (arguments JSON cannot
+  // carry — a cycle, a BigInt — or a binding that went away) rejects at once,
+  // as the browser's IPC invoke does, instead of leaving the handler awaiting
+  // an answer that will never come.
   const call = (method: string, patchId: string, args: unknown[]): Promise<unknown> => {
     const id = ++seq;
     return new Promise((resolve, reject) => {
+      let payload: string;
+      try {
+        payload = JSON.stringify({ type: 'call', id, method, patchId, origin: location.origin, args });
+      } catch (err) {
+        reject(new Error(`${method} failed: ${err instanceof Error ? err.message : String(err)}`));
+        return;
+      }
       pending.set(id, { resolve, reject });
-      post({ type: 'call', id, method, patchId, origin: location.origin, args });
+      try {
+        send(payload);
+      } catch (err) {
+        pending.delete(id);
+        reject(new Error(`${method} failed: ${err instanceof Error ? err.message : String(err)}`));
+      }
     });
   };
 

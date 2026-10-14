@@ -333,7 +333,12 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
       else if (method === 'storage.delete') value = await storage.delete(scope, key);
       else if (method === 'storage.list') value = await storage.list(scope);
       else value = undefined;
-      const literal = value === undefined ? 'undefined' : JSON.stringify(value);
+      // The reply crosses as a quoted JSON string parsed page-side, never as
+      // an object literal: a literal would turn an own `__proto__` key into a
+      // prototype setter, so the handler would read a different object than
+      // the store holds.
+      const json: string | undefined = value === undefined ? undefined : JSON.stringify(value);
+      const literal = json === undefined ? 'undefined' : `JSON.parse(${JSON.stringify(json)})`;
       expression = `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].resolve(${id}, ${literal})`;
     } catch (err) {
       expression = `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].reject(${id}, ${JSON.stringify(`${method} failed: ${errText(err)}`)})`;
