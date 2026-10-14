@@ -99,6 +99,11 @@ function wholeLiteral(expression: string): string | null {
 // `Object.assign(module, { exports })`, which import accepts, and a regex
 // can't see past comments and strings either way.
 const MODULE_REF_RE = /\bmodule\b/;
+// The other ways a module can reach `module` without spelling it: the
+// wrapper's `arguments` (`arguments[0].exports = …`), a direct `eval`, and a
+// unicode escape in an identifier (`m\u006fdule`). A source using any of them
+// is left to the browser's execution-based check.
+const INDIRECT_MODULE_REF_RE = /\barguments\b|\beval\b|\\u/;
 
 /**
  * Why a handler module can't give the browser a function, or null when
@@ -117,7 +122,7 @@ export function handlerModuleProblem(moduleSource: string): string | null {
   if (!moduleSource.trim()) return 'is empty';
   const syntax = syntaxProbe(`(function (module, exports) {\n${moduleSource}\n});`);
   if (!syntax.ok) return `does not parse as JavaScript: ${syntax.error ?? 'syntax error'}`;
-  if (!MODULE_REF_RE.test(moduleSource)) {
+  if (!MODULE_REF_RE.test(moduleSource) && !INDIRECT_MODULE_REF_RE.test(moduleSource)) {
     return 'never assigns module.exports — a handler file is `module.exports = function (ctx) { ... };`';
   }
   const expression = exportedExpression(moduleSource)?.trim();

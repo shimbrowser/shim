@@ -223,6 +223,15 @@ rejects('a script handler module exporting a string', 'malformed-shim-folder',
   () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = "notes"' }), 'not a function');
 rejects('a script handler file that is a bare function declaration', 'malformed-shim-folder',
   () => packShim({ ...good(), 'handlers/notes.js': 'function notes({ anchor }) { anchor.dataset.n = "1"; }\n' }), 'handlers/notes.js never assigns module.exports');
+for (const [label, src] of [
+  ['through the wrapper\'s arguments', 'arguments[0].exports = function notes() {};\n'],
+  ['through an escaped identifier', 'm\\u006fdule.exports = function notes() {};\n'],
+  ['through a direct eval', 'eval("module").exports = function notes() {};\n'],
+] as const) {
+  let packed: string;
+  try { packShim({ ...good(), 'handlers/notes.js': src }); packed = 'ok'; } catch (err) { packed = err instanceof Error ? err.message : String(err); }
+  check(`a module that assigns its export ${label} packs`, packed === 'ok', packed);
+}
 rejects('a script handler module exporting an object', 'malformed-shim-folder',
   () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = {};\n' }), 'handlers/notes.js exports an object, not a function');
 rejects('…an object of handlers', 'malformed-shim-folder',
