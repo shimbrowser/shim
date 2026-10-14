@@ -48,6 +48,9 @@ export const HEADLESS_CAPABILITIES: PageHostCapabilities = Object.freeze({
     'script', 'inject-element', 'inject-html', 'remove', 'replace-root',
   ]),
   iframeRules: false,
+  // Previews are per rule (applyExtraRule on a stub spec): nothing installs
+  // the spec-level stylesheet, so a shim that has one is refused (D15).
+  specCss: false,
   apiMembers: Object.freeze([]),
   componentIdentity: false,
   engineInspection: false,

@@ -32,6 +32,12 @@
 //     judged stale (under the takeover mutex, itself recovered from a dead
 //     holder);
 //   - a .shim whose match.hosts isn't a list of strings refused at open;
+//   - a captured witness carried by every replay of its rule (reload_page,
+//     a followed navigation), so the replay can't attach to another match;
+//   - a reload (in place, or back to the start URL) that lands off the
+//     site answers page-away, applying nothing there;
+//   - a .shim with a spec-level css block refused at open (D15: headless
+//     installs no whole-patch stylesheet);
 //   - commit: the .shim written once per commitId, version + deploy baseline +
 //     witnesses + history, the session continuing from it;
 //   - ending tears every preview down, closes the page and frees the file.
@@ -700,6 +706,112 @@ async function main(): Promise<void> {
     const saved = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { rules: Array<{ id: string; anchor?: { witness?: unknown } }> } };
     check('…with its captured witness on the committed rule', isRecord(saved.spec.rules.find((x) => x.id === '__proto__')?.anchor?.witness), saved.spec.rules);
     await req(r, 'DELETE', `/sessions/${pid}`);
+  }
+
+  console.log('a captured witness rides every replay of its rule');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'witness-replay.shim');
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile, create: { name: 'Replay' } });
+    const wid = String(opened.sessionId);
+    const host = r.hosts[0] as FakeHost;
+    // A fake engine over two `.item` elements: on the first document the
+    // selector resolves "first"; on every later one "second" comes first, so
+    // only the witness keeps the rule off it.
+    let doc = 0;
+    const attached: string[] = [];
+    host.onApply = (p, h) => {
+      const witness = p.rule.anchor?.witness as { textStem?: string } | undefined;
+      const element = doc === 0 || witness?.textStem === 'first' ? 'first' : 'second';
+      attached.push(element);
+      h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 1 });
+      if (!witness) h.emit({ kind: 'rule-witness', specId: p.ruleKey, ruleId: p.rule.id, witness: { v: 1, tag: 'li', textStem: element } });
+    };
+    const folder = decodeWorkingCopy((await req(r, 'GET', `/sessions/${wid}/checkout`)).files);
+    const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown>;
+    spec.rules = [{ id: 'pick', anchor: css('.item'), mutations: [{ kind: 'hide' }] }];
+    const pv = await preview(r, wid, { ...folder, 'shim.json': json(spec) } as Record<string, string>);
+    check('the rule previews and captures its witness', pv.applied === true && attached.join() === 'first', { pv, attached });
+    const lastPick = (): PreviewRule | undefined => [...host.applied].reverse().find((p) => p.rule.id === 'pick');
+    const witnessStem = (): unknown => (lastPick()?.rule.anchor?.witness as { textStem?: string } | undefined)?.textStem;
+
+    doc = 1;
+    const reload = await req(r, 'POST', `/sessions/${wid}/call`, { name: 'reload_page', input: {} });
+    check('reload_page replays the rule with its captured witness', String(reload.result).includes('"ok":true') && witnessStem() === 'first', { reload, rule: lastPick()?.rule });
+    check('…so the replay attaches to the witnessed element, not the selector\'s new first match', attached.join() === 'first,first', attached);
+
+    doc = 2;
+    host.navigate(url);
+    await req(r, 'POST', `/sessions/${wid}/call`, { name: 'view_page', input: {} });
+    check('a followed navigation replays it with the witness too', witnessStem() === 'first' && attached.join() === 'first,first,first', attached);
+    check('…keeping the preview\'s deploy baseline (a new rule runs behind none)', lastPick()?.bundleHash === undefined);
+    await req(r, 'DELETE', `/sessions/${wid}`);
+  }
+
+  console.log('a reload that lands off the site re-applies nothing');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'reload-away.shim');
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile, create: { name: 'Away' } });
+    const aid = String(opened.sessionId);
+    const host = r.hosts[0] as FakeHost;
+    const folder = decodeWorkingCopy((await req(r, 'GET', `/sessions/${aid}/checkout`)).files);
+    const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown>;
+    spec.rules = [{ id: 'mark', anchor: css('.track'), mutations: [{ kind: 'script', handler: 'mark' }] }];
+    const pv = await preview(r, aid, { ...folder, 'shim.json': json(spec), 'handlers/mark.js': 'module.exports = function mark({ anchor }) { anchor.dataset.m = "1"; };\n' } as Record<string, string>);
+    check('a script rule is live', pv.applied === true, pv);
+    // Every load lands where `landing` says, whatever the reload asked for.
+    let landing = 'https://login.other.test/sign-in';
+    host.reload = (u) => { host.reloads.push(u); host.navigate(landing); };
+    const call = async (): Promise<Record<string, unknown>> => {
+      const res = await req(r, 'POST', `/sessions/${aid}/call`, { name: 'reload_page', input: {} });
+      return typeof res.result === 'string' ? JSON.parse(res.result) as Record<string, unknown> : {};
+    };
+
+    let at = host.applied.length;
+    let settles = r.appliedAtSettle.length;
+    const inPlace = await call();
+    check('an in-place reload redirected off the site answers page-away', inPlace.error === 'page-away'
+      && inPlace.url === landing && host.reloads[host.reloads.length - 1] === undefined, inPlace);
+    check('…applying nothing to that page, and not settling', host.applied.length === at && r.appliedAtSettle.length === settles, host.applied.length - at);
+    const tool = await req(r, 'POST', `/sessions/${aid}/call`, { name: 'view_page', input: {} });
+    check('…and the page tools stay away from it too', String(tool.result).includes('page-away') && host.applied.length === at);
+
+    landing = 'http://localhost:9090/';
+    at = host.applied.length;
+    settles = r.appliedAtSettle.length;
+    const back = await call();
+    check('the way back to the start URL redirected off the site answers page-away', back.error === 'page-away'
+      && back.url === landing && host.reloads[host.reloads.length - 1] === url, back);
+    check('…applying nothing there either', host.applied.length === at && r.appliedAtSettle.length === settles, host.applied.length - at);
+
+    landing = url;
+    at = host.applied.length;
+    const home = await call();
+    check('a reload that lands on the site re-applies the live set kept through the detours', home.ok === true && home.reapplied === 1
+      && host.applied.length === at + 1 && host.applied[at]?.rule.id === 'mark', home);
+    await req(r, 'DELETE', `/sessions/${aid}`);
+  }
+
+  console.log('a .shim with a spec-level css block is refused before any page opens');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'spec-css.shim');
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'Styled', handlers: {},
+      spec: { id: 'shim-css', version: 1, match: { hosts: ['site.test'] }, css: '.promo { display: none }', rules: [{ id: 'h', anchor: css('.ad'), mutations: [{ kind: 'hide' }] }] },
+    }));
+    const res = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('the open answers unsupported, naming the css block', res.error === 'unsupported' && Array.isArray(res.unsupported)
+      && res.unsupported.length === 1 && String(res.unsupported[0]).includes('"css"'), res);
+    check('…before any page opened, holding nothing', r.hosts.length === 0 && r.control.sessions.list().length === 0 && !fs.existsSync(lockFileFor(shimFile)));
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'Styled', handlers: {},
+      spec: { id: 'shim-css', version: 1, match: { hosts: ['site.test'] }, css: ' \n', rules: [{ id: 'h', anchor: css('.ad'), mutations: [{ kind: 'hide' }] }] },
+    }));
+    const blank = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('a whitespace-only css block styles nothing, so the shim opens', blank.ok === true, blank);
+    if (blank.ok === true) await req(r, 'DELETE', `/sessions/${String(blank.sessionId)}`);
   }
 }
 

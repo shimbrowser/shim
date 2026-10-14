@@ -153,6 +153,8 @@ export interface PageHostCapabilities {
   mutationKinds: readonly string[];
   /** Rules targeting a child frame (`anchor.iframe`). */
   iframeRules: boolean;
+  /** The spec-level `css` block (the engine's whole-patch stylesheet) is installed with the shim. */
+  specCss: boolean;
   /** Handler api members beyond the core set. */
   apiMembers: readonly PageHostApiMember[];
   /** Component identity in a witness is captured, verified and used for recovery. */

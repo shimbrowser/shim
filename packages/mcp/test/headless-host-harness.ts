@@ -103,8 +103,8 @@ async function main(): Promise<void> {
     }
     const builtin = new Set<string>(BUILTIN_KINDS);
     check('every advertised kind is a built-in kind', HEADLESS_CAPABILITIES.mutationKinds.every((k) => builtin.has(k)));
-    check('no iframe rules, no host api members, no component identity, no engine inspection',
-      !HEADLESS_CAPABILITIES.iframeRules && HEADLESS_CAPABILITIES.apiMembers.length === 0
+    check('no iframe rules, no spec css, no host api members, no component identity, no engine inspection',
+      !HEADLESS_CAPABILITIES.iframeRules && !HEADLESS_CAPABILITIES.specCss && HEADLESS_CAPABILITIES.apiMembers.length === 0
       && !HEADLESS_CAPABILITIES.componentIdentity && !HEADLESS_CAPABILITIES.engineInspection);
     check('the capability object is frozen', Object.isFrozen(HEADLESS_CAPABILITIES) && Object.isFrozen(HEADLESS_CAPABILITIES.mutationKinds));
     const covered = coveredCapabilities() as Set<string>;

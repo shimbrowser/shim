@@ -437,12 +437,22 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       if (e.kind === 'rule-status' && e.specId) lastStatus.set(e.specId, e);
     }
     // Witness capture (§8): the engine fingerprinted a rule that resolved
-    // exactly one element. Kept on the working rule for commit; never in the
-    // evidence (invariant 8).
+    // exactly one element. Kept on the working rule for commit and on its
+    // live preview, so a replay onto a new document (reload_page,
+    // followDocument) filters by it as the committed shim will, instead of
+    // re-resolving the bare selector to whichever element matches first;
+    // never in the evidence (invariant 8).
     for (const { event: e } of mine) {
       if (e.kind !== 'rule-witness' || typeof e.ruleId !== 'string' || !isRecord(e.witness)) continue;
+      const witness = e.witness as unknown as Witness;
       const rule = (handle.working.rules || []).find((r) => r.id === e.ruleId);
-      if (rule?.anchor) rule.anchor = { ...rule.anchor, witness: e.witness as unknown as Witness };
+      if (!rule?.anchor) continue;
+      rule.anchor = { ...rule.anchor, witness };
+      const key = previewKey(handle.source.spec.id, rule.id);
+      const live = handle.live.get(key);
+      // The deploy baseline stays as the preview was applied: a fresh
+      // witness is this deploy's, with nothing committed to rebase from.
+      if (live?.rule.anchor) handle.live.set(key, { ...live, rule: { ...live.rule, anchor: { ...live.rule.anchor, witness } } });
     }
     const quarantined = mine
       .filter((t) => t.event.kind === 'rule-quarantined')
@@ -573,6 +583,12 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       // keep the live set so the next successful reload restores it.
       return { error: `the reload did not finish (${describeLoadOutcome(outcome)}) — no previews were re-applied`, url: handle.host.url() };
     }
+    // Where the load ended decides, not where it was sent: a reload, or the
+    // way back to the start URL, can redirect off the session's site (a
+    // sign-in host, another local port). Nothing of the shim runs there; the
+    // live set is kept for the next document on the site.
+    const landed = pageAway(handle);
+    if (landed) return { ...landed, url: handle.host.url() };
     let reapplied = 0;
     for (const p of handle.live.values()) {
       apply(handle, p);

@@ -632,8 +632,8 @@ no logins, never Shim's). The loop is the same, with three differences:
 - **A subset of features.** Headless runs `hide`, `restyle`, `reorder`, `reshape`, `script`,
   `inject-element`, `inject-html`, `remove` and `replace-root`, with `api.storage` and
   `api.cleanup`. A preview that uses anything else — the network and route kinds,
-  `anchor.iframe`, or a `settings` / `permissions` / `storage` / `connections`
-  declaration — applies nothing and answers `error: "unsupported"` with the list: drop it,
+  `anchor.iframe`, a spec-level `css` block, or a `settings` / `permissions` / `storage` /
+  `connections` declaration — applies nothing and answers `error: "unsupported"` with the list: drop it,
   or author that shim in the Shim browser. A handler that calls a member headless lacks gets
   the answer the browser gives an unconfigured shim (`api.fetch` resolves
   `{ ok: false, error: "requires-shim-browser" }`, `api.settings.get` resolves `undefined`,
