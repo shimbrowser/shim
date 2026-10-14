@@ -42,6 +42,13 @@
 //     sees the deploy; updating the anchor lets the baseline advance;
 //   - a reload (in place, or back to the start URL) that lands off the
 //     site answers page-away, applying nothing there;
+//   - a quarantined rule keeps the committed baseline on commit (and says
+//     so) until it resolves through its primary again;
+//   - shutdown (closeAll) refuses new opens and settles one in flight — a
+//     page still launching, a begin still settling — leaving no session,
+//     page or lock;
+//   - file storage: a failed write rejects and changes nothing, in memory
+//     or in the next write;
 //   - a .shim with a spec-level css block refused at open (D15: headless
 //     installs no whole-patch stylesheet);
 //   - commit: the .shim written once per commitId, version + deploy baseline +
@@ -153,11 +160,13 @@ interface Rig {
   appliedAtSettle: number[];
   // Where opening a url lands (a redirect); the url itself by default.
   redirect: (url: string) => string;
+  // When set, every settle waits for it (a begin still settling).
+  settleGate: Promise<void> | null;
 }
 
 function rig(fileLock?: FileLockOptions): Rig {
   const r: Rig = {
-    control: null as unknown as HeadlessControl, hosts: [], storages: [], writes: [], failOpen: false, gate: null, appliedAtSettle: [], redirect: (u) => u,
+    control: null as unknown as HeadlessControl, hosts: [], storages: [], writes: [], failOpen: false, gate: null, appliedAtSettle: [], redirect: (u) => u, settleGate: null,
   };
   let ids = 0;
   r.control = createHeadlessControl({
@@ -177,6 +186,7 @@ function rig(fileLock?: FileLockOptions): Rig {
       settleMs: 5,
       sleep: async () => {
         r.appliedAtSettle.push(r.hosts.reduce((n, h) => n + h.applied.length, 0));
+        if (r.settleGate) await r.settleGate;
         await new Promise<void>((resolve) => setTimeout(resolve, 1));
       },
       writeShimFile: (file, content) => {
@@ -233,6 +243,34 @@ async function main(): Promise<void> {
     let rejected = false;
     try { await c.set(scope, 'k', 1); } catch { rejected = true; }
     check('a file that is not ours is refused, never overwritten', rejected && fs.readFileSync(foreign, 'utf8') === '{"not":"ours"}');
+  }
+
+  console.log('file storage: a failed write changes nothing');
+  {
+    const dir = path.join(tmp, 'store-fail');
+    const file = path.join(dir, 'data.json');
+    let fail = false;
+    const st = fileStorage(file, {
+      writeFile: (tmpFile, text) => {
+        if (fail) throw new Error('ENOSPC: disk full');
+        fs.writeFileSync(tmpFile, text);
+      },
+    });
+    const scope = { patchId: 'p', origin: 'https://a.test' };
+    await st.set(scope, 'kept', 1);
+    fail = true;
+    const outcome = async (p: Promise<unknown>): Promise<string> => p.then(() => 'resolved', (e: unknown) => (e instanceof Error ? e.message : String(e)));
+    check('a set whose write fails rejects', (await outcome(st.set(scope, 'lost', 2))).includes('disk full'));
+    check('…and reads never see it', (await st.get(scope, 'lost')) === null && JSON.stringify(await st.list(scope)) === JSON.stringify({ kept: 1 }));
+    check('a delete whose write fails rejects', (await outcome(st.delete(scope, 'kept'))).includes('disk full'));
+    check('…and the key reads as before', (await st.get(scope, 'kept')) === 1);
+    check('a set into a new bucket whose write fails leaves no bucket behind', (await outcome(st.set({ patchId: 'q', origin: 'https://b.test' }, 'k', 1))).includes('disk full')
+      && JSON.stringify(await st.list({ patchId: 'q', origin: 'https://b.test' })) === '{}');
+    check('…and no temp file is left behind', fs.readdirSync(dir).every((f) => !f.endsWith('.tmp')), fs.readdirSync(dir));
+    fail = false;
+    await st.set(scope, 'next', 3);
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf8')) as { buckets: Record<string, Record<string, Record<string, unknown>>> };
+    check('the next successful write persists none of the failed changes', JSON.stringify(onDisk.buckets) === JSON.stringify({ 'https://a.test': { p: { kept: 1, next: 3 } } }), onDisk.buckets);
   }
 
   console.log('cli mode');
@@ -864,6 +902,112 @@ async function main(): Promise<void> {
     const saved2 = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { bundleHash?: string } };
     check('once the anchor is updated, a commit advances the baseline to this deploy', c2.ok === true && saved2.spec.bundleHash === 'deploy-2', saved2.spec);
     await req(second.r, 'DELETE', `/sessions/${second.sid}`);
+  }
+
+  console.log('a quarantined rule keeps the committed baseline until it is healthy or re-anchored');
+  {
+    const shimFile = path.join(tmp, 'quarantine.shim');
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'Quarantine', handlers: {},
+      spec: {
+        id: 'shim-q', version: 2, bundleHash: 'deploy-1', match: { hosts: ['site.test'] },
+        rules: [
+          { id: 'buy', anchor: { ...css('.buy-v1'), witness: { v: 1, tag: 'button', textStem: 'buy' } }, mutations: [{ kind: 'hide' }] },
+          { id: 'other', anchor: { ...css('.other'), witness: { v: 1, tag: 'div' } }, mutations: [{ kind: 'hide' }] },
+        ],
+      },
+    }));
+    // deploy-2: `.buy-v1` resolves to nothing its witness accepts, and
+    // neither recovery scan finds the button — quarantined, no rule-rebase.
+    let buyHealthy = false;
+    const engine = (p: PreviewRule, h: FakeHost): void => {
+      const isBuy = p.rule.anchor?.primary.value === '.buy-v1';
+      if (isBuy && !buyHealthy) {
+        h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 0, matchedVia: null, applyId: p.applyId });
+        h.emit({ kind: 'rule-quarantined', specId: p.ruleKey, ruleId: p.rule.id, selector: '.buy-v1', applyId: p.applyId });
+        return;
+      }
+      h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 1, matchedVia: 'primary', applyId: p.applyId });
+    };
+    const openQ = async (): Promise<{ r: Rig; sid: string; host: FakeHost }> => {
+      const r = rig();
+      const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+      const host = r.hosts[0] as FakeHost;
+      host.onApply = engine;
+      await req(r, 'POST', `/sessions/${String(opened.sessionId)}/call`, { name: 'reload_page', input: {} });
+      return { r, sid: String(opened.sessionId), host };
+    };
+    const editOther = async (o: { r: Rig; sid: string }, opacity: string): Promise<Record<string, unknown>> => {
+      const folder = decodeWorkingCopy((await req(o.r, 'GET', `/sessions/${o.sid}/checkout`)).files);
+      const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown> & { rules: Array<Record<string, unknown>> };
+      const rules = spec.rules.map((rule) => (rule.id === 'other' ? { ...rule, mutations: [{ kind: 'restyle', css: { opacity } }] } : rule));
+      return preview(o.r, o.sid, { ...folder, 'shim.json': json({ ...spec, rules }) } as Record<string, string>);
+    };
+    const bundleOnDisk = (): unknown => (JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { bundleHash?: unknown } }).spec.bundleHash;
+
+    const first = await openQ();
+    const pv = await editOther(first, '0.5');
+    const notes = isRecord(pv.evidence) && Array.isArray(pv.evidence.notes) ? pv.evidence.notes.map(String) : [];
+    check('the evidence says the rule is quarantined and what a commit does meanwhile', notes.some((n) => n.includes('rule "buy" is quarantined')
+      && n.includes('keeps the committed deploy baseline')), notes);
+    const c1 = await req(first.r, 'POST', `/sessions/${first.sid}/commit`, { revision: 1, commitId: 'q1', summary: 'restyled other' });
+    check('an unrelated commit keeps the committed baseline over the quarantined rule', c1.ok === true && bundleOnDisk() === 'deploy-1', bundleOnDisk());
+    await req(first.r, 'DELETE', `/sessions/${first.sid}`);
+
+    const second = await openQ();
+    const buy = [...second.host.applied].reverse().find((p) => p.rule.id === 'buy');
+    check('reopened, the rule still runs behind deploy-1: the deploy and its quarantine path are still there', buy?.bundleHash === 'deploy-1', buy);
+    // The button comes back under its primary: healthy, so the baseline may advance.
+    buyHealthy = true;
+    await req(second.r, 'POST', `/sessions/${second.sid}/call`, { name: 'reload_page', input: {} });
+    await editOther(second, '0.6');
+    const c2 = await req(second.r, 'POST', `/sessions/${second.sid}/commit`, { revision: 1, commitId: 'q2', summary: 'again' });
+    check('once the rule resolves through its primary again, a commit advances the baseline', c2.ok === true && bundleOnDisk() === 'deploy-2', bundleOnDisk());
+    await req(second.r, 'DELETE', `/sessions/${second.sid}`);
+  }
+
+  console.log('shutdown settles opens in flight');
+  {
+    // A page still launching when shutdown begins.
+    const r = rig();
+    let release: () => void = () => undefined;
+    r.gate = new Promise<void>((resolve) => { release = resolve; });
+    const shimFile = path.join(tmp, 'shutdown-launch.shim');
+    const pending = req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile, create: { name: 'S' } });
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    check('the open holds the file lock while its page launches', fs.existsSync(lockFileFor(shimFile)));
+    const closed = r.control.closeAll();
+    const refusedNewAt = req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile: path.join(tmp, 'other.shim'), create: { name: 'O' } });
+    release();
+    await closed;
+    const refusedNew = await refusedNewAt;
+    check('a new open during shutdown is refused', refusedNew.error === 'shutting-down', refusedNew);
+    const answered = await pending;
+    check('closeAll waits for the launch, then the open answers shutting-down', answered.error === 'shutting-down', answered);
+    check('…its page closed, no session, no lock', r.hosts.length === 1 && r.hosts[0]?.closed === true
+      && r.control.sessions.list().length === 0 && !fs.existsSync(lockFileFor(shimFile)));
+  }
+  {
+    // A session whose begin is still settling when shutdown begins.
+    const r = rig();
+    const shimFile = path.join(tmp, 'shutdown-begin.shim');
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'B', handlers: {},
+      spec: { id: 'shim-b', version: 1, match: { hosts: ['site.test'] }, rules: [{ id: 'h', anchor: css('.ad'), mutations: [{ kind: 'hide' }] }] },
+    }));
+    let release: () => void = () => undefined;
+    r.settleGate = new Promise<void>((resolve) => { release = resolve; });
+    const pending = req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    check('begin is settling with the page open', r.hosts.length === 1 && r.hosts[0]?.closed === false);
+    const closed = r.control.closeAll();
+    release();
+    r.settleGate = null;
+    await closed;
+    const answered = await pending;
+    check('a session that registers after shutdown began is ended, and the open answers shutting-down', answered.error === 'shutting-down', answered);
+    check('…its page closed, no session, no lock', r.hosts[0]?.closed === true
+      && r.control.sessions.list().length === 0 && !fs.existsSync(lockFileFor(shimFile)));
   }
 
   console.log('a reload that lands off the site re-applies nothing');

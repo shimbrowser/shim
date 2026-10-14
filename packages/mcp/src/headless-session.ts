@@ -30,9 +30,10 @@
 //     standing listener, not a preview's evidence window): an element that
 //     appears after the settle still gets fingerprinted.
 //   - A recovery the engine reports on a deploy (`rule-rebase`) is evidence
-//     only, never applied to the working rule. While one stands unapplied,
-//     a commit keeps the committed deploy baseline, so Shim still sees the
-//     deploy and can recover the rule itself.
+//     only, never applied to the working rule. While any rule with an
+//     unchanged anchor stands broken — an unapplied recovery, or quarantined
+//     — a commit keeps the committed deploy baseline, so Shim still sees the
+//     deploy and runs its own recovery / quarantine path on the rule.
 //   - Nothing here reads the Shim browser's profile (invariant 10): the page
 //     is the caller's, `api.storage` is the caller's file.
 
@@ -114,6 +115,9 @@ export interface HeadlessBackendOptions {
   writeShimFile?(file: string, content: string): void;
 }
 
+/** A rule's broken reconciliation outcome: a recovery the engine reported but nothing applied, or a quarantine. */
+type BrokenOutcome = 'recovery' | 'quarantined';
+
 interface TimedEvent {
   at: number;
   event: PageRuntimeEvent;
@@ -142,10 +146,10 @@ export interface HeadlessHandle {
   live: Map<string, PreviewRule>;
   /** Preview versions minted (PreviewRule.applyId). */
   applies: number;
-  /** Recoveries the engine reported but nothing applied, by rule id: the anchor digest they were reported against. */
-  recoveries: Map<string, string>;
-  /** Recoveries not yet reported in a preview's evidence. */
-  unreportedRecoveries: Array<{ ruleId: string; strategy: string; to?: string }>;
+  /** Rules the engine last reported broken, by rule id: how, and the anchor digest it was reported against. A healthy report clears one. */
+  broken: Map<string, { digest: string; outcome: BrokenOutcome }>;
+  /** Broken reports not yet in a preview's evidence. */
+  unreportedBroken: Array<{ ruleId: string; outcome: BrokenOutcome; strategy?: string; to?: string }>;
   events: TimedEvent[];
   console: ConsoleFeed;
   /** unsupported-api members per ruleKey since the rule was last applied. */
@@ -340,24 +344,33 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     handle.live.set(current.key, { ...current.live, rule: { ...current.live.rule, anchor: { ...current.live.rule.anchor, witness } } });
   }
 
-  // A recovery the engine reported for a rule running behind the committed
-  // baseline (rule-reconcile only reports it; nothing here applies it).
-  function noteRecovery(handle: HeadlessHandle, event: PageRuntimeEvent): void {
+  // A live rule's latest reconciliation outcome (rule-reconcile): a recovery
+  // it reported (only reported; nothing here applies it) or a quarantine
+  // marks the rule broken; resolving through its primary again clears it.
+  function noteOutcome(handle: HeadlessHandle, event: PageRuntimeEvent): void {
+    const healthy = event.kind === 'rule-status' && typeof event.matched === 'number' && event.matched > 0 && event.matchedVia === 'primary';
+    const outcome: BrokenOutcome | null = event.kind === 'rule-rebase' ? 'recovery' : event.kind === 'rule-quarantined' ? 'quarantined' : null;
+    if (!healthy && !outcome) return;
     const current = currentRuleFor(handle, event);
     if (!current?.rule.anchor) return;
-    handle.recoveries.set(current.rule.id, anchorDigest(current.rule.anchor));
-    handle.unreportedRecoveries.push({
+    if (!outcome) {
+      handle.broken.delete(current.rule.id);
+      return;
+    }
+    handle.broken.set(current.rule.id, { digest: anchorDigest(current.rule.anchor), outcome });
+    handle.unreportedBroken.push({
       ruleId: current.rule.id,
-      strategy: typeof event.strategy === 'string' ? event.strategy : 'rebase',
-      ...(typeof event.to === 'string' && event.to ? { to: event.to } : {}),
+      outcome,
+      ...(outcome === 'recovery' ? { strategy: typeof event.strategy === 'string' ? event.strategy : 'rebase' } : {}),
+      ...(outcome === 'recovery' && typeof event.to === 'string' && event.to ? { to: event.to } : {}),
     });
   }
 
-  // Rules with a reported recovery still unapplied: the working rule keeps
-  // the anchor the recovery was reported against.
-  function unappliedRecoveries(handle: HeadlessHandle): string[] {
+  // Rules still broken: the working rule keeps the anchor the break was
+  // reported against (a re-anchored or removed rule is no longer one).
+  function brokenRules(handle: HeadlessHandle): string[] {
     const out: string[] = [];
-    for (const [ruleId, digest] of handle.recoveries) {
+    for (const [ruleId, { digest }] of handle.broken) {
       const rule = (handle.working.rules || []).find((r) => r.id === ruleId);
       if (rule?.anchor && anchorDigest(rule.anchor) === digest) out.push(ruleId);
     }
@@ -530,10 +543,13 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     for (const { ruleId, member } of unsupportedApi) {
       notes.push(`rule "${ruleId}" used api.${member}, which headless mode does not provide (${REQUIRES_SHIM_BROWSER}) — its result is partial`);
     }
-    for (const { ruleId, strategy, to } of handle.unreportedRecoveries.splice(0)) {
-      notes.push(`rule "${ruleId}" no longer resolves through its anchor on this deploy; the engine found its element again ` +
-        `(${strategy}${to ? `, as ${to}` : ''}) but nothing applied that to the shim — update its anchor in shim.json. ` +
-        'Until you do, a commit keeps the committed deploy baseline, so Shim can still recover the rule itself');
+    for (const { ruleId, outcome, strategy, to } of handle.unreportedBroken.splice(0)) {
+      notes.push(outcome === 'recovery'
+        ? `rule "${ruleId}" no longer resolves through its anchor on this deploy; the engine found its element again ` +
+          `(${strategy ?? 'rebase'}${to ? `, as ${to}` : ''}) but nothing applied that to the shim — update its anchor in shim.json. ` +
+          'Until you do, a commit keeps the committed deploy baseline, so Shim can still recover the rule itself'
+        : `rule "${ruleId}" is quarantined: its anchor no longer finds the element its witness describes — re-anchor it in shim.json. ` +
+          'Until you do, a commit keeps the committed deploy baseline, so Shim still treats the break as a deploy and offers its repair');
     }
     const consoleBlock = formatAutoBlock(handle.console.drainSinceEmit());
     const evidence: Record<string, unknown> = {
@@ -668,10 +684,11 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     if (away && away.error === 'page-away') return { ok: false, error: away.error, detail: away.detail };
     const deployId = away ? null : await currentDeployId(handle);
     const version = handle.version + 1;
-    // A recovery the engine reported but nothing applied leaves its rule on
-    // the dead anchor: stamping this deploy would hide the deploy from Shim
-    // and gate its recovery off for good, so the committed baseline stands.
-    const bundleHash = unappliedRecoveries(handle).length ? handle.bundleHash : (deployId ?? handle.bundleHash);
+    // A rule left broken on this deploy (a recovery nothing applied, or a
+    // quarantine) still has its dead anchor: stamping this deploy would hide
+    // the deploy from Shim — a transient no-match instead of its recovery /
+    // quarantine path, for good — so the committed baseline stands.
+    const bundleHash = brokenRules(handle).length ? handle.bundleHash : (deployId ?? handle.bundleHash);
     const spec = clone(handle.working) as Spec & Record<string, unknown>;
     delete spec.version;
     delete spec.bundleHash;
@@ -748,8 +765,8 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         envelope: { ...source.envelope },
         live: new Map(),
         applies: 0,
-        recoveries: new Map(),
-        unreportedRecoveries: [],
+        broken: new Map(),
+        unreportedBroken: [],
         events: [],
         console: createConsoleFeed(),
         unsupported: new Map(),
@@ -763,7 +780,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         handle.events.push({ at: now(), event });
         if (handle.events.length > EVENT_CAP) handle.events.splice(0, handle.events.length - EVENT_CAP);
         if (event.kind === 'rule-witness') takeWitness(handle, event);
-        else if (event.kind === 'rule-rebase') noteRecovery(handle, event);
+        else noteOutcome(handle, event);
         if (event.kind === UNSUPPORTED_API_EVENT && typeof event.specId === 'string' && typeof event.member === 'string') {
           const live = handle.live.get(event.specId);
           let members = handle.unsupported.get(event.specId);
