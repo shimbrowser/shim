@@ -202,6 +202,22 @@ check('…and wraps any other expression', moduleForExpression(expr) === express
     check(`an export that mentions \`${binding}\` keeps the IIFE`,
       moduleToExpression(`module.exports = function h() { return typeof ${binding}; };\n`).startsWith('(function () {'));
   }
+  const escaped = 'module.exports = function h() { return m\\u006fdule.\\u0065xports === h; };\n';
+  const asEscaped = moduleToExpression(escaped);
+  check('an export spelling `module` with an escape keeps the IIFE', asEscaped.startsWith('(function () {'));
+  const viaEscape = vm.runInNewContext(`(${asEscaped})`) as unknown;
+  check('…and inline it still sees its own module', typeof viaEscape === 'function' && (viaEscape as () => unknown)() === true);
+  // The browser's module compile passes (module, exports, require,
+  // __filename, __dirname); the IIFE forwards the same, in order, from the
+  // scope it is compiled in.
+  const viaArgs = moduleToExpression('module.exports = function h() { return [typeof arguments, h.length]; };\nconst grab = arguments;\nmodule.exports.args = grab;\n');
+  const fakeRequire = () => 'required';
+  const scoped = vm.runInNewContext(`(function (require, __filename, __dirname) { return ${viaArgs}; })`)(fakeRequire, 'shim://x/handlers/h.js', '') as { args?: unknown[] };
+  const args = Array.from((scoped.args ?? []) as ArrayLike<unknown>);
+  check('the IIFE passes the module compile\'s five arguments in its order',
+    args.length === 5 && args[2] === fakeRequire && args[3] === 'shim://x/handlers/h.js' && args[4] === '', JSON.stringify(args.map((a) => typeof a)));
+  const unscoped = vm.runInNewContext(`(${viaArgs})`) as { args?: unknown[] };
+  check('…and still compiles where no require is in scope', Array.from((unscoped.args ?? []) as ArrayLike<unknown>).length === 5);
   const commented = 'module.exports = function h() { return 3; } // explanation\n';
   const asCommented = moduleToExpression(commented);
   check('an export ending in a // comment keeps the IIFE', asCommented.startsWith('(function () {'));

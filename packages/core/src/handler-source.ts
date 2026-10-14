@@ -28,12 +28,19 @@ function exactWrappedExpression(moduleSource: string): string | null {
 
 // `module.exports = <expr>;` — the exact form expressionToModule writes, with
 // the whitespace and trailing semicolon a hand edit might change.
-// The IIFE moduleToExpression wraps a module in: runs it in its own
-// `(module, exports)` scope and evaluates to its `module.exports`.
-const MODULE_IIFE_PREFIX = '(function () {\nvar module = { exports: {} };\n(function (module, exports) {\n';
+// The IIFE moduleToExpression wraps a module in: runs it in its own CommonJS
+// scope and evaluates to its `module.exports`. The parameters are the
+// browser's module compile's, in its order (module, exports, require,
+// __filename, __dirname), so `arguments[i]` reads the same; require /
+// __filename / __dirname come from wherever the expression is compiled, when
+// that scope has them.
+const MODULE_IIFE_PREFIX = '(function () {\nvar module = { exports: {} };\n(function (module, exports, require, __filename, __dirname) {\n';
 // `.call(module.exports, …)` keeps CommonJS's top-level `this` (the browser's
 // module compile runs a module with `this === module.exports`).
-const MODULE_IIFE_SUFFIX = '\n}).call(module.exports, module, module.exports);\nreturn module.exports;\n})()';
+const MODULE_IIFE_SUFFIX = '\n}).call(module.exports, module, module.exports, '
+  + 'typeof require === "undefined" ? undefined : require, '
+  + 'typeof __filename === "undefined" ? "" : __filename, '
+  + 'typeof __dirname === "undefined" ? "" : __dirname);\nreturn module.exports;\n})()';
 
 const WRAPPED_EXPRESSION_RE = /^\s*module\.exports\s*=\s*([\s\S]*?)\s*;?\s*$/;
 
@@ -56,7 +63,9 @@ export function moduleToExpression(moduleSource: string): string {
 // The names a module's code can only resolve inside its CommonJS wrapper
 // (and its receiver). A bare expression runs inline without that wrapper,
 // so one that mentions any of them keeps the IIFE, which binds them.
-const CJS_BINDING_RE = /\b(?:module|exports|require|arguments|this|__filename|__dirname|eval)\b/;
+// A unicode escape can spell any of them (`m\u006fdule`), so it keeps the
+// IIFE too.
+const CJS_BINDING_RE = /\b(?:module|exports|require|arguments|this|__filename|__dirname|eval)\b|\\u/;
 
 // Whether an exported expression runs the same unwrapped: it uses none of the
 // wrapper's bindings, and it parses as `(<expr>)` with the closer on its last
