@@ -26,6 +26,13 @@
 //     `unsupported-api` event fired for the rule since it was last applied.
 //   - Witnesses never reach the agent: the evidence carries none, checkout
 //     writes none; they live in the session and in the committed `.shim`.
+//     They are taken whenever the engine reports one for a live rule (a
+//     standing listener, not a preview's evidence window): an element that
+//     appears after the settle still gets fingerprinted.
+//   - A recovery the engine reports on a deploy (`rule-rebase`) is evidence
+//     only, never applied to the working rule. While one stands unapplied,
+//     a commit keeps the committed deploy baseline, so Shim still sees the
+//     deploy and can recover the rule itself.
 //   - Nothing here reads the Shim browser's profile (invariant 10): the page
 //     is the caller's, `api.storage` is the caller's file.
 
@@ -133,6 +140,12 @@ export interface HeadlessHandle {
   envelope: Record<string, unknown>;
   /** Live previews by ruleKey: what reload_page re-applies. */
   live: Map<string, PreviewRule>;
+  /** Preview versions minted (PreviewRule.applyId). */
+  applies: number;
+  /** Recoveries the engine reported but nothing applied, by rule id: the anchor digest they were reported against. */
+  recoveries: Map<string, string>;
+  /** Recoveries not yet reported in a preview's evidence. */
+  unreportedRecoveries: Array<{ ruleId: string; strategy: string; to?: string }>;
   events: TimedEvent[];
   console: ConsoleFeed;
   /** unsupported-api members per ruleKey since the rule was last applied. */
@@ -296,6 +309,61 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const writeShimFile = options.writeShimFile ?? writeAtomic;
 
+  // The live preview and working rule a runtime event is about, or null when
+  // the event is stale: its key no longer live, an older version of the key
+  // (applyId, where the host stamps it), a working rule whose anchor changed
+  // since, or a page that left the site.
+  function currentRuleFor(handle: HeadlessHandle, event: PageRuntimeEvent): { key: string; live: PreviewRule; rule: Rule } | null {
+    if (typeof event.specId !== 'string' || typeof event.ruleId !== 'string') return null;
+    const live = handle.live.get(event.specId);
+    if (!live || live.rule.id !== event.ruleId || !live.rule.anchor) return null;
+    if (typeof event.applyId === 'string' && event.applyId !== live.applyId) return null;
+    const rule = (handle.working.rules || []).find((r) => r.id === event.ruleId);
+    if (!rule?.anchor || anchorDigest(rule.anchor) !== anchorDigest(live.rule.anchor)) return null;
+    if (pageAway(handle)) return null;
+    return { key: event.specId, live, rule };
+  }
+
+  // Witness capture (§8): the engine fingerprinted a live rule that resolved
+  // exactly one element — at apply, or whenever the element appeared. Kept on
+  // the working rule for commit and on its live preview, so a replay onto a
+  // new document (reload_page, followDocument) filters by it as the committed
+  // shim will, instead of re-resolving the bare selector to whichever element
+  // matches first. The preview's deploy baseline is left as applied: a fresh
+  // witness is this deploy's, with nothing committed to rebase from.
+  function takeWitness(handle: HeadlessHandle, event: PageRuntimeEvent): void {
+    if (!isRecord(event.witness)) return;
+    const current = currentRuleFor(handle, event);
+    if (!current?.rule.anchor || !current.live.rule.anchor || current.live.rule.anchor.witness) return;
+    const witness = event.witness as unknown as Witness;
+    current.rule.anchor = { ...current.rule.anchor, witness };
+    handle.live.set(current.key, { ...current.live, rule: { ...current.live.rule, anchor: { ...current.live.rule.anchor, witness } } });
+  }
+
+  // A recovery the engine reported for a rule running behind the committed
+  // baseline (rule-reconcile only reports it; nothing here applies it).
+  function noteRecovery(handle: HeadlessHandle, event: PageRuntimeEvent): void {
+    const current = currentRuleFor(handle, event);
+    if (!current?.rule.anchor) return;
+    handle.recoveries.set(current.rule.id, anchorDigest(current.rule.anchor));
+    handle.unreportedRecoveries.push({
+      ruleId: current.rule.id,
+      strategy: typeof event.strategy === 'string' ? event.strategy : 'rebase',
+      ...(typeof event.to === 'string' && event.to ? { to: event.to } : {}),
+    });
+  }
+
+  // Rules with a reported recovery still unapplied: the working rule keeps
+  // the anchor the recovery was reported against.
+  function unappliedRecoveries(handle: HeadlessHandle): string[] {
+    const out: string[] = [];
+    for (const [ruleId, digest] of handle.recoveries) {
+      const rule = (handle.working.rules || []).find((r) => r.id === ruleId);
+      if (rule?.anchor && anchorDigest(rule.anchor) === digest) out.push(ruleId);
+    }
+    return out;
+  }
+
   function apply(handle: HeadlessHandle, preview: PreviewRule): void {
     handle.unsupported.delete(preview.ruleKey);
     handle.live.set(preview.ruleKey, preview);
@@ -312,10 +380,12 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
   // the witness it was committed with (an unchanged anchor): a new or
   // re-anchored rule has nothing to rebase from.
   function previewFor(handle: HeadlessHandle, rule: Rule): PreviewRule {
+    handle.applies += 1;
     const preview: PreviewRule = {
       patchId: handle.source.spec.id,
       rule: previewRule(rule, handle.storedHandlers),
       ruleKey: previewKey(handle.source.spec.id, rule.id),
+      applyId: `${handle.sessionId}:${handle.applies}`,
     };
     if (handle.bundleHash && rule.anchor?.witness) preview.bundleHash = handle.bundleHash;
     return preview;
@@ -409,6 +479,9 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     const appliedAt = now();
     const emitKeys = new Map<string, Rule>();
     const nextById = new Map((next.rules || []).map((r) => [r.id, r]));
+    // The working state first: an event the page reports for a preview below
+    // (a witness) is matched against it.
+    handle.working = next;
     for (const op of diff.ops) {
       if ((op.op === 'add-rule' || op.op === 'update-rule') && op.rule?.id) {
         const rule = nextById.get(op.rule.id) ?? op.rule;
@@ -421,7 +494,6 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         remove(handle, key);
       }
     }
-    handle.working = next;
 
     await settle(signal);
 
@@ -436,28 +508,9 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     for (const { event: e } of mine) {
       if (e.kind === 'rule-status' && e.specId) lastStatus.set(e.specId, e);
     }
-    // Witness capture (§8): the engine fingerprinted a rule that resolved
-    // exactly one element. Kept on the working rule for commit and on its
-    // live preview, so a replay onto a new document (reload_page,
-    // followDocument) filters by it as the committed shim will, instead of
-    // re-resolving the bare selector to whichever element matches first;
-    // never in the evidence (invariant 8).
-    for (const { event: e } of mine) {
-      if (e.kind !== 'rule-witness' || typeof e.ruleId !== 'string' || !isRecord(e.witness)) continue;
-      const witness = e.witness as unknown as Witness;
-      const rule = (handle.working.rules || []).find((r) => r.id === e.ruleId);
-      if (!rule?.anchor) continue;
-      rule.anchor = { ...rule.anchor, witness };
-      const key = previewKey(handle.source.spec.id, rule.id);
-      const live = handle.live.get(key);
-      // The deploy baseline stays as the preview was applied: a fresh
-      // witness is this deploy's, with nothing committed to rebase from.
-      if (live?.rule.anchor) handle.live.set(key, { ...live, rule: { ...live.rule, anchor: { ...live.rule.anchor, witness } } });
-    }
     const quarantined = mine
       .filter((t) => t.event.kind === 'rule-quarantined')
       .map(({ event: e }) => ({ ruleId: e.ruleId, ...(typeof e.selector === 'string' && e.selector ? { selector: e.selector } : {}) }));
-    const rebased = mine.filter((t) => t.event.kind === 'rule-rebase');
 
     const rules = [...emitKeys].map(([key, rule]) => {
       const status = lastStatus.get(key);
@@ -477,9 +530,10 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     for (const { ruleId, member } of unsupportedApi) {
       notes.push(`rule "${ruleId}" used api.${member}, which headless mode does not provide (${REQUIRES_SHIM_BROWSER}) — its result is partial`);
     }
-    for (const { event: e } of rebased) {
-      const how = typeof e.strategy === 'string' ? e.strategy : 'rebase';
-      notes.push(`rule "${String(e.ruleId)}" was re-anchored on this deploy (${how}) — the page changed since the shim was committed; update its anchor in shim.json to keep the fix`);
+    for (const { ruleId, strategy, to } of handle.unreportedRecoveries.splice(0)) {
+      notes.push(`rule "${ruleId}" no longer resolves through its anchor on this deploy; the engine found its element again ` +
+        `(${strategy}${to ? `, as ${to}` : ''}) but nothing applied that to the shim — update its anchor in shim.json. ` +
+        'Until you do, a commit keeps the committed deploy baseline, so Shim can still recover the rule itself');
     }
     const consoleBlock = formatAutoBlock(handle.console.drainSinceEmit());
     const evidence: Record<string, unknown> = {
@@ -614,7 +668,10 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     if (away && away.error === 'page-away') return { ok: false, error: away.error, detail: away.detail };
     const deployId = away ? null : await currentDeployId(handle);
     const version = handle.version + 1;
-    const bundleHash = deployId ?? handle.bundleHash;
+    // A recovery the engine reported but nothing applied leaves its rule on
+    // the dead anchor: stamping this deploy would hide the deploy from Shim
+    // and gate its recovery off for good, so the committed baseline stands.
+    const bundleHash = unappliedRecoveries(handle).length ? handle.bundleHash : (deployId ?? handle.bundleHash);
     const spec = clone(handle.working) as Spec & Record<string, unknown>;
     delete spec.version;
     delete spec.bundleHash;
@@ -690,6 +747,9 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         bundleHash: typeof source.spec.bundleHash === 'string' ? source.spec.bundleHash : undefined,
         envelope: { ...source.envelope },
         live: new Map(),
+        applies: 0,
+        recoveries: new Map(),
+        unreportedRecoveries: [],
         events: [],
         console: createConsoleFeed(),
         unsupported: new Map(),
@@ -702,6 +762,8 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       handle.off.push(host.onRuntimeEvent((event) => {
         handle.events.push({ at: now(), event });
         if (handle.events.length > EVENT_CAP) handle.events.splice(0, handle.events.length - EVENT_CAP);
+        if (event.kind === 'rule-witness') takeWitness(handle, event);
+        else if (event.kind === 'rule-rebase') noteRecovery(handle, event);
         if (event.kind === UNSUPPORTED_API_EVENT && typeof event.specId === 'string' && typeof event.member === 'string') {
           const live = handle.live.get(event.specId);
           let members = handle.unsupported.get(event.specId);

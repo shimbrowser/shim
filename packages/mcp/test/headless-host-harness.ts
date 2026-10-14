@@ -160,7 +160,11 @@ async function main(): Promise<void> {
     // The runtime over a stand-in engine: just enough ShimCore to boot, with
     // the api a preview gets captured from run().
     const posted: Array<Record<string, unknown>> = [];
-    interface PreviewApi { storage: { set(k: string, v: unknown): Promise<unknown>; get(k: string): Promise<unknown> } }
+    interface PreviewApi {
+      storage: { set(k: string, v: unknown): Promise<unknown>; get(k: string): Promise<unknown> };
+      reportEvent(kind: string, payload?: Record<string, unknown>): void;
+      db?: unknown;
+    }
     const captured: { api: PreviewApi | null } = { api: null };
     const sandbox: Record<string, unknown> = {
       location: { origin: 'https://x.test', pathname: '/', hostname: 'x.test', href: 'https://x.test/' },
@@ -225,10 +229,41 @@ async function main(): Promise<void> {
         const refusedIds = [Number(readCall?.id) + 1, Number(readCall?.id) + 2];
         check('…nor left a pending entry behind', refusedIds.every((id) => !control.resolve(id, 'late')));
       }
+      // A preview's events carry the version tag it was applied with, so the
+      // session can drop a late one from a version it replaced.
+      const eventsOf = (key: string): Array<Record<string, unknown>> => {
+        const out: Array<Record<string, unknown>> = [];
+        for (const m of posted) {
+          if (m.type !== 'event' || typeof m.payload !== 'object' || m.payload === null) continue;
+          const event: Record<string, unknown> = { ...(m.payload as Record<string, unknown>), kind: m.kind };
+          if (event.specId === key) out.push(event);
+        }
+        return out;
+      };
+      const untaggedApi = captured.api;
+      control.apply('shim-a', { id: 'r', anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] }, 'rk2', null, 'sess:7');
+      const tagged = captured.api;
+      tagged?.reportEvent('rule-witness', { specId: 'rk2', ruleId: 'r', witness: { v: 1 } });
+      void tagged?.db;
+      const stamped = eventsOf('rk2');
+      check('an engine event and an unsupported-api event both carry the preview\'s applyId', stamped.length === 2
+        && stamped.every((e) => e.applyId === 'sess:7') && stamped.some((e) => e.kind === 'unsupported-api'), JSON.stringify(stamped));
+      untaggedApi?.reportEvent('rule-status', { specId: 'rk' });
+      const untagged = eventsOf('rk');
+      check('…and a preview applied without one carries none', untagged.length > 0 && untagged.every((e) => !('applyId' in e)), JSON.stringify(untagged));
     }
   }
 
   console.log('driver over a scripted CDP session');
+  {
+    const { page, cdp } = fakePage(true);
+    const host = await attachPlaywrightPageHost(page, { engineBundle: '' });
+    host.applyPreview({ patchId: 'p', ruleKey: 'preview:p:r', applyId: 'sess:3', rule: { id: 'r', anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] } });
+    await tick();
+    const applyExpr = cdp.sends.map((x) => String(x.params.expression ?? '')).find((e) => e.includes('.apply("p"')) ?? '';
+    check('the driver hands the preview\'s applyId to the page runtime', applyExpr.endsWith(', null, "sess:3")'), applyExpr);
+    await host.detach();
+  }
   {
     // Previews queued while no engine world exists: detach must not wait out
     // each one's world wait in turn.

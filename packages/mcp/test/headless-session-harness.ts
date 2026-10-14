@@ -34,6 +34,12 @@
 //   - a .shim whose match.hosts isn't a list of strings refused at open;
 //   - a captured witness carried by every replay of its rule (reload_page,
 //     a followed navigation), so the replay can't attach to another match;
+//   - witnesses taken whenever the engine reports them (during begin, after
+//     a preview answered) and kept through replay and commit, but never
+//     from a replaced version of a rule (applyId) or a key no longer live;
+//   - a deploy recovery the engine reported but nothing applied keeps the
+//     committed baseline on commit (and says so), so a reopened shim still
+//     sees the deploy; updating the anchor lets the baseline advance;
 //   - a reload (in place, or back to the start URL) that lands off the
 //     site answers page-away, applying nothing there;
 //   - a .shim with a spec-level css block refused at open (D15: headless
@@ -746,6 +752,118 @@ async function main(): Promise<void> {
     check('a followed navigation replays it with the witness too', witnessStem() === 'first' && attached.join() === 'first,first,first', attached);
     check('…keeping the preview\'s deploy baseline (a new rule runs behind none)', lastPick()?.bundleHash === undefined);
     await req(r, 'DELETE', `/sessions/${wid}`);
+  }
+
+  console.log('a witness the engine reports after the preview answered is still taken');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'late-witness.shim');
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'Late', handlers: {},
+      spec: { id: 'shim-late', version: 1, match: { hosts: ['site.test'] }, rules: [{ id: 'old', anchor: css('.old'), mutations: [{ kind: 'hide' }] }] },
+    }));
+    // The engine fingerprints `old` while begin applies it; every later
+    // apply only reports status (an element still being fetched).
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    const lid = String(opened.sessionId);
+    const host = r.hosts[0] as FakeHost;
+    host.onApply = (p, h) => { h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 0, applyId: p.applyId }); };
+    const folder = decodeWorkingCopy((await req(r, 'GET', `/sessions/${lid}/checkout`)).files);
+    const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown> & { rules: unknown[] };
+    const withRules = (rules: unknown[]): Record<string, string> => ({ ...folder, 'shim.json': json({ ...spec, rules }) } as Record<string, string>);
+    const late = { id: 'late', anchor: css('.late'), mutations: [{ kind: 'hide' }] };
+    const swap = { id: 'swap', anchor: css('.swap-a'), mutations: [{ kind: 'hide' }] };
+    const p1 = await preview(r, lid, withRules([...spec.rules, late, swap]));
+    check('the preview answers before either new rule matched', p1.applied === true, p1);
+    const keyOf = (rid: string): string => `preview:shim-late:${rid}`;
+    const lastOf = (rid: string): PreviewRule | undefined => [...host.applied].reverse().find((x) => x.rule.id === rid);
+    const swapV1 = lastOf('swap')?.applyId;
+    // The element arrives: the engine fingerprints `late` after the window.
+    host.emit({ kind: 'rule-witness', specId: keyOf('late'), ruleId: 'late', witness: { v: 1, tag: 'li', textStem: 'arrived' }, applyId: lastOf('late')?.applyId });
+    // `swap` is re-anchored, then a late witness from its first version lands.
+    const p2 = await preview(r, lid, withRules([...spec.rules, late, { ...swap, anchor: css('.swap-b') }]));
+    check('swap is re-anchored as a new version', p2.applied === true && typeof swapV1 === 'string' && lastOf('swap')?.applyId !== swapV1, p2);
+    host.emit({ kind: 'rule-witness', specId: keyOf('swap'), ruleId: 'swap', witness: { v: 1, tag: 'li', textStem: 'stale' }, applyId: swapV1 });
+    // And one for a rule key that is not live at all.
+    host.emit({ kind: 'rule-witness', specId: keyOf('ghost'), ruleId: 'ghost', witness: { v: 1, tag: 'li' } });
+
+    const stemOf = (p: PreviewRule | undefined): unknown => (p?.rule.anchor?.witness as { textStem?: string } | undefined)?.textStem;
+    const reload = await req(r, 'POST', `/sessions/${lid}/call`, { name: 'reload_page', input: {} });
+    check('reload_page replays the late-captured witness', String(reload.result).includes('"ok":true') && stemOf(lastOf('late')) === 'arrived', lastOf('late')?.rule);
+    check('…and the witness captured during begin', isRecord(lastOf('old')?.rule.anchor?.witness), lastOf('old')?.rule);
+    check('…but not a late witness from a version of the rule since replaced', lastOf('swap')?.rule.anchor?.witness === undefined, lastOf('swap')?.rule);
+    const cm = await req(r, 'POST', `/sessions/${lid}/commit`, { revision: 2, commitId: 'l1', summary: 's' });
+    check('the session commits', cm.ok === true, cm);
+    const saved = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { rules: Array<{ id: string; anchor?: { witness?: { textStem?: string } } }> } };
+    const savedRule = (rid: string): { anchor?: { witness?: { textStem?: string } } } | undefined => saved.spec.rules.find((x) => x.id === rid);
+    check('the commit keeps the witness captured after the preview answered', savedRule('late')?.anchor?.witness?.textStem === 'arrived', saved.spec.rules);
+    check('…and the one captured during begin', isRecord(savedRule('old')?.anchor?.witness), saved.spec.rules);
+    check('…and no stale one', savedRule('swap')?.anchor?.witness === undefined && !saved.spec.rules.some((x) => x.id === 'ghost'), saved.spec.rules);
+    await req(r, 'DELETE', `/sessions/${lid}`);
+  }
+
+  console.log('an unapplied deploy recovery keeps the committed baseline');
+  {
+    const shimFile = path.join(tmp, 'recover.shim');
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'Recover', handlers: {},
+      spec: {
+        id: 'shim-rec', version: 2, bundleHash: 'deploy-1', match: { hosts: ['site.test'] },
+        rules: [
+          { id: 'buy', anchor: { ...css('.buy-v1'), witness: { v: 1, tag: 'button', textStem: 'buy' } }, mutations: [{ kind: 'hide' }] },
+          { id: 'other', anchor: { ...css('.other'), witness: { v: 1, tag: 'div' } }, mutations: [{ kind: 'hide' }] },
+        ],
+      },
+    }));
+    // The page is on deploy-2: `.buy-v1` is dead, and the witness finds the
+    // button again — reported, not applied (rule-reconcile).
+    const engine = (p: PreviewRule, h: FakeHost): void => {
+      const dead = p.rule.anchor?.primary.value === '.buy-v1';
+      if (dead && p.bundleHash === 'deploy-1') {
+        h.emit({ kind: 'rule-rebase', specId: p.ruleKey, ruleId: p.rule.id, strategy: 'recover', via: 'witness', anchor: css('.buy-v2'), from: '.buy-v1', to: '.buy-v2', bundleHash: 'deploy-2', applyId: p.applyId });
+      }
+      h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: dead ? 0 : 1, applyId: p.applyId });
+    };
+    const open = async (): Promise<{ r: Rig; sid: string; host: FakeHost }> => {
+      const r = rig();
+      const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+      const host = r.hosts[0] as FakeHost;
+      return { r, sid: String(opened.sessionId), host };
+    };
+    const first = await open();
+    const begun = first.host.applied.find((p) => p.rule.id === 'buy');
+    check('the dead rule runs behind the committed baseline', begun?.bundleHash === 'deploy-1', begun);
+    first.host.onApply = engine;
+    // begin ran on the fake's default engine: replay as the deploy-2 page would.
+    const reload = await req(first.r, 'POST', `/sessions/${first.sid}/call`, { name: 'reload_page', input: {} });
+    check('the reload replays the committed rules', String(reload.result).includes('"ok":true'), reload);
+    const folder = decodeWorkingCopy((await req(first.r, 'GET', `/sessions/${first.sid}/checkout`)).files);
+    const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown> & { rules: Array<Record<string, unknown>> };
+    const edited = spec.rules.map((rule) => (rule.id === 'other' ? { ...rule, mutations: [{ kind: 'restyle', css: { opacity: '0.5' } }] } : rule));
+    const pv = await preview(first.r, first.sid, { ...folder, 'shim.json': json({ ...spec, rules: edited }) } as Record<string, string>);
+    const notes = isRecord(pv.evidence) && Array.isArray(pv.evidence.notes) ? pv.evidence.notes.map(String) : [];
+    check('the evidence says the recovery is not applied and what a commit does meanwhile', notes.some((n) => n.includes('rule "buy"')
+      && n.includes('.buy-v2') && n.includes('nothing applied') && n.includes('keeps the committed deploy baseline')), notes);
+    const c1 = await req(first.r, 'POST', `/sessions/${first.sid}/commit`, { revision: 1, commitId: 'r1', summary: 'restyled other' });
+    const saved1 = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { version: number; bundleHash?: string } };
+    check('an unrelated commit keeps the committed deploy baseline', c1.ok === true && saved1.spec.version === 3 && saved1.spec.bundleHash === 'deploy-1', saved1.spec);
+    await req(first.r, 'DELETE', `/sessions/${first.sid}`);
+
+    const second = await open();
+    const reopened = second.host.applied.find((p) => p.rule.id === 'buy');
+    check('reopened, the dead rule still runs behind deploy-1, so the deploy is still seen and recoverable', reopened?.bundleHash === 'deploy-1', reopened);
+    second.host.onApply = engine;
+    await req(second.r, 'POST', `/sessions/${second.sid}/call`, { name: 'reload_page', input: {} });
+    // The agent takes the recovery into the shim: the baseline may advance.
+    const folder2 = decodeWorkingCopy((await req(second.r, 'GET', `/sessions/${second.sid}/checkout`)).files);
+    const spec2 = JSON.parse(String(folder2['shim.json'])) as Record<string, unknown> & { rules: Array<Record<string, unknown>> };
+    const fixed = spec2.rules.map((rule) => (rule.id === 'buy' ? { ...rule, anchor: css('.buy-v2') } : rule));
+    const pv2 = await preview(second.r, second.sid, { ...folder2, 'shim.json': json({ ...spec2, rules: fixed }) } as Record<string, string>);
+    check('the re-anchored rule previews', pv2.applied === true, pv2);
+    const c2 = await req(second.r, 'POST', `/sessions/${second.sid}/commit`, { revision: 1, commitId: 'r2', summary: 're-anchored buy' });
+    const saved2 = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { bundleHash?: string } };
+    check('once the anchor is updated, a commit advances the baseline to this deploy', c2.ok === true && saved2.spec.bundleHash === 'deploy-2', saved2.spec);
+    await req(second.r, 'DELETE', `/sessions/${second.sid}`);
   }
 
   console.log('a reload that lands off the site re-applies nothing');

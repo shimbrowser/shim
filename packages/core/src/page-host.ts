@@ -79,6 +79,14 @@ export interface PreviewRule {
    * for a preview is evidence only; nothing is persisted.
    */
   bundleHash?: string;
+  /**
+   * An opaque tag for this version of the preview. A host that supports it
+   * stamps it as `applyId` on every runtime event the preview reports, so a
+   * consumer can tell a late event from a replaced version of the same
+   * `ruleKey` from one the current version caused. Optional both ways: a
+   * host may ignore it, and a consumer must accept events without it.
+   */
+  applyId?: string;
 }
 
 /**
