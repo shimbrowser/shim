@@ -182,8 +182,10 @@ function refuseSymlinksBelow(root: string, abs: string): void {
 // created exclusively (so nothing already at that name, link or not, is
 // followed) next to the target (so the rename never crosses a device), and is
 // hidden (so a leftover from a crash never reads as part of the working copy).
+// Its name is short and fixed-length, not derived from the target's: a
+// handler file can use the whole 255-byte name a filesystem allows.
 function replaceFile(abs: string, content: string | Uint8Array): void {
-  const temp = path.join(path.dirname(abs), `.${path.basename(abs)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`);
+  const temp = path.join(path.dirname(abs), `.shim-${randomBytes(8).toString('hex')}.tmp`);
   fs.writeFileSync(temp, content, { flag: 'wx' });
   try {
     fs.renameSync(temp, abs);
