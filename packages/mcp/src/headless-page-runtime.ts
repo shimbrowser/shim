@@ -77,9 +77,32 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
   // carry — a cycle, a BigInt — or a binding that went away) rejects at once,
   // as the browser's IPC invoke does, instead of leaving the handler awaiting
   // an answer that will never come.
+  //
+  // JSON alone is not enough: it turns a function or symbol into null, or
+  // drops it from an object, so the store would quietly write a different
+  // value. The browser's structured-clone IPC refuses those, keeping what was
+  // stored; `unclonable` finds them first so this host refuses them too.
+  const unclonable = (value: unknown, seen: Set<object>): string | null => {
+    if (typeof value === 'function') return 'a function';
+    if (typeof value === 'symbol') return 'a symbol';
+    if (typeof value !== 'object' || value === null || seen.has(value)) return null;
+    seen.add(value);
+    // Own enumerable string keys: the ones both JSON and structured clone
+    // carry (each ignores symbol keys alike).
+    for (const key of Object.keys(value)) {
+      const found = unclonable((value as Record<string, unknown>)[key], seen);
+      if (found) return found;
+    }
+    return null;
+  };
   const call = (method: string, patchId: string, args: unknown[]): Promise<unknown> => {
     const id = ++seq;
     return new Promise((resolve, reject) => {
+      const bad = unclonable(args, new Set());
+      if (bad) {
+        reject(new Error(`${method} failed: ${bad} could not be cloned`));
+        return;
+      }
       let payload: string;
       try {
         payload = JSON.stringify({ type: 'call', id, method, patchId, origin: location.origin, args });

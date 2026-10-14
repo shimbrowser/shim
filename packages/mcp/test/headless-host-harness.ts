@@ -11,6 +11,8 @@
 //   - memoryStorage keeps the browser's api.storage semantics, per shim and
 //     origin;
 //   - the page runtime rejects an api call the driver's store failed;
+//   - the page runtime refuses arguments structured clone would (functions,
+//     symbols, cycles, BigInts) without reaching the store;
 //   - over a scripted CDP session: detach does not wait out queued previews
 //     when no engine world exists, and a failing store rejects the page's
 //     call instead of answering undefined;
@@ -92,6 +94,39 @@ function fakePage(world: boolean): { page: Page; cdp: FakeCdp } {
 
 const tick = (ms = 20): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+// The page runtime over a stand-in engine: just enough ShimCore to boot, with
+// the api a preview gets captured from run(). `send` is the binding.
+interface PreviewApi {
+  storage: { set(k: string, v: unknown): Promise<unknown>; get(k: string): Promise<unknown> };
+  reportEvent(kind: string, payload?: Record<string, unknown>): void;
+  db?: unknown;
+}
+function bootRuntime(send: (payload: string) => void): { control: PageRuntimeControl | undefined; captured: { api: PreviewApi | null } } {
+  const captured: { api: PreviewApi | null } = { api: null };
+  const sandbox: Record<string, unknown> = {
+    location: { origin: 'https://x.test', pathname: '/', hostname: 'x.test', href: 'https://x.test/' },
+    document: { readyState: 'complete', addEventListener() { /* unused */ } },
+    addEventListener() { /* unused */ },
+    fetch: () => Promise.resolve(null),
+    console,
+    b: send,
+    ShimCore: {
+      run: (_spec: unknown, api: PreviewApi) => {
+        captured.api = api;
+        return { applyExtraRule() { /* no-op */ }, teardownAll() { /* no-op */ } };
+      },
+      createFetchBudget: () => ({ take: () => ({ delayMs: 0, throttled: false }) }),
+      deployIdForDocument: () => null,
+      sameRegistrableDomain: () => true,
+    },
+  };
+  sandbox.window = sandbox;
+  sandbox.top = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(pageRuntimeSource({ binding: 'b', globalName: 'g', unsupportedError: REQUIRES_SHIM_BROWSER }), sandbox);
+  return { control: sandbox.g as PageRuntimeControl | undefined, captured };
+}
+
 async function main(): Promise<void> {
   console.log('capabilities (D15)');
   {
@@ -157,37 +192,8 @@ async function main(): Promise<void> {
 
   console.log('page runtime api calls');
   {
-    // The runtime over a stand-in engine: just enough ShimCore to boot, with
-    // the api a preview gets captured from run().
     const posted: Array<Record<string, unknown>> = [];
-    interface PreviewApi {
-      storage: { set(k: string, v: unknown): Promise<unknown>; get(k: string): Promise<unknown> };
-      reportEvent(kind: string, payload?: Record<string, unknown>): void;
-      db?: unknown;
-    }
-    const captured: { api: PreviewApi | null } = { api: null };
-    const sandbox: Record<string, unknown> = {
-      location: { origin: 'https://x.test', pathname: '/', hostname: 'x.test', href: 'https://x.test/' },
-      document: { readyState: 'complete', addEventListener() { /* unused */ } },
-      addEventListener() { /* unused */ },
-      fetch: () => Promise.resolve(null),
-      console,
-      b: (payload: string) => { posted.push(JSON.parse(payload) as Record<string, unknown>); },
-      ShimCore: {
-        run: (_spec: unknown, api: PreviewApi) => {
-          captured.api = api;
-          return { applyExtraRule() { /* no-op */ }, teardownAll() { /* no-op */ } };
-        },
-        createFetchBudget: () => ({ take: () => ({ delayMs: 0, throttled: false }) }),
-        deployIdForDocument: () => null,
-        sameRegistrableDomain: () => true,
-      },
-    };
-    sandbox.window = sandbox;
-    sandbox.top = sandbox;
-    sandbox.globalThis = sandbox;
-    vm.runInNewContext(pageRuntimeSource({ binding: 'b', globalName: 'g', unsupportedError: REQUIRES_SHIM_BROWSER }), sandbox);
-    const control = sandbox.g as PageRuntimeControl | undefined;
+    const { control, captured } = bootRuntime((payload) => { posted.push(JSON.parse(payload) as Record<string, unknown>); });
     check('the runtime boots over a stand-in engine', control !== undefined);
     if (control) {
       control.apply('shim-a', { id: 'r', anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] }, 'rk', null);
@@ -251,6 +257,56 @@ async function main(): Promise<void> {
       untaggedApi?.reportEvent('rule-status', { specId: 'rk' });
       const untagged = eventsOf('rk');
       check('…and a preview applied without one carries none', untagged.length > 0 && untagged.every((e) => !('applyId' in e)), JSON.stringify(untagged));
+    }
+  }
+
+  console.log('page runtime refuses what structured clone would');
+  {
+    // The binding answers from a real store, the way the driver does, so a
+    // refused write can be seen to leave the stored value alone.
+    const store = memoryStorage();
+    const scope = { patchId: 'shim-a', origin: 'https://x.test' };
+    let reached = 0;
+    const box: { control: PageRuntimeControl | undefined } = { control: undefined };
+    const booted = bootRuntime((payload) => {
+      const msg = JSON.parse(payload) as { type?: unknown; id?: unknown; method?: unknown; args?: unknown };
+      if (msg.type !== 'call' || typeof msg.id !== 'number' || !Array.isArray(msg.args)) return;
+      reached++;
+      const id = msg.id;
+      const [key, value] = msg.args as [string, unknown];
+      const answer = msg.method === 'storage.set' ? store.set(scope, key, value) : store.get(scope, key);
+      void answer.then((v) => box.control?.resolve(id, v));
+    });
+    box.control = booted.control;
+    booted.control?.apply('shim-a', { id: 'r', anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] }, 'rk', null);
+    const api = booted.captured.api;
+    check('a preview gets an api', api !== null);
+    if (api) {
+      await api.storage.set('k', 'old');
+      const writes = reached;
+      const symbolValue: unknown = Symbol('s');
+      const cases: Array<[string, unknown]> = [
+        ['a top-level function', () => 1],
+        ['a nested function', { n: 1, deep: { fn: () => 1 } }],
+        ['a function in a list', [1, () => 1]],
+        ['a symbol', symbolValue],
+        ['a nested symbol', { s: symbolValue }],
+      ];
+      for (const [label, value] of cases) {
+        let rejected: unknown = null;
+        try { await api.storage.set('k', value); } catch (e) { rejected = e; }
+        check(`${label} rejects the write`, typeof rejected === 'object' && rejected !== null
+          && /^storage\.set failed: .*could not be cloned/.test(String((rejected as { message?: unknown }).message)), String(rejected));
+      }
+      check('…none of them reached the store', reached === writes, `${reached - writes} reached`);
+      check('…and the stored value is unchanged', (await api.storage.get('k')) === 'old');
+      const cyclic: Record<string, unknown> = { ok: true };
+      cyclic.self = cyclic;
+      let cyc: unknown = null;
+      try { await api.storage.set('k', cyclic); } catch (e) { cyc = e; }
+      check('a cycle still rejects (and the walk terminates)', cyc !== null);
+      await api.storage.set('k', { plain: [1, 'two', { three: null }] });
+      check('a plain value still writes', JSON.stringify(await api.storage.get('k')) === '{"plain":[1,"two",{"three":null}]}');
     }
   }
 
