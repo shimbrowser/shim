@@ -68,6 +68,14 @@ console.log('checkout:');
   check('an earlier checkout is replaced', fs.readFileSync(path.join(fresh, 'shim.json'), 'utf8') === '{"a":2}' && fs.readFileSync(path.join(fresh, 'handlers', 'x.js'), 'utf8') === 'x2');
   check('a handler the checkout dropped is removed', !fs.existsSync(path.join(fresh, 'handlers', 'y.js')) && JSON.stringify(again.removed) === JSON.stringify(['handlers/y.js']));
   check('other files are left alone', fs.existsSync(path.join(fresh, 'notes.md')) && fs.existsSync(path.join(fresh, 'handlers', 'README')));
+  // The folder format accepts a 252-character handler name: a 255-byte
+  // `<name>.js`, the most a filesystem name may be. The temp file a write
+  // goes through must not be any longer.
+  const longName = 'h'.repeat(252);
+  const longDir = path.join(root, 'long');
+  let longErr = '';
+  try { writeCheckout(longDir, { 'shim.json': '{}', [`handlers/${longName}.js`]: 'x' }); } catch (e) { longErr = String(e); }
+  check('a maximum-length handler name checks out', longErr === '' && fs.readFileSync(path.join(longDir, 'handlers', `${longName}.js`), 'utf8') === 'x', longErr);
   const project = path.join(root, 'project');
   fs.mkdirSync(project);
   fs.writeFileSync(path.join(project, 'package.json'), '{}');
