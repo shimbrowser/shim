@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// shim — the command line for Shim shims (shim-core design D8, D10): the
+// shim — the command line for Shim shims: the
 // folder ↔ .shim conversions, lint, a headless preview with a screenshot,
 // launching the Shim browser, and the MCP server. The commands themselves
 // are cli-commands.ts; this file parses the command line and wires them to

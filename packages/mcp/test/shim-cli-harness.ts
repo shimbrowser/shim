@@ -1,5 +1,5 @@
 // Harness for the `shim` command line (packages/mcp/src/shim-cli.ts,
-// cli-commands.ts; shim-core design D8, D10, D15) — no browser, no Shim:
+// cli-commands.ts) — no browser, no Shim:
 // the launcher and the preview page are fakes. Covers:
 //
 //   - the command line: help / version, unknown commands, missing and extra

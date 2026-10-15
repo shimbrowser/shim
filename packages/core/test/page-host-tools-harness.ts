@@ -1,5 +1,5 @@
 // Harness for the page tools' page-side work over a PageHost
-// (packages/core/src/page-host-tools.ts, shim-core design §5 / D5): view_page,
+// (packages/core/src/page-host-tools.ts): view_page,
 // evaluate_in_page and the self-contained query_page / inspect_element reads,
 // run against a scripted in-memory host — the point being that they need
 // nothing but the PageHost interface, so any driver can run them.

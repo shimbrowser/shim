@@ -1,5 +1,5 @@
 // Diagnostic harness for the pure route-transition decision (packages/core/src/
-// route-transition.ts — CLAUDE.md §6 nested sub-routes). Bare node, no DOM:
+// route-transition.ts nested sub-routes). Bare node, no DOM:
 //
 //   node out/packages/core/test/route-transition-harness.js
 //

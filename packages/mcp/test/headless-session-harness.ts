@@ -1,6 +1,5 @@
 // Harness for headless sessions (packages/mcp/src/headless-control.ts,
-// headless-session.ts, file-storage.ts; shim-core design D9, D10, D11, D14,
-// D15) over a scripted fake PageHost — no browser. Covers:
+// headless-session.ts, file-storage.ts) over a scripted fake PageHost — no browser. Covers:
 //
 //   - the file-backed api.storage: the browser's semantics per shim and
 //     origin, persistence across instances, atomic writes, own-property keys,

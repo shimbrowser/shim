@@ -1,14 +1,14 @@
-// Pure delta application (shim-core design D5): an authoring turn's ops
-// (`emit_shim_delta`'s payload, CLAUDE.md §16) applied to a spec. No storage,
-// no validation — the browser's commit path (src/main/shims/commit.ts)
+// Pure delta application: an authoring turn's ops
+// (`emit_shim_delta`'s payload) applied to a spec. No storage,
+// no validation — the browser's commit path
 // validates the result before anything is written, and the working-copy
 // differ (working-copy-diff.ts) produces these same ops from a shim folder.
 
 import type { Spec, Rule } from './types';
 import { normalizeIntent } from './intent';
 
-// One entry in an authoring turn's ops list (`emit_shim_delta`'s payload,
-// CLAUDE.md §16). Flat optional-field shape — mirrors AnchorSpec in
+// One entry in an authoring turn's ops list (`emit_shim_delta`'s payload).
+// Flat optional-field shape — mirrors AnchorSpec in
 // types.ts — rather than a discriminated union: applyDelta
 // switches on `op` and reads only the relevant field, and every op crosses
 // an untyped boundary (an LLM's tool input, or a working copy) on its way
@@ -26,20 +26,20 @@ export interface DeltaOp {
   settings?: unknown[];
   permissions?: string[];
   intent?: string;
-  // Per-shim SQLite declaration (shim-db foundation): the whole
+  // Per-shim SQLite declaration: the whole
   // `spec.storage` value, replaced wholesale by `set-storage`. Deliberately
   // `unknown` — the same loose shape `Spec.storage` carries, validated by
   // shim-db/schema's validateStorageDecl at commit time rather than typed
   // structurally here (every op crosses an untyped LLM boundary on its way
   // in, so the runtime validator is the real gate).
   storage?: unknown;
-  // Remote database connection declarations (shim-db remote-transport §1):
+  // Remote database connection declarations:
   // the whole `spec.connections` value, replaced wholesale by
   // `set-connections` — same replace-wholesale contract as `storage` above,
   // validated by shim-db/connections's validateConnectionsDecl at commit
   // time rather than typed structurally here.
   connections?: unknown;
-  // Auto mode (design 2026-08-10): raw function-expression source for a
+  // Auto mode: raw function-expression source for a
   // shared handler. Carried by `set-shared-handler` (upsert into
   // `spec.sharedHandlers`); `edit-shared-handler` is resolved to a
   // `set-shared-handler` carrying the full edited source upstream
@@ -91,7 +91,7 @@ export function applyDelta(spec: Spec, ops: DeltaOp[] | undefined): Spec {
     } else if (op.op === 'set-permissions') {
       // Replace the whole permissions DECLARATION. The user's allow/deny
       // decisions live in the shim_permissions table, never on the spec —
-      // declaring a permission never grants it (§19).
+      // declaring a permission never grants it.
       permissions = Array.isArray(op.permissions) ? op.permissions : [];
       permissionsTouched = true;
     } else if (op.op === 'set-intent') {

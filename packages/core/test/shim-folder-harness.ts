@@ -1,5 +1,5 @@
-// Harness for the shim folder format (packages/core/src/shim-folder.ts,
-// shim-core design D10): unpack → pack is lossless, a witness survives pack
+// Harness for the shim folder format (packages/core/src/shim-folder.ts):
+// unpack → pack is lossless, a witness survives pack
 // only while its rule's anchor digest still matches, checkout writes what an
 // attached session edits, and a malformed folder or file is rejected with
 // every problem named.

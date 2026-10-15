@@ -1,5 +1,5 @@
 // Diagnostic harness for the engine's own-DOM guard (packages/core/src/
-// engine.ts, `isShimOwnedElement` — CLAUDE.md §6). Bare node — no DOM, no
+// engine.ts, `isShimOwnedElement`). Bare node — no DOM, no
 // Electron: elements are duck-typed stubs shaped like the subset of
 // Element/Node the predicate reads (`closest`, `contains`), the same
 // feature-detect style as `AnchorElement` (anchors.ts:38-51). Run when

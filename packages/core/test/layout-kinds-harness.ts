@@ -1,5 +1,5 @@
 // Pure-logic harness for the Tier-1 layout kinds (packages/core/src/
-// layout-kinds.ts — CLAUDE.md §6 reorder/reshape). Bare node — no DOM.
+// layout-kinds.ts reorder/reshape). Bare node — no DOM.
 //
 //   node out/packages/core/test/layout-kinds-harness.js
 

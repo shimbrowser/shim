@@ -1,5 +1,5 @@
 // Harness for the working copy's wire encoding (packages/core/src/
-// working-copy-wire.ts, shim-core design D10): text and binary files round
+// working-copy-wire.ts): text and binary files round
 // trip byte for byte, the encoding is deterministic, and a hostile or
 // malformed envelope is refused with every problem named — no path can
 // leave the folder it describes.

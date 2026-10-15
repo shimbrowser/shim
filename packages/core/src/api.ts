@@ -5,8 +5,7 @@
 // db, ai, fetch, settings, modules, shared, …) the engine never reads — it only
 // passes the object through to handlers via a per-mount `Object.create(api)`.
 //
-// The Shim browser's full handler surface (src/preload/shim-api-types.ts's
-// `ShimApiBase`) EXTENDS `CoreApi`, so the browser keeps its complete typing
+// The Shim browser's full handler surface (its `ShimApiBase`) EXTENDS `CoreApi`, so the browser keeps its complete typing
 // while the engine names none of the browser's capability types.
 //
 // Types only: nothing here exists at runtime.
@@ -19,12 +18,12 @@ export interface CoreApi {
   origin: string;
   host: string;
   patchId: string;
-  // Parent→child iframe rule forwarding (CLAUDE.md §11). Hosts without frames
+  // Parent→child iframe rule forwarding. Hosts without frames
   // may provide a stub; bridge-rule.ts guards `api.bridge?.forwardRule`.
   bridge: {
     forwardRule(targetOrigin: string, rule: Rule, sourcePatchId: string): void;
   };
-  // Framework component identity (CLAUDE.md §8). Every engine consumer
+  // Framework component identity. Every engine consumer
   // null-checks the member and each method before calling.
   componentId: {
     verify(el: Element): Promise<ComponentDescriptor | null>;
@@ -57,7 +56,7 @@ export interface MountCleanup {
 export type CoreHandlerApi = CoreApi & MountCleanup & HostApiMembers;
 
 // The route match a mount-route handler receives, and receives again on each
-// in-place inner navigation via api.onRouteChange (CLAUDE.md §6 nested
+// in-place inner navigation via api.onRouteChange (nested
 // sub-routes).
 export interface RouteMatch {
   path: string;

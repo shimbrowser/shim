@@ -1,4 +1,4 @@
-// The working copy on the wire (shim-core design D10): an attached session
+// The working copy on the wire: an attached session
 // sends its WHOLE folder as bytes, and a checkout answers one the same way.
 // This is the one encoding both ends share — the MCP server reads a folder
 // from disk and encodes it, the host decodes it and hands the result to the

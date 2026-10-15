@@ -1,5 +1,5 @@
 // Harness for the MCP server's auto mode (packages/mcp/src/server.ts,
-// modes.ts; shim-core C5): one server, the plugin's only entry, serves both
+// modes.ts): one server, the plugin's only entry, serves both
 // people with Shim and people without it. A real MCP client talks to the
 // real server over the SDK's in-memory transport; the Shim endpoint and the
 // headless control are scripted, and every request each receives is recorded.

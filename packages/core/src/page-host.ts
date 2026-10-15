@@ -1,8 +1,8 @@
-// The PageHost (shim-core design §5, D5): everything an authoring session
+// The PageHost: everything an authoring session
 // needs from a page, and nothing else. The page tools (page-host-tools.ts)
 // and preview apply run against this interface, so the same tool code drives
 // the Shim browser's tabs (its Electron driver, private) and a headless
-// Playwright page (the public driver, C2).
+// Playwright page (the public driver).
 //
 // A host is one page. It never decides *which* page or *whether* a call may
 // touch it: the page-away guard, reload budgets and allowed reload
@@ -71,7 +71,7 @@ export interface PreviewRule {
   ruleKey: string;
   /**
    * The deploy baseline the rule was committed under (the spec's
-   * `bundleHash`, CLAUDE.md §12). When set, the preview runs behind the same
+   * `bundleHash`). When set, the preview runs behind the same
    * deploy gate a committed rule does: against a page whose deploy identity
    * differs, the rebase ladder (refresh, promote, witness recovery,
    * quarantine) reports through runtime events, as it would for the

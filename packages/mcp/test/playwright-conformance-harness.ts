@@ -1,8 +1,8 @@
 // playwright-conformance-harness — the PageHost conformance suite
-// (@shimbrowser/core/page-host-conformance; shim-core design D12 gate, D15)
+// (@shimbrowser/core/page-host-conformance)
 // against the headless host: Playwright's Chromium driven by
-// attachPlaywrightPageHost (CDP isolated world + binding, the path the A5
-// spike proved). Its twin, scripts/electron-conformance-harness.ts, runs the
+// attachPlaywrightPageHost (CDP isolated world + binding, the path the real-browser
+// spike proved). Its twin in the Shim browser runs the
 // same cases against the Shim browser; a capability is "yes" for headless only
 // while its cases pass on both.
 //

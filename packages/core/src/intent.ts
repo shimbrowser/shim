@@ -1,7 +1,7 @@
 // A shim's `intent` — its distilled statement of purpose (Spec A). The
 // normalizer lives in core because the pure delta application (spec-delta.ts,
-// `set-intent`) runs it; the browser re-exports it from
-// src/main/global-shims/intent.ts alongside its own intent helpers.
+// `set-intent`) runs it; the browser re-exports it
+// alongside its own intent helpers.
 
 // A distilled statement of purpose is a short paragraph, but 600 chars cut real
 // intents mid-sentence (e.g. the clickbait-rewriter's) and baked a visible

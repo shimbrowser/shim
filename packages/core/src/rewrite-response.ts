@@ -1,5 +1,5 @@
-// rewrite-response — Tier-5 JSON response transforms (§6/§7, narrow slice).
-// docs/2026-08-04-rewrite-response-design.md is the design doc; this module is
+// rewrite-response — Tier-5 JSON response transforms (narrow slice).
+// This module is
 // PURE / Electron-free, mirroring the `redirect` mutation's shape (non-DOM
 // rule, table + registry, conditional install) and `component-id.ts`'s
 // main-world-helper-injection pattern (a function is written as real,
@@ -19,7 +19,7 @@
 // Wiring (main-process IPC, page-preload injection, spec-lint hookup) is a
 // later task; this file only produces the table/matcher/wrapper-builder
 // primitives and has zero Electron/DOM dependencies, so it is bare-node
-// testable end-to-end (scripts/rewrite-response-harness.ts), including
+// testable end-to-end (a bare-node harness), including
 // running the built wrapper source in a `vm` sandbox. `detectTransformForm`
 // (below) follows the same discipline for a THIRD piece — transform-source
 // syntax detection — by taking its `vm.Script`-backed compile probe as a
@@ -112,7 +112,7 @@ export type DetectedForm = { form: TransformForm } | { form: null; error: string
 // silently defaulted to 'module' and shipped, unchecked, into
 // `buildWrapperSrc`'s ONE shared generated script — one bad transform's
 // syntax error failed the whole script's parse, killing every rewrite rule
-// on the host (CLAUDE.md §6). Expression form is tried first: a source that
+// on the host. Expression form is tried first: a source that
 // parses as a bare expression is never ALSO meaningfully module source (the
 // only overlap is a lone function expression, which the module-form probe
 // would also accept as a harmless no-op expression STATEMENT — trying expr
@@ -173,7 +173,7 @@ export function hostInScope(reqHost: string, regDomain: string): boolean {
 // normalizePath (strip query/hash, force a leading slash, collapse a
 // trailing slash) + inline splitSegments (split on "/", drop empty
 // segments), then the same literal/param/optional/wildcard walk. Semantics
-// must not drift from route-match's — scripts/rewrite-response-harness.ts
+// must not drift from route-match's — a harness
 // pins parity against `matchPath` across a pattern × pathname table.
 //
 // `hasWildcard` is accepted (it rides along on every table entry and callers
@@ -417,7 +417,7 @@ export function transformLiteral(src: string, form: TransformForm): string {
 // requests against the table, runs the matched transform, and publishes
 // per-rule apply/error stats onto `<html data-shim-rewrite-stats>` for the
 // engine to read at settle time (component-id's cross-world attribute-bridge
-// pattern, §8). `matchSerializedTokens`/`hostInScope` are interpolated via
+// pattern). `matchSerializedTokens`/`hostInScope` are interpolated via
 // `.toString()` — see their own header comments for why they're written the
 // way they are. TypeScript notes: everything below is ONE template string —
 // no TS syntax lives inside it, so there is nothing for tsc to check beyond
@@ -559,7 +559,7 @@ function buildInfraSrc(): string {
 }
 
 // Build the full source to inject via `webFrame.executeJavaScript` (main-
-// world, CSP-immune — see the design doc's "Mechanics" §2): the once-guarded
+// world, CSP-immune): the once-guarded
 // infra IIFE, followed by one call installing this table's entries + bound
 // transforms. `formFor` lets the caller (which knows whether a given source
 // string is the LLM's bare-expression convention or an imported shim's full

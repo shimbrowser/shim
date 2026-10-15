@@ -1,5 +1,5 @@
 // Invokes one mutation against a resolved anchor and returns the DOM nodes the
-// handler produced. This is the per-mutation-kind switch (the built-ins of §6
+// handler produced. This is the per-mutation-kind switch (the built-in kinds
 // plus custom registry kinds); applyRule's mountOn calls it once per mutation
 // on each matched element. Handlers enable self-healing by returning the root
 // node(s) they mounted; handlers that return nothing opt out.
@@ -16,7 +16,7 @@ import type { Mutation, Rule, Spec } from './types';
 import type { CoreHandlerApi } from './api';
 import { errMessage } from './error';
 
-// Apply-time strip feedback for inject-html (§6): when the strip pass removed
+// Apply-time strip feedback for inject-html: when the strip pass removed
 // active content, the fact rides the rule-status `note` field so the authoring
 // loop tells the model its onclick/script never shipped. Keyed spec/rule; set
 // here at mount, read + cleared by the rule's status reporter + teardown
@@ -106,7 +106,7 @@ export function dispatchMutation(
     return Promise.resolve([]);
   }
 
-  // Tier-1 layout kinds (§6): compile via layout-kinds.ts, ride the same token
+  // Tier-1 layout kinds: compile via layout-kinds.ts, ride the same token
   // machinery as hide/restyle. Relative reorder (before/after) compiles to null
   // here — applyRule's restamp path owns it (a whole-sibling ordering can't be
   // expressed as one anchor rule).
@@ -130,7 +130,7 @@ export function dispatchMutation(
     return Promise.resolve([]);
   }
 
-  // Tier-2 declarative injection (§6): build static DOM from the payload,
+  // Tier-2 declarative injection: build static DOM from the payload,
   // insert per `placement`, and RETURN the nodes — the script-output path
   // (self-healing, per-anchor dedupe, teardown, emit feedback) does the rest.
   if (mut.kind === 'inject-element') {
@@ -220,7 +220,7 @@ export function dispatchMutation(
   }
   // Custom declarative mutations don't carry a handler-name slot in the event
   // vocabulary; pass null so the throw still hits the console but no event is
-  // emitted. (None ship today — see CLAUDE.md §22 step 23.)
+  // emitted. (None ship today.)
   return safe(`mount ${rule.id}/${mut.kind}`, null, () =>
     handler.mount(el, mut, rule, spec, api),
   );

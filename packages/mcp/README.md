@@ -260,6 +260,11 @@ npm run build && node out/packages/mcp/test/shim-cli-e2e-harness.js
 node out/packages/mcp/test/plugin-install-e2e-harness.js
 ```
 
+## Design decisions
+
+Comments cite the design decisions they rest on as `D1`…`D16`; they are listed in
+[`@shimbrowser/core`'s DECISIONS.md](../core/DECISIONS.md).
+
 ## License
 
 Licensed under the Apache License 2.0. Copyright Artificial Apps, LLC. See

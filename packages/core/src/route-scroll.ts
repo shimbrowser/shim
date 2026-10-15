@@ -1,4 +1,4 @@
-// Pure scroll-position store for mount-route virtual routes (CLAUDE.md §6). The
+// Pure scroll-position store for mount-route virtual routes. The
 // engine keeps one per page and supplies all DOM/history side effects (the
 // scroll listener, window.scrollTo, history.replaceState); this module only
 // owns key minting + the saved-position map, so it is bare-node testable. No

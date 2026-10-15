@@ -3,7 +3,7 @@
 // The engine applies a declarative patch spec to any page with a DOM: hand
 // `run(spec, api)` a spec and an object satisfying `CoreApi` and it resolves
 // anchors, applies mutations and reports rule status through `api.reportEvent`.
-// It imports no Node builtin and no host code (shim-core design D4), so the
+// It imports no Node builtin and no host code, so the
 // same source runs in the Shim browser's preload and, bundled for the browser
 // platform (`@shimbrowser/core/page`), in any page a driver injects it into.
 //

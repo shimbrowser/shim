@@ -1,5 +1,5 @@
-// A headless authoring session on a shim (shim-core design D9, D10, D11, D14,
-// D15): the session backend @shimbrowser/core's session registry drives when
+// A headless authoring session on a shim: the session backend
+// @shimbrowser/core's session registry drives when
 // there is no Shim browser — a Playwright Chromium page (any PageHost) instead
 // of a tab, a `.shim` file instead of the shim library.
 //
@@ -210,7 +210,7 @@ function portOf(url: string): string {
 
 /**
  * Whether a match.hosts pattern covers `url` — the browser registry's
- * semantics (src/main/patches/host-match.ts): a pattern without a port
+ * semantics: a pattern without a port
  * matches any port, an exact host or a `*.` subdomain wildcard; a pattern
  * with a port matches only that exact host:port.
  */
@@ -352,7 +352,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     return { key: event.specId, live, rule };
   }
 
-  // Witness capture (§8): the engine fingerprinted a live rule that resolved
+  // Witness capture: the engine fingerprinted a live rule that resolved
   // exactly one element — at apply, or whenever the element appeared. Kept on
   // the working rule for commit and on its live preview, so a replay onto a
   // new document (reload_page, followDocument) filters by it as the committed

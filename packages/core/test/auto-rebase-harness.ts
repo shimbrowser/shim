@@ -1,4 +1,4 @@
-// Diagnostic harness for the auto-rebase building blocks (§14):
+// Diagnostic harness for the auto-rebase building blocks:
 // anchors.suggestAnchorFor (synthesize a fresh anchor for a found element)
 // and anchors.witnessRecover (find a drifted element by its witness). Bare
 // node — no DOM, no Electron: elements are stubs shaped like the subset of
@@ -115,7 +115,7 @@ function tWitnessRecover() {
   const d5 = witnessRecoverDetail(null, root1);
   check('detail: no witness → explicit reason', d5.el === null && /no witness/.test(String(d5.reason)), d5.reason);
 
-  // Engine-injected candidates (CLAUDE.md §6/§12 back door) must never be
+  // Engine-injected candidates (the shim-owned DOM back door) must never be
   // recovery targets — an injected node that happens to satisfy the witness
   // (tag/attrs/text-stem/parent/child-shape) would otherwise silently
   // re-anchor the rule onto the engine's own output.

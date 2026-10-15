@@ -1,5 +1,5 @@
 // Diagnostic harness for the deploy-identity hash (packages/core/src/deploy-id.js)
-// — the §12 auto-rebase gate's ROUTE-STABLE page fingerprint. Bare node. Run
+// — the auto-rebase deploy gate's ROUTE-STABLE page fingerprint. Bare node. Run
 // when touching the gate's identity logic:
 //
 //   node out/packages/core/test/deploy-id-harness.js

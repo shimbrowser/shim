@@ -1,6 +1,6 @@
-// What a preview's evidence says about each rule and screenshot (shim-core
-// design D11: "both hosts return the same shape"). The Shim browser's emit
-// feedback (src/main/authoring) and the headless session (@shimbrowser/mcp)
+// What a preview's evidence says about each rule and screenshot (both
+// hosts return the same shape). The Shim browser's emit
+// feedback and the headless session (@shimbrowser/mcp)
 // word every rule status and view_page caption with these, so the agent reads
 // the same evidence whichever host it drives.
 //
@@ -34,7 +34,7 @@ export function describeRuleStatus(rule: Rule | undefined, status: RuleStatusEve
   if (isRedirect) {
     return 'redirect registered (applied in main at the network layer — no DOM status; takes effect on the next navigation to the source host)';
   }
-  // `rewrite-response` rules are anchorless (§6/§7 Tier-5) — their status
+  // `rewrite-response` rules are anchorless (Tier-5) — their status
   // arrives from rewrite-install.ts's own reporter, keyed matchedVia:
   // 'rewrite', with `matched` counting applications rather than DOM matches.
   // `matched: 0` is the common resting state (no matching traffic yet), not
@@ -51,7 +51,7 @@ export function describeRuleStatus(rule: Rule | undefined, status: RuleStatusEve
     }
     return note || 'no matching responses yet — a rewrite applies when the site refetches; reload the page to verify';
   }
-  // `intercept` rules are also anchorless (§6/§7 Tier-5) — status arrives
+  // `intercept` rules are also anchorless (Tier-5) — status arrives
   // from intercept-install.ts's own reporter, keyed matchedVia: 'intercept',
   // with `matched` counting wrapped-call applications rather than DOM
   // matches. `matched: 0` is a common resting state (module not yet

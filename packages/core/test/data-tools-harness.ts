@@ -1,5 +1,5 @@
-// Harness for the data tools' one definition (packages/core/src/data-tools.ts,
-// shim-core design D2, §5): each roster names its tools after their keys and
+// Harness for the data tools' one definition (packages/core/src/data-tools.ts):
+// each roster names its tools after their keys and
 // covers every data tool, each input schema is a well-formed object schema,
 // and each session schema accepts every property the worker's has (same
 // name, same type) and requires nothing the worker doesn't — so one static

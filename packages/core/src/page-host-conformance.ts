@@ -1,4 +1,4 @@
-// The PageHost conformance suite (shim-core design D12 gate, D15).
+// The PageHost conformance suite.
 //
 // One set of fixture pages and specs, run against any PageHost through the
 // interface alone: the Shim browser's Electron host and the headless
@@ -10,7 +10,7 @@
 // Cases (D15): apply (every supported kind and mount strategy), re-render
 // survival, SPA navigation, anchor recovery after a simulated deploy,
 // teardown, a throwing handler, plus api.storage, the page tools, and a page
-// with a strict CSP (the A5 spike's compile path, through the real driver).
+// with a strict CSP (the real-browser spike's compile path (D12), through the real driver).
 //
 // The suite owns its site: `conformanceFixture(path, state)` answers every
 // request, and the runner serves it (any HTTP server; the case only needs the
@@ -19,7 +19,7 @@
 //
 // Pure: no Node, no host code. Runners live with each host
 // (packages/mcp/test/playwright-conformance-harness.ts,
-// scripts/electron-conformance-harness.ts).
+// and the Shim browser's Electron runner).
 
 import type { PageHost, PageRuntimeEvent, PageConsoleMessage, Unsubscribe } from './page-host';
 import type { AnchorSpec, Rule, Witness } from './types';
@@ -328,7 +328,7 @@ function makeKit(ctx: ConformanceContext, checks: ConformanceCheck[], applied: S
 // --- shared bits for the cases ---------------------------------------------
 
 const css = (value: string): Rule['anchor'] => ({ primary: { kind: 'css', value } });
-// Every anchor kind the engine resolves (§5); a recovered anchor of any
+// Every anchor kind the engine resolves; a recovered anchor of any
 // other kind is a failed recovery.
 const ANCHOR_KINDS: ReadonlySet<string> = new Set<AnchorSpec['kind']>(['css', 'data-attr', 'aria', 'text']);
 

@@ -1,4 +1,4 @@
-// Diagnostic harness for anchor synthesis quality (§8): suggestAnchorLadder /
+// Diagnostic harness for anchor synthesis quality: suggestAnchorLadder /
 // suggestAnchorFor — the ranked, DOM-verified ladder the auto-rebase recover
 // paths use to re-point a rule. Bare node — no DOM, no Electron: elements are
 // stubs, and the "document" stub implements just enough querySelectorAll for
@@ -275,7 +275,7 @@ function tTextCaseInsensitive() {
 }
 
 function tShouldAppendPositional() {
-  console.log('shouldAppendPositional (pure decision — page-preload computeAnchorLadder, CLAUDE.md §16):');
+  console.log('shouldAppendPositional (pure decision — page-preload computeAnchorLadder):');
   // The review-fixed bug this pins: an element with >=4 stronger-but-still-
   // crowd-matching rungs has its positional rung sliced off by
   // suggestAnchorLadder's LADDER_MAX cap, leaving nothing unique. If a
@@ -295,7 +295,7 @@ function tShouldAppendPositional() {
 }
 
 function tStableGroupClass() {
-  console.log('isStableGroupClass (CLAUDE.md §16 "hide all like this" — class-quality guard, review Important 1 + round 3):');
+  console.log('isStableGroupClass ("hide all like this" — class-quality guard):');
   // Semantic / human-named classes survive at any plausible count — same
   // names the generated-class filter already lets through for the ladder.
   check('a semantic class is stable', isStableGroupClass('sitestr', 30) === true, '');
@@ -308,7 +308,7 @@ function tStableGroupClass() {
   check('"hidden" is rejected (bare layout utility)', isStableGroupClass('hidden', 30) === false, '');
   check('"relative" is rejected (bare layout utility)', isStableGroupClass('relative', 30) === false, '');
   // Prefix-value utility SHAPES are only rejected when the candidate is
-  // also broad (review round 3) — `top`/`order`/`content`/etc. are common
+  // also broad — `top`/`order`/`content`/etc. are common
   // words in real semantic class names (`.top-bar`, `.order-summary`), so a
   // narrow match count reads as a real component, not a utility class.
   check('"w-full" at a wide count is rejected (genuinely a utility)', isStableGroupClass('w-full', 300) === false, '');

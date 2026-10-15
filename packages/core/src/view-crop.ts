@@ -1,4 +1,4 @@
-// Pure crop-rect math for view_page's element-scoped screenshots (§16).
+// Pure crop-rect math for view_page's element-scoped screenshots.
 // Separate so the padding / minimum-size / viewport clamping rules are
 // bare-node testable (test/view-crop-harness.ts) — page-host-tools.ts
 // measures the element and captures through a PageHost, and delegates the

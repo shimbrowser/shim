@@ -19,7 +19,7 @@ export interface StatusReporter {
 }
 
 export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: RuleRuntimeState): StatusReporter {
-  // Apply-time precondition notes for the layout kinds (§6): computed-style
+  // Apply-time precondition notes for the layout kinds: computed-style
   // checks whose failure means the compiled CSS silently does nothing (reorder
   // under a block parent, grid templates on a flex container). Joined into the
   // rule-status `note` so the authoring loop sees them mid-turn and
@@ -29,7 +29,7 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
   // element (<video>/<audio>), or blankets most of the viewport, silently
   // blanks the player — audio keeps playing, picture goes white. Live-caught: a
   // ".video-stream" hide meant for Shorts nuked YouTube's own player, and
-  // nothing warned. Rides the rule-status `note` into authoring feedback (§16)
+  // nothing warned. Rides the rule-status `note` into authoring feedback
   // so the model self-corrects mid-turn; never changes runtime behavior.
   const hasHideOrRemoveKind = (rule.mutations || []).some((m) => m.kind === 'hide' || m.kind === 'remove');
 
@@ -59,7 +59,7 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
   // Media / large-cover guard (see hasHideOrRemoveKind above). Pure reads, fully
   // guarded — never throws. Rides the rule-status event as `mediaHide` so main
   // can persist a durable, browsing-time "hiding the video player" warning
-  // (§14); the human `note` below is derived from the same verdict.
+  //; the human `note` below is derived from the same verdict.
   //
   // Two detectors, because the two signals have different physics:
   //  - MEDIA is layout-independent (matches/querySelector), so it's checked LIVE
@@ -153,7 +153,7 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
       ...(box ? { box } : {}),
       ...(note ? { note } : {}),
       // Structured twin of the media half of `note` — main persists it as a
-      // durable browsing-time "hiding the video player" warning (§14). Absent
+      // durable browsing-time "hiding the video player" warning. Absent
       // when the matched element is neither media nor a viewport-blanketing
       // cover; its ABSENCE on a later rule-status self-clears any prior row.
       ...(mediaHide ? { mediaHide } : {}),

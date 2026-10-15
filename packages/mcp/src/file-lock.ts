@@ -1,5 +1,5 @@
-// A `.shim` file's cross-process claim for headless sessions (shim-core
-// design D14: one session per file). The in-process lease only covers the
+// A `.shim` file's cross-process claim for headless sessions (one
+// session per file). The in-process lease only covers the
 // sessions of one `shim-mcp --headless` process; two processes on the same
 // file would both load it and the last commit's rename would silently drop
 // the other's work. This lock is what spans processes.

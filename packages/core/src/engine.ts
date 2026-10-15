@@ -27,7 +27,7 @@ interface PatchBundle {
   handlers?: HandlerMap;
   // Each spec rule's own inline handlers (`rule.handlers`, authored as source
   // strings), already compiled by the host and keyed by the rule object in
-  // `spec.rules`. The engine never compiles source (design D4: no Node, and the
+  // `spec.rules`. The engine never compiles source (no Node, and the
   // CSP-immune way to compile differs per host). A rule's own handlers win
   // over the bag's `handlers` on a name collision — see setupRule.
   ruleHandlers?: ReadonlyMap<Rule, HandlerMap>;
@@ -49,7 +49,7 @@ interface PatchControl {
   // `ruleHandlers` is the rule's own `rule.handlers` already compiled by the
   // host (preview and forwarded rules carry handler source inline). The rule
   // itself stays plain JSON — bridgeRule forwards it to child frames as-is.
-  // `deploy` puts the extra rule behind the deploy gate (§12): `bundleHash` is
+  // `deploy` puts the extra rule behind the deploy gate: `bundleHash` is
   // the baseline it was committed under, `current` the page's deploy identity
   // getter. Without it the rule never sees a deploy (the control's own spec
   // carries no baseline). PageHost previews of a committed rule pass it.
@@ -134,8 +134,8 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
   //   - `__cssPriority` — cross-shim cascade priority for the tier-1 injector
   //     (main: user shims above platform fixtures; sidebar order among users).
   //   - `__bundleHashFn` — getter for the current page fingerprint, compared by
-  //     the rebase pass against the stored `spec.bundleHash` to detect a deploy
-  //     (§14). A getter (not a value) because it must be evaluated at reconcile
+  //     the rebase pass against the stored `spec.bundleHash` to detect a deploy.
+  //     A getter (not a value) because it must be evaluated at reconcile
   //     time — boot() computes it before the page's scripts are in the DOM. A
   //     plain string is accepted too (tests/stubs).
   const bundleHashFn = typeof patch.bundleHash === 'function'

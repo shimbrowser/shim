@@ -1,4 +1,4 @@
-// How the MCP server reaches Shim (shim-core design D6): the discovery file
+// How the MCP server reaches Shim: the discovery file
 // `<userData>/control.json` names a Unix socket (a named pipe on Windows) and
 // a bearer token; every request is HTTP over that socket. Nothing here
 // listens, and nothing here is reachable from a web page.

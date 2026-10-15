@@ -1,4 +1,4 @@
-// The static tool contract (shim-core design D2, §5): every tool this server
+// The static tool contract: every tool this server
 // offers, registered once at startup — nothing depends on a mid-session
 // tools/list_changed. The session tools are defined here; the page tools'
 // one definition is @shimbrowser/core/page-tools, the same module Shim's own

@@ -1,15 +1,15 @@
-// The composition-only session tools (shim-core design D2, D3, D16, §5): what
+// The composition-only session tools: what
 // @shimbrowser/mcp registers statically, beside the page and API map tools,
 // for an agent driving a composition session. ONE definition per tool, here.
 //
 //   probe_request  one GET of the agent's own through the composition's real
-//                  fetch path (grants, mint, same-host redirects) — §5's API
+//                  fetch path (grants, mint, same-host redirects) — the API
 //                  map group, composition sessions only
 //   read_calls     the composition's broker call trace: the requests its
-//                  page made, identity and status only — §5's data group
+//                  page made, identity and status only — the data group
 //   verify_mint    a proposed mint config run end to end against the user's
 //                  session, behind a card in Shim for the mint host (and a
-//                  follow host) — §5's API map group, composition sessions
+//                  follow host) — the API map group, composition sessions
 //                  only
 //
 // A shim session answers all three as not offered. Also here: the answer and the

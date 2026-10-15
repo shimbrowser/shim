@@ -19,7 +19,7 @@ export interface RuntimeSpec extends Spec {
   __bundleHashFn: () => string | null;
 }
 
-// A patch-declared custom mutation kind (rare — the built-ins in CLAUDE.md §6
+// A patch-declared custom mutation kind (rare — the built-in kinds
 // cover nearly every authored shim; both shipped fixtures declare an empty
 // registry, `mutations: {}`). `deps` lets one custom kind pull in another's
 // CSS; `mount` is invoked exactly like a script handler against the anchor.
@@ -33,7 +33,7 @@ export type MutationRegistry = Record<string, MutationHandlerDef>;
 // Args a compiled handler function is invoked with. Two shapes: `script` /
 // `replace-root` mutations hand the handler the resolved DOM anchor;
 // `mount-route` handlers get the route match instead (routeRule has no DOM
-// anchor to give). The engine never compiles source (design D4): the HOST turns
+// anchor to give). The engine never compiles source: the HOST turns
 // handler source into functions — the Shim browser with `vm` in the preload's
 // isolated world, other hosts their own way — and hands the engine functions.
 // A handler's RETURN value is the one genuinely dynamic boundary, handled via
@@ -71,7 +71,7 @@ export interface RejectedSample {
   source?: string | null;
 }
 
-// Current deploy's {minified: original} component-name map (§8 Stage B), via
+// Current deploy's {minified: original} component-name map (sourcemap Stage B), via
 // the api bridge. Null-safe on every degraded surface — stub apis, forwarded
 // frames, harnesses — and never throws; null means "compare raw names".
 export function getSymbols(api: CoreApi): Promise<Record<string, string> | null> {

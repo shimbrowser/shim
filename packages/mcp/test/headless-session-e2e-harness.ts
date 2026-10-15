@@ -1,5 +1,5 @@
 // headless-session-e2e-harness — the full loop on a supported shim with no
-// Shim browser (shim-core design C3; D9, D10, D11, D14, D15): a real MCP
+// Shim browser: a real MCP
 // client talks to the real @shimbrowser/mcp server in headless mode, which
 // drives a real Playwright Chromium against a local fixture site.
 //

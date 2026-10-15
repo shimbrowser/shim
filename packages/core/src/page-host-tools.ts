@@ -1,5 +1,5 @@
-// The page tools' page-side work, over a PageHost (shim-core design D5:
-// "implementations of every tool that needs only a page" are public):
+// The page tools' page-side work, over a PageHost
+// (the implementations of every tool that needs only a page are public):
 // view_page's crop and capture, evaluate_in_page's wrapper, and the
 // self-contained query_page / inspect_element reads a host without engine
 // inspection answers with.
@@ -7,7 +7,7 @@
 // Each function takes one host and the world its scripts run in. What a
 // session layers on top — which page, the page-away guard, reload budgets,
 // the console buffer — stays with the session (the Shim browser's
-// src/main/authoring/preview-tools.ts). Every result is a value, never a
+// preview tools). Every result is a value, never a
 // throw: an error is `{ error, detail? }`.
 
 import { computeCropRect } from './view-crop';

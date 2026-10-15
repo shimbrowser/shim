@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// build — compiles @shimbrowser/core's src/ into dist/ (shim-core design D8).
+// build — compiles @shimbrowser/core's src/ into dist/.
 //
 // Three outputs, all under dist/:
 //   dist/<module>.js        CommonJS, one file per src/<module>.ts — what the
@@ -10,13 +10,13 @@
 //   dist/shim-core.page.js  the whole engine bundled for the BROWSER platform
 //                           as one IIFE (global `ShimCore`, no externals) — the
 //                           script a driver injects into a page. Its build
-//                           fails on any Node builtin (design D4: the page
+//                           fails on any Node builtin (the page
 //                           bundle imports no Node builtins), even one an npm
 //                           polyfill could satisfy.
 //
 // Zero runtime dependencies: esbuild and typescript are build tools only.
 // Run standalone (`npm run build -w @shimbrowser/core`) or through the
-// repo-root scripts/build.js, which calls buildCore() before compiling the app.
+// Shim browser's build, which calls buildCore() before compiling the app.
 
 const fs = require('fs');
 const path = require('path');
@@ -57,7 +57,7 @@ const nodeBuiltinGuard = {
       if (args.kind === 'entry-point' || !isNodeBuiltin(args.path)) return undefined;
       return {
         errors: [{
-          text: `Node builtin "${args.path}" in the @shimbrowser/core page bundle (shim-core design D4: the engine imports no Node builtin; do host-specific work in the host)`,
+          text: `Node builtin "${args.path}" in the @shimbrowser/core page bundle (the engine imports no Node builtin; do host-specific work in the host)`,
         }],
       };
     });

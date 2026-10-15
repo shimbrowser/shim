@@ -1,5 +1,5 @@
 // plugin-install-e2e-harness — the Claude Code plugin as someone WITHOUT Shim
-// gets it (shim-core C5; D7, D9, D10, D11, D15): the built plugin is copied
+// gets it (D7, D9, D10, D11, D15): the built plugin is copied
 // to a temp folder outside the repository (no workspace node_modules above
 // it), its .mcp.json entry is started exactly as Claude Code starts it, over
 // stdio, with no Shim browser and only Playwright reachable (through

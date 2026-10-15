@@ -1,4 +1,4 @@
-// Bare-node harness for packages/core/src/inject-kinds.ts (CLAUDE.md §6).
+// Bare-node harness for packages/core/src/inject-kinds.ts.
 // DOM-free: builder/strip/placement run against minimal structural stubs.
 import {
   INJECT_PLACEMENTS, INJECT_MAX_DEPTH, INJECT_MAX_NODES, INJECT_HTML_MAX_CHARS,

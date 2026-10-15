@@ -1,5 +1,5 @@
 // Handler-fetch budget — the engine-level backstop against a shim hammering
-// its host site (CLAUDE.md §13; live-caught: a row-hydration handler fired
+// its host site (live-caught: a row-hydration handler fired
 // ~100 `/tracks/status/:id` requests per mount, soundeo rate-limited the
 // burst with 503s, and the failed hydrations killed the whole mount).
 //

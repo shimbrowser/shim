@@ -1,4 +1,4 @@
-// The shim folder — the working copy an agent edits (shim-core design D10).
+// The shim folder — the working copy an agent edits.
 //
 //   shim.json            the spec, minus everything the tool manages: handler
 //                        source (rules name their handlers; the source is in
@@ -183,7 +183,7 @@ function json(value: unknown): string {
 
 // shim.json's spec: a deep copy without handler source and witnesses. A
 // global shim's promoted default carries rules of its own, and their
-// witnesses never leave either (CLAUDE.md §8: the model never sees one).
+// witnesses never leave either (the model never sees one).
 function authoredSpec(spec: Spec, dropFields: readonly string[]): Spec {
   const out = clone(spec) as Spec & Record<string, unknown>;
   delete out.handlers;

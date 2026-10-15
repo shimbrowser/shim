@@ -11,7 +11,7 @@
 //                             model + chat: probably a typo or an invented
 //                             capability the user should hear about)
 //
-// The allowlists below mirror the spec format (CLAUDE.md §5) and the engine's
+// The allowlists below mirror the spec format and the engine's
 // mutation dispatch. Keep them in sync when a real kind/field is added.
 //
 // `lintSpec`'s input is a genuinely dynamic boundary — it exists to validate
@@ -21,7 +21,7 @@
 // it's read through the real @shimbrowser/core types.
 
 //
-// Lives in @shimbrowser/core (shim-core design D5: spec-lint is public) so the
+// Lives in @shimbrowser/core (spec-lint is public) so the
 // Shim browser, the MCP server and a headless host all lint with one copy.
 // Node-free like the rest of core: the transform / wrap syntax check uses
 // `syntaxProbe` (syntax-probe.ts), which gives vm.Script's diagnostics
@@ -74,7 +74,7 @@ const BUILTIN_KINDS = new Set([
   'reorder', 'reshape', 'inject-element', 'inject-html', 'rewrite-response', 'intercept',
 ]);
 const RULE_KEYS = new Set(['id', 'anchor', 'mutations', 'handlers']);
-// Mirrors shim-db/connections.ts's DB_ENGINES (shim-db remote-transport §1).
+// Mirrors the Shim browser's DB_ENGINES.
 // A local copy, not an import: this file stays a pure, dependency-free leaf
 // like the rest of its allowlists (keep in sync when a real engine is added —
 // same "mirror the spec format" contract the header comment describes).
@@ -102,7 +102,7 @@ const MUTATION_KEYS = new Set([
   'module', 'symbol',
 ]);
 
-// Anchor-quality lint (§8): the model drifts toward positional CSS
+// Anchor-quality lint: the model drifts toward positional CSS
 // (`:nth-child(3)`) and build-generated classes (`.css-1a2b3c`) — selectors
 // that resolve today and die on the next deploy/reorder, turning into
 // quarantine → re-anchor churn. Warn on the PRIMARY only: the engine's own
@@ -138,7 +138,7 @@ const DISCONNECT_RE = /\.disconnect\s*\(/g;
 
 // Single source of truth for the observer-loop heuristic itself — both the
 // in-spec scan below (rule.handlers, rule-scoped) and the pre-import
-// inspector (src/main/capabilities/inspect.ts, handler-scoped: `exportToShim` strips
+// inspector (in the Shim browser, handler-scoped: `exportToShim` strips
 // `rule.handlers` into a top-level `handlers` map, so a canonically exported
 // `.shim` file has no rule.handlers left for the rule-scoped scan below to
 // find) call this rather than each carrying its own copy of the regex logic.
@@ -166,7 +166,7 @@ export interface LintResult {
   warnings: string[];
 }
 
-// `mutations` is a reserved bag field for per-patch declarative kinds (§6) —
+// `mutations` is a reserved bag field for per-patch declarative kinds —
 // not part of the canonical `Spec` shape (registry.ts's bagForUserPatch
 // always passes it undefined for user patches today), so it's typed as a
 // spec-lint-local extension rather than added to the shared type. `handlers`
@@ -223,7 +223,7 @@ function lintPrimaryAnchor(rid: string, primary: AnchorSpec | undefined, warning
 // witness — it's a single css/data-attr/aria/text spec resolved fresh every
 // scan, with nothing to fall back to and nothing to verify it against. A
 // brittle selector here is worse than a brittle primary anchor: it fails
-// silently (a downgraded rule-status note, §6/§8) with no self-heal path.
+// silently (a downgraded rule-status note) with no self-heal path.
 function lintReorderTarget(rid: string, key: 'before' | 'after', target: unknown, warnings: string[]): void {
   if (!isRecord(target) || target.kind !== 'css' || typeof target.value !== 'string') return;
   const { value } = target;
@@ -317,7 +317,7 @@ function lintLayoutMutation(rid: string, mut: Mutation, errors: string[], warnin
   }
 }
 
-// Inject kinds (§6): payload-shape problems are ERRORS (a malformed tree is
+// Inject kinds: payload-shape problems are ERRORS (a malformed tree is
 // a silent no-op otherwise); strippable content in inject-html is a WARNING
 // (the runtime strip is the belt — the model should hear it before apply).
 // inject-element's tree is inspectable, so active content there is an ERROR
@@ -380,7 +380,7 @@ const MAIN_WORLD_DOM_RE = /\b(?:document|window)\s*\./;
 // capability-refs.ts (shared with the browser's composition emit lint) — same
 // source-text-heuristic posture, warnings only.
 
-// rewrite-response (§6, docs/2026-08-04-rewrite-response-design.md). Payload
+// rewrite-response. Payload
 // shape errors delegate to `validateRewriteMutation` (packages/core/src/
 // rewrite-response.ts) rather than re-deriving them here — one source of
 // truth for what a valid endpoint/transform payload looks like, shared with
@@ -426,7 +426,7 @@ function lintRewriteMutation(
     return;
   }
 
-  // Syntax-check the bound source itself (Fix 1a, CLAUDE.md §6): a malformed
+  // Syntax-check the bound source itself: a malformed
   // transform (e.g. a missing brace) used to pass lint/commit untouched,
   // then poison rewrite-install.ts's ONE shared generated script at
   // install time — one bad rule's syntax error killed every rewrite rule
@@ -449,7 +449,7 @@ function lintRewriteMutation(
   }
 }
 
-// intercept (§6, docs/2026-08-04-intercept-design.md). Structural copy of
+// intercept. Structural copy of
 // `lintRewriteMutation` immediately above — same three jobs, same order:
 // delegate payload shape to `validateInterceptMutation` (packages/core/src/
 // intercept.ts, the one source of truth shared with the runtime table
@@ -629,12 +629,12 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown): LintResult {
   // this is exactly the dynamic-boundary case the cast pattern is for — the
   // fields are read defensively below, never trusted blind.
   const s: LintableSpec | null = isRecord(spec) ? (spec as unknown as LintableSpec) : null;
-  // Per-patch declarative kinds (rare extension point, §6) are valid too.
+  // Per-patch declarative kinds (rare extension point) are valid too.
   const declaredKinds = s && isRecord(s.mutations)
     ? new Set(Object.keys(s.mutations))
     : new Set<string>();
 
-  // Declared remote connections (shim-db remote-transport §1). Spec-level,
+  // Declared remote connections. Spec-level,
   // not per-rule — computed once, same as declaredKinds above.
   //   - engine-enum ERROR: cheap same-turn feedback for an unknown engine,
   //     redundant with (but earlier than) commit's validateConnectionsDecl.
@@ -658,7 +658,7 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown): LintResult {
       // legitimate shape — it's exactly what pointing at an existing
       // Supabase project through the paste door looks like (there is
       // nothing to provision; declarative-additive migrations never apply
-      // to it, design/shim-db.md's supabase section). But it's worth
+      // to it). But it's worth
       // flagging: with no declared tables the connection has no
       // declared-table allowlist (B.1a) — every table on the project is
       // reachable through it, not just the ones the shim's own schema
@@ -774,7 +774,7 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown): LintResult {
       lintInterceptMutation(rid, mut, handlerScope, errors, warnings);
     }
 
-    // api.ai without the 'ai' permission declared (§19): the call would
+    // api.ai without the 'ai' permission declared: the call would
     // reject at runtime with a permission error, so the shim ships broken.
     // A WARNING (not error): the source scan is heuristic (comments/strings
     // can false-positive), and the runtime failure is loud + explicable.
@@ -794,8 +794,7 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown): LintResult {
       }
     }
 
-    // api.db.connection("x") referencing an undeclared connection name (shim-
-    // db remote-transport §1): the call would resolve { ok: false, error:
+    // api.db.connection("x") referencing an undeclared connection name: the call would resolve { ok: false, error:
     // "not-declared" } at runtime, so the shim ships broken against a name
     // that's either a typo or a connection the model forgot to declare. A
     // WARNING, not an error — same heuristic-source-scan posture as the

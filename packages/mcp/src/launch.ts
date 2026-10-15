@@ -1,4 +1,4 @@
-// shim_launch (shim-core design D6): attach to the running Shim when the
+// shim_launch: attach to the running Shim when the
 // discovery file names a live process that answers, otherwise start Shim
 // with its control endpoint on for this run, and wait for it to answer.
 //

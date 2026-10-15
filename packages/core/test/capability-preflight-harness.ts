@@ -1,4 +1,4 @@
-// Harness for @shimbrowser/core/capability-preflight (shim-core design D15):
+// Harness for @shimbrowser/core/capability-preflight:
 //
 //   - preflight lists every declared feature a host lacks — mutation kinds,
 //     anchor.iframe, and the settings / permissions / storage / connections

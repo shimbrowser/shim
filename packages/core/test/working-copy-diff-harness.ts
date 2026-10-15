@@ -1,5 +1,5 @@
-// Harness for the working-copy differ (packages/core/src/working-copy-diff.ts,
-// shim-core design D10): a shim folder diffed against the session's working
+// Harness for the working-copy differ (packages/core/src/working-copy-diff.ts):
+// a shim folder diffed against the session's working
 // state becomes the DeltaOps the emit path applies. Pins that applying the
 // ops yields exactly the folder's rules (in the folder's order) and
 // declarations, that an untouched checkout diffs to nothing, that a rule
@@ -7,7 +7,7 @@
 // drops it, and that edits no op can carry are refused.
 //
 // Parity with the browser's internal worker (the same ops for equivalent
-// edits) is pinned app-side in scripts/working-copy-diff-parity-harness.ts.
+// edits) is pinned in the Shim browser's own harness.
 //
 //   node out/packages/core/test/working-copy-diff-harness.js
 //

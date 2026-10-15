@@ -6,8 +6,8 @@
 //     lands on a matching path. We intercept clicks (preventDefault +
 //     history.pushState) and listen for popstate. No server round-trip.
 //   - Hard load: the user types the URL or reloads. Main serves a same-origin
-//     local shell for registered routes (see src/main/mutation-runtime/
-//     route-protocol.ts), so the document loads at the real URL with the
+//     local shell for registered routes (the Shim browser's
+//     route protocol), so the document loads at the real URL with the
 //     site's session intact; the engine boots and `evaluate()` sees the path
 //     already matches.
 //
@@ -37,7 +37,7 @@ interface MountedRoute {
   prevTitle: string;
 }
 
-// --- virtual-route scroll restoration (§6) -------------------------------
+// --- virtual-route scroll restoration -------------------------------
 // Page-global: window scroll + history are shared across all route rules, so a
 // single store + one ref-counted scroll listener serve them all. We never touch
 // history.scrollRestoration (that would change the HOST site's own scroll
@@ -143,7 +143,7 @@ export function routeRule(rule: Rule, spec: Spec, api: CoreApi, handlers: Handle
   let mounted: MountedRoute | null = null;
 
   // Handlers opt into in-place inner-route updates by registering onRouteChange
-  // callbacks (§6 nested sub-routes): each is called on a same-route path change
+  // callbacks (nested sub-routes): each is called on a same-route path change
   // with the new match, keeping the shell mounted. A callback may return a
   // teardown fn — run before its NEXT call and on final unmount (per-inner-view
   // cleanup). No callback registered → a param change remounts, exactly as before.
@@ -224,7 +224,7 @@ export function routeRule(rule: Rule, spec: Spec, api: CoreApi, handlers: Handle
   // In-place inner navigation: the shell stays mounted, each onRouteChange
   // callback is re-run with the new match. A const arrow (not hoisted fn) so
   // `mut`'s narrowing survives, same reason mountRoute is one. Never scrolls or
-  // re-applies mut.title — the handler owns inner scroll/title (§6).
+  // re-applies mut.title — the handler owns inner scroll/title.
   const updateRoute = (m: { params: Record<string, string | undefined> }) => {
     if (!mounted) return;
     const here = routeMatch.normalizePath(location.pathname);
@@ -245,7 +245,7 @@ export function routeRule(rule: Rule, spec: Spec, api: CoreApi, handlers: Handle
     }
     mounted.path = here;
     // Restore scroll on a BACK/FORWARD return to a seen entry; a forward
-    // in-place nav (fresh entry) stays scroll-neutral (§6 #275 contract).
+    // in-place nav (fresh entry) stays scroll-neutral (the in-place nav contract).
     applyRouteScroll(true);
   };
 
