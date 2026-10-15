@@ -401,6 +401,16 @@ const H = {
   boom: `function boom() {
   throw new Error('conf-boom');
 }`,
+  slowMount: `function slowMount({ anchor }) {
+  return new Promise(function (resolve) {
+    setTimeout(function () {
+      const s = document.createElement('i');
+      s.className = 'conf-slow';
+      anchor.appendChild(s);
+      resolve(s);
+    }, 800);
+  });
+}`,
   lateBoom: `function lateBoom({ anchor }) {
   setTimeout(function later() {
     throw new Error('conf-late-boom');
@@ -940,6 +950,21 @@ const noMatchCase: ConformanceCase = {
     const late = await kit.event((e) => e.kind === 'rule-no-match' && e.specId === deadKey, 8000);
     kit.check('the engine still reports the dead anchor itself', late?.ruleId === 'dead', late);
     kit.check('…and never the live one', !kit.events.some((e) => e.kind === 'rule-no-match' && e.specId === liveKey));
+
+    // A preview replaced while its handler is still mounting: the old
+    // version's mount must not land, nor report a match under the key the
+    // replacement (a dead anchor) now owns.
+    const slowRule = { id: 'slow', anchor: css('#lead'), mutations: [{ kind: 'script', handler: 'slowMount' }], handlers: { slowMount: H.slowMount } } satisfies Rule;
+    const slowKey = kit.apply(slowRule);
+    await kit.sleep(100);
+    const replacedAt = kit.events.length;
+    kit.apply({ ...slowRule, anchor: css('#conf-also-missing') });
+    await kit.sleep(PREVIEW_SETTLE_MS);
+    const after = kit.events.slice(replacedAt).filter((e) => e.kind === 'rule-status' && e.specId === slowKey);
+    kit.check('a replaced version\'s late mount reports no match under the replacement\'s key',
+      after.length > 0 && after.every((e) => e.matched === 0), after);
+    kit.check('…and leaves nothing on the page', (await kit.read(`document.querySelectorAll('.conf-slow').length`)) === 0);
+    kit.remove(slowKey);
   },
 };
 
