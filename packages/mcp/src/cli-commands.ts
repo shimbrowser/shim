@@ -73,6 +73,12 @@ function asCliError(e: unknown): never {
   throw e;
 }
 
+// A path as one shell word, so a suggested command still runs when pasted:
+// bare when it holds only safe characters, else single-quoted ('\'' for a quote).
+export function shellQuote(p: string): string {
+  return /^[A-Za-z0-9_/.,:@%+=-]+$/.test(p) ? p : `'${p.replace(/'/g, "'\\''")}'`;
+}
+
 // What a path handed to the wrong command actually is, so the refusal can name
 // the command that takes it: a `.shim` file (it carries a `format`), a shim
 // folder's shim.json (a spec: rules and no format), or a folder.
@@ -98,8 +104,8 @@ function sniffInput(abs: string): InputKind {
 // a `.shim` file nor a folder's shim.json.
 function wrongInputHint(abs: string): string {
   const kind = sniffInput(abs);
-  if (kind === 'shim-file') return ` It is a .shim file; to turn it into a shim folder, run: shim unpack ${abs}`;
-  if (kind === 'spec') return ` It is a shim folder's shim.json; pass the folder instead: ${path.dirname(abs)}`;
+  if (kind === 'shim-file') return ` It is a .shim file; to turn it into a shim folder, run: shim unpack ${shellQuote(abs)}`;
+  if (kind === 'spec') return ` It is a shim folder's shim.json; pass the folder instead: ${shellQuote(path.dirname(abs))}`;
   return '';
 }
 
@@ -213,11 +219,11 @@ export function unpackFile(file: string, out?: string): UnpackResult {
   const abs = path.resolve(file);
   const kind = sniffInput(abs);
   if (kind === 'folder') {
-    throw new CliError('invalid-arguments', `${abs} is a folder; unpack takes a .shim file. To make one from a shim folder, run: shim pack ${abs}`);
+    throw new CliError('invalid-arguments', `${abs} is a folder; unpack takes a .shim file. To make one from a shim folder, run: shim pack ${shellQuote(abs)}`);
   }
   if (kind === 'spec') {
     throw new CliError('invalid-arguments',
-      `${abs} is a shim folder's shim.json, not a .shim file. To make a .shim file from its folder, run: shim pack ${path.dirname(abs)}`);
+      `${abs} is a shim folder's shim.json, not a .shim file. To make a .shim file from its folder, run: shim pack ${shellQuote(path.dirname(abs))}`);
   }
   const text = readText(file);
   const dir = out ? path.resolve(out) : defaultFolderFor(file);
@@ -240,7 +246,7 @@ export function unpackFile(file: string, out?: string): UnpackResult {
       const stem = path.basename(abs).replace(/\.shim$/, '') || 'shim';
       throw new CliError('not-a-working-copy',
         `${dir} already holds other files and no shim.json. unpack writes a whole shim folder and removes handlers the file `
-        + `doesn't carry, so it only writes into an empty folder or one it unpacked before. Name a new folder, e.g. --out ${path.join(dir, stem)}`);
+        + `doesn't carry, so it only writes into an empty folder or one it unpacked before. Name a new folder, e.g. --out ${shellQuote(path.join(dir, stem))}`);
     }
     if (e instanceof FolderError || e instanceof ShimFolderError) asCliError(e);
     throw new CliError('write-failed', `could not write ${dir}: ${errMessage(e)}`);
@@ -281,7 +287,7 @@ export function lintTarget(target: string, opts: { headless?: boolean } = {}): L
   const kind: LintReport['kind'] = st.isDirectory() ? 'folder' : 'file';
   if (kind === 'file' && sniffInput(abs) === 'spec') {
     throw new CliError('invalid-arguments',
-      `${abs} is a shim folder's shim.json; lint takes the folder or a .shim file. Run: shim lint ${path.dirname(abs)}`);
+      `${abs} is a shim folder's shim.json; lint takes the folder or a .shim file. Run: shim lint ${shellQuote(path.dirname(abs))}`);
   }
   const report: LintReport = { target: abs, kind, errors: [], warnings: [] };
   let folder: FolderInput;
