@@ -248,6 +248,16 @@ export function moduleForExpression(expression: string): string {
   return wrappedModule(expression) ?? expressionToModule(expression);
 }
 
+/**
+ * Whether an expression is one of moduleToExpression's wrapper forms (either
+ * world's, or the cross-world pick of both) — a whole module run in its own
+ * CommonJS scope, so evaluating it inline or as the stored
+ * `module.exports = <expr>;` runs the module identically.
+ */
+export function isModuleWrapperExpression(expression: string): boolean {
+  return wrappedModule(expression) !== null;
+}
+
 // The module a wrapper form (either world's, or the cross-world pick of both)
 // wrapped, when the expression is exactly that wrapper around it.
 function wrappedModule(expression: string): string | null {
