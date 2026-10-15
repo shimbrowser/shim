@@ -249,6 +249,27 @@ export function moduleForExpression(expression: string): string {
 }
 
 /**
+ * Whether evaluating `expression` inline gives the same, single module the
+ * stored `moduleSource` is — so a host may reuse the stored module's compiled
+ * export for it instead of evaluating the module a second time. True when the
+ * expression is one of the wrapper forms around that module (it runs the
+ * module in its own CommonJS scope; the stored module is that module, or the
+ * wrapper's own `module.exports = <wrapper>;` once committed), or when it is the module's
+ * `module.exports = <expr>` export and names none of the CommonJS bindings
+ * (so the module scope and the inline scope evaluate it identically). Source
+ * compared ignoring surrounding whitespace and trailing semicolons.
+ */
+export function isStoredModuleExpression(moduleSource: string, expression: string): boolean {
+  const canonical = (src: string): string => src.trim().replace(/[;\s]+$/, '');
+  const stored = canonical(moduleSource);
+  const wrapped = wrappedModule(expression);
+  // A wrapper is the module either as written (hydration's, before a commit)
+  // or as commit stores the wrapper itself (`module.exports = <wrapper>;`).
+  if (wrapped !== null) return canonical(wrapped) === stored || canonical(expressionToModule(expression)) === stored;
+  return !CJS_BINDING_RE.test(expression) && canonical(expressionToModule(expression)) === stored;
+}
+
+/**
  * Whether an expression is one of moduleToExpression's wrapper forms (either
  * world's, or the cross-world pick of both) — a whole module run in its own
  * CommonJS scope, so evaluating it inline or as the stored
