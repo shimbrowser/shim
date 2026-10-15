@@ -55,7 +55,7 @@ import { decodeWorkingCopy, encodeWorkingCopy, WorkingCopyWireError } from '@shi
 import {
   preflightSpec, scanRuleHandlers, verificationLevel, UNSUPPORTED_API_EVENT, type UnsupportedFeature,
 } from '@shimbrowser/core/capability-preflight';
-import { describeRuleStatus, previewKey, shimViewPageCaption } from '@shimbrowser/core/preview-evidence';
+import { describeRuleStatus, previewKey, previewNoMatch, shimViewPageCaption } from '@shimbrowser/core/preview-evidence';
 import { createConsoleFeed, formatAutoBlock, formatConsoleRead, type ConsoleFeed } from '@shimbrowser/core/console-feed';
 import {
   viewPageOnHost, queryPageByScript, inspectElementByScript, evaluateOnHost, expressionProblem,
@@ -554,9 +554,6 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     const errors = mine
       .filter((t) => t.event.kind === 'handler-error')
       .map(({ event: e }) => ({ ruleId: e.ruleId, handler: e.handlerName, message: e.message, stack: e.stack }));
-    const noMatch = mine
-      .filter((t) => t.event.kind === 'rule-no-match')
-      .map(({ event: e }) => ({ ruleId: e.ruleId, selector: e.selector }));
     const lastStatus = new Map<string, PageRuntimeEvent>();
     for (const { event: e } of mine) {
       if (e.kind === 'rule-status' && e.specId) lastStatus.set(e.specId, e);
@@ -564,14 +561,28 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     const quarantined = mine
       .filter((t) => t.event.kind === 'rule-quarantined')
       .map(({ event: e }) => ({ ruleId: e.ruleId, ...(typeof e.selector === 'string' && e.selector ? { selector: e.selector } : {}) }));
+    const previewed = [...emitKeys].map(([key, rule]) => ({
+      key,
+      rule,
+      status: lastStatus.get(key) as Parameters<typeof describeRuleStatus>[1],
+    }));
+    const noMatch = previewNoMatch(
+      mine
+        .filter((t) => t.event.kind === 'rule-no-match')
+        .map(({ event: e }) => ({ ruleId: e.ruleId, selector: typeof e.selector === 'string' ? e.selector : undefined })),
+      previewed,
+      new Set(quarantined.flatMap((q) => (typeof q.ruleId === 'string' ? [q.ruleId] : []))),
+    );
+    const noMatchIds = new Set(noMatch.map((n) => n.ruleId));
 
-    const rules = [...emitKeys].map(([key, rule]) => {
-      const status = lastStatus.get(key);
+    const rules = previewed.map(({ key, rule, status }) => {
       const live = (handle.working.rules || []).find((r) => r.id === rule.id);
       return {
         ruleId: rule.id,
-        status: describeRuleStatus(rule, status as Parameters<typeof describeRuleStatus>[1]),
-        verification: verificationLevel(live?.anchor?.witness, handle.host.capabilities, (handle.unsupported.get(key)?.size ?? 0) > 0),
+        status: describeRuleStatus(rule, status),
+        verification: verificationLevel(
+          live?.anchor?.witness, handle.host.capabilities, (handle.unsupported.get(key)?.size ?? 0) > 0, noMatchIds.has(rule.id),
+        ),
       };
     });
 

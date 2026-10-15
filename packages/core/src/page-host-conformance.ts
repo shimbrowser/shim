@@ -9,8 +9,9 @@
 //
 // Cases (D15): apply (every supported kind and mount strategy), re-render
 // survival, SPA navigation, anchor recovery after a simulated deploy,
-// teardown, a throwing handler, plus api.storage, the page tools, and a page
-// with a strict CSP (the A5 spike's compile path, through the real driver).
+// teardown, a throwing handler, plus api.storage, the page tools, a page
+// with a strict CSP (the A5 spike's compile path, through the real driver),
+// shared handler modules, and a dead anchor's preview evidence.
 //
 // The suite owns its site: `conformanceFixture(path, state)` answers every
 // request, and the runner serves it (any HTTP server; the case only needs the
@@ -27,6 +28,8 @@ import { computeDeployId } from './deploy-id';
 import { viewPageOnHost, evaluateOnHost, MAX_SHOT_WIDTH } from './page-host-tools';
 import { errMessage } from './error';
 import { moduleToExpression } from './handler-source';
+import { previewNoMatch, type NoMatchEntry, type RuleStatusEvent } from './preview-evidence';
+import { verificationLevel } from './capability-preflight';
 
 // --- the fixture site -------------------------------------------------------
 
@@ -185,6 +188,7 @@ export const CONFORMANCE_CAPABILITIES = [
   'mount:inline', 'mount:portal', 'mount:overlay', 'mount:shadow', 'self-healing',
   'witness:capture', 'witness:verify', 'rebase:refresh', 'rebase:promote', 'rebase:recover', 'rebase:quarantine',
   'api.storage', 'api.cleanup', 'handler-errors', 'console', 'spa-navigation', 'teardown', 'page-tools', 'strict-csp',
+  'no-match',
 ] as const;
 export type ConformanceCapability = (typeof CONFORMANCE_CAPABILITIES)[number];
 
@@ -894,8 +898,53 @@ const sharedModuleCase: ConformanceCase = {
   },
 };
 
+// Both hosts collect a preview's evidence 2 s after applying it. The engine's
+// own rule-no-match runs on a page timer 1.5 s after setup, which a page in a
+// background window fires late, so the evidence must not hang on it: a dead
+// anchor's status (matched 0) arrives as the rule is set up, and noMatch[] is
+// read from it.
+const PREVIEW_SETTLE_MS = 2000;
+
+const noMatchCase: ConformanceCase = {
+  id: 'dead-anchor',
+  title: 'a dead anchor reaches the preview evidence within the settle window',
+  covers: ['no-match'],
+  async run(kit) {
+    if (!(await kit.load('/apply'))) return;
+    const dead = { id: 'dead', anchor: css('#conf-does-not-exist'), mutations: [{ kind: 'hide' }] } satisfies Rule;
+    const live = { id: 'live', anchor: css('#ad'), mutations: [{ kind: 'hide' }] } satisfies Rule;
+    const deadKey = kit.apply(dead);
+    const liveKey = kit.apply(live);
+    await kit.sleep(PREVIEW_SETTLE_MS);
+    const seen = kit.events.slice();
+    const last = (key: string): RuleStatusEvent | undefined => {
+      const all = seen.filter((e) => e.kind === 'rule-status' && e.specId === key);
+      return all.at(-1) as RuleStatusEvent | undefined;
+    };
+    const previewed = [{ rule: dead, status: last(deadKey) }, { rule: live, status: last(liveKey) }];
+    kit.check('the dead rule\'s status (matched 0) arrived within the window', last(deadKey)?.matched === 0, last(deadKey));
+    kit.check('the live rule\'s status shows its match', last(liveKey)?.matched === 1, last(liveKey));
+
+    const ids = (list: NoMatchEntry[]): string => list.map((n) => `${n.ruleId}:${n.selector}`).join(',');
+    const fromStatus = previewNoMatch([], previewed);
+    kit.check('noMatch lists the dead rule even with no rule-no-match event yet', ids(fromStatus) === 'dead:#conf-does-not-exist', fromStatus);
+    const reported = seen
+      .filter((e) => e.kind === 'rule-no-match' && (e.specId === deadKey || e.specId === liveKey))
+      .map((e) => ({ ruleId: e.ruleId, selector: typeof e.selector === 'string' ? e.selector : undefined }));
+    const both = previewNoMatch(reported, previewed);
+    kit.check('…and once when the engine\'s event did arrive', ids(both) === 'dead:#conf-does-not-exist', { reported, both });
+    kit.check('a dead rule\'s verification is none, not full',
+      verificationLevel(undefined, kit.host.capabilities, false, true) === 'none'
+      && verificationLevel(undefined, kit.host.capabilities, false, false) !== 'none');
+
+    const late = await kit.event((e) => e.kind === 'rule-no-match' && e.specId === deadKey, 8000);
+    kit.check('the engine still reports the dead anchor itself', late?.ruleId === 'dead', late);
+    kit.check('…and never the live one', !kit.events.some((e) => e.kind === 'rule-no-match' && e.specId === liveKey));
+  },
+};
+
 export const CONFORMANCE_CASES: readonly ConformanceCase[] = [
-  applyCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, strictCspCase, sharedModuleCase,
+  applyCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, strictCspCase, sharedModuleCase, noMatchCase,
 ];
 
 /** Every capability some case vouches for. */

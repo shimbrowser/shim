@@ -389,7 +389,8 @@ async function main(): Promise<void> {
     // An applied preview: change two rules, add one that uses an unsupported member.
     host.onApply = (p, h) => {
       h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: p.rule.id === 'gone' ? 0 : 1, box: { x: 1, y: 2, w: 3, h: 4 } });
-      if (p.rule.id === 'gone') h.emit({ kind: 'rule-no-match', specId: p.ruleKey, ruleId: p.rule.id, selector: '.gone' });
+      // No rule-no-match for 'gone': the engine's timer can fire past the
+      // settle window (a background page), so the evidence reads the status.
       if (p.rule.id === 'fetcher') {
         h.emit({ kind: 'unsupported-api', specId: p.ruleKey, member: 'fetch', path: '/tracks' });
         h.emit({ kind: 'handler-error', specId: p.ruleKey, ruleId: p.rule.id, handlerName: 'fetcher', message: 'boom', stack: 'Error: boom\n    at shim://patches/x/handlers/fetcher.js:1:1' });
@@ -412,10 +413,10 @@ async function main(): Promise<void> {
       && byId.get('gone')?.status === 'matched 0 elements — the anchor does not resolve on this page', byId.get('row'));
     check('a component-identity witness headless can\'t check is partial', byId.get('row')?.verification === 'partial');
     check('a rule that used an unsupported member is partial', byId.get('fetcher')?.verification === 'partial');
-    check('a plain rule is full', byId.get('gone')?.verification === 'full');
+    check('a rule that matched nothing is none, not full', byId.get('gone')?.verification === 'none');
     check('the re-applied rule kept its committed deploy baseline', host.applied.find((p) => p.ruleKey.endsWith(':row') && host.applied.indexOf(p) >= before)?.bundleHash === 'deploy-1');
     check('handler errors carry rule, handler, message, stack', JSON.stringify(ev.errors).includes('"handler":"fetcher"') && JSON.stringify(ev.errors).includes('boom'));
-    check('no-match is reported', JSON.stringify(ev.noMatch) === JSON.stringify([{ ruleId: 'gone', selector: '.gone' }]));
+    check('no-match is reported from the status, with no engine event', JSON.stringify(ev.noMatch) === JSON.stringify([{ ruleId: 'gone', selector: '.gone' }]), ev.noMatch);
     check('unsupported uses are listed with a note', JSON.stringify(ev.unsupportedApi) === JSON.stringify([{ ruleId: 'fetcher', member: 'fetch' }])
       && Array.isArray(ev.notes) && String(ev.notes[0]).includes('api.fetch'), ev);
     check('the source scan warns about the handler', Array.isArray(ev.warnings) && ev.warnings.some((w) => String(w).includes('handler "fetcher" mentions api.fetch')), ev.warnings);

@@ -161,9 +161,9 @@ Every `shim_preview` answers `{ revision, applied, evidence }`. On an applied pr
 | Field | What it says |
 |---|---|
 | `changes` | what the folder changed: `add-rule <id>`, `update-rule <id>`, `remove-rule <id>`, `set-settings`, … |
-| `rules[]` | per changed rule: `status` — did the anchor resolve, how many elements, via which anchor, and the matched element's **measured box** (`W×Hpx at (x, y)`, viewport CSS px, measured after your mutation applied); and `verification` (`full` or `partial`) |
+| `rules[]` | per changed rule: `status` — did the anchor resolve, how many elements, via which anchor, and the matched element's **measured box** (`W×Hpx at (x, y)`, viewport CSS px, measured after your mutation applied); and `verification`: `full` (every check the rule carries ran on this host), `partial` (something went unchecked) or `none` (it matched nothing, so nothing was verified). None of them says the rule looks right |
 | `errors[]` | handler exceptions: `{ ruleId, handler, message, stack }` |
-| `noMatch[]` | anchors that resolved nothing |
+| `noMatch[]` | every changed rule whose anchor resolved nothing (its status says matched 0) |
 | `warnings[]` | lint warnings (unknown fields, brittle anchors, an observer that watches what it mutates) and unused handler files |
 | `notes[]` | outcomes Shim reports about consent and capabilities |
 | `console` | errors and warnings the page logged since the previous preview |
@@ -175,7 +175,7 @@ malformed folder): nothing was applied. Fix and preview again.
 Read the evidence, then:
 
 - **A handler threw** → fix the bug in its file.
-- **Matched 0 elements** → the anchor is wrong. Re-locate with `query_page` /
+- **Matched 0 elements** (the rule is in `noMatch`, `verification: none`) → the anchor is wrong. Re-locate with `query_page` /
   `inspect_element`; never re-send the same anchor hoping for a different result.
 - **A `[site]` error storm in `console`** right after your change usually means your handler
   caused it (a fetch burst, broken hydration, a loop) — fix the cause.

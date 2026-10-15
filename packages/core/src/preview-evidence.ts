@@ -89,6 +89,73 @@ export function describeRuleStatus(rule: Rule | undefined, status: RuleStatusEve
   return `matched ${status.matched} element(s) via ${status.matchedVia || 'primary'}${box}${note}`;
 }
 
+/** One `noMatch[]` entry: a rule whose anchor resolved nothing. */
+export interface NoMatchEntry {
+  ruleId: string | undefined;
+  selector: string | undefined;
+}
+
+/** A rule this preview applied, with the freshest `rule-status` it reported. */
+export interface PreviewedRule {
+  rule: Rule;
+  status: RuleStatusEvent | undefined;
+}
+
+// Rules that report a DOM match count. The network / module kinds and routes
+// report something else in `matched` (or nothing), and an `anchor.iframe` rule
+// resolves in a child frame, so a 0 from any of them is not a dead anchor.
+function reportsDomMatches(rule: Rule): boolean {
+  if (rule.anchor?.iframe) return false;
+  return !(rule.mutations || []).some((m) =>
+    m?.kind === 'mount-route' || m?.kind === 'redirect' || m?.kind === 'rewrite-response' || m?.kind === 'intercept');
+}
+
+/**
+ * Did this previewed rule's anchor resolve nothing? Read off its freshest
+ * status, the same `state.size === 0` the engine's own settle-delayed
+ * `rule-no-match` reads. No status yet is not a verdict.
+ */
+export function previewMatchedNothing({ rule, status }: PreviewedRule): boolean {
+  return reportsDomMatches(rule) && status !== undefined && !status.matched;
+}
+
+/**
+ * A preview's `noMatch[]`. The engine reports `rule-no-match` from a timer
+ * 1.5 s after the rule is set up, and a page the user isn't looking at runs
+ * that timer late (Chromium throttles a hidden page's timers), so the event
+ * can miss the host's settle window while the rule's status already says it
+ * matched 0. Both count, once per rule:
+ *   - every `reported` entry, unless that rule's freshest status shows it
+ *     matching now (it rendered after the engine looked);
+ *   - every previewed rule whose freshest status matched nothing, unless the
+ *     engine quarantined it (a witness refused what the selector found: that
+ *     answer belongs to `quarantined`, not here).
+ */
+export function previewNoMatch(
+  reported: readonly NoMatchEntry[],
+  previewed: readonly PreviewedRule[],
+  quarantinedRuleIds: ReadonlySet<string> = new Set(),
+): NoMatchEntry[] {
+  const byId = new Map<string, PreviewedRule>();
+  for (const p of previewed) byId.set(p.rule.id, p);
+  const out: NoMatchEntry[] = [];
+  const seen = new Set<string | undefined>();
+  for (const entry of reported) {
+    if (seen.has(entry.ruleId)) continue;
+    const p = entry.ruleId !== undefined ? byId.get(entry.ruleId) : undefined;
+    if (p && reportsDomMatches(p.rule) && p.status?.matched) continue;
+    seen.add(entry.ruleId);
+    out.push(entry);
+  }
+  for (const p of previewed) {
+    const id = p.rule.id;
+    if (seen.has(id) || quarantinedRuleIds.has(id) || !previewMatchedNothing(p)) continue;
+    seen.add(id);
+    out.push({ ruleId: id, selector: p.rule.anchor?.primary?.value || '' });
+  }
+  return out;
+}
+
 /** What view_page's caption reads: the capture's url, size, and crop. */
 export interface ViewPageCaptionInput {
   url?: string;
