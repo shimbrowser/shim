@@ -154,3 +154,11 @@ export function pidAlive(pid: number): boolean {
     return (e as NodeJS.ErrnoException).code === 'EPERM';
   }
 }
+
+// Whether a launch needs a shell: only npm's Windows launcher, a .cmd shim
+// that can't be spawned directly. A native executable (SHIM_APP, possibly
+// under `C:\Program Files\…`) is spawned directly, because a shell would
+// split its path at the space.
+export function launchNeedsShell(command: string, platform: NodeJS.Platform): boolean {
+  return platform === 'win32' && (command === 'npm' || /\.cmd$/i.test(command));
+}
