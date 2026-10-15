@@ -161,7 +161,7 @@ function wrap(text: string, wrappers: string[]): string {
 // each level absolutizes against its own `baseURL`. `media` is the top-level
 // link's media (applied to every copy as the sheet's own condition). False
 // when anything can't be read (SecurityError on an opaque cross-origin sheet)
-// or expressed.
+// or expressed (an anonymous layer import that itself imports).
 function copySheet(sheet: CSSStyleSheet, baseURL: string, media: string, wrappers: string[], out: CSSStyleSheet[], depth: number): boolean {
   if (depth > MAX_IMPORT_DEPTH) return false;
   const rules = Array.from(sheet.cssRules); // SecurityError: cross-origin without CORS
@@ -179,6 +179,11 @@ function copySheet(sheet: CSSStyleSheet, baseURL: string, media: string, wrapper
       flush();
       const nested = rule.styleSheet;
       if (!nested) continue; // didn't load: contributes nothing, as natively
+      // An anonymous `layer` import whose sheet imports others would be
+      // copied as several fragments, each in its own fresh `@layer { }` —
+      // separate layers, where natively they are one. Not expressible, so
+      // the whole element stays on its native links (all-or-none).
+      if (rule.layerName === '' && Array.from(nested.cssRules).some((r) => r instanceof CSSImportRule)) return false;
       if (!copySheet(nested, nested.href || rule.href, media, [...wrappers, ...importWrappers(rule)], out, depth + 1)) return false;
       continue;
     }
