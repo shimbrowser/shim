@@ -299,7 +299,10 @@ All three only read, and only this shim's own data (and its pack's).
   it. Use it when the ask depends on what is already saved ("the counter is wrong").
 - **`query_db { sql, connection? }`** — a read-only SQL query against the shim's own
   database (its `storage` tables) or a declared remote connection. SELECT only: anything
-  else is refused before it reaches the database. Results are capped; add `LIMIT`.
+  else is refused before it reaches the database. Results are capped; add `LIMIT`. A
+  remote connection whose declared tables haven't been set up on it yet answers
+  `schema-not-ready`: a session never creates them — the shim's own next use of the
+  connection on its page does, so ask the user to open it and try again.
 - **`read_sibling_shim { name }`** — another shim in this shim's pack, in full: its spec,
   handler source and last few exchanges. Use it before building on a sibling's data or
   conventions (storage keys, class prefixes). A shim in no pack answers that it has no
