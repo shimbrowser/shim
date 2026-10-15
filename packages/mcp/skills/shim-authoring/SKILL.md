@@ -31,17 +31,21 @@ browser.
    turns it on for this run, and the user can also turn it on in Shim's Settings. If
    neither mode is available, give the user the install command `shim_status` names.
 2. **Pick the tab.** `shim_list_tabs` lists every open tab with its `tabId`, URL and, for a
-   site tab, the shims that already run on its host. Work against the tab showing the page
-   the user means.
+   site tab, the shims that already run on its host and `connect`: `"asks"` (opening a
+   session shows the user a card) or `"allowed"` (they allowed this site until Shim quits,
+   so no card comes). Compositions carry `connect` the same way. Work against the tab
+   showing the page the user means.
 3. **Open a session.** `shim_open_session { tabId, intent, shimId | newShimName, dir }`.
    - `shimId` refines an existing shim; `newShimName` starts a new one on the tab's site
      (it is kept only if you commit).
    - `intent` is one or two sentences of what you set out to do. The user sees it on the
      card in Shim and it is recorded in the shim's chat when you commit.
-   - The user is asked in Shim to allow the session, and the call waits (up to two
-     minutes) with nothing on screen here. So **before** calling, tell the user in one
+   - When the tab's `connect` is `"asks"`, the user is asked in Shim to allow the session
+     and the call waits (up to two minutes). So **before** calling, tell the user in one
      line to switch to Shim and allow the "coding agent wants to connect" card at the top
-     of its sidebar. If they decline, do not retry unless they ask you to.
+     of its sidebar. When it is `"allowed"`, no card comes: don't tell them to look. The
+     answer's `consent` says which happened (`"asked"` or `"remembered"`). If they
+     decline, do not retry unless they ask you to.
    - With `dir` (an absolute path to an empty folder, or an earlier checkout) the shim is
      checked out at once. Otherwise call `shim_checkout { dir }`.
 4. **Edit the folder** (section 2): `shim.json` and `handlers/<name>.js`.
@@ -56,8 +60,10 @@ browser.
    shim. `summary` is what changed and why, in a few sentences — it becomes your reply in
    the shim's chat. If the work declares something sensitive (a redirect target, a remote
    database connection) the user approves it in Shim first, and the call waits. Any call
-   that waits on a card in Shim (this one, the API map, a composition's hosts) shows
-   nothing here while it waits: when you expect a card, tell the user to look at Shim first.
+   that waits on a card in Shim (this one, the API map, a composition's hosts) can sit
+   for up to two minutes: when you expect a card, tell the user to look at Shim first.
+   While it waits, Shim also bounces its dock icon and posts a notification if it is
+   behind another app, and the call reports the wait as progress.
 8. **End.** `shim_end_session`. Anything previewed after the last commit is discarded and
    the page returns to the shim as committed.
 

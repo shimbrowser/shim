@@ -34,7 +34,8 @@ import { SESSION_API_MAP_TOOLS } from '@shimbrowser/core/api-map-tools';
 import { SESSION_DATA_TOOLS } from '@shimbrowser/core/data-tools';
 import { SESSION_COMPOSITION_TOOLS } from '@shimbrowser/core/composition-session-tools';
 import { COMPOSITION_MARKER } from '../src/folder';
-import { createShimMcpServer, agentDisplayName, type ShimMcpDeps } from '../src/server';
+import { createShimMcpServer, agentDisplayName, cardWaitMessage, clockLeft, type ShimMcpDeps } from '../src/server';
+import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { SESSION_TOOL_NAMES, SESSION_TOOLS } from '../src/contract';
 import { ControlTransportError, type ControlClient, type ControlReply } from '../src/control-client';
 
@@ -56,7 +57,7 @@ function refuse(status: number, error: string, detail?: string): ControlReply {
 
 const PNG_1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
-function rig(script: Script, opts: { running?: boolean; agentName?: string; maxOutputTokens?: number } = {}) {
+function rig(script: Script, opts: { running?: boolean; agentName?: string; maxOutputTokens?: number; waitNotices?: { firstMs: number; everyMs: number } } = {}) {
   const sent: Sent[] = [];
   let ids = 0;
   const control: ControlClient = {
@@ -75,6 +76,7 @@ function rig(script: Script, opts: { running?: boolean; agentName?: string; maxO
     newCommitId: () => `commit-${++ids}`,
     maxOutputTokens: opts.maxOutputTokens ?? 25_000,
     ...(opts.agentName ? { agentName: opts.agentName } : {}),
+    ...(opts.waitNotices ? { waitNotices: opts.waitNotices } : {}),
   };
   return { sent, deps };
 }
@@ -546,6 +548,76 @@ async function main(): Promise<void> {
     check('an oversized error is cut to the budget', big.isError === true && bigText.length <= 1_000 * 4 && longDetail.length > 1_000 * 4, String(bigText.length));
     check('…keeping its code, the cut marker and the hint', /^stale-revision: handlers\//.test(bigText) && /more characters cut/.test(bigText) && /Preview again/.test(bigText), bigText.slice(-300));
     await c4.close();
+  }
+
+  console.log('progress while a call waits on the user in Shim:');
+  {
+    const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let cardsUp = false;
+    const { deps, sent } = rig(async (req) => {
+      if (req.path === '/sessions') {
+        await gate;
+        return ok({ sessionId: 'sess-w', artifactId: 's', consent: 'asked' });
+      }
+      if (req.path.endsWith('/cards')) {
+        return ok({ cards: cardsUp ? [{ card: 'mint-host', hosts: ['www.beatport.com'], msLeft: 105_000 }] : [] });
+      }
+      if (req.path.endsWith('/call')) {
+        cardsUp = true;
+        await wait(120);
+        cardsUp = false;
+        return ok({ result: { ok: true } });
+      }
+      return refuse(404, 'not-found');
+    }, { waitNotices: { firstMs: 20, everyMs: 30 } });
+    const client = await connect(deps);
+    const openNotes: string[] = [];
+    const opening = client.callTool({ name: 'shim_open_session', arguments: { tabId: 1, intent: 'x', shimId: 's' } }, CallToolResultSchema, {
+      onprogress: (p) => { if (p.message) openNotes.push(p.message); },
+    });
+    await wait(80);
+    release();
+    const opened = firstJson((await opening) as unknown as Result);
+    check('an open waiting on the attach card reports progress', openNotes.length >= 1 && /coding agent wants to connect/.test(openNotes[0] ?? '') && /left\)$/.test(openNotes[0] ?? ''), JSON.stringify(openNotes));
+    check('the open\'s answer says the user was asked', opened.consent === 'asked', JSON.stringify(opened));
+    const callNotes: string[] = [];
+    await client.callTool({ name: 'verify_mint', arguments: { config: {} } }, CallToolResultSchema, {
+      onprogress: (p) => { if (p.message) callNotes.push(p.message); },
+    });
+    check('a session call waiting on a card says which card, and its time left',
+      callNotes.length >= 1 && callNotes[0] === 'waiting for you in Shim: allow the token check on www.beatport.com on the card in its sidebar (1:45 left)', JSON.stringify(callNotes));
+    check('…read from the session\'s own cards', sent.some((r) => r.method === 'GET' && r.path === '/sessions/sess-w/cards'));
+    const before = sent.length;
+    await client.callTool({ name: 'verify_mint', arguments: { config: {} } });
+    await wait(80);
+    check('no progress asked for → nothing polled', !sent.slice(before).some((r) => r.path.endsWith('/cards')));
+    const quiet: string[] = [];
+    await client.callTool({ name: 'shim_list_tabs', arguments: {} }, CallToolResultSchema, { onprogress: (p) => { if (p.message) quiet.push(p.message); } });
+    check('a tool that never waits on a card reports nothing', quiet.length === 0);
+    await client.close();
+
+    check('the clock reads m:ss and never goes negative', clockLeft(105_000) === '1:45' && clockLeft(-5) === '0:00' && clockLeft(59_001) === '1:00');
+    check('several cards: the first, and how many more', cardWaitMessage([{ card: 'commit', hosts: [], msLeft: 1_000 }, { card: 'sources', hosts: ['a.com'] }])
+      === 'waiting for you in Shim: approve the commit on the card in its sidebar (and 1 more) (0:01 left)');
+    check('no cards → no message', cardWaitMessage([]) === null);
+  }
+
+  console.log('a remembered allow:');
+  {
+    const { deps } = rig((req) => {
+      if (req.path === '/tabs') return ok({ windows: [{ windowId: 1, tabs: [{ webContentsId: 9, tabId: 3, url: 'http://localhost:5173/', kind: 'site', shims: [], connect: 'allowed' }] }] });
+      if (req.path === '/sessions') return ok({ sessionId: 'sess-r', artifactId: 's', consent: 'remembered' });
+      return refuse(404, 'not-found');
+    });
+    const client = await connect(deps);
+    const tabs = firstJson(await call(client, 'shim_list_tabs'));
+    const tab = ((tabs.windows as Array<{ tabs: Array<Record<string, unknown>> }>)[0]?.tabs ?? [])[0];
+    check('shim_list_tabs passes each tab\'s connect state through', tab?.connect === 'allowed' && tab.tabId === 9, JSON.stringify(tab));
+    const opened = firstJson(await call(client, 'shim_open_session', { tabId: 9, intent: 'x', shimId: 's' }));
+    check('the open says no card was shown', opened.consent === 'remembered', JSON.stringify(opened));
+    await client.close();
   }
 
   console.log('agent names:');
