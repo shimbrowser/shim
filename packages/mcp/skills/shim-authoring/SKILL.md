@@ -902,7 +902,9 @@ A refused preview answers `applied: false` with `error` and `problems`:
   `api.example.com` but never `api.example.net` — and either the mint host itself or a host
   `probe_request` may reach; otherwise `test-host-not-allowed` before any card), the status
   it got. It never returns the token or any body. Each call
-  asks again.
+  asks again, unless the user chose "allow for this session" on that host's card: then
+  later calls against it run without a card until they revoke it or the session ends.
+  When you expect a card, tell the user to look at Shim first.
 - The API map tools (section 4) work the same, except `replay_endpoint` runs GET and HEAD
   only (`read-only`).
 - **`inspect_storage`** and **`query_db`** (section 4) read the composition's own saved
