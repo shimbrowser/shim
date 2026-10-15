@@ -861,6 +861,8 @@ const SHARED_MODULE = 'document.documentElement.setAttribute("data-conf-inits", 
   + 'let count = 0;\n'
   + 'module.exports = function counted({ anchor }) { anchor.setAttribute("data-conf-count", String(++count)); };\n';
 
+const SHARED_IIFE_MODULE = 'module.exports = (() => { let tally = 0; return function tallied({ anchor }) { anchor.setAttribute("data-conf-tally", String(++tally)); }; })();\n';
+
 const sharedModuleCase: ConformanceCase = {
   id: 'shared-module',
   title: 'rules naming one stored module share one instance of it',
@@ -877,6 +879,18 @@ const sharedModuleCase: ConformanceCase = {
     const s: Record<string, unknown> = state ?? {};
     kit.check('the two rules count on one shared counter (1 and 2)', [s.lead, s.a].sort().join(',') === '1,2', s);
     kit.check('the module\'s top-level code ran once', s.inits === '1', s.inits);
+
+    // The same module as one `module.exports = (IIFE)()` assignment converts
+    // to the bare IIFE, not a wrapper; it is still one instance.
+    const iife = moduleToExpression(SHARED_IIFE_MODULE, 'isolated');
+    kit.apply({ id: 'shared-c', anchor: css('#grid'), mutations: [{ kind: 'script', handler: 'tallied' }], handlers: { tallied: iife } });
+    kit.apply({ id: 'shared-d', anchor: css('#ad'), mutations: [{ kind: 'script', handler: 'tallied' }], handlers: { tallied: iife } });
+    const bare = await kit.until(async () => {
+      const b = await kit.read(`({ grid: document.querySelector('#grid').getAttribute('data-conf-tally'), ad: document.querySelector('#ad').getAttribute('data-conf-tally') })`);
+      return isRecord(b) && b.grid !== null && b.ad !== null ? b : null;
+    });
+    const b: Record<string, unknown> = bare ?? {};
+    kit.check('a single-assignment IIFE module is one instance too (1 and 2)', iife.startsWith('(() =>') && [b.grid, b.ad].sort().join(',') === '1,2', b);
   },
 };
 

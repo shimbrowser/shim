@@ -37,7 +37,7 @@ export interface PageRuntimeConfig {
 /** The control object the driver calls into, by Runtime.evaluate / callFunctionOn. */
 export interface PageRuntimeControl {
   defineHandler(ruleKey: string, name: string, fn: unknown): string;
-  /** Keeps a compiled module-wrapper handler as this document's one instance under `key`. */
+  /** Keeps a compiled handler as this document's one instance under `key`. */
   shareHandler(key: string, fn: unknown): void;
   /** Defines a rule's handler from the instance kept under `key`; false when there is none yet. */
   defineShared(ruleKey: string, name: string, key: string): boolean;
@@ -195,8 +195,8 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
   // --- previews ----------------------------------------------------------------
   const compiled = new Map<string, HandlerMap>();
   const previews = new Map<string, PatchControl>();
-  // Module-wrapper handlers compiled once per shim, name and source for this
-  // document, as the Shim browser keeps one instance per stored module.
+  // Handlers compiled once per shim, name and source for this document, as
+  // the Shim browser keeps one instance per stored module.
   const sharedHandlers = new Map<string, unknown>();
   const deployId = (): string | null => ShimCore.deployIdForDocument(document);
 

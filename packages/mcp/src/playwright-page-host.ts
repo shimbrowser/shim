@@ -26,7 +26,7 @@ import type {
   PageHost, PageHostCapabilities, PageWorld, ScreenshotOptions, ScreenshotResult, PreviewRule,
   PageRuntimeEvent, PageConsoleMessage, PageLoadOutcome, LoadWaitOptions, Unsubscribe,
 } from '@shimbrowser/core/page-host';
-import { handlerExpressionSource, isModuleWrapperExpression } from '@shimbrowser/core/handler-source';
+import { handlerExpressionSource } from '@shimbrowser/core/handler-source';
 import { pageRuntimeSource } from './headless-page-runtime';
 import { imageSize } from './results';
 
@@ -407,18 +407,18 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
   async function compileHandler(contextId: number, patchId: string, ruleKey: string, name: string, source: string): Promise<void> {
     const objectGroup = `shim-compile-${ruleKey}`;
     const rt = `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}]`;
-    // A module-wrapper source is one instance per shim in the document, as
-    // the Shim browser keeps it: reuse it rather than running the module's
-    // top-level code again.
-    const shareKey = isModuleWrapperExpression(source) ? `${patchId}\u0000${name}\u0000${source}` : null;
-    if (shareKey !== null) {
-      const reused = await cdp.send('Runtime.evaluate', {
-        expression: `${rt}.defineShared(${JSON.stringify(ruleKey)}, ${JSON.stringify(name)}, ${JSON.stringify(shareKey)})`,
-        contextId,
-        returnByValue: true,
-      });
-      if (reused.result.value === true) return;
-    }
+    // One instance per shim, name and source in the document, as the Shim
+    // browser keeps it: reuse it rather than evaluating the source (and a
+    // stored module's top-level code) again. A shared instance keeps the
+    // sourceURL of the rule that compiled it, so an async throw from it names
+    // that rule; the engine attributes a throw from the call itself by rule.
+    const shareKey = `${patchId}\u0000${name}\u0000${source}`;
+    const reused = await cdp.send('Runtime.evaluate', {
+      expression: `${rt}.defineShared(${JSON.stringify(ruleKey)}, ${JSON.stringify(name)}, ${JSON.stringify(shareKey)})`,
+      contextId,
+      returnByValue: true,
+    });
+    if (reused.result.value === true) return;
     try {
       const res = await cdp.send('Runtime.evaluate', { expression: handlerSource(source, ruleKey, name), contextId, objectGroup });
       if (res.exceptionDetails) {
@@ -435,7 +435,7 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
       const fnId = res.result.objectId;
       if (fnId) {
         await cdp.send('Runtime.callFunctionOn', {
-          functionDeclaration: `function (fn, key) { if (key !== null) ${rt}.shareHandler(key, fn); return ${rt}.defineHandler(${JSON.stringify(ruleKey)}, ${JSON.stringify(name)}, fn); }`,
+          functionDeclaration: `function (fn, key) { ${rt}.shareHandler(key, fn); return ${rt}.defineHandler(${JSON.stringify(ruleKey)}, ${JSON.stringify(name)}, fn); }`,
           executionContextId: contextId,
           arguments: [{ objectId: fnId }, { value: shareKey }],
           returnByValue: true,
