@@ -32,6 +32,7 @@ function check(label: string, cond: boolean, detail?: string): void {
 const HEADLESS: PageHostCapabilities = {
   mutationKinds: ['hide', 'restyle', 'reorder', 'reshape', 'script', 'inject-element', 'inject-html', 'remove', 'replace-root'],
   iframeRules: false,
+  specCss: false,
   apiMembers: [],
   componentIdentity: false,
   engineInspection: false,
@@ -39,6 +40,7 @@ const HEADLESS: PageHostCapabilities = {
 const BROWSER: PageHostCapabilities = {
   mutationKinds: [...HEADLESS.mutationKinds, 'mount-route', 'redirect', 'rewrite-response', 'intercept'],
   iframeRules: true,
+  specCss: true,
   apiMembers: ['db', 'ai', 'settings', 'fetch', 'storage.pack', 'storage.global', 'shared', 'modules'],
   componentIdentity: true,
   engineInspection: true,
@@ -57,9 +59,14 @@ console.log('preflight');
     ],
   };
   check('a spec inside the set passes (empty declarations are none)', preflightSpec(ok, HEADLESS).ok);
+  check('a whitespace-only spec css is none', preflightSpec({ ...ok, css: '  \n' }, HEADLESS).ok);
+  const cssOnly = preflightSpec({ ...ok, css: 'body { color: red }' }, HEADLESS);
+  check('a spec css block is refused where the host does not install it', !cssOnly.ok
+    && cssOnly.unsupported.length === 1 && cssOnly.unsupported[0]?.feature === 'css' && cssOnly.unsupported[0].message.includes('"css"'), JSON.stringify(cssOnly));
 
   const bad: Spec = {
     id: 's', match: { hosts: ['a.test'] },
+    css: '.promo { display: none }',
     settings: [{ key: 'k', type: 'string' }],
     permissions: ['ai'],
     storage: { tables: { notes: {} } },
@@ -78,12 +85,12 @@ console.log('preflight');
   const list = r.ok ? [] : r.unsupported;
   const features = list.map((u) => `${u.ruleId ?? '-'}:${u.feature}:${u.kind ?? ''}`);
   const want = [
-    '-:settings:', '-:permissions:', '-:storage:', '-:connections:',
+    '-:settings:', '-:permissions:', '-:storage:', '-:connections:', '-:css:',
     'route:mutation-kind:mount-route', 'redir:mutation-kind:redirect', 'rw:mutation-kind:rewrite-response',
     'icpt:mutation-kind:intercept', 'frame:iframe-rule:',
   ];
   check('every declared unsupported feature is listed once, in spec order', JSON.stringify(features) === JSON.stringify(want), features.join(' | '));
-  check('each entry carries a message naming it', list.every((u) => u.message.length > 0) && (list[4]?.message.includes('mount-route') ?? false));
+  check('each entry carries a message naming it', list.every((u) => u.message.length > 0) && (list[5]?.message.includes('mount-route') ?? false));
   check('the Shim browser\'s capabilities pass the same spec', preflightSpec(bad, BROWSER).ok);
 }
 

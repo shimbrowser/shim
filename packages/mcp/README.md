@@ -219,8 +219,8 @@ shim mcp [--attach | --headless] [--visible]
 | `mcp` | Starts the MCP server on stdio, the same server as `shim-mcp`: auto by default, one mode with `--attach` or `--headless`. |
 
 Exit codes: `0` success. `1` the command found a problem: lint errors, a preview that
-applied nothing or reported handler errors / unmatched / quarantined rules, a failed
-screenshot or launch. `2` a usage error, or a file that couldn't be read or written.
+applied nothing, reported handler errors / unmatched / quarantined rules, or has a rule
+that never matched an element, a failed screenshot or launch. `2` a usage error, or a file that couldn't be read or written.
 
 `shim.json` holds only what you author. Witnesses (the fingerprints that keep a rule from
 attaching to the wrong element), `version` and `bundleHash` are managed by the tools. `unpack`

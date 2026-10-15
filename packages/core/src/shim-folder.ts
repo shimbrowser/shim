@@ -181,16 +181,22 @@ function json(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
-// shim.json's spec: a deep copy without handler source and witnesses.
+// shim.json's spec: a deep copy without handler source and witnesses. A
+// global shim's promoted default carries rules of its own, and their
+// witnesses never leave either (CLAUDE.md §8: the model never sees one).
 function authoredSpec(spec: Spec, dropFields: readonly string[]): Spec {
   const out = clone(spec) as Spec & Record<string, unknown>;
   delete out.handlers;
   for (const field of dropFields) delete out[field];
-  for (const rule of out.rules || []) {
-    if (!isRecord(rule)) continue;
-    delete (rule as Rule).handlers;
-    const anchor = (rule as Rule).anchor;
-    if (isRecord(anchor)) delete anchor.witness;
+  const ruleLists: unknown[] = [out.rules];
+  if (isRecord(out.default)) ruleLists.push(out.default.rules);
+  for (const list of ruleLists) {
+    if (!Array.isArray(list)) continue;
+    for (const rule of list) {
+      if (!isRecord(rule)) continue;
+      delete rule.handlers;
+      if (isRecord(rule.anchor)) delete rule.anchor.witness;
+    }
   }
   return out;
 }
@@ -458,7 +464,12 @@ function checkAuthoredSpec(raw: Record<string, unknown>, handlers: Record<string
 // function; lint only syntax-checks transforms and wraps. So pack refuses
 // what can be told without running the code (handlerModuleProblem) rather
 // than write a file the browser won't import.
-function checkScriptModules(spec: Spec, handlers: Record<string, string>): void {
+/**
+ * Every `script` handler module that can't export a function, one problem
+ * per file — what `packShim` refuses after spec-lint. `shim lint` reports
+ * the same list.
+ */
+export function scriptModuleProblems(spec: Spec, handlers: Record<string, string>): string[] {
   const problems: string[] = [];
   const checked = new Set<string>();
   for (const rule of spec.rules || []) {
@@ -474,6 +485,11 @@ function checkScriptModules(spec: Spec, handlers: Record<string, string>): void 
       if (problem) problems.push(`${handlerPath(name)} ${problem}`);
     }
   }
+  return problems;
+}
+
+function checkScriptModules(spec: Spec, handlers: Record<string, string>): void {
+  const problems = scriptModuleProblems(spec, handlers);
   if (problems.length) throw new ShimFolderError('malformed-shim-folder', problems);
 }
 

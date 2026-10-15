@@ -11,6 +11,8 @@
 //   - memoryStorage keeps the browser's api.storage semantics, per shim and
 //     origin;
 //   - the page runtime rejects an api call the driver's store failed;
+//   - the page runtime refuses arguments structured clone would (functions,
+//     symbols, cycles, BigInts) without reaching the store;
 //   - over a scripted CDP session: detach does not wait out queued previews
 //     when no engine world exists, and a failing store rejects the page's
 //     call instead of answering undefined;
@@ -99,6 +101,39 @@ function fakePage(world: boolean): { page: Page; cdp: FakeCdp } {
 
 const tick = (ms = 20): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+// The page runtime over a stand-in engine: just enough ShimCore to boot, with
+// the api a preview gets captured from run(). `send` is the binding.
+interface PreviewApi {
+  storage: { set(k: string, v: unknown): Promise<unknown>; get(k: string): Promise<unknown> };
+  reportEvent(kind: string, payload?: Record<string, unknown>): void;
+  db?: unknown;
+}
+function bootRuntime(send: (payload: string) => void): { control: PageRuntimeControl | undefined; captured: { api: PreviewApi | null } } {
+  const captured: { api: PreviewApi | null } = { api: null };
+  const sandbox: Record<string, unknown> = {
+    location: { origin: 'https://x.test', pathname: '/', hostname: 'x.test', href: 'https://x.test/' },
+    document: { readyState: 'complete', addEventListener() { /* unused */ } },
+    addEventListener() { /* unused */ },
+    fetch: () => Promise.resolve(null),
+    console,
+    b: send,
+    ShimCore: {
+      run: (_spec: unknown, api: PreviewApi) => {
+        captured.api = api;
+        return { applyExtraRule() { /* no-op */ }, teardownAll() { /* no-op */ } };
+      },
+      createFetchBudget: () => ({ take: () => ({ delayMs: 0, throttled: false }) }),
+      deployIdForDocument: () => null,
+      sameRegistrableDomain: () => true,
+    },
+  };
+  sandbox.window = sandbox;
+  sandbox.top = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(pageRuntimeSource({ binding: 'b', globalName: 'g', unsupportedError: REQUIRES_SHIM_BROWSER }), sandbox);
+  return { control: sandbox.g as PageRuntimeControl | undefined, captured };
+}
+
 async function main(): Promise<void> {
   console.log('capabilities (D15)');
   {
@@ -110,8 +145,8 @@ async function main(): Promise<void> {
     }
     const builtin = new Set<string>(BUILTIN_KINDS);
     check('every advertised kind is a built-in kind', HEADLESS_CAPABILITIES.mutationKinds.every((k) => builtin.has(k)));
-    check('no iframe rules, no host api members, no component identity, no engine inspection',
-      !HEADLESS_CAPABILITIES.iframeRules && HEADLESS_CAPABILITIES.apiMembers.length === 0
+    check('no iframe rules, no spec css, no host api members, no component identity, no engine inspection',
+      !HEADLESS_CAPABILITIES.iframeRules && !HEADLESS_CAPABILITIES.specCss && HEADLESS_CAPABILITIES.apiMembers.length === 0
       && !HEADLESS_CAPABILITIES.componentIdentity && !HEADLESS_CAPABILITIES.engineInspection);
     check('the capability object is frozen', Object.isFrozen(HEADLESS_CAPABILITIES) && Object.isFrozen(HEADLESS_CAPABILITIES.mutationKinds));
     const covered = coveredCapabilities() as Set<string>;
@@ -164,33 +199,8 @@ async function main(): Promise<void> {
 
   console.log('page runtime api calls');
   {
-    // The runtime over a stand-in engine: just enough ShimCore to boot, with
-    // the api a preview gets captured from run().
     const posted: Array<Record<string, unknown>> = [];
-    interface PreviewApi { storage: { set(k: string, v: unknown): Promise<unknown>; get(k: string): Promise<unknown> } }
-    const captured: { api: PreviewApi | null } = { api: null };
-    const sandbox: Record<string, unknown> = {
-      location: { origin: 'https://x.test', pathname: '/', hostname: 'x.test', href: 'https://x.test/' },
-      document: { readyState: 'complete', addEventListener() { /* unused */ } },
-      addEventListener() { /* unused */ },
-      fetch: () => Promise.resolve(null),
-      console,
-      b: (payload: string) => { posted.push(JSON.parse(payload) as Record<string, unknown>); },
-      ShimCore: {
-        run: (_spec: unknown, api: PreviewApi) => {
-          captured.api = api;
-          return { applyExtraRule() { /* no-op */ }, teardownAll() { /* no-op */ } };
-        },
-        createFetchBudget: () => ({ take: () => ({ delayMs: 0, throttled: false }) }),
-        deployIdForDocument: () => null,
-        sameRegistrableDomain: () => true,
-      },
-    };
-    sandbox.window = sandbox;
-    sandbox.top = sandbox;
-    sandbox.globalThis = sandbox;
-    vm.runInNewContext(pageRuntimeSource({ binding: 'b', globalName: 'g', unsupportedError: REQUIRES_SHIM_BROWSER }), sandbox);
-    const control = sandbox.g as PageRuntimeControl | undefined;
+    const { control, captured } = bootRuntime((payload) => { posted.push(JSON.parse(payload) as Record<string, unknown>); });
     check('the runtime boots over a stand-in engine', control !== undefined);
     if (control) {
       control.apply('shim-a', { id: 'r', anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] }, 'rk', null);
@@ -210,11 +220,113 @@ async function main(): Promise<void> {
         control.resolve(Number(readCall?.id), 'v');
         check('a call the driver resolves still resolves with its value', (await read) === 'v');
         check('a settled call cannot be settled again', !control.reject(Number(readCall?.id), 'late'));
+        // Arguments JSON cannot carry: the call rejects at once and leaves
+        // nothing pending, rather than hanging the handler forever.
+        const settles = async (p: Promise<unknown>): Promise<unknown> => {
+          const timeout = Symbol('timeout');
+          const out = await Promise.race([p.then(() => 'resolved', (e: unknown) => e), tick(200).then(() => timeout)]);
+          return out === timeout ? 'pending' : out;
+        };
+        // The error comes from the runtime's realm: match on its message.
+        const failedWith = (e: unknown): boolean => typeof e === 'object' && e !== null
+          && /^storage\.set failed: /.test(String((e as { message?: unknown }).message));
+        const before = posted.length;
+        const cyclic: Record<string, unknown> = {};
+        cyclic.self = cyclic;
+        const cyc = await settles(api.storage.set('k', cyclic));
+        check('a circular value rejects the call', failedWith(cyc), String(cyc));
+        const big = await settles(api.storage.set('k', 10n));
+        check('a BigInt value rejects the call', failedWith(big), String(big));
+        check('…and neither reached the driver', posted.length === before);
+        // The two refused calls took the next two ids after the read.
+        const refusedIds = [Number(readCall?.id) + 1, Number(readCall?.id) + 2];
+        check('…nor left a pending entry behind', refusedIds.every((id) => !control.resolve(id, 'late')));
       }
+      // A preview's events carry the version tag it was applied with, so the
+      // session can drop a late one from a version it replaced.
+      const eventsOf = (key: string): Array<Record<string, unknown>> => {
+        const out: Array<Record<string, unknown>> = [];
+        for (const m of posted) {
+          if (m.type !== 'event' || typeof m.payload !== 'object' || m.payload === null) continue;
+          const event: Record<string, unknown> = { ...(m.payload as Record<string, unknown>), kind: m.kind };
+          if (event.specId === key) out.push(event);
+        }
+        return out;
+      };
+      const untaggedApi = captured.api;
+      control.apply('shim-a', { id: 'r', anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] }, 'rk2', null, 'sess:7');
+      const tagged = captured.api;
+      tagged?.reportEvent('rule-witness', { specId: 'rk2', ruleId: 'r', witness: { v: 1 } });
+      void tagged?.db;
+      const stamped = eventsOf('rk2');
+      check('an engine event and an unsupported-api event both carry the preview\'s applyId', stamped.length === 2
+        && stamped.every((e) => e.applyId === 'sess:7') && stamped.some((e) => e.kind === 'unsupported-api'), JSON.stringify(stamped));
+      untaggedApi?.reportEvent('rule-status', { specId: 'rk' });
+      const untagged = eventsOf('rk');
+      check('…and a preview applied without one carries none', untagged.length > 0 && untagged.every((e) => !('applyId' in e)), JSON.stringify(untagged));
+    }
+  }
+
+  console.log('page runtime refuses what structured clone would');
+  {
+    // The binding answers from a real store, the way the driver does, so a
+    // refused write can be seen to leave the stored value alone.
+    const store = memoryStorage();
+    const scope = { patchId: 'shim-a', origin: 'https://x.test' };
+    let reached = 0;
+    const box: { control: PageRuntimeControl | undefined } = { control: undefined };
+    const booted = bootRuntime((payload) => {
+      const msg = JSON.parse(payload) as { type?: unknown; id?: unknown; method?: unknown; args?: unknown };
+      if (msg.type !== 'call' || typeof msg.id !== 'number' || !Array.isArray(msg.args)) return;
+      reached++;
+      const id = msg.id;
+      const [key, value] = msg.args as [string, unknown];
+      const answer = msg.method === 'storage.set' ? store.set(scope, key, value) : store.get(scope, key);
+      void answer.then((v) => box.control?.resolve(id, v));
+    });
+    box.control = booted.control;
+    booted.control?.apply('shim-a', { id: 'r', anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] }, 'rk', null);
+    const api = booted.captured.api;
+    check('a preview gets an api', api !== null);
+    if (api) {
+      await api.storage.set('k', 'old');
+      const writes = reached;
+      const symbolValue: unknown = Symbol('s');
+      const cases: Array<[string, unknown]> = [
+        ['a top-level function', () => 1],
+        ['a nested function', { n: 1, deep: { fn: () => 1 } }],
+        ['a function in a list', [1, () => 1]],
+        ['a symbol', symbolValue],
+        ['a nested symbol', { s: symbolValue }],
+      ];
+      for (const [label, value] of cases) {
+        let rejected: unknown = null;
+        try { await api.storage.set('k', value); } catch (e) { rejected = e; }
+        check(`${label} rejects the write`, typeof rejected === 'object' && rejected !== null
+          && /^storage\.set failed: .*could not be cloned/.test(String((rejected as { message?: unknown }).message)), String(rejected));
+      }
+      check('…none of them reached the store', reached === writes, `${reached - writes} reached`);
+      check('…and the stored value is unchanged', (await api.storage.get('k')) === 'old');
+      const cyclic: Record<string, unknown> = { ok: true };
+      cyclic.self = cyclic;
+      let cyc: unknown = null;
+      try { await api.storage.set('k', cyclic); } catch (e) { cyc = e; }
+      check('a cycle still rejects (and the walk terminates)', cyc !== null);
+      await api.storage.set('k', { plain: [1, 'two', { three: null }] });
+      check('a plain value still writes', JSON.stringify(await api.storage.get('k')) === '{"plain":[1,"two",{"three":null}]}');
     }
   }
 
   console.log('driver over a scripted CDP session');
+  {
+    const { page, cdp } = fakePage(true);
+    const host = await attachPlaywrightPageHost(page, { engineBundle: '' });
+    host.applyPreview({ patchId: 'p', ruleKey: 'preview:p:r', applyId: 'sess:3', rule: { id: 'r', anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] } });
+    await tick();
+    const applyExpr = cdp.sends.map((x) => String(x.params.expression ?? '')).find((e) => e.includes('.apply("p"')) ?? '';
+    check('the driver hands the preview\'s applyId to the page runtime', applyExpr.endsWith(', null, "sess:3")'), applyExpr);
+    await host.detach();
+  }
   {
     // Previews queued while no engine world exists: detach must not wait out
     // each one's world wait in turn.
@@ -254,7 +366,62 @@ async function main(): Promise<void> {
     const answer1 = answers.find((e) => /\.(resolve|reject)\(1,/.test(e)) ?? '';
     const answer2 = answers.find((e) => /\.(resolve|reject)\(2,/.test(e)) ?? '';
     check('a store that fails rejects the page\'s call, naming the failure', answer1.includes('.reject(1,') && answer1.includes('disk full'), answer1);
-    check('a store that answers resolves it with the value', answer2.includes('.resolve(2, "stored")'), answer2);
+    check('a store that answers resolves it with the value', answer2.includes('.resolve(2, JSON.parse("\\"stored\\""))'), answer2);
+    await host.detach();
+  }
+  {
+    // A reply is exact JSON in the page: an own `__proto__` key stays an own
+    // key (an object literal would make it a prototype setter), at the top
+    // level, nested, and inside a list reply.
+    const tricky = '{"__proto__":{"flag":true},"nested":{"__proto__":{"deep":1}}}';
+    const store: HeadlessStorage = {
+      get: () => Promise.resolve(JSON.parse(tricky) as unknown),
+      set: (_s, _k, v) => Promise.resolve(v),
+      delete: () => Promise.resolve(false),
+      list: () => Promise.resolve({ row: JSON.parse(tricky) as unknown }),
+    };
+    const { page, cdp } = fakePage(true);
+    const host = await attachPlaywrightPageHost(page, { engineBundle: '', storage: store });
+    const call = (id: number, method: string, args: unknown[]): void => {
+      cdp.emit('Runtime.bindingCalled', {
+        name: '__shimCoreHost',
+        executionContextId: 7,
+        payload: JSON.stringify({ type: 'call', id, method, patchId: 'p', origin: 'https://x.test', args }),
+      });
+    };
+    call(11, 'storage.get', ['k']);
+    call(12, 'storage.list', []);
+    call(13, 'storage.set', ['k', JSON.parse(tricky) as unknown]);
+    await tick();
+    // Run each answer the driver sent in a context standing in for the
+    // engine world, capturing what the page's promise would resolve with.
+    const settled = new Map<number, unknown>();
+    const world: Record<string, unknown> = {};
+    world.globalThis = world;
+    world.__shimCoreRuntime = {
+      resolve: (id: number, value: unknown) => { settled.set(id, value); return true; },
+      reject: () => false,
+    };
+    for (const s of cdp.sends) {
+      if (s.method !== 'Runtime.evaluate' || s.params.contextId !== 7) continue;
+      const expr = String(s.params.expression);
+      if (/\.resolve\(1[123],/.test(expr)) vm.runInNewContext(expr, world);
+    }
+    // Exact: `__proto__` is an own data key, nothing is inherited from it,
+    // and the prototype is still the realm's Object.prototype (whose own
+    // prototype is null).
+    const ownProtoKey = (v: unknown): v is Record<string, unknown> => {
+      if (typeof v !== 'object' || v === null) return false;
+      const proto: unknown = Object.getPrototypeOf(v);
+      return Object.prototype.hasOwnProperty.call(v, '__proto__')
+        && typeof proto === 'object' && proto !== null && Object.getPrototypeOf(proto) === null;
+    };
+    const isExact = (v: unknown): boolean => ownProtoKey(v) && !('flag' in v)
+      && ownProtoKey(v.nested) && !('deep' in v.nested);
+    check('a get reply keeps an own __proto__ key and its prototype', isExact(settled.get(11)), JSON.stringify(settled.get(11)));
+    const listed = settled.get(12) as Record<string, unknown> | undefined;
+    check('…so does a list reply', isExact(listed?.row), JSON.stringify(listed));
+    check('…and a set reply', isExact(settled.get(13)), JSON.stringify(settled.get(13)));
     await host.detach();
   }
 
