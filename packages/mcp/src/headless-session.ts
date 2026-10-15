@@ -531,6 +531,10 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
 
     const appliedAt = now();
     const emitKeys = new Map<string, Rule>();
+    // Each emitted key's version (applyId): a replaced version's handler can
+    // still report after this apply (a mount the engine doesn't cancel), and
+    // its events are not this preview's evidence.
+    const versions = new Map<string, string | undefined>();
     const nextById = new Map((next.rules || []).map((r) => [r.id, r]));
     // The working state first: an event the page reports for a preview below
     // (a witness) is matched against it.
@@ -540,6 +544,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         const rule = nextById.get(op.rule.id) ?? op.rule;
         const p = previewFor(handle, rule);
         emitKeys.set(p.ruleKey, rule);
+        versions.set(p.ruleKey, p.applyId);
         apply(handle, p);
       } else if (op.op === 'remove-rule' && op.ruleId) {
         const key = previewKey(handle.source.spec.id, op.ruleId);
@@ -550,7 +555,8 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
 
     await settle(signal);
 
-    const mine = handle.events.filter((t) => t.at >= appliedAt && typeof t.event.specId === 'string' && emitKeys.has(t.event.specId));
+    const mine = handle.events.filter((t) => t.at >= appliedAt && typeof t.event.specId === 'string' && emitKeys.has(t.event.specId)
+      && (typeof t.event.applyId !== 'string' || t.event.applyId === versions.get(t.event.specId)));
     const errors = mine
       .filter((t) => t.event.kind === 'handler-error')
       .map(({ event: e }) => ({ ruleId: e.ruleId, handler: e.handlerName, message: e.message, stack: e.stack }));

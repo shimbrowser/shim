@@ -845,6 +845,19 @@ async function main(): Promise<void> {
     const p2 = await preview(r, lid, withRules([...spec.rules, late, { ...swap, anchor: css('.swap-b') }]));
     check('swap is re-anchored as a new version', p2.applied === true && typeof swapV1 === 'string' && lastOf('swap')?.applyId !== swapV1, p2);
     host.emit({ kind: 'rule-witness', specId: keyOf('swap'), ruleId: 'swap', witness: { v: 1, tag: 'li', textStem: 'stale' }, applyId: swapV1 });
+    // A replaced version's handler reports a match during the next version's
+    // window: not this preview's evidence.
+    const swapV2 = lastOf('swap')?.applyId;
+    host.onApply = (p, h) => {
+      if (p.rule.id === 'swap') h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: 'swap', matched: 1, applyId: swapV2 });
+      h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 0, applyId: p.applyId });
+    };
+    const p3 = await preview(r, lid, withRules([...spec.rules, late, { ...swap, anchor: css('.swap-gone') }]));
+    const ev3 = isRecord(p3.evidence) ? p3.evidence : {};
+    const swap3 = (Array.isArray(ev3.rules) ? ev3.rules.filter(isRecord) : []).find((x) => x.ruleId === 'swap');
+    check('a replaced version\'s late match is not this preview\'s evidence: still no match, verification none',
+      JSON.stringify(ev3.noMatch) === JSON.stringify([{ ruleId: 'swap', selector: '.swap-gone' }]) && swap3?.verification === 'none', ev3);
+    host.onApply = (p, h) => { h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 0, applyId: p.applyId }); };
     // And one for a rule key that is not live at all.
     host.emit({ kind: 'rule-witness', specId: keyOf('ghost'), ruleId: 'ghost', witness: { v: 1, tag: 'li' } });
 
@@ -853,7 +866,7 @@ async function main(): Promise<void> {
     check('reload_page replays the late-captured witness', String(reload.result).includes('"ok":true') && stemOf(lastOf('late')) === 'arrived', lastOf('late')?.rule);
     check('…and the witness captured during begin', isRecord(lastOf('old')?.rule.anchor?.witness), lastOf('old')?.rule);
     check('…but not a late witness from a version of the rule since replaced', lastOf('swap')?.rule.anchor?.witness === undefined, lastOf('swap')?.rule);
-    const cm = await req(r, 'POST', `/sessions/${lid}/commit`, { revision: 2, commitId: 'l1', summary: 's' });
+    const cm = await req(r, 'POST', `/sessions/${lid}/commit`, { revision: 3, commitId: 'l1', summary: 's' });
     check('the session commits', cm.ok === true, cm);
     const saved = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { rules: Array<{ id: string; anchor?: { witness?: { textStem?: string } } }> } };
     const savedRule = (rid: string): { anchor?: { witness?: { textStem?: string } } } | undefined => saved.spec.rules.find((x) => x.id === rid);
