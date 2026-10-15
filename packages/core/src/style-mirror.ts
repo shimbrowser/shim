@@ -45,7 +45,7 @@
 // still holds. A loaded sheet's own nested `@import`s are copied too, each into
 // its own run of sheets (URLs resolved against its own URL, its media / layer / supports
 // conditions re-expressed as wrapping at-rules) in rule order. A cross-origin
-// import is first requested with CORS (`crossorigin="anonymous"`) so its rules
+// import is first requested with credentialed CORS (`crossorigin="use-credentials"`) so its rules
 // are readable when the server allows it; if that load fails it is retried
 // without, as an `@import` would have loaded it. That is all-or-none per
 // element: if any import still can't be read (cross-origin without CORS),
@@ -57,7 +57,6 @@
 // skipped (css-imports.ts).
 
 import { absolutizeUrls, leadingImports } from './css-imports';
-import { sameRegistrableDomain } from './deploy-id';
 import type { CssImport } from './css-imports';
 
 type StyleRoot = Document | ShadowRoot;
@@ -234,18 +233,18 @@ function isCrossOrigin(style: HTMLStyleElement, href: string): boolean {
   }
 }
 
-// One import's `<link>`. `cors`: request it in CORS mode so a cross-origin
-// sheet's rules are readable (copyable) when the server allows it — with
-// credentials for a same-site origin, as the native `@import` would send its
-// cookies there (a sibling host may serve a cookie-dependent sheet), and
-// anonymously across sites, where those cookies are third-party. If that
-// load fails, the link is replaced by a plain one — how the `@import` itself
+// One import's `<link>`. `cors`: request it in credentialed CORS mode so a
+// cross-origin sheet's rules are readable (copyable) when the server allows
+// it — with the cookies a native `@import` would send (same-site or a
+// partitioned/allowed third-party one; a server may vary its sheet on them).
+// If that load fails (no credentialed CORS, `Access-Control-Allow-Origin: *`
+// included), the link is replaced by a plain one — how the `@import` itself
 // would have loaded it — which may then only apply from its document slot.
 function importLink(style: HTMLStyleElement, m: Mirror, imp: CssImport, idx: number, cors: boolean): HTMLLinkElement {
   const link = style.ownerDocument.createElement('link');
   link.rel = 'stylesheet';
   link.setAttribute('data-shim-import', style.getAttribute('data-shim') || '');
-  if (cors) link.crossOrigin = sameSiteImport(style, imp.href) ? 'use-credentials' : 'anonymous';
+  if (cors) link.crossOrigin = 'use-credentials';
   link.href = imp.href;
   if (imp.media) link.media = imp.media;
   link.addEventListener('load', () => settleImport(style, m, link, idx, () => copyLoaded(link, imp.media)), { once: true });
@@ -254,14 +253,6 @@ function importLink(style: HTMLStyleElement, m: Mirror, imp: CssImport, idx: num
     else settleImport(style, m, link, idx, () => 'failed');
   }, { once: true });
   return link;
-}
-
-function sameSiteImport(style: HTMLStyleElement, href: string): boolean {
-  try {
-    return sameRegistrableDomain(new URL(href, style.baseURI).hostname, new URL(style.ownerDocument.URL).hostname);
-  } catch {
-    return false;
-  }
 }
 
 function retryWithoutCors(style: HTMLStyleElement, m: Mirror, failed: HTMLLinkElement, imp: CssImport, idx: number): void {
