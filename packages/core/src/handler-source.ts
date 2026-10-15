@@ -5,7 +5,7 @@
 // folder's handlers/<name>.js. This module owns the flattening between the
 // two so the browser's commit path and the shim folder format agree on it.
 
-import type { Spec } from './types';
+import type { Spec, Rule } from './types';
 import { syntaxProbe } from './syntax-probe';
 
 /** A spec that may carry an import-time top-level `handlers` map (module form). */
@@ -61,13 +61,82 @@ const WRAPPED_EXPRESSION_RE = /^\s*module\.exports\s*=\s*([\s\S]*?)\s*;?\s*$/;
  * expression is the identity, as long as `<expr>` runs the same unwrapped
  * (safeBareExpression). Anything else (helpers beside the export, a leading
  * comment, an export that uses `module` / `this` / …) becomes an IIFE that runs the module in its own
- * `(module, exports)` scope and evaluates to its `module.exports` — the same
- * value the browser's module compile produces, in a form `module.exports =
- * <expr>;` can carry.
+ * CommonJS scope and evaluates to its `module.exports` — the same value the
+ * stored module produces, in a form `module.exports = <expr>;` can carry.
+ * The IIFE is the convention of the world(s) the handler runs in
+ * (`worlds`, from handlerWorlds): the module compile's for an isolated-world
+ * handler, transformLiteral's for a page-world transform / wrap, and an
+ * expression that picks between them for a name referenced from both.
  */
-export function moduleToExpression(moduleSource: string): string {
+export function moduleToExpression(moduleSource: string, worlds: HandlerWorld | ReadonlySet<HandlerWorld> = 'isolated'): string {
   const inner = exportedExpression(moduleSource);
-  return inner !== null && safeBareExpression(inner) ? inner : `${MODULE_IIFE_PREFIX}${moduleSource}${MODULE_IIFE_SUFFIX}`;
+  return inner !== null && safeBareExpression(inner) ? inner : wrapModuleForWorlds(moduleSource, worlds);
+}
+
+/**
+ * Where a handler a mutation names runs: a `handler` (script, replace-root,
+ * mount-route) in the preload's isolated world, where a stored module runs in
+ * the CommonJS wrapper above; a `transform` (rewrite-response) or `wrap`
+ * (intercept) spliced into the page's main world by transformLiteral, whose
+ * module convention is a plain `(module, exports)` call. A module that needs
+ * a wrapper inline needs the one its own world runs it under.
+ */
+export type HandlerWorld = 'isolated' | 'page';
+const HANDLER_REF_WORLDS = { handler: 'isolated', transform: 'page', wrap: 'page' } as const satisfies Record<string, HandlerWorld>;
+
+/** Every handler name the rules' mutations reference, with the worlds each runs in. */
+export function handlerWorlds(rules: readonly Rule[]): Map<string, Set<HandlerWorld>> {
+  const out = new Map<string, Set<HandlerWorld>>();
+  for (const rule of rules) {
+    const mutations: unknown = rule?.mutations;
+    if (!Array.isArray(mutations)) continue;
+    for (const mutation of mutations) {
+      if (typeof mutation !== 'object' || mutation === null) continue;
+      for (const [field, world] of Object.entries(HANDLER_REF_WORLDS)) {
+        const name = (mutation as Record<string, unknown>)[field];
+        if (typeof name !== 'string' || !name) continue;
+        const worlds = out.get(name) ?? new Set<HandlerWorld>();
+        worlds.add(world);
+        out.set(name, worlds);
+      }
+    }
+  }
+  return out;
+}
+
+// transformLiteral's module convention (rewrite-response.ts): a plain
+// two-argument call, so the module-level `this` is the page's global and
+// `arguments` has two entries, and the export only when it is a function.
+const PAGE_IIFE_PREFIX = '(function () {\nvar module = { exports: {} };\n(function (module, exports) {\n';
+const PAGE_IIFE_SUFFIX = '\n})(module, module.exports);\nreturn typeof module.exports === "function" ? module.exports : null;\n})()';
+// A name referenced from both worlds is one source (lint refuses two), so its
+// expression picks the wrapper where it is evaluated: only the isolated world
+// has a string `__filename` in scope (compileBag's module wrapper on the
+// stored path, compileInlineHandlers inline); a transform / wrap spliced into
+// the page sees none. Re-wrapped as `module.exports = <expr>;` it picks the
+// same way, so a commit keeps both worlds' conventions.
+const CROSS_PREFIX = "(typeof __filename === 'string'\n? ";
+const CROSS_MIDDLE = '\n: ';
+const CROSS_SUFFIX = ')';
+
+/** The module wrapped to run inline under `world`'s convention. */
+export function wrapModuleForWorld(moduleSource: string, world: HandlerWorld): string {
+  return world === 'page'
+    ? `${PAGE_IIFE_PREFIX}${moduleSource}${PAGE_IIFE_SUFFIX}`
+    : `${MODULE_IIFE_PREFIX}${moduleSource}${MODULE_IIFE_SUFFIX}`;
+}
+
+/** One expression that evaluates `isolated` in the isolated world and `page` in the page's. */
+export function crossWorldExpression(isolated: string, page: string): string {
+  return isolated === page ? isolated : `${CROSS_PREFIX}${isolated}${CROSS_MIDDLE}${page}${CROSS_SUFFIX}`;
+}
+
+function wrapModuleForWorlds(moduleSource: string, worlds: HandlerWorld | ReadonlySet<HandlerWorld>): string {
+  if (typeof worlds === 'string') return wrapModuleForWorld(moduleSource, worlds);
+  const isolated = worlds.has('isolated') || worlds.size === 0;
+  const page = worlds.has('page');
+  if (isolated && page) return crossWorldExpression(wrapModuleForWorld(moduleSource, 'isolated'), wrapModuleForWorld(moduleSource, 'page'));
+  return wrapModuleForWorld(moduleSource, page ? 'page' : 'isolated');
 }
 
 // The names a module's code can only resolve inside its CommonJS wrapper
@@ -176,11 +245,32 @@ export function handlerModuleProblem(moduleSource: string): string | null {
  * `module.exports = <expr>;`. Both readings run the same code.
  */
 export function moduleForExpression(expression: string): string {
-  if (expression.startsWith(MODULE_IIFE_PREFIX) && expression.endsWith(MODULE_IIFE_SUFFIX)
-    && expression.length >= MODULE_IIFE_PREFIX.length + MODULE_IIFE_SUFFIX.length) {
-    return expression.slice(MODULE_IIFE_PREFIX.length, expression.length - MODULE_IIFE_SUFFIX.length);
+  return wrappedModule(expression) ?? expressionToModule(expression);
+}
+
+// The module a wrapper form (either world's, or the cross-world pick of both)
+// wrapped, when the expression is exactly that wrapper around it.
+function wrappedModule(expression: string): string | null {
+  const between = (prefix: string, suffix: string): string | null =>
+    expression.length >= prefix.length + suffix.length && expression.startsWith(prefix) && expression.endsWith(suffix)
+      ? expression.slice(prefix.length, expression.length - suffix.length)
+      : null;
+  for (const world of ['isolated', 'page'] as const) {
+    const inner = world === 'page' ? between(PAGE_IIFE_PREFIX, PAGE_IIFE_SUFFIX) : between(MODULE_IIFE_PREFIX, MODULE_IIFE_SUFFIX);
+    if (inner !== null && wrapModuleForWorld(inner, world) === expression) return inner;
   }
-  return expressionToModule(expression);
+  const both = between(`${CROSS_PREFIX}${MODULE_IIFE_PREFIX}`, `${PAGE_IIFE_SUFFIX}${CROSS_SUFFIX}`);
+  if (both !== null) {
+    // The module appears twice; the first copy ends where the isolated
+    // wrapper's suffix plus the page wrapper's prefix begin. Rebuilding the
+    // whole expression from it is the proof it is this form.
+    const join = `${MODULE_IIFE_SUFFIX}${CROSS_MIDDLE}${PAGE_IIFE_PREFIX}`;
+    for (let at = both.indexOf(join); at !== -1; at = both.indexOf(join, at + 1)) {
+      const inner = both.slice(0, at);
+      if (wrapModuleForWorlds(inner, new Set<HandlerWorld>(['isolated', 'page'])) === expression) return inner;
+    }
+  }
+  return null;
 }
 
 // Collapse the spec's handler sources into a flat { name: moduleSource }

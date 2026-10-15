@@ -36,7 +36,7 @@
 
 import type { Spec, Rule } from './types';
 import type { DeltaOp } from './spec-delta';
-import { moduleForExpression, moduleToExpression } from './handler-source';
+import { handlerWorlds, moduleForExpression, moduleToExpression } from './handler-source';
 import { canonicalModule } from './spec-lint';
 import { normalizeIntent } from './intent';
 import {
@@ -209,6 +209,11 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
   // Handler files every rule references, plus — so a checkout round-trips —
   // a name the previous rule carried inline without referencing it.
   const used = new Set<string>();
+  // Each name converts under the convention of every world the folder's rules
+  // run it in (one source per name, so a name shared across worlds gets the
+  // expression that picks per world); a name only carried inline runs nowhere
+  // yet and takes the isolated form.
+  const worlds = handlerWorlds(nextRules);
   const built = nextRules.map((authored) => {
     const before = prevById.get(authored.id);
     const names = new Set(referencedHandlerNames(authored));
@@ -225,7 +230,7 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
     // fromEntries defines each name as an own property (`__proto__` too)
     // while the op's rule keeps an ordinary object for the emit path.
     if (names.size) {
-      rule.handlers = Object.fromEntries(Object.entries(modules).map(([name, source]) => [name, moduleToExpression(source)]));
+      rule.handlers = Object.fromEntries(Object.entries(modules).map(([name, source]) => [name, moduleToExpression(source, worlds.get(name) ?? 'isolated')]));
     }
     const changed = !before || ruleFingerprint(authored, modules) !== ruleFingerprint(before, previousModules(before, stored));
     if (before?.anchor?.witness && rule.anchor && anchorDigest(before.anchor) === anchorDigest(rule.anchor)) {
