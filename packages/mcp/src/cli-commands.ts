@@ -73,6 +73,36 @@ function asCliError(e: unknown): never {
   throw e;
 }
 
+// What a path handed to the wrong command actually is, so the refusal can name
+// the command that takes it: a `.shim` file (it carries a `format`), a shim
+// folder's shim.json (a spec: rules and no format), or a folder.
+type InputKind = 'folder' | 'shim-file' | 'spec' | 'other';
+
+const SNIFF_MAX_BYTES = 8 * 1024 * 1024;
+
+function sniffInput(abs: string): InputKind {
+  try {
+    const st = fs.statSync(abs);
+    if (st.isDirectory()) return 'folder';
+    if (!st.isFile() || st.size > SNIFF_MAX_BYTES) return 'other';
+    const parsed: unknown = JSON.parse(fs.readFileSync(abs, 'utf8'));
+    if (!isRecord(parsed)) return 'other';
+    if (typeof parsed.format === 'string') return 'shim-file';
+    return Array.isArray(parsed.rules) ? 'spec' : 'other';
+  } catch {
+    return 'other';
+  }
+}
+
+// One line pointing at the command that takes `abs`, or '' when it is neither
+// a `.shim` file nor a folder's shim.json.
+function wrongInputHint(abs: string): string {
+  const kind = sniffInput(abs);
+  if (kind === 'shim-file') return ` It is a .shim file; to turn it into a shim folder, run: shim unpack ${abs}`;
+  if (kind === 'spec') return ` It is a shim folder's shim.json; pass the folder instead: ${path.dirname(abs)}`;
+  return '';
+}
+
 function requireFolder(dir: string): string {
   const abs = path.resolve(dir);
   let st: fs.Stats;
@@ -81,7 +111,7 @@ function requireFolder(dir: string): string {
   } catch {
     throw new CliError('folder-missing', `${abs} does not exist`);
   }
-  if (!st.isDirectory()) throw new CliError('folder-missing', `${abs} is not a folder`);
+  if (!st.isDirectory()) throw new CliError('folder-missing', `${abs} is not a folder.${wrongInputHint(abs)}`);
   return abs;
 }
 
@@ -178,6 +208,17 @@ function readText(file: string): string {
 
 /** Unpack a `shim/1` file into a folder (`out`, default the file's path without `.shim`). */
 export function unpackFile(file: string, out?: string): UnpackResult {
+  // A folder, or a folder's shim.json, is what `pack` takes: say so instead of
+  // a format error about a file that was never meant to be a `.shim`.
+  const abs = path.resolve(file);
+  const kind = sniffInput(abs);
+  if (kind === 'folder') {
+    throw new CliError('invalid-arguments', `${abs} is a folder; unpack takes a .shim file. To make one from a shim folder, run: shim pack ${abs}`);
+  }
+  if (kind === 'spec') {
+    throw new CliError('invalid-arguments',
+      `${abs} is a shim folder's shim.json, not a .shim file. To make a .shim file from its folder, run: shim pack ${path.dirname(abs)}`);
+  }
   const text = readText(file);
   const dir = out ? path.resolve(out) : defaultFolderFor(file);
   let files: FolderInput;
@@ -192,8 +233,25 @@ export function unpackFile(file: string, out?: string): UnpackResult {
     // A refused folder (not a working copy, a symlink) is the user's
     // arguments; any other failure (unwritable folder, full disk, a stale
     // handler that won't delete) is their environment. Both exit 2.
+    if (e instanceof FolderError && e.code === 'not-a-working-copy' && isDirectory(dir)) {
+      // Why, and what to do: unpack replaces the folder's shim files (and
+      // deletes handlers the file doesn't carry), so it never mixes into a
+      // folder of something else.
+      const stem = path.basename(abs).replace(/\.shim$/, '') || 'shim';
+      throw new CliError('not-a-working-copy',
+        `${dir} already holds other files and no shim.json. unpack writes a whole shim folder and removes handlers the file `
+        + `doesn't carry, so it only writes into an empty folder or one it unpacked before. Name a new folder, e.g. --out ${path.join(dir, stem)}`);
+    }
     if (e instanceof FolderError || e instanceof ShimFolderError) asCliError(e);
     throw new CliError('write-failed', `could not write ${dir}: ${errMessage(e)}`);
+  }
+}
+
+function isDirectory(p: string): boolean {
+  try {
+    return fs.statSync(p).isDirectory();
+  } catch {
+    return false;
   }
 }
 
@@ -221,6 +279,10 @@ export function lintTarget(target: string, opts: { headless?: boolean } = {}): L
     throw new CliError('file-missing', `${abs} does not exist`);
   }
   const kind: LintReport['kind'] = st.isDirectory() ? 'folder' : 'file';
+  if (kind === 'file' && sniffInput(abs) === 'spec') {
+    throw new CliError('invalid-arguments',
+      `${abs} is a shim folder's shim.json; lint takes the folder or a .shim file. Run: shim lint ${path.dirname(abs)}`);
+  }
   const report: LintReport = { target: abs, kind, errors: [], warnings: [] };
   let folder: FolderInput;
   if (kind === 'folder') {

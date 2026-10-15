@@ -244,7 +244,7 @@ that file alone.
 ## Build and test
 
 ```sh
-npm run build -w @shimbrowser/mcp   # dist/shim-mcp.js and dist/shim.js
+npm run build -w @shimbrowser/mcp   # dist/shim-mcp.js and dist/shim.js (the root's npm run build does this too)
 npm test                            # from the repository root: every harness
 ```
 

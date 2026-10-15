@@ -44,6 +44,12 @@ browser.
      of its sidebar. If they decline, do not retry unless they ask you to.
    - With `dir` (an absolute path to an empty folder, or an earlier checkout) the shim is
      checked out at once. Otherwise call `shim_checkout { dir }`.
+   - **Where the folder goes.** Unless the user names a folder, use your working directory
+     plus the shim's name, lowercased and hyphenated: started in `~/shim-sessions`, a shim
+     named "Test hide" goes in `~/shim-sessions/test-hide` (add `-2`, `-3` if that folder
+     holds something else). Never a temp or scratch folder: the user opens, packs
+     (`shim pack`) and previews (`shim preview`) the folder there after you're done. Tell
+     the user the folder in your first reply after the checkout.
 4. **Edit the folder** (section 2): `shim.json` and `handlers/<name>.js`.
 5. **Preview.** `shim_preview` sends the whole folder; Shim lints it, applies the
    difference to the live page, waits for it to settle and answers with a **revision** and
@@ -731,7 +737,9 @@ this section is what differs.
    hosts and an empty `index.html`, and is **kept only if you commit**: end the session
    without a commit and it is deleted, its address freed.
 3. **Check out** (with `dir`, or `shim_checkout { dir }`): `manifest.json` plus every file of
-   the composition, flat. Use an empty folder.
+   the composition, flat. Use an empty folder, placed like a shim's (section 1): your
+   working directory plus the composition's name, never a temp or scratch folder, and
+   tell the user where it is.
 4. **Edit, then `shim_preview`.** Shim validates the folder, saves the changed files onto the
    composition and reloads its page. If the manifest adds a host (or changes a host's
    `mint`), the user is asked in Shim first and the preview waits; allowed, the page can
