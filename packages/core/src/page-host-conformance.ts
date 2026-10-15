@@ -26,6 +26,7 @@ import type { AnchorSpec, Rule, Witness } from './types';
 import { computeDeployId } from './deploy-id';
 import { viewPageOnHost, evaluateOnHost, MAX_SHOT_WIDTH } from './page-host-tools';
 import { errMessage } from './error';
+import { moduleToExpression } from './handler-source';
 
 // --- the fixture site -------------------------------------------------------
 
@@ -853,8 +854,34 @@ const strictCspCase: ConformanceCase = {
   },
 };
 
+// A stored module two rules name (an imported shim's, hydrated to its wrapper
+// form): one instance per shim in the document, as a committed shim boots —
+// its top-level code runs once and its state is shared.
+const SHARED_MODULE = 'document.documentElement.setAttribute("data-conf-inits", String(Number(document.documentElement.getAttribute("data-conf-inits") || 0) + 1));\n'
+  + 'let count = 0;\n'
+  + 'module.exports = function counted({ anchor }) { anchor.setAttribute("data-conf-count", String(++count)); };\n';
+
+const sharedModuleCase: ConformanceCase = {
+  id: 'shared-module',
+  title: 'rules naming one stored module share one instance of it',
+  covers: ['script'],
+  async run(kit) {
+    if (!(await kit.load('/apply'))) return;
+    const counted = moduleToExpression(SHARED_MODULE, 'isolated');
+    kit.apply({ id: 'shared-a', anchor: css('#lead'), mutations: [{ kind: 'script', handler: 'counted' }], handlers: { counted } });
+    kit.apply({ id: 'shared-b', anchor: css('#a'), mutations: [{ kind: 'script', handler: 'counted' }], handlers: { counted } });
+    const state = await kit.until(async () => {
+      const s = await kit.read(`({ lead: document.querySelector('#lead').getAttribute('data-conf-count'), a: document.querySelector('#a').getAttribute('data-conf-count'), inits: document.documentElement.getAttribute('data-conf-inits') })`);
+      return isRecord(s) && s.lead !== null && s.a !== null ? s : null;
+    });
+    const s: Record<string, unknown> = state ?? {};
+    kit.check('the two rules count on one shared counter (1 and 2)', [s.lead, s.a].sort().join(',') === '1,2', s);
+    kit.check('the module\'s top-level code ran once', s.inits === '1', s.inits);
+  },
+};
+
 export const CONFORMANCE_CASES: readonly ConformanceCase[] = [
-  applyCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, strictCspCase,
+  applyCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, strictCspCase, sharedModuleCase,
 ];
 
 /** Every capability some case vouches for. */

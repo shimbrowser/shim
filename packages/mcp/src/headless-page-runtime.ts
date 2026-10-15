@@ -37,6 +37,10 @@ export interface PageRuntimeConfig {
 /** The control object the driver calls into, by Runtime.evaluate / callFunctionOn. */
 export interface PageRuntimeControl {
   defineHandler(ruleKey: string, name: string, fn: unknown): string;
+  /** Keeps a compiled module-wrapper handler as this document's one instance under `key`. */
+  shareHandler(key: string, fn: unknown): void;
+  /** Defines a rule's handler from the instance kept under `key`; false when there is none yet. */
+  defineShared(ruleKey: string, name: string, key: string): boolean;
   apply(patchId: string, rule: Rule, ruleKey: string, bundleHash: string | null, applyId?: string | null): boolean;
   remove(ruleKey: string): boolean;
   resolve(id: number, value: unknown): boolean;
@@ -191,6 +195,9 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
   // --- previews ----------------------------------------------------------------
   const compiled = new Map<string, HandlerMap>();
   const previews = new Map<string, PatchControl>();
+  // Module-wrapper handlers compiled once per shim, name and source for this
+  // document, as the Shim browser keeps one instance per stored module.
+  const sharedHandlers = new Map<string, unknown>();
   const deployId = (): string | null => ShimCore.deployIdForDocument(document);
 
   const remove = (ruleKey: string): boolean => {
@@ -214,6 +221,14 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
       }
       handlers[name] = fn as HandlerFn;
       return name;
+    },
+    shareHandler(key, fn) {
+      sharedHandlers.set(key, fn);
+    },
+    defineShared(ruleKey, name, key) {
+      if (!sharedHandlers.has(key)) return false;
+      control.defineHandler(ruleKey, name, sharedHandlers.get(key));
+      return true;
     },
     apply(patchId, rule, ruleKey, bundleHash, applyId) {
       remove(ruleKey);
