@@ -4,8 +4,9 @@
 // anything runs:
 //
 //   preflight     preflightSpec — the declared features: mutation kinds,
-//                 `anchor.iframe`, and the spec's settings / permissions /
-//                 storage / connections declarations. Atomic: a session
+//                 `anchor.iframe`, the spec-level `css` block, and the spec's
+//                 settings / permissions / storage / connections
+//                 declarations. Atomic: a session
 //                 applies nothing and answers `unsupported` with the list.
 //   source scan   scanHandlerSource / scanSpecHandlers — handler source that
 //                 mentions an api member the host lacks. A heuristic warning
@@ -32,7 +33,7 @@ export const UNSUPPORTED_API_EVENT = 'unsupported-api';
 export interface UnsupportedFeature {
   /** The rule that declares it, or absent for a spec-level declaration. */
   ruleId?: string;
-  /** `mutation-kind`, `iframe-rule`, or the declaration field (`settings`, `permissions`, `storage`, `connections`). */
+  /** `mutation-kind`, `iframe-rule`, `css`, or the declaration field (`settings`, `permissions`, `storage`, `connections`). */
   feature: string;
   /** The kind name, for a mutation kind. */
   kind?: string;
@@ -70,6 +71,12 @@ function declares(value: unknown): boolean {
   return true;
 }
 
+// The engine installs any truthy `css`; whitespace alone styles nothing.
+function declaresCss(value: unknown): boolean {
+  if (typeof value === 'string') return value.trim() !== '';
+  return declares(value);
+}
+
 /**
  * Every declared feature of `spec` the host lacks, in spec order. A host
  * applies nothing from a spec that has any (D15 preflight: atomic).
@@ -85,6 +92,14 @@ export function preflightSpec(spec: Spec, capabilities: PageHostCapabilities): P
     unsupported.push({
       feature: field,
       message: `the shim declares "${field}", which needs ${need.what} — not available on this host`,
+    });
+  }
+  // A whole-patch stylesheet a host doesn't install would leave every rule
+  // reporting a clean apply on a page that lacks the shim's styling.
+  if (!capabilities.specCss && declaresCss(record.css)) {
+    unsupported.push({
+      feature: 'css',
+      message: 'the shim declares a spec-level "css" block, which this host does not install — move its styles into rules (restyle) or author this shim in the Shim browser',
     });
   }
   for (const rule of spec.rules || []) {

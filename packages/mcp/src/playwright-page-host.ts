@@ -48,6 +48,9 @@ export const HEADLESS_CAPABILITIES: PageHostCapabilities = Object.freeze({
     'script', 'inject-element', 'inject-html', 'remove', 'replace-root',
   ]),
   iframeRules: false,
+  // Previews are per rule (applyExtraRule on a stub spec): nothing installs
+  // the spec-level stylesheet, so a shim that has one is refused (D15).
+  specCss: false,
   apiMembers: Object.freeze([]),
   componentIdentity: false,
   engineInspection: false,
@@ -333,7 +336,12 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
       else if (method === 'storage.delete') value = await storage.delete(scope, key);
       else if (method === 'storage.list') value = await storage.list(scope);
       else value = undefined;
-      const literal = value === undefined ? 'undefined' : JSON.stringify(value);
+      // The reply crosses as a quoted JSON string parsed page-side, never as
+      // an object literal: a literal would turn an own `__proto__` key into a
+      // prototype setter, so the handler would read a different object than
+      // the store holds.
+      const json: string | undefined = value === undefined ? undefined : JSON.stringify(value);
+      const literal = json === undefined ? 'undefined' : `JSON.parse(${JSON.stringify(json)})`;
       expression = `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].resolve(${id}, ${literal})`;
     } catch (err) {
       expression = `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].reject(${id}, ${JSON.stringify(`${method} failed: ${errText(err)}`)})`;
@@ -437,13 +445,13 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
   async function applyPreviewNow(preview: PreviewRule): Promise<void> {
     const contextId = await waitForWorld(worldWaitMs);
     if (contextId === null || detached) return;
-    const { patchId, rule, ruleKey, bundleHash } = preview;
+    const { patchId, rule, ruleKey, bundleHash, applyId } = preview;
     for (const [name, source] of Object.entries(rule.handlers ?? {})) {
       if (typeof source !== 'string') continue;
       await compileHandler(contextId, ruleKey, name, source);
     }
     await cdp.send('Runtime.evaluate', {
-      expression: `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].apply(${JSON.stringify(patchId)}, ${JSON.stringify(rule)}, ${JSON.stringify(ruleKey)}, ${JSON.stringify(bundleHash ?? null)})`,
+      expression: `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].apply(${JSON.stringify(patchId)}, ${JSON.stringify(rule)}, ${JSON.stringify(ruleKey)}, ${JSON.stringify(bundleHash ?? null)}, ${JSON.stringify(applyId ?? null)})`,
       contextId,
     });
   }

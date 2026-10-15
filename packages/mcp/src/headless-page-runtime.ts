@@ -37,7 +37,7 @@ export interface PageRuntimeConfig {
 /** The control object the driver calls into, by Runtime.evaluate / callFunctionOn. */
 export interface PageRuntimeControl {
   defineHandler(ruleKey: string, name: string, fn: unknown): string;
-  apply(patchId: string, rule: Rule, ruleKey: string, bundleHash: string | null): boolean;
+  apply(patchId: string, rule: Rule, ruleKey: string, bundleHash: string | null, applyId?: string | null): boolean;
   remove(ruleKey: string): boolean;
   resolve(id: number, value: unknown): boolean;
   /** Rejects a pending api call: the driver's store failed. */
@@ -60,6 +60,9 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
   const send = host[config.binding] as ((payload: string) => void) | undefined;
   if (!ShimCore || typeof ShimCore.run !== 'function' || typeof send !== 'function') return;
 
+  // Events are fire-and-forget: one that cannot be serialized, or a driver
+  // that went away, drops it. An api call goes through `call`, which rejects
+  // instead (see below).
   const post = (msg: Record<string, unknown>): void => {
     try { send(JSON.stringify(msg)); } catch (_) { /* driver gone or unserializable — drop */ }
   };
@@ -70,11 +73,50 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
   // --- api calls answered by the driver -------------------------------------
   const pending = new Map<number, { resolve: (value: unknown) => void; reject: (err: Error) => void }>();
   let seq = 0;
+  // A call whose request never reaches the driver (arguments JSON cannot
+  // carry — a cycle, a BigInt — or a binding that went away) rejects at once,
+  // as the browser's IPC invoke does, instead of leaving the handler awaiting
+  // an answer that will never come.
+  //
+  // JSON alone is not enough: it turns a function or symbol into null, or
+  // drops it from an object, so the store would quietly write a different
+  // value. The browser's structured-clone IPC refuses those, keeping what was
+  // stored; `unclonable` finds them first so this host refuses them too.
+  const unclonable = (value: unknown, seen: Set<object>): string | null => {
+    if (typeof value === 'function') return 'a function';
+    if (typeof value === 'symbol') return 'a symbol';
+    if (typeof value !== 'object' || value === null || seen.has(value)) return null;
+    seen.add(value);
+    // Own enumerable string keys: the ones both JSON and structured clone
+    // carry (each ignores symbol keys alike).
+    for (const key of Object.keys(value)) {
+      const found = unclonable((value as Record<string, unknown>)[key], seen);
+      if (found) return found;
+    }
+    return null;
+  };
   const call = (method: string, patchId: string, args: unknown[]): Promise<unknown> => {
     const id = ++seq;
     return new Promise((resolve, reject) => {
+      const bad = unclonable(args, new Set());
+      if (bad) {
+        reject(new Error(`${method} failed: ${bad} could not be cloned`));
+        return;
+      }
+      let payload: string;
+      try {
+        payload = JSON.stringify({ type: 'call', id, method, patchId, origin: location.origin, args });
+      } catch (err) {
+        reject(new Error(`${method} failed: ${err instanceof Error ? err.message : String(err)}`));
+        return;
+      }
       pending.set(id, { resolve, reject });
-      post({ type: 'call', id, method, patchId, origin: location.origin, args });
+      try {
+        send(payload);
+      } catch (err) {
+        pending.delete(id);
+        reject(new Error(`${method} failed: ${err instanceof Error ? err.message : String(err)}`));
+      }
     });
   };
 
@@ -83,11 +125,15 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn, { once: true });
     else fn();
   };
-  const makeApi = (patchId: string, ruleKey: string): Core.CoreApi & Record<string, unknown> => {
+  const makeApi = (patchId: string, ruleKey: string, applyId: string | null): Core.CoreApi & Record<string, unknown> => {
+    // Every event the preview reports carries the version tag it was applied
+    // with (PreviewRule.applyId), so the session can drop a late one from a
+    // version it has since replaced.
+    const tag = applyId ? { applyId } : {};
     // D15: every unsupported member records an event, including a read of
     // an absent one, so the session can mark the rule `partial`.
     const unsupported = (member: string): void => {
-      emit('unsupported-api', { specId: ruleKey, member, path: location.pathname });
+      emit('unsupported-api', { specId: ruleKey, member, path: location.pathname, ...tag });
     };
     const refusal = (member: string) => (): Promise<{ ok: false; error: string }> => {
       unsupported(member);
@@ -133,7 +179,7 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
       reportEvent(kind: string, payload?: Record<string, unknown>) {
         // Every engine event carries the page's path, as the browser's
         // page-preload stamps it.
-        emit(kind, { ...(payload || {}), path: location.pathname });
+        emit(kind, { ...(payload || {}), path: location.pathname, ...tag });
       },
       onReady,
     };
@@ -169,7 +215,7 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
       handlers[name] = fn as HandlerFn;
       return name;
     },
-    apply(patchId, rule, ruleKey, bundleHash) {
+    apply(patchId, rule, ruleKey, bundleHash, applyId) {
       remove(ruleKey);
       const handlers = compiled.get(ruleKey);
       compiled.delete(ruleKey);
@@ -177,7 +223,7 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
         // One stub control per preview (the browser runs every preview on one
         // stub): its api is per preview, so storage keys by the preview's
         // shim and an unsupported-api event names the preview.
-        const previewControl = ShimCore.run({ spec: { id: ruleKey, rules: [] } }, makeApi(patchId, ruleKey));
+        const previewControl = ShimCore.run({ spec: { id: ruleKey, rules: [] } }, makeApi(patchId, ruleKey, typeof applyId === 'string' && applyId ? applyId : null));
         previews.set(ruleKey, previewControl);
         const deploy = typeof bundleHash === 'string' ? { bundleHash, current: deployId } : undefined;
         previewControl.applyExtraRule(rule, ruleKey, ruleKey, handlers, deploy);

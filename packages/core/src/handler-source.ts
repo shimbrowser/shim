@@ -38,12 +38,19 @@ function exactWrappedExpression(moduleSource: string): string | null {
 
 // `module.exports = <expr>;` — the exact form expressionToModule writes, with
 // the whitespace and trailing semicolon a hand edit might change.
-// The IIFE moduleToExpression wraps a module in: runs it in its own
-// `(module, exports)` scope and evaluates to its `module.exports`.
-const MODULE_IIFE_PREFIX = '(function () {\nvar module = { exports: {} };\n(function (module, exports) {\n';
+// The IIFE moduleToExpression wraps a module in: runs it in its own CommonJS
+// scope and evaluates to its `module.exports`. The parameters are the
+// browser's module compile's, in its order (module, exports, require,
+// __filename, __dirname), so `arguments[i]` reads the same; require /
+// __filename / __dirname come from wherever the expression is compiled, when
+// that scope has them.
+const MODULE_IIFE_PREFIX = '(function () {\nvar module = { exports: {} };\n(function (module, exports, require, __filename, __dirname) {\n';
 // `.call(module.exports, …)` keeps CommonJS's top-level `this` (the browser's
 // module compile runs a module with `this === module.exports`).
-const MODULE_IIFE_SUFFIX = '\n}).call(module.exports, module, module.exports);\nreturn module.exports;\n})()';
+const MODULE_IIFE_SUFFIX = '\n}).call(module.exports, module, module.exports, '
+  + 'typeof require === "undefined" ? undefined : require, '
+  + 'typeof __filename === "undefined" ? "" : __filename, '
+  + 'typeof __dirname === "undefined" ? "" : __dirname);\nreturn module.exports;\n})()';
 
 const WRAPPED_EXPRESSION_RE = /^\s*module\.exports\s*=\s*([\s\S]*?)\s*;?\s*$/;
 
@@ -51,14 +58,31 @@ const WRAPPED_EXPRESSION_RE = /^\s*module\.exports\s*=\s*([\s\S]*?)\s*;?\s*$/;
  * The rule-local expression form of a handler module (a shim folder's
  * handlers/<name>.js going back onto `rule.handlers`). A module that is just
  * `module.exports = <expr>;` gives back `<expr>`, so expression → module →
- * expression is the identity. Anything else (helpers beside the export, a
- * leading comment) becomes an IIFE that runs the module in its own
+ * expression is the identity, as long as `<expr>` runs the same unwrapped
+ * (safeBareExpression). Anything else (helpers beside the export, a leading
+ * comment, an export that uses `module` / `this` / …) becomes an IIFE that runs the module in its own
  * `(module, exports)` scope and evaluates to its `module.exports` — the same
  * value the browser's module compile produces, in a form `module.exports =
  * <expr>;` can carry.
  */
 export function moduleToExpression(moduleSource: string): string {
-  return exportedExpression(moduleSource) ?? `${MODULE_IIFE_PREFIX}${moduleSource}${MODULE_IIFE_SUFFIX}`;
+  const inner = exportedExpression(moduleSource);
+  return inner !== null && safeBareExpression(inner) ? inner : `${MODULE_IIFE_PREFIX}${moduleSource}${MODULE_IIFE_SUFFIX}`;
+}
+
+// The names a module's code can only resolve inside its CommonJS wrapper
+// (and its receiver). A bare expression runs inline without that wrapper,
+// so one that mentions any of them keeps the IIFE, which binds them.
+// A unicode escape can spell any of them (`m\u006fdule`), so it keeps the
+// IIFE too.
+const CJS_BINDING_RE = /\b(?:module|exports|require|arguments|this|__filename|__dirname|eval)\b|\\u/;
+
+// Whether an exported expression runs the same unwrapped: it uses none of the
+// wrapper's bindings, and it parses as `(<expr>)` with the closer on its last
+// line — inline compile puts it there, so a trailing `// comment` would
+// swallow it (the IIFE's closer sits on its own line).
+function safeBareExpression(expression: string): boolean {
+  return !CJS_BINDING_RE.test(expression) && syntaxProbe(`(${expression})`).ok;
 }
 
 /**
@@ -109,6 +133,11 @@ function wholeLiteral(expression: string): string | null {
 // `Object.assign(module, { exports })`, which import accepts, and a regex
 // can't see past comments and strings either way.
 const MODULE_REF_RE = /\bmodule\b/;
+// The other ways a module can reach `module` without spelling it: the
+// wrapper's `arguments` (`arguments[0].exports = …`), a direct `eval`, and a
+// unicode escape in an identifier (`m\u006fdule`). A source using any of them
+// is left to the browser's execution-based check.
+const INDIRECT_MODULE_REF_RE = /\barguments\b|\beval\b|\\u/;
 
 /**
  * Why a handler module can't give the browser a function, or null when
@@ -127,7 +156,7 @@ export function handlerModuleProblem(moduleSource: string): string | null {
   if (!moduleSource.trim()) return 'is empty';
   const syntax = syntaxProbe(`(function (module, exports) {\n${moduleSource}\n});`);
   if (!syntax.ok) return `does not parse as JavaScript: ${syntax.error ?? 'syntax error'}`;
-  if (!MODULE_REF_RE.test(moduleSource)) {
+  if (!MODULE_REF_RE.test(moduleSource) && !INDIRECT_MODULE_REF_RE.test(moduleSource)) {
     return 'never assigns module.exports — a handler file is `module.exports = function (ctx) { ... };`';
   }
   const expression = exportedExpression(moduleSource)?.trim();

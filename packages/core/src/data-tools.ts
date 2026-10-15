@@ -170,7 +170,9 @@ export const SESSION_DATA_TOOLS: Record<DataToolName, ToolDefinition> = {
       '`storage` declares), or a declared remote connection. Use it to check what the handlers or the page ' +
       'actually wrote — row counts, recent rows, a value the user says is wrong. SELECT only: writes and DDL ' +
       'are refused, before anything reaches the database. Results are capped; add LIMIT. Nothing to query ' +
-      '(no tables declared, or a connection the user hasn\'t configured) answers an error.',
+      '(no tables declared, or a connection the user hasn\'t configured) answers an error. A remote connection ' +
+      'whose declared tables are not set up on it yet answers schema-not-ready: a session never creates them; ' +
+      'the shim or composition does on its own next use of the connection.',
     input_schema: {
       type: 'object',
       properties: {
