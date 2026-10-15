@@ -209,11 +209,36 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
   // Handler files every rule references, plus — so a checkout round-trips —
   // a name the previous rule carried inline without referencing it.
   const used = new Set<string>();
-  // Each name converts under the convention of every world the folder's rules
-  // run it in (one source per name, so a name shared across worlds gets the
-  // expression that picks per world); a name only carried inline runs nowhere
-  // yet and takes the isolated form.
-  const worlds = handlerWorlds(nextRules);
+  // One inline expression per name, shared by every rule that carries it
+  // (commit refuses two different sources under one name). A name whose file
+  // and worlds are both unchanged keeps the expression the working spec
+  // already holds — it may have come from hydration, whose conversion differs
+  // in form, and an untouched rule must keep matching it. Otherwise the file
+  // converts under the convention of every world the folder's rules run it in
+  // (a name shared across worlds gets the expression that picks per world); a
+  // name only carried inline runs nowhere yet and takes the isolated form.
+  const nextWorlds = handlerWorlds(nextRules);
+  const prevWorlds = handlerWorlds(prevRules);
+  const prevExpressions = new Map<string, string>();
+  for (const rule of prevRules) {
+    for (const [name, source] of Object.entries(rule.handlers || {})) {
+      if (typeof source === 'string' && !prevExpressions.has(name)) prevExpressions.set(name, source);
+    }
+  }
+  const sameWorlds = (a: ReadonlySet<string> | undefined, b: ReadonlySet<string> | undefined): boolean =>
+    (a?.size ?? 0) === (b?.size ?? 0) && [...(a ?? [])].every((w) => b?.has(w));
+  const expressions = new Map<string, string>();
+  const expressionFor = (name: string, source: string): string => {
+    const known = expressions.get(name);
+    if (known !== undefined) return known;
+    const prev = prevExpressions.get(name);
+    const keep = prev !== undefined
+      && canonicalModule(moduleForExpression(prev)) === canonicalModule(source)
+      && sameWorlds(prevWorlds.get(name), nextWorlds.get(name));
+    const expression = keep ? prev : moduleToExpression(source, nextWorlds.get(name) ?? 'isolated');
+    expressions.set(name, expression);
+    return expression;
+  };
   const built = nextRules.map((authored) => {
     const before = prevById.get(authored.id);
     const names = new Set(referencedHandlerNames(authored));
@@ -230,9 +255,15 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
     // fromEntries defines each name as an own property (`__proto__` too)
     // while the op's rule keeps an ordinary object for the emit path.
     if (names.size) {
-      rule.handlers = Object.fromEntries(Object.entries(modules).map(([name, source]) => [name, moduleToExpression(source, worlds.get(name) ?? 'isolated')]));
+      rule.handlers = Object.fromEntries(Object.entries(modules).map(([name, source]) => [name, expressionFor(name, source)]));
     }
-    const changed = !before || ruleFingerprint(authored, modules) !== ruleFingerprint(before, previousModules(before, stored));
+    // Changed when its authored content is, or when a handler it holds inline
+    // now needs a different expression (the name gained or lost a world
+    // through another rule). A rule that held none inline runs the stored
+    // module under its own world's convention, so it has nothing to update.
+    const held = before?.handlers;
+    const changed = !before || ruleFingerprint(authored, modules) !== ruleFingerprint(before, previousModules(before, stored))
+      || Object.entries(rule.handlers || {}).some(([name, expression]) => !!held && Object.hasOwn(held, name) && held[name] !== expression);
     if (before?.anchor?.witness && rule.anchor && anchorDigest(before.anchor) === anchorDigest(rule.anchor)) {
       rule.anchor = { ...rule.anchor, witness: before.anchor.witness };
     }
