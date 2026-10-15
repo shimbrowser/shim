@@ -160,8 +160,11 @@ console.log('noMatch evidence');
   check('an event for a rule this preview has no status for is kept',
     ids(previewNoMatch([{ ruleId: 'other', selector: '.x' }], [{ rule: live, status: { matched: 1 } }])) === 'other');
   check('no status yet is not a verdict', ids(previewNoMatch([], [{ rule: dead, status: undefined }])) === '' && !previewMatchedNothing({ rule: dead, status: undefined }));
+  const removed: Rule = { id: 'rm', anchor: css('.ad'), mutations: [{ kind: 'remove' }] };
   check('a rule that matched earlier in the preview (a remove) is not a no-match',
-    ids(previewNoMatch([], [{ rule: dead, status: { matched: 0 }, peakMatched: 1 }])) === '');
+    ids(previewNoMatch([], [{ rule: removed, status: { matched: 0 }, peakMatched: 1 }])) === '');
+  check('…even when the engine\'s timer saw it gone and reported a miss',
+    ids(previewNoMatch([{ ruleId: 'rm', selector: '.ad' }], [{ rule: removed, status: { matched: 0 }, peakMatched: 1 }])) === '');
   const witnessed: Rule = { id: 'w', anchor: { ...css('.promo'), witness: { v: 1, tag: 'div' } }, mutations: [{ kind: 'hide' }] } as Rule;
   check('a witnessed rule at 0 waits for the engine\'s verdict (no-match or quarantine)',
     ids(previewNoMatch([], [{ rule: witnessed, status: { matched: 0 } }])) === ''

@@ -130,8 +130,9 @@ export function previewMatchedNothing({ rule, status, peakMatched }: PreviewedRu
  * that timer late (Chromium throttles a hidden page's timers), so the event
  * can miss the host's settle window while the rule's status already says it
  * matched 0. Both count, once per rule:
- *   - every `reported` entry, unless that rule's freshest status shows it
- *     matching now (it rendered after the engine looked);
+ *   - every `reported` entry, unless a status in this preview shows the rule
+ *     matching (it rendered after the engine looked, or it applied and its
+ *     element went away, as a `remove` does);
  *   - every previewed rule that matched nothing (previewMatchedNothing),
  *     unless the engine quarantined it (that answer belongs to
  *     `quarantined`, not here).
@@ -148,7 +149,7 @@ export function previewNoMatch(
   for (const entry of reported) {
     if (seen.has(entry.ruleId)) continue;
     const p = entry.ruleId !== undefined ? byId.get(entry.ruleId) : undefined;
-    if (p && !p.rule.anchor?.iframe && p.status?.matched) continue;
+    if (p && !p.rule.anchor?.iframe && (p.status?.matched || (p.peakMatched ?? 0) > 0)) continue;
     seen.add(entry.ruleId);
     out.push(entry);
   }
