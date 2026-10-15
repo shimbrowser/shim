@@ -339,7 +339,7 @@ const H = {
   s.textContent = ' noted';
   anchor.appendChild(s);
   return s;
-}`,
+} // a trailing comment: the host's compile must not let it swallow the close`,
   badge: `function badge({ anchor }) {
   const s = document.createElement('span');
   s.className = 'conf-badge';
