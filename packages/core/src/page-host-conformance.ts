@@ -921,7 +921,7 @@ const noMatchCase: ConformanceCase = {
       const all = seen.filter((e) => e.kind === 'rule-status' && e.specId === key);
       return all.at(-1) as RuleStatusEvent | undefined;
     };
-    const previewed = [{ rule: dead, status: last(deadKey) }, { rule: live, status: last(liveKey) }];
+    const previewed = [{ rule: dead, status: last(deadKey), peakMatched: 0 }, { rule: live, status: last(liveKey), peakMatched: 1 }];
     kit.check('the dead rule\'s status (matched 0) arrived within the window', last(deadKey)?.matched === 0, last(deadKey));
     kit.check('the live rule\'s status shows its match', last(liveKey)?.matched === 1, last(liveKey));
 

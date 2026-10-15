@@ -395,7 +395,8 @@ async function main(): Promise<void> {
         h.emit({ kind: 'unsupported-api', specId: p.ruleKey, member: 'fetch', path: '/tracks' });
         h.emit({ kind: 'handler-error', specId: p.ruleKey, ruleId: p.rule.id, handlerName: 'fetcher', message: 'boom', stack: 'Error: boom\n    at shim://patches/x/handlers/fetcher.js:1:1' });
       }
-      if (!p.rule.anchor?.witness) h.emit({ kind: 'rule-witness', specId: p.ruleKey, ruleId: p.rule.id, witness: { v: 1, tag: 'span', textStem: 'new' } });
+      // The engine fingerprints a rule that resolved exactly one element.
+      if (!p.rule.anchor?.witness && p.rule.id !== 'gone') h.emit({ kind: 'rule-witness', specId: p.ruleKey, ruleId: p.rule.id, witness: { v: 1, tag: 'span', textStem: 'new' } });
     };
     host.log({ level: 'error', message: 'TypeError: x is undefined', source: 'https://site.test/app.js' });
     const rules = spec.rules.map((rule) => (rule.id === 'row' ? { ...rule, mutations: [{ kind: 'restyle', css: { color: 'blue' } }] } : rule));
@@ -493,7 +494,7 @@ async function main(): Promise<void> {
       return isRecord(rule) && isRecord(rule.anchor) ? rule.anchor.witness : undefined;
     };
     check('the file carries the new version and the page\'s deploy id', fspec.version === 5 && fspec.bundleHash === 'deploy-2', fspec);
-    check('kept witnesses stay, new ones are captured', isRecord(witnessOf('hide-promo')) && isRecord(witnessOf('gone'))
+    check('kept witnesses stay, new ones are captured (none for a rule that matched nothing)', isRecord(witnessOf('hide-promo')) && isRecord(witnessOf('fetcher')) && witnessOf('gone') === undefined
       && JSON.stringify(witnessOf('row')).includes('TrackRow'), frules.map((x) => x.id));
     check('rules name handlers; sources are modules', isRecord(file.handlers) && typeof file.handlers.fetcher === 'string'
       && frules.every((x) => !('handlers' in x)));

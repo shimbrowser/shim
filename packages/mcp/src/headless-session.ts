@@ -555,8 +555,11 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       .filter((t) => t.event.kind === 'handler-error')
       .map(({ event: e }) => ({ ruleId: e.ruleId, handler: e.handlerName, message: e.message, stack: e.stack }));
     const lastStatus = new Map<string, PageRuntimeEvent>();
+    const peak = new Map<string, number>();
     for (const { event: e } of mine) {
-      if (e.kind === 'rule-status' && e.specId) lastStatus.set(e.specId, e);
+      if (e.kind !== 'rule-status' || !e.specId) continue;
+      lastStatus.set(e.specId, e);
+      if (typeof e.matched === 'number') peak.set(e.specId, Math.max(peak.get(e.specId) ?? 0, e.matched));
     }
     const quarantined = mine
       .filter((t) => t.event.kind === 'rule-quarantined')
@@ -565,6 +568,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       key,
       rule,
       status: lastStatus.get(key) as Parameters<typeof describeRuleStatus>[1],
+      peakMatched: peak.get(key) ?? 0,
     }));
     const noMatch = previewNoMatch(
       mine
