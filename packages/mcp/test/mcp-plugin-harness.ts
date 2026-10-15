@@ -175,6 +175,12 @@ check('states the portable handler-name exclusions (__proto__, device names, cas
 check('says route and redirect rules do not install on a global shim', /Not on a global shim\.\*\* Route and redirect rules/.test(skill));
 check('documents the whole-export intercept wrap and its reload', /give `wrap` without `symbol`[\s\S]{0,200}reload/.test(skill));
 check('says api.fetch cannot reach the local network', /cannot reach the local network[\s\S]{0,200}blocked/.test(skill));
+// A preview's api.fetch is the real broker (page-preload's makeApi), private-network block included.
+// Redirect's boundary is per-target consent (redirect-registry's grant gate), not domain.
+check('never says a redirect must stay on one registrable domain', !/`from` and `to` must share a registrable domain/.test(skill));
+check('says a redirect may go cross-site once the target is allowed', /`to` may be any site, including another domain/.test(skill) && /boundary is consent/.test(skill));
+check('never claims a preview skips api.fetch', !/previews? (?:don't|do not|doesn't|does not|never) (?:exercise|use|reach|run)[^.]{0,60}(?:fetch|this path)/i.test(skill));
+check('says a preview makes the same real fetch requests', /preview makes the same real requests/.test(skill));
 check('documents sharedHandlers as editable on a global shim', /On a global shim[\s\S]{0,200}`sharedHandlers`/.test(skill) && skill.includes('api.shared.<name>'));
 
 console.log('the composition half:');
