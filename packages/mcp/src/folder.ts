@@ -25,6 +25,10 @@
 //     because the folder IS the composition: a re-checkout removes every
 //     visible file the composition no longer has. A folder that merely holds
 //     a manifest.json (a web app, an extension) is never treated as one.
+//     Where the composition now has a file and the folder holds a folder,
+//     that folder goes too when the removals empty it; when it holds
+//     anything the checkout wouldn't remove (hidden content no checkout
+//     wrote, a symlink), the checkout is refused before anything changes.
 //   - Every path written is checked against the folder root, and no
 //     existing file or folder below the root on the way to it may be a
 //     symlink (a crafted or stale folder could otherwise redirect a write
@@ -290,6 +294,41 @@ function isRegularFile(abs: string): boolean {
   }
 }
 
+// A folder standing where a composition checkout needs a file: the folders
+// to remove (deepest first) once the checkout's removals have emptied them,
+// or the first entry under it that would stay. Removable is exactly what the
+// removal step deletes: a regular file the composition no longer has that is
+// visible or that an earlier checkout wrote. Anything else — a hidden file no
+// checkout wrote, a symlink, a file the composition still has — stays.
+function emptiedFolders(abs: string, rel: string, files: FolderInput, previousHidden: ReadonlySet<string>): { folders: string[] } | { stays: string } {
+  const folders: string[] = [];
+  const walk = (dirAbs: string, dirRel: string): string | null => {
+    for (const entry of fs.readdirSync(dirAbs, { withFileTypes: true })) {
+      const childAbs = path.join(dirAbs, entry.name);
+      const childRel = `${dirRel}/${entry.name}`;
+      if (entry.isDirectory()) {
+        const stays = walk(childAbs, childRel);
+        if (stays !== null) return stays;
+        continue;
+      }
+      const removable = entry.isFile() && !(childRel in files) && (!hasHiddenSegment(childRel) || previousHidden.has(childRel));
+      if (!removable) return childRel;
+    }
+    folders.push(dirAbs);
+    return null;
+  };
+  const stays = walk(abs, rel);
+  return stays === null ? { folders } : { stays };
+}
+
+function isFolder(abs: string): boolean {
+  try {
+    return fs.lstatSync(abs).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** Writes a composition checkout (manifest.json + its files) into `dir`. */
 export function writeCompositionCheckout(dir: string, files: FolderInput): CheckoutWrite {
   const root = path.resolve(dir);
@@ -340,6 +379,24 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
         'check out into an empty folder',
     );
   }
+  // A file the composition has where the folder holds a folder (an earlier
+  // checkout's app.js/util.js, now a top-level app.js): the rename can't
+  // replace a folder, so it must be gone first. Decided before any removal,
+  // so a folder that would keep something refuses the checkout with the
+  // earlier one intact rather than half-deleted.
+  const emptied: string[] = [];
+  for (const [rel, abs] of targets) {
+    if (!isFolder(abs)) continue;
+    const plan = emptiedFolders(abs, rel, files, previousHidden);
+    if ('stays' in plan) {
+      throw new FolderError(
+        'not-a-working-copy',
+        `the composition has a file "${rel}" where ${root} holds a folder, and that folder still holds "${plan.stays}", which no earlier checkout wrote — ` +
+          'move it out of the way, or check out into an empty folder',
+      );
+    }
+    emptied.push(...plan.folders);
+  }
   fs.mkdirSync(root, { recursive: true });
   // The folder is the composition: what it no longer has goes — visible
   // files, and hidden ones an earlier checkout wrote.
@@ -351,6 +408,8 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
     fs.unlinkSync(abs);
     removed.push(rel);
   }
+  // …then the folders that stood where a file goes, now empty.
+  for (const abs of emptied) fs.rmdirSync(abs);
   const written: string[] = [];
   for (const [rel, abs] of targets) {
     const content = files[rel];

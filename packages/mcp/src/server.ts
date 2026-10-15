@@ -599,6 +599,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           versionId: reply.versionId,
           revision: reply.revision ?? revision,
           commitId,
+          ...(Array.isArray(reply.notes) && reply.notes.length ? { notes: reply.notes } : {}),
           ...(state.shimFile ? { writtenTo: state.shimFile } : {}),
         })];
       }

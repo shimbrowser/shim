@@ -41,7 +41,7 @@ function scriptedHost(
     evals,
     shots,
     capabilities: {
-      mutationKinds: ['hide'], iframeRules: false, apiMembers: [], componentIdentity: false, engineInspection: false,
+      mutationKinds: ['hide'], iframeRules: false, specCss: false, apiMembers: [], componentIdentity: false, engineInspection: false,
     },
     url: () => 'https://example.com/a',
     isClosed: () => false,
