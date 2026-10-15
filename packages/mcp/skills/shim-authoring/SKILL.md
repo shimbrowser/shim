@@ -895,8 +895,10 @@ A refused preview answers `applied: false` with `error` and `problems`:
   is requested before they answer. Declined, or unanswered in two minutes, it answers
   `denied` — ask the user rather than retrying. Otherwise it answers whether the token was
   extracted (`detail` says why not) and, with a `testEndpoint` (a read-only endpoint on the
-  mint host, or on a host `probe_request` may reach — otherwise `test-host-not-allowed`
-  before any card), the status it got. It never returns the token or any body. Each call
+  mint host's site — same registrable domain, so a mint on `auth.example.com` can test
+  `api.example.com` but never `api.example.net` — and either the mint host itself or a host
+  `probe_request` may reach; otherwise `test-host-not-allowed` before any card), the status
+  it got. It never returns the token or any body. Each call
   asks again.
 - The API map tools (section 4) work the same, except `replay_endpoint` runs GET and HEAD
   only (`read-only`).
