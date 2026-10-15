@@ -826,8 +826,8 @@ const pageToolsCase: ConformanceCase = {
 const strictCspCase: ConformanceCase = {
   id: 'strict-csp',
   title: 'handlers compile and run on a page whose CSP forbids eval and inline style',
-  // `strict-csp` vouches for handler compile and mount under the policy; the
-  // tier-1 check below pins a gap both hosts share.
+  // `strict-csp` vouches for handler compile and mount under the policy, and
+  // for tier-1 CSS landing under it on every host.
   covers: ['strict-csp', 'script'],
   async run(kit) {
     if (!(await kit.load('/strict'))) return;
@@ -842,14 +842,12 @@ const strictCspCase: ConformanceCase = {
     const matched = await kit.event((e) => e.kind === 'rule-status' && e.specId === conformanceRuleKey('strict-hide') && e.matched === 1);
     kit.check('a tier-1 rule resolved its anchor', matched !== null);
     await kit.sleep(300);
-    // Pinned as found (2026-10-02), identical on both hosts: the engine's
-    // tier-1 <style> element is refused by a style-src without
-    // 'unsafe-inline', even inserted from an isolated world, so the rule
-    // matches but its CSS never lands. An engine gap shared by every host,
-    // not a host difference; a CSP-immune stylesheet path in the engine
-    // (constructable sheets) flips this check on both hosts together.
+    // The engine's tier-1 <style> element is refused by a style-src without
+    // 'unsafe-inline' (even inserted from an isolated world), and the style
+    // mirror (style-mirror.ts) re-adopts its text as a constructable sheet,
+    // which style-src doesn't govern: the rule's CSS lands on every host.
     const display = await kit.read(`getComputedStyle(document.querySelector('#strict-ad')).display`);
-    kit.check('tier-1 CSS under a strict style-src is refused alike on every host (known engine gap)', display === 'block', display);
+    kit.check('tier-1 CSS under a strict style-src lands on every host (the style mirror)', display === 'none', display);
   },
 };
 
