@@ -26,6 +26,7 @@ import type {
   PageHost, PageHostCapabilities, PageWorld, ScreenshotOptions, ScreenshotResult, PreviewRule,
   PageRuntimeEvent, PageConsoleMessage, PageLoadOutcome, LoadWaitOptions, Unsubscribe,
 } from '@shimbrowser/core/page-host';
+import { handlerExpressionSource } from '@shimbrowser/core/handler-source';
 import { pageRuntimeSource } from './headless-page-runtime';
 import { imageSize } from './results';
 
@@ -216,10 +217,11 @@ function formatConsoleArg(arg: RemoteValue): string {
 }
 
 // A handler compiled the way the Shim browser's preload compiles it — the
-// same `(source)` + trailing sourceURL layout, so stack line and column
-// numbers match across hosts (the pragma must end its line, CLAUDE.md §17).
+// same handlerExpressionSource wrap + trailing sourceURL layout, so stack line
+// and column numbers match across hosts and a source ending in a `// comment`
+// can't swallow the closing paren (the pragma must end its line, CLAUDE.md §17).
 function handlerSource(source: string, ruleKey: string, name: string): string {
-  return `(${source})\n//# sourceURL=shim://patches/${ruleKey}/handlers/${name}.js\n`;
+  return `${handlerExpressionSource(source)}\n//# sourceURL=shim://patches/${ruleKey}/handlers/${name}.js\n`;
 }
 
 // --- the host ----------------------------------------------------------------

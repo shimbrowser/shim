@@ -14,6 +14,16 @@ export type SpecWithHandlers = Spec & { handlers?: Record<string, string> };
 const MODULE_PREFIX = 'module.exports = ';
 const MODULE_SUFFIX = ';\n';
 
+/**
+ * `(<expression>\n)` — the source that evaluates to a rule-local handler.
+ * The `)` sits on its own line: an expression may end in a `// comment`,
+ * which runs to end-of-line (the `//# sourceURL=` trap, CLAUDE.md §17) and
+ * would swallow a closer on the same line, so the handler never compiles.
+ */
+export function handlerExpressionSource(expression: string): string {
+  return `(${expression}\n)`;
+}
+
 /** The module form a rule-local handler expression is stored in. */
 export function expressionToModule(expression: string): string {
   return `${MODULE_PREFIX}${expression}${MODULE_SUFFIX}`;

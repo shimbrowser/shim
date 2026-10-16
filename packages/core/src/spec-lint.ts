@@ -36,6 +36,38 @@ import {
 import { validateRewriteMutation, detectTransformForm } from './rewrite-response';
 import { validateInterceptMutation } from './intercept';
 import { syntaxProbe } from './syntax-probe';
+import { expressionToModule, handlerModuleProblem } from './handler-source';
+
+// A transform / wrap is kept by transformLiteral only if it evaluates to a
+// function; anything else parses fine and then leaves the rule silently
+// inactive (the wrapper skips non-functions). Two shapes reach it: CJS
+// source (`module.exports = …` — what an export writes and an import
+// carries; without a trailing `;` the dual-form probe calls it 'expr') and a
+// bare function expression (the authoring convention). Static only — lint
+// runs on import content, which must never be executed, and core has no
+// parser dependency — so this rejects what can never work (a module that
+// never touches `module`, a literal export, a literal expression) and lets
+// anything dynamic through: transformLiteral's fault isolation keeps a bad
+// one to its own rule.
+const MODULE_EXPORTS_RE = /^\s*module\.exports\s*=/;
+const NOT_A_FUNCTION_EXPORT = 'is module-form source that does not assign a function to module.exports, so the rule would never run. '
+  + 'Write it as `module.exports = function (…) { … };` (or a bare function expression).';
+
+// Shared tail of the transform / wrap check: null when the bound source is
+// usable, otherwise the reason it is not.
+function boundSourceProblem(source: string): string | null {
+  const syntax = detectTransformForm(source, syntaxProbe);
+  if (syntax.form === null) return `does not parse as JavaScript: ${syntax.error}`;
+  if (syntax.form === 'module' || MODULE_EXPORTS_RE.test(source)) {
+    return handlerModuleProblem(source) === null ? null : NOT_A_FUNCTION_EXPORT;
+  }
+  // An expression is a function unless it is a literal; wrapped as a module
+  // it gets handlerModuleProblem's literal-export check.
+  if (handlerModuleProblem(expressionToModule(source)) !== null) {
+    return 'does not evaluate to a function, so the rule would never run. Write it as a function expression: `function (…) { … }`.';
+  }
+  return null;
+}
 
 const BUILTIN_KINDS = new Set([
   'hide', 'restyle', 'script', 'remove', 'replace-root', 'mount-route', 'redirect',
@@ -400,9 +432,9 @@ function lintRewriteMutation(
   // install time — one bad rule's syntax error killed every rewrite rule
   // on the host. Rejecting it here, at emit/commit/import (every path runs
   // `assertNoSpecErrors`), closes that at the source.
-  const syntax = detectTransformForm(source, syntaxProbe);
-  if (syntax.form === null) {
-    errors.push(`rule "${rid}": transform "${transformName}" does not parse as JavaScript: ${syntax.error}`);
+  const problem = boundSourceProblem(source);
+  if (problem !== null) {
+    errors.push(`rule "${rid}": transform "${transformName}" ${problem}`);
     return;
   }
 
@@ -470,9 +502,9 @@ function lintInterceptMutation(
     return;
   }
 
-  const syntax = detectTransformForm(source, syntaxProbe);
-  if (syntax.form === null) {
-    errors.push(`rule "${rid}": wrap "${wrapName}" does not parse as JavaScript: ${syntax.error}`);
+  const problem = boundSourceProblem(source);
+  if (problem !== null) {
+    errors.push(`rule "${rid}": wrap "${wrapName}" ${problem}`);
     return;
   }
 
@@ -519,7 +551,7 @@ function lintHandlerNameCollisions(
         ruleId: rid,
         // A rule-local handler is a bare function expression; this is the
         // module form extractHandlers stores it in.
-        module: canonicalModule(`module.exports = ${src};\n`),
+        module: canonicalModule(expressionToModule(src)),
         refFields: handlerRefFields(ruleValue.mutations, name),
       });
     }
@@ -680,15 +712,21 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown): LintResult {
 
     lintMediaHideRule(rid, rule, mutationsList, warnings);
 
-    // The "patch-level handler set" a rewrite-response transform may resolve
-    // through, alongside this rule's own `handlers` — merged once per rule
-    // (not per mutation) since it's the same scope for every mutation in the
-    // rule. `s.handlers` is the import-carried top-level map (LintableSpec);
-    // rule.handlers wins on key collision, matching shims.ts's own
-    // baseSources → ruleSources merge order for the analogous script-handler
-    // lookup.
+    // The "patch-level handler set" a rewrite-response transform / intercept
+    // wrap may resolve through, alongside this rule's own `handlers` — merged
+    // once per rule (not per mutation) since it's the same scope for every
+    // mutation in the rule. Lowest to highest precedence: the caller-carried
+    // map (a `.shim` file's top-level `handlers` — export strips both
+    // rule.handlers and spec.handlers, so on import this is the ONLY place a
+    // transform/wrap source lives; it lands in patch_files, which is what the
+    // runtime bag resolves through), then `s.handlers`, then rule.handlers —
+    // the same extraDefinedSources → spec.handlers → rule.handlers order
+    // shims' findUnboundScriptHandlers uses for script handlers. Precedence
+    // only matters for binding here: a name defined with DIFFERENT source in
+    // two of these places is still rejected by lintHandlerNameCollisions.
     const handlerScope: { handlers: Record<string, unknown> } = {
       handlers: {
+        ...(isRecord(carriedHandlers) ? carriedHandlers : {}),
         ...(s && isRecord(s.handlers) ? s.handlers : {}),
         ...(isRecord(rule.handlers) ? rule.handlers : {}),
       },

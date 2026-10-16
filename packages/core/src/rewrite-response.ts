@@ -27,6 +27,7 @@
 
 import * as routeMatch from './route-match';
 import type { Token } from './route-match';
+import { handlerExpressionSource } from './handler-source';
 
 // The shape of `mutation.endpoint` on a `rewrite-response` mutation (design
 // doc "Spec shape"). Declared here for downstream consumers (the `Mutation`
@@ -120,10 +121,20 @@ export type DetectedForm = { form: TransformForm } | { form: null; error: string
 // probes fail, with the FIRST (expr) probe's error message, since that's
 // the form most transform sources are actually written in.
 export function detectTransformForm(src: string, tryCompile: CompileProbe): DetectedForm {
-  const expr = tryCompile('(' + src + '\n)');
+  const expr = tryCompile(handlerExpressionSource(src));
   if (expr.ok) return { form: 'expr' };
   const mod = tryCompile(src);
-  if (mod.ok) return { form: 'module' };
+  if (mod.ok) {
+    // Module source must also parse where it actually runs: inside
+    // transformLiteral's `(function (module, exports) { … })` wrapper. A
+    // top-level `const module = …` / `let exports` is fine on its own but a
+    // parse-time redeclaration error there — and that literal shares ONE
+    // generated install script with every other rule on the host, where a
+    // SyntaxError can't be caught by the literal's own try.
+    const wrapped = tryCompile(transformLiteral(src, 'module'));
+    if (wrapped.ok) return { form: 'module' };
+    return { form: null, error: wrapped.error ?? 'does not parse inside the module wrapper' };
+  }
   return { form: null, error: expr.error ?? mod.error ?? 'does not parse as JavaScript' };
 }
 
@@ -383,12 +394,22 @@ export function transformLiteral(src: string, form: TransformForm): string {
   // (the hand-edited .shim import path can carry exactly this shape). With
   // the shell, the assignment evaluates to the function and both readings
   // agree; genuine expression sources never touch `module` and are unchanged.
+  //
+  // Every literal is fault-isolated: evaluating it runs the source's own
+  // top-level code (a module-form source's helper statements, an expr-form
+  // source's initializer), and these literals are object-property values in
+  // ONE shared install argument — a throw there would abort the install for
+  // every rule on the host. A throwing source yields `null` instead, which
+  // the wrapper already skips (`typeof fn !== 'function'`), so only its own
+  // rule goes inactive. spec-lint rejects a module-form source that leaves no
+  // function on module.exports up front; this is the runtime backstop.
   if (form === 'expr') {
-    return '(function () { var module = { exports: {} }; var exports = module.exports; return (' + src
-      + '\n); })()';
+    return '(function () { try { var module = { exports: {} }; var exports = module.exports; return (' + src
+      + '\n); } catch (e) { return null; } })()';
   }
-  return '(function () { var module = { exports: {} }; (function (module, exports) {\n' + src
-    + '\n})(module, module.exports); return typeof module.exports === "function" ? module.exports : null; })()';
+  return '(function () { try { var module = { exports: {} }; (function (module, exports) {\n' + src
+    + '\n})(module, module.exports); return typeof module.exports === "function" ? module.exports : null; }'
+    + ' catch (e) { return null; } })()';
 }
 
 // The once-guarded main-world IIFE: installs (and, on a live update, re-
