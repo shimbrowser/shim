@@ -2,12 +2,13 @@
   "name": "@shimbrowser/mcp",
   "version": "0.7.0-dev",
   "private": true,
-  "description": "MCP server that lets Claude Code author Shim shims against the running Shim browser.",
+  "description": "MCP server and command line for authoring Shim shims from Claude Code: against the running Shim browser, or headless in Playwright Chromium.",
   "license": "Apache-2.0",
   "author": "Artificial Apps, LLC",
   "homepage": "https://shimbrowser.com",
   "bin": {
-    "shim-mcp": "./dist/shim-mcp.js"
+    "shim-mcp": "./dist/shim-mcp.js",
+    "shim": "./dist/shim.js"
   },
   "files": [
     "dist",

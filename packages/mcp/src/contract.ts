@@ -33,8 +33,10 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
   shim_status: {
     name: 'shim_status',
     description:
-      'Report whether the Shim browser is running with its control endpoint on, its version, and the ' +
-      'sessions open on it. Call first; if Shim is not reachable, call shim_launch.',
+      'Report which authoring modes are available right now and why: attach (a tab in the running Shim browser, ' +
+      'with the user\'s logins; needs Shim running with its control endpoint on) and headless (a fresh Chromium ' +
+      'driven by Playwright, no Shim needed; needs Playwright installed — when it is not, the exact install command). ' +
+      'Also the sessions this server opened, each with its mode, and what to do next. Call first.',
     input_schema: { type: 'object', properties: {} },
   },
   shim_launch: {
@@ -61,18 +63,25 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
     name: 'shim_open_session',
     description:
       'Open an authoring session on one shim (against one of Shim\'s site tabs) or one composition. The user is ' +
-      'asked in Shim to allow it (up to two minutes); this call waits for the answer. Name an existing shim with ' +
+      'asked in Shim to allow it (up to two minutes); this call waits for the answer, and nothing shows here ' +
+      'meanwhile, so first tell the user to switch to Shim and allow the "coding agent wants to connect" card in ' +
+      'its sidebar. Name an existing shim with ' +
       'shimId, start a new one on the tab\'s site with newShimName, name a composition with compositionId, or ' +
       'start a new composition with newCompositionName (and optionally the mount you propose for its ' +
       'compose://<mount> address; the user can change it before allowing, and the answer says which they chose). ' +
       'A composition\'s page opens in Shim as the preview; tabId is optional. Something new is kept only if you ' +
       'commit. Pass dir to check the work out into that folder ' +
       'right away (same as shim_checkout). While the session is open the shim or composition is yours alone; Shim ' +
-      'ends it after 10 idle minutes, or when the user stops it or starts their own turn on it.',
+      'ends it after 10 idle minutes, or when the user stops it or starts their own turn on it. ' +
+      'Headless (no Shim browser needed): pass url instead of tabId. The session opens that page in its own ' +
+      'Chromium, with no logins, and works on the .shim file shimFile (loaded when it exists; with newShimName, ' +
+      'created by your first commit — default <dir>.shim). A url opens headless only while no Shim browser is ' +
+      'reachable; with Shim running, use its tab (tabId) or pass mode "headless" explicitly. The answer always ' +
+      'names the session\'s mode and why. Headless has no compositions.',
     input_schema: {
       type: 'object',
       properties: {
-        tabId: { type: 'number', description: 'The target tab, as shim_list_tabs reports it. Required for a shim; optional for a composition (the window its preview opens in).' },
+        tabId: { type: 'number', description: 'The target tab, as shim_list_tabs reports it. Required for a shim in the Shim browser; optional for a composition (the window its preview opens in).' },
         intent: { type: 'string', description: 'What you set out to do, in a sentence or two. Shown to the user on the card in Shim and recorded in the chat when you commit.' },
         shimId: { type: 'string', description: 'An existing shim to work on (shim_list_tabs lists the ones on each tab\'s host).' },
         newShimName: { type: 'string', description: 'Instead of shimId: create a new shim with this name on the tab\'s site. It is kept only if you commit.' },
@@ -80,6 +89,13 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
         newCompositionName: { type: 'string', description: 'Instead of compositionId: create a new composition with this name (a manifest and an empty index.html to start from). It is kept only if you commit.' },
         mount: { type: 'string', description: 'With newCompositionName: the address to propose, compose://<mount> — lowercase letters, digits and hyphens, not starting with a hyphen, and not already taken. Omitted: Shim suggests one from the name. The user may change it.' },
         dir: { type: 'string', description: 'Optional absolute folder to check the working copy out into once the session opens.' },
+        url: { type: 'string', description: 'Headless mode only, instead of tabId: the http(s) page to open.' },
+        shimFile: { type: 'string', description: 'Headless mode only, instead of shimId: the absolute path of the .shim file to work on. Commits write it.' },
+        mode: {
+          type: 'string',
+          enum: ['attach', 'headless'],
+          description: 'Optional. The default is attach for a tabId, and headless for a url while no Shim browser is reachable. Pass "headless" to open a url headless even with Shim running.',
+        },
       },
       required: ['intent'],
     },
@@ -191,3 +207,29 @@ export const SERVER_INSTRUCTIONS =
   'saved, and read_sibling_shim a shim\'s pack siblings; a composition session also has probe_request, ' +
   'read_calls and verify_mint. The shim-authoring skill documents both formats, every mutation kind, anchors, the runtime ' +
   'api and window.api.';
+
+export const HEADLESS_SERVER_INSTRUCTIONS =
+  'Shim applies user-authored modifications ("shims") to live websites. This server runs in HEADLESS mode: no ' +
+  'Shim browser — each session drives its own Chromium page (no logins) and works on a .shim file. ' +
+  'shim_open_session with url, intent and shimFile (plus newShimName for a new shim) and dir, edit shim.json and ' +
+  'handlers/*.js, shim_preview to apply the folder to the live page and read the evidence, the page tools ' +
+  '(view_page, query_page, inspect_element, …) to look, then shim_commit (it writes the .shim file) and ' +
+  'shim_end_session. Headless supports a subset of shim features: a preview that declares anything else answers ' +
+  '"unsupported" and applies nothing, and a rule reported verification "partial" is unverified — tell the user. ' +
+  'Compositions, the API map tools and other tools that need the Shim browser answer requires-shim-browser. ' +
+  'The shim-authoring skill documents the spec format, every mutation kind, anchors and the runtime api.';
+
+export const AUTO_SERVER_INSTRUCTIONS =
+  'Shim applies user-authored modifications ("shims") to live websites. This server authors shims in two modes, ' +
+  'the same tools in both: ATTACH works on a tab in the running Shim browser (the user\'s logins; the user allows ' +
+  'each session in Shim; commits go to Shim\'s library), HEADLESS needs no Shim and drives its own Chromium per ' +
+  'session (no logins; commits write a .shim file). Call shim_status first: it says which modes are available, ' +
+  'why, and what to do next. Attach: shim_list_tabs, shim_open_session with tabId. Headless: shim_open_session with ' +
+  'url, intent, newShimName (or shimFile) and dir. Then edit shim.json and handlers/*.js, shim_preview to apply ' +
+  'the folder to the live page and read the evidence, the page tools (view_page, query_page, inspect_element, …) ' +
+  'to look, shim_commit with a summary, and shim_end_session. For a visual change, verify with a screenshot ' +
+  'before committing. Headless supports a subset of shim features: a preview declaring anything else answers ' +
+  '"unsupported", and a rule reported verification "partial" is unverified — tell the user. Attach sessions also ' +
+  'author compositions (compositionId or newCompositionName) and have the API map and data tools; a headless ' +
+  'session answers requires-shim-browser for those. The shim-authoring skill documents the spec format, every ' +
+  'mutation kind, anchors, the runtime api and window.api.';

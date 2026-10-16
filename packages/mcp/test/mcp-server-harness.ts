@@ -428,6 +428,12 @@ async function main(): Promise<void> {
     check('naming a shim and a composition together is refused', three.isError === true && /exactly one/.test(three.content[0]?.text ?? ''));
     const noTab = await call(cc, 'shim_open_session', { intent: 'x', shimId: 'a' });
     check('a shim session without tabId is refused', noTab.isError === true && /needs tabId/.test(noTab.content[0]?.text ?? ''));
+    // Headless mode has no compositions: the server refuses before asking its control.
+    const { deps: dh, sent: sh } = rig(() => refuse(500, 'unreached'));
+    const ch = await connect({ ...dh, mode: 'headless' });
+    const headlessComp = await call(ch, 'shim_open_session', { intent: 'x', compositionId: 'comp-1' });
+    check('headless mode refuses a composition session as requires-shim-browser',
+      headlessComp.isError === true && (headlessComp.content[0]?.text ?? '').startsWith('requires-shim-browser') && sh.length === 0, headlessComp.content[0]?.text);
     fs.mkdirSync(cdir, { recursive: true });
     fs.writeFileSync(path.join(cdir, 'manifest.json'), '{}');
     const notOurs = await call(cc, 'shim_open_session', { intent: 'Build a crate view', compositionId: 'comp-1', dir: cdir });

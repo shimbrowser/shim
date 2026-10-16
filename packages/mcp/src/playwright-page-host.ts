@@ -48,6 +48,9 @@ export const HEADLESS_CAPABILITIES: PageHostCapabilities = Object.freeze({
     'script', 'inject-element', 'inject-html', 'remove', 'replace-root',
   ]),
   iframeRules: false,
+  // Previews are per rule (applyExtraRule on a stub spec): nothing installs
+  // the spec-level stylesheet, so a shim that has one is refused (D15).
+  specCss: false,
   apiMembers: Object.freeze([]),
   componentIdentity: false,
   engineInspection: false,
@@ -120,8 +123,13 @@ export interface PlaywrightPageHost extends PageHost {
   detach(): Promise<void>;
 }
 
-/** The @shimbrowser/core browser bundle (`@shimbrowser/core/page`). */
+// Embedded by the one-file plugin build (scripts/build.js); undefined when
+// this module runs from the workspace or an npm install.
+declare const SHIM_CORE_PAGE_BUNDLE: string | undefined;
+
+/** The @shimbrowser/core browser bundle: the one embedded in the plugin build, else `@shimbrowser/core/page`. */
 export function readEngineBundle(): string {
+  if (typeof SHIM_CORE_PAGE_BUNDLE === 'string') return SHIM_CORE_PAGE_BUNDLE;
   return fs.readFileSync(require.resolve('@shimbrowser/core/page'), 'utf8');
 }
 
@@ -437,13 +445,13 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
   async function applyPreviewNow(preview: PreviewRule): Promise<void> {
     const contextId = await waitForWorld(worldWaitMs);
     if (contextId === null || detached) return;
-    const { patchId, rule, ruleKey, bundleHash } = preview;
+    const { patchId, rule, ruleKey, bundleHash, applyId } = preview;
     for (const [name, source] of Object.entries(rule.handlers ?? {})) {
       if (typeof source !== 'string') continue;
       await compileHandler(contextId, ruleKey, name, source);
     }
     await cdp.send('Runtime.evaluate', {
-      expression: `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].apply(${JSON.stringify(patchId)}, ${JSON.stringify(rule)}, ${JSON.stringify(ruleKey)}, ${JSON.stringify(bundleHash ?? null)})`,
+      expression: `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].apply(${JSON.stringify(patchId)}, ${JSON.stringify(rule)}, ${JSON.stringify(ruleKey)}, ${JSON.stringify(bundleHash ?? null)}, ${JSON.stringify(applyId ?? null)})`,
       contextId,
     });
   }

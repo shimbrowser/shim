@@ -159,7 +159,11 @@ export function anchorDigest(anchor: Anchor | undefined): string {
 /** The handler names a rule's mutations reference (handler / transform / wrap). */
 export function referencedHandlerNames(rule: Rule): string[] {
   const names: string[] = [];
-  for (const mutation of rule.mutations || []) {
+  // A hand-written shim.json can carry any JSON here; a non-array is reported
+  // by the folder check, never thrown from here.
+  const mutations: unknown = rule.mutations;
+  if (!Array.isArray(mutations)) return names;
+  for (const mutation of mutations) {
     if (!isRecord(mutation)) continue;
     for (const field of HANDLER_REF_FIELDS) {
       const name = mutation[field];
@@ -444,6 +448,10 @@ function checkAuthoredSpec(raw: Record<string, unknown>, handlers: Record<string
     if (isRecord(ruleValue.anchor) && 'witness' in ruleValue.anchor) {
       problems.push(`rule "${id}": anchor "witness" is managed by Shim — remove it`);
     }
+    if (ruleValue.mutations !== undefined && !Array.isArray(ruleValue.mutations)) {
+      problems.push(`rule "${id}": "mutations" must be an array`);
+      return;
+    }
     for (const name of referencedHandlerNames(ruleValue as unknown as Rule)) {
       if (!Object.hasOwn(handlers, name)) problems.push(`rule "${id}" names handler "${name}" but ${handlerPath(name)} is missing`);
     }
@@ -456,7 +464,12 @@ function checkAuthoredSpec(raw: Record<string, unknown>, handlers: Record<string
 // function; lint only syntax-checks transforms and wraps. So pack refuses
 // what can be told without running the code (handlerModuleProblem) rather
 // than write a file the browser won't import.
-function checkScriptModules(spec: Spec, handlers: Record<string, string>): void {
+/**
+ * Every `script` handler module that can't export a function, one problem
+ * per file — what `packShim` refuses after spec-lint. `shim lint` reports
+ * the same list.
+ */
+export function scriptModuleProblems(spec: Spec, handlers: Record<string, string>): string[] {
   const problems: string[] = [];
   const checked = new Set<string>();
   for (const rule of spec.rules || []) {
@@ -472,6 +485,11 @@ function checkScriptModules(spec: Spec, handlers: Record<string, string>): void 
       if (problem) problems.push(`${handlerPath(name)} ${problem}`);
     }
   }
+  return problems;
+}
+
+function checkScriptModules(spec: Spec, handlers: Record<string, string>): void {
+  const problems = scriptModuleProblems(spec, handlers);
   if (problems.length) throw new ShimFolderError('malformed-shim-folder', problems);
 }
 
@@ -503,6 +521,19 @@ function parseState(text: string): ShimState {
 }
 
 /**
+ * Why a spec's `match.hosts` is unusable, or null: it must be an array of
+ * host-pattern strings — what import and a headless session require — so
+ * pack and lint never bless a folder whose file those then refuse.
+ */
+export function matchHostsProblem(spec: { match?: unknown }): string | null {
+  const match = spec.match;
+  if (!isRecord(match) || !Array.isArray(match.hosts) || !match.hosts.every((h: unknown) => typeof h === 'string')) {
+    return `${SHIM_JSON}: "match.hosts" must be an array of host patterns (strings)`;
+  }
+  return null;
+}
+
+/**
  * Pack a folder into a `shim/1` file. Restores `version` / `bundleHash` and
  * each witness whose anchor digest still matches from .shim-state.json (when
  * present), checks `match.hosts` as import does, and runs spec-lint — a lint
@@ -521,9 +552,8 @@ export function packShim(input: FolderInput): ShimFile {
     rule.anchor = { ...rule.anchor, witness: clone(entry.witness) };
   }
 
-  const problems: string[] = [];
-  if (!isRecord(spec.match) || !Array.isArray(spec.match.hosts)) problems.push(`${SHIM_JSON}: "match.hosts" must be an array of host patterns`);
-  if (problems.length) throw new ShimFolderError('malformed-shim-folder', problems);
+  const hostsProblem = matchHostsProblem(spec);
+  if (hostsProblem) throw new ShimFolderError('malformed-shim-folder', [hostsProblem]);
   // The handler modules ride as the spec-level map, so a rewrite transform
   // or intercept wrap resolves its name the way it will after import.
   const { errors } = lintSpec({ ...spec, handlers });

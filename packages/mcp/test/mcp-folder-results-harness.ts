@@ -4,7 +4,10 @@
 // folder: a read takes every non-hidden file, bounded; a checkout writes only
 // into an empty folder or an earlier checkout, replaces shim.json and the
 // handler files (removing ones the checkout dropped), leaves other files
-// alone, and never writes outside the folder.
+// alone, and never writes outside the folder; a composition re-checkout
+// replaces a folder it emptied with the file now at that path, and refuses
+// (changing nothing) when that folder holds hidden content no checkout
+// wrote.
 // results: Shim's tool_result content (string / Anthropic blocks) becomes MCP
 // content; PNG and JPEG sizes are read from their headers; a result over
 // the tool-result budget truncates text and swaps an image for a note.
@@ -14,7 +17,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { readWorkingCopy, writeCheckout, writeCompositionCheckout, COMPOSITION_MARKER, FolderError } from '../src/folder';
+import { readWorkingCopy, writeCheckout, writeCompositionCheckout, checkoutKind, folderKind, COMPOSITION_MARKER, FolderError } from '../src/folder';
 import { toMcpContent, imageSize, estimateTokens, fitToBudget, maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS } from '../src/results';
 
 let failures = 0;
@@ -199,6 +202,95 @@ console.log('checkout:');
     throwsCode('a marker that is a symlink is refused', 'unsafe-path', () => writeCompositionCheckout(linkedMarker, { 'manifest.json': '{}' }));
     check('…and its target is untouched', fs.readFileSync(path.join(outside, 'victim.txt'), 'utf8') === 'keep');
   }
+}
+
+console.log('composition checkout, paths a case-insensitive disk folds together:');
+{
+  // An earlier checkout, to prove a refused one leaves it untouched.
+  const dir = tmp();
+  writeCompositionCheckout(dir, { 'manifest.json': '{}', 'index.html': 'page', 'A.js': 'upper' });
+  const before = JSON.stringify(readWorkingCopy(dir));
+  throwsCode('two files differing only in case are refused', 'unsafe-path',
+    () => writeCompositionCheckout(dir, { 'manifest.json': '{}', 'A.js': 'upper', 'a.js': 'lower' }));
+  throwsCode('…and two folders differing only in case', 'unsafe-path',
+    () => writeCompositionCheckout(dir, { 'manifest.json': '{}', 'Lib/x.js': 'x', 'lib/y.js': 'y' }));
+  throwsCode('…and a file named like a folder in another case', 'unsafe-path',
+    () => writeCompositionCheckout(dir, { 'manifest.json': '{}', 'App': 'x', 'app/y.js': 'y' }));
+  throwsCode('…and a case variant of the checkout marker', 'unsafe-path',
+    () => writeCompositionCheckout(dir, { 'manifest.json': '{}', [COMPOSITION_MARKER.toUpperCase()]: 'x' }));
+  throwsCode('…and two Unicode normalizations of one name', 'unsafe-path',
+    () => writeCompositionCheckout(dir, { 'manifest.json': '{}', 'café.js': 'nfc', 'café.js': 'nfd' }));
+  throwsCode('…and one name as both a file and a folder', 'unsafe-path',
+    () => writeCompositionCheckout(dir, { 'manifest.json': '{}', 'app': 'x', 'app/x.js': 'y' }));
+  throwsCode('…and a file under the checkout marker', 'unsafe-path',
+    () => writeCompositionCheckout(dir, { 'manifest.json': '{}', [`${COMPOSITION_MARKER}/x.js`]: 'x' }));
+  check('a refused checkout leaves the earlier one as it was', JSON.stringify(readWorkingCopy(dir)) === before);
+  check('distinct names still check out', writeCompositionCheckout(tmp(), { 'manifest.json': '{}', 'a.js': 'x', 'ab.js': 'y', 'lib/a.js': 'z' }).written.length === 4);
+}
+
+console.log('composition re-checkout, folder → file:');
+{
+  // An earlier checkout had app.js/util.js (and a hidden file it wrote under
+  // that folder); the composition now has a top-level app.js.
+  const dir = tmp();
+  writeCompositionCheckout(dir, { 'manifest.json': '{}', 'app.js/util.js': 'old-util', 'app.js/.cfg/x.json': '{}', 'index.html': 'page' });
+  const cw = writeCompositionCheckout(dir, { 'manifest.json': '{}', 'app.js': 'new-app', 'index.html': 'page' });
+  check('a folder the composition now has as a file is replaced by it',
+    fs.lstatSync(path.join(dir, 'app.js')).isFile() && fs.readFileSync(path.join(dir, 'app.js'), 'utf8') === 'new-app', JSON.stringify(cw));
+  check('…removing what the earlier checkout wrote under it', cw.removed.includes('app.js/util.js') && cw.removed.includes('app.js/.cfg/x.json'), JSON.stringify(cw.removed));
+  check('…and the checkout reads back as the composition', JSON.stringify(Object.keys(readWorkingCopy(dir)).sort()) === JSON.stringify(['app.js', 'index.html', 'manifest.json']));
+  check('…and a second checkout of it is a plain replace', writeCompositionCheckout(dir, { 'manifest.json': '{}', 'app.js': 'newer', 'index.html': 'page' }).removed.length === 0
+    && fs.readFileSync(path.join(dir, 'app.js'), 'utf8') === 'newer');
+
+  // Nested: a folder under a folder, both emptied.
+  const nested = tmp();
+  writeCompositionCheckout(nested, { 'manifest.json': '{}', 'lib/a/b.js': 'b', 'lib/c.js': 'c' });
+  writeCompositionCheckout(nested, { 'manifest.json': '{}', 'lib': 'now a file' });
+  check('a nested folder tree emptied by the checkout is removed deepest first', fs.readFileSync(path.join(nested, 'lib'), 'utf8') === 'now a file');
+
+  // A visible file the earlier checkout didn't write is still the
+  // composition's (the folder IS the composition: a re-checkout removes every
+  // visible file it no longer has), so it doesn't hold the folder up.
+  const visible = tmp();
+  writeCompositionCheckout(visible, { 'manifest.json': '{}', 'app.js/util.js': 'old-util' });
+  fs.writeFileSync(path.join(visible, 'app.js', 'notes.txt'), 'scratch');
+  writeCompositionCheckout(visible, { 'manifest.json': '{}', 'app.js': 'new-app' });
+  check('a visible stray in that folder goes with it, as any visible file the composition lacks does',
+    fs.readFileSync(path.join(visible, 'app.js'), 'utf8') === 'new-app');
+
+  // Hidden content no checkout wrote is never removed, so it keeps the
+  // folder: refused before anything changes.
+  const strays: Array<[string, (folder: string) => void]> = [
+    ['a hidden file no checkout wrote', (folder) => { fs.writeFileSync(path.join(folder, '.DS_Store'), 'mine'); }],
+    ['a hidden folder no checkout wrote', (folder) => { fs.mkdirSync(path.join(folder, '.git')); fs.writeFileSync(path.join(folder, '.git', 'HEAD'), 'mine'); }],
+  ];
+  for (const [label, plant] of strays) {
+    const kept = tmp();
+    writeCompositionCheckout(kept, { 'manifest.json': '{"v":1}', 'app.js/util.js': 'old-util', 'index.html': 'old-page', 'gone.js': 'old-gone' });
+    plant(path.join(kept, 'app.js'));
+    throwsCode(`a folder where a file goes that holds ${label} is refused`, 'not-a-working-copy',
+      () => writeCompositionCheckout(kept, { 'manifest.json': '{"v":2}', 'app.js': 'new-app', 'index.html': 'new-page' }));
+    check(`…leaving the earlier checkout intact (${label})`,
+      fs.readFileSync(path.join(kept, 'app.js', 'util.js'), 'utf8') === 'old-util'
+      && fs.readFileSync(path.join(kept, 'index.html'), 'utf8') === 'old-page'
+      && fs.readFileSync(path.join(kept, 'gone.js'), 'utf8') === 'old-gone'
+      && fs.readFileSync(path.join(kept, 'manifest.json'), 'utf8') === '{"v":1}');
+    throwsCode(`…and repeating it refuses the same way (${label})`, 'not-a-working-copy',
+      () => writeCompositionCheckout(kept, { 'manifest.json': '{"v":2}', 'app.js': 'new-app', 'index.html': 'new-page' }));
+  }
+}
+
+console.log('kind:');
+{
+  check('a checkout with manifest.json is a composition, even holding a shim.json', checkoutKind({ 'manifest.json': '{}', 'shim.json': '{}' }) === 'composition');
+  check('a checkout with shim.json and no manifest is a shim', checkoutKind({ 'shim.json': '{}', 'handlers/a.js': 'x' }) === 'shim');
+  const comp = tmp();
+  writeCompositionCheckout(comp, { 'manifest.json': '{}', 'shim.json': '{}' });
+  check('a composition checkout holding a shim.json is a composition folder', folderKind(comp) === 'composition');
+  const shimDir = tmp();
+  fs.writeFileSync(path.join(shimDir, 'shim.json'), '{}');
+  check('a folder with shim.json is a shim folder', folderKind(shimDir) === 'shim');
+  check('an empty folder is neither', folderKind(tmp()) === null);
 }
 
 console.log('content:');

@@ -18,13 +18,18 @@ files, preview, look at what actually happened, fix, and commit only what you ve
 
 Shim also serves **compositions**: whole pages you write from scratch, which read the
 user's sites through `window.api`. They use the same session loop with a different folder;
-section 9 covers what differs.
+section 9 covers what differs. Section 10 covers headless mode, which runs without the Shim
+browser.
 
 ## 1. The session loop
 
-1. **Find Shim.** `shim_status`; if it isn't running, `shim_launch`. Shim's control
-   endpoint is off by default — launching turns it on for this run; the user can also turn
-   it on in Shim's Settings.
+1. **Pick a mode.** `shim_status` says which modes are available, why, and what to do
+   next. **Attach** works in a tab of the running Shim browser, with the user's logins, and
+   commits to Shim's library. **Headless** needs no Shim: it opens the page in its own
+   Chromium and commits to a `.shim` file (section 9). If the user has Shim but it isn't
+   reachable, `shim_launch` starts it. Shim's control endpoint is off by default; launching
+   turns it on for this run, and the user can also turn it on in Shim's Settings. If
+   neither mode is available, give the user the install command `shim_status` names.
 2. **Pick the tab.** `shim_list_tabs` lists every open tab with its `tabId`, URL and, for a
    site tab, the shims that already run on its host. Work against the tab showing the page
    the user means.
@@ -34,7 +39,9 @@ section 9 covers what differs.
    - `intent` is one or two sentences of what you set out to do. The user sees it on the
      card in Shim and it is recorded in the shim's chat when you commit.
    - The user is asked in Shim to allow the session, and the call waits (up to two
-     minutes). If they decline, do not retry unless they ask you to.
+     minutes) with nothing on screen here. So **before** calling, tell the user in one
+     line to switch to Shim and allow the "coding agent wants to connect" card at the top
+     of its sidebar. If they decline, do not retry unless they ask you to.
    - With `dir` (an absolute path to an empty folder, or an earlier checkout) the shim is
      checked out at once. Otherwise call `shim_checkout { dir }`.
 4. **Edit the folder** (section 2): `shim.json` and `handlers/<name>.js`.
@@ -48,7 +55,9 @@ section 9 covers what differs.
 7. **Commit.** `shim_commit { summary }` saves the latest preview as a new version of the
    shim. `summary` is what changed and why, in a few sentences — it becomes your reply in
    the shim's chat. If the work declares something sensitive (a redirect target, a remote
-   database connection) the user approves it in Shim first, and the call waits.
+   database connection) the user approves it in Shim first, and the call waits. Any call
+   that waits on a card in Shim (this one, the API map, a composition's hosts) shows
+   nothing here while it waits: when you expect a card, tell the user to look at Shim first.
 8. **End.** `shim_end_session`. Anything previewed after the last commit is discarded and
    the page returns to the shim as committed.
 
@@ -273,9 +282,10 @@ Then, for a granted site only — every call names its `host`:
 An endpoint id belongs to its site: naming it under another host answers `not-found`.
 Refusals come back as `{ ok: false, error, hint }` — `host-not-granted`, `no-sources`,
 `sources-denied`, `site-names-denied`, `replay-declined`, `consent-timeout`,
-`discovery-off` (Discovery is off in Shim: there is no map to read — `request_sources`
-still asks and grants, with every site under `noApiMap`, and in a composition session
-that grant is all `probe_request` needs). Don't re-ask for what the user declined. In the handler, call the
+`too-many-pending`, `discovery-off` (Discovery is off in Shim: there is no map to read —
+`request_sources` still asks and grants, with every site under `noApiMap`, and in a
+composition session that grant is all `probe_request` needs). Don't re-ask for what the
+user declined; a timeout or a full queue of cards is not a no, so those can be retried. In the handler, call the
 endpoint with the page's `fetch(url, { credentials: 'include' })` (section 7).
 
 ### What the shim has saved: the data tools
@@ -289,7 +299,10 @@ All three only read, and only this shim's own data (and its pack's).
   it. Use it when the ask depends on what is already saved ("the counter is wrong").
 - **`query_db { sql, connection? }`** — a read-only SQL query against the shim's own
   database (its `storage` tables) or a declared remote connection. SELECT only: anything
-  else is refused before it reaches the database. Results are capped; add `LIMIT`.
+  else is refused before it reaches the database. Results are capped; add `LIMIT`. A
+  remote connection whose declared tables haven't been set up on it yet answers
+  `schema-not-ready`: a session never creates them — the shim's own next use of the
+  connection on its page does, so ask the user to open it and try again.
 - **`read_sibling_shim { name }`** — another shim in this shim's pack, in full: its spec,
   handler source and last few exchanges. Use it before building on a sibling's data or
   conventions (storage keys, class prefixes). A shim in no pack answers that it has no
@@ -897,3 +910,41 @@ A refused preview answers `applied: false` with `error` and `problems`:
   connection and whether the user configured it. While you build, the page's own writes
   are refused, so what they show is the data as of the last commit. `read_sibling_shim` is
   for shims (`shim-only`).
+
+## 10. Headless mode
+
+A session runs headless when you open it on a `url` and no Shim browser is reachable, or
+when you pass `mode: "headless"`, or when the server runs as `shim-mcp --headless`. The
+session opens its own Chromium page (a fresh profile, no logins, never Shim's). The
+`shim_open_session` answer always says `mode` and `modeReason`: tell the user which one you
+are in, because what a commit saves differs. With Shim running, a bare `url` answers
+`shim-running`: work in the user's Shim tab (`shim_list_tabs`, then `tabId`) unless they
+want a standalone `.shim` file, in which case pass `mode: "headless"`.
+
+Headless needs Playwright. If it is missing, opening answers `playwright-missing` (or
+`chromium-missing`, or `system-deps-missing` on Linux) with the exact command to run. Give the user that command; don't run
+installs on their machine without asking.
+
+The loop is the same, with three differences:
+
+- **Open on a url and a file.** `shim_open_session { url, intent, shimFile, dir }` works on
+  the `.shim` file `shimFile`: an existing one is loaded and its rules run on the page at
+  once; with `newShimName` a new shim starts there (default `<dir>.shim`). A headless
+  session has no tabs and no shim library, so `shimId` answers `requires-shim-browser`,
+  and so do `verify_across_pages`, `interact_page`, compositions (section 9) and their
+  tools, the API map tools and the data tools (section 4). A headless-only server also
+  refuses `shim_list_tabs` and `shim_launch`.
+- **`shim_commit` writes the file**: a new version, with its history and what the session
+  verified. `api.storage` lives in `<shimFile>.storage.json`. Hand the `.shim` file to the
+  user; they import it into Shim.
+- **A subset of features.** Headless runs `hide`, `restyle`, `reorder`, `reshape`, `script`,
+  `inject-element`, `inject-html`, `remove` and `replace-root`, with `api.storage` and
+  `api.cleanup`. A preview that uses anything else — the network and route kinds,
+  `anchor.iframe`, a spec-level `css` block, or a `settings` / `permissions` / `storage` /
+  `connections` declaration — applies nothing and answers `error: "unsupported"` with the list: drop it,
+  or author that shim in the Shim browser. A handler that calls a member headless lacks gets
+  the answer the browser gives an unconfigured shim (`api.fetch` resolves
+  `{ ok: false, error: "requires-shim-browser" }`, `api.settings.get` resolves `undefined`,
+  `api.db` reads as absent), the preview lists it under `unsupportedApi`, and its rule is
+  **`verification: partial`** — tell the user that rule is unverified until they try it in
+  Shim. Only a `full` rule behaves the same in Shim.

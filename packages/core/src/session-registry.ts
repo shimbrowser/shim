@@ -1,10 +1,16 @@
-// sessions/registry.ts — external authoring sessions (design D1, D6, D14):
-// an agent outside Shim (Claude Code, through the control endpoint) owns one
-// artifact for a while and drives the same turn machinery an internal turn
-// drives. Pure and Electron-free: the per-kind work lives behind a
-// SessionBackend, the ownership behind the artifact's LeaseRegistry, and the
-// clock behind injectable timers, so every ordering rule below is
-// bare-node harness-pinned (session-registry-harness).
+// The authoring session registry (shim-core design D1, D6, D14): an agent
+// outside the host (Claude Code, through the Shim browser's control endpoint
+// or @shimbrowser/mcp's headless mode) owns one artifact for a while and
+// drives the same turn machinery an internal turn drives. One implementation
+// for every host, so a headless session orders, revisions, commits and ends
+// exactly as an attached one does.
+//
+// Pure: no Node, no Electron. The per-kind work lives behind a
+// SessionBackend, the ownership behind the host's lease registry (any
+// SessionLeases — the Shim browser passes its artifact lease registry,
+// headless an in-process one), and the clock behind injectable timers, so
+// every ordering rule below is bare-node harness-pinned
+// (scripts/session-registry-harness.ts).
 //
 // Invariants:
 //   - Ownership. open() takes the artifact's 'turn' lease without preempting
@@ -52,8 +58,31 @@
 //     finish with uncommitted changes.
 //   - Sessions never touch the user's API key: nothing here, or in a
 //     backend's contract, takes a model client.
-import type { Lease, LeaseRegistry } from '../authoring/artifact-lease';
-import { isLeaseTimeout } from '../authoring/artifact-lease';
+
+/** The ownership a session holds for its life: the host's lease on the artifact. */
+export interface SessionLease {
+  /** Aborts when something preempts the session's hold on the artifact. */
+  readonly signal: AbortSignal;
+  /** Idempotent. */
+  release(): void;
+}
+
+/** A host's lease registry, as far as a session needs one. */
+export interface SessionLeases<L extends SessionLease = SessionLease> {
+  /**
+   * Take the artifact's 'turn' lease without preempting its holder. Rejects
+   * with a lease timeout (see isLeaseTimeout) when the holder doesn't let go
+   * within `timeoutMs`.
+   */
+  acquire(key: string, kind: 'turn', opts: { owner: string; timeoutMs: number }): Promise<L>;
+}
+
+/** The rejection a lease acquire gives when it waited out its timeout. */
+export const LEASE_TIMEOUT = 'lease-timeout';
+
+export function isLeaseTimeout(err: unknown): boolean {
+  return err instanceof Error && err.message === LEASE_TIMEOUT;
+}
 
 export type SessionArtifactKind = 'shim' | 'composition';
 
@@ -141,9 +170,8 @@ export interface OpenRequest {
   signal?: AbortSignal;
 }
 
-// A begin that refuses for a reason the agent can act on (a new
-// composition's mount went to another while it waited): answered as its own
-// error code rather than 'begin-failed'.
+// A begin that refuses for a reason the agent can act on: answered as its
+// own error code rather than 'begin-failed'.
 export class BeginRefusal extends Error {
   readonly code: string;
   constructor(code: string, message: string) {
@@ -158,7 +186,7 @@ export interface SessionMint {
   mount: string;
 }
 
-export interface BeginArgs {
+export interface BeginArgs<L extends SessionLease = SessionLease> {
   sessionId: string;
   artifactId: string;
   target: unknown;
@@ -170,7 +198,7 @@ export interface BeginArgs {
   // See OpenRequest.mint; null when the artifact already exists.
   mint: SessionMint | null;
   // The artifact's 'turn' lease, held for the session's life.
-  lease: Lease;
+  lease: L;
   // Aborts when the session ends, for any reason.
   signal: AbortSignal;
 }
@@ -184,7 +212,8 @@ export type BackendCheckout =
   | { ok: false; error: string; detail?: string };
 
 export type BackendCommit =
-  | { ok: true; versionId: VersionId }
+  // `notes`: what the agent should know about what was written (passed through).
+  | { ok: true; versionId: VersionId; notes?: string[] }
   | { ok: false; error: string; detail?: string };
 
 export interface FinishInfo {
@@ -199,12 +228,12 @@ export interface FinishInfo {
 // One artifact kind's session work. `H` is the backend's own per-session
 // state. preview / call / commit run strictly one at a time per session,
 // never after finish has started.
-export interface SessionBackend<H = unknown> {
+export interface SessionBackend<H = unknown, L extends SessionLease = SessionLease> {
   // Sets up exactly what an internal turn sets up (the kind's "begin"),
   // under the already-held lease. A throw fails open() with 'begin-failed'
   // ('artifact-busy' for an ArtifactBusyError, 'target-changed' for a
   // TargetChangedError, its own code for a BeginRefusal).
-  begin(args: BeginArgs): Promise<H>;
+  begin(args: BeginArgs<L>): Promise<H>;
   // The session's working copy as files (design D10), as of the latest
   // applied revision. Optional: a kind without one answers
   // 'checkout-unavailable'.
@@ -238,7 +267,7 @@ export type OpenResult = { ok: true; sessionId: string } | SessionError;
 export type CheckoutResult = { ok: true; revision: number; files: unknown } | SessionError;
 export type PreviewResult = { ok: true; applied: boolean; revision: number; evidence: unknown } | SessionError;
 export type CallResult = { ok: true; result: unknown } | SessionError;
-export type CommitResult = { ok: true; versionId: VersionId; revision: number } | SessionError;
+export type CommitResult = { ok: true; versionId: VersionId; revision: number; notes?: string[] } | SessionError;
 export type EndResult = { ok: true; reason: EndReason; versionId: VersionId | null } | SessionError;
 
 export interface CommitRequest {
@@ -252,11 +281,14 @@ export interface Timers {
   clearTimeout(handle: unknown): void;
 }
 
-export interface SessionRegistryOptions {
-  leases: Record<SessionArtifactKind, LeaseRegistry>;
+export interface SessionRegistryOptions<L extends SessionLease = SessionLease> {
+  // Per kind; a host that serves one kind only leaves the other out.
+  leases: Partial<Record<SessionArtifactKind, SessionLeases<L>>>;
   // The lease key for an artifact (the shim id, the composition uid).
   leaseKey?(kind: SessionArtifactKind, artifactId: string): string;
-  backends: Partial<Record<SessionArtifactKind, SessionBackend<unknown>>>;
+  backends: Partial<Record<SessionArtifactKind, SessionBackend<unknown, L>>>;
+  // Recognizes an acquire that timed out (default: isLeaseTimeout).
+  isLeaseTimeout?(err: unknown): boolean;
   idleTimeoutMs?: number;
   openLeaseTimeoutMs?: number;
   endSettleTimeoutMs?: number;
@@ -307,11 +339,11 @@ interface CommitRecord {
   result?: CommitResult;
 }
 
-interface Session {
+interface Session<L extends SessionLease> {
   info: SessionInfo;
-  backend: SessionBackend<unknown>;
+  backend: SessionBackend<unknown, L>;
   handle: unknown;
-  lease: Lease;
+  lease: L;
   controller: AbortController;
   queue: QueuedOp[];
   inFlight: { op: QueuedOp; done: Promise<void> } | null;
@@ -346,7 +378,7 @@ function snapshot(info: SessionInfo): SessionInfo {
   return { ...info };
 }
 
-export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegistry {
+export function createSessionRegistry<L extends SessionLease = SessionLease>(opts: SessionRegistryOptions<L>): SessionRegistry {
   const timers = opts.timers ?? realTimers;
   const idleTimeoutMs = opts.idleTimeoutMs ?? IDLE_TIMEOUT_MS;
   const openLeaseTimeoutMs = opts.openLeaseTimeoutMs ?? OPEN_LEASE_TIMEOUT_MS;
@@ -354,8 +386,10 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
   const keepEnded = opts.keepEnded ?? 50;
   const newId = opts.newId ?? defaultId;
   const leaseKey = opts.leaseKey ?? ((_kind: SessionArtifactKind, id: string) => id);
+  const acquireTimedOut = opts.isLeaseTimeout ?? isLeaseTimeout;
+  type S = Session<L>;
 
-  const live = new Map<string, Session>();
+  const live = new Map<string, S>();
   const ended = new Map<string, EndedSession>();
   const opening = new Set<Promise<OpenResult>>();
 
@@ -377,7 +411,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
 
   // --- idle timer -----------------------------------------------------------
 
-  function armIdle(s: Session): void {
+  function armIdle(s: S): void {
     if (s.idleTimer !== null) timers.clearTimeout(s.idleTimer);
     s.idleTimer = timers.setTimeout(() => {
       s.idleTimer = null;
@@ -389,7 +423,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
     }, idleTimeoutMs);
   }
 
-  function disarmIdle(s: Session): void {
+  function disarmIdle(s: S): void {
     if (s.idleTimer !== null) {
       timers.clearTimeout(s.idleTimer);
       s.idleTimer = null;
@@ -398,7 +432,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
 
   // --- queue ----------------------------------------------------------------
 
-  function pump(s: Session): void {
+  function pump(s: S): void {
     if (s.ending || s.inFlight) return;
     const op = s.queue.shift();
     if (!op) {
@@ -428,7 +462,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
     });
   }
 
-  function enqueue<T extends OpResult>(s: Session, isCommit: boolean, run: (signal: AbortSignal) => Promise<T>): Promise<T | SessionError> {
+  function enqueue<T extends OpResult>(s: S, isCommit: boolean, run: (signal: AbortSignal) => Promise<T>): Promise<T | SessionError> {
     return new Promise<T | SessionError>((resolve) => {
       const op: QueuedOp = {
         run,
@@ -443,7 +477,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
   }
 
   // Common gate for preview / call / a new commit.
-  function liveSession(sessionId: string): Session | SessionError {
+  function liveSession(sessionId: string): S | SessionError {
     const s = live.get(sessionId);
     if (!s) return ended.has(sessionId) ? SESSION_ENDED : UNKNOWN_SESSION;
     if (s.ending) return SESSION_ENDED;
@@ -453,7 +487,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
 
   // --- end ------------------------------------------------------------------
 
-  function endSession(s: Session, reason: EndReason): Promise<EndResult> {
+  function endSession(s: S, reason: EndReason): Promise<EndResult> {
     if (s.ending) return s.ending;
     s.info.state = 'ending';
     changed();
@@ -541,16 +575,16 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
   async function openSession(req: OpenRequest): Promise<OpenResult> {
     if (typeof req.artifactId !== 'string' || req.artifactId === '') return { ok: false, error: 'invalid-request', detail: 'artifactId is required' };
     const backend = opts.backends[req.kind];
-    const leases = opts.leases[req.kind] as LeaseRegistry | undefined;
+    const leases = opts.leases[req.kind];
     if (!backend || !leases) return { ok: false, error: 'unknown-kind' };
     const callerGone = (): boolean => req.signal?.aborted === true;
     if (callerGone()) return OPEN_CANCELLED;
     const sessionId = newId();
-    let lease: Lease;
+    let lease: L;
     try {
       lease = await leases.acquire(leaseKey(req.kind, req.artifactId), 'turn', { owner: sessionId, timeoutMs: openLeaseTimeoutMs });
     } catch (e) {
-      if (isLeaseTimeout(e)) return callerGone() ? OPEN_CANCELLED : { ok: false, error: 'artifact-busy' };
+      if (acquireTimedOut(e)) return callerGone() ? OPEN_CANCELLED : { ok: false, error: 'artifact-busy' };
       throw e;
     }
     // The caller went away while we waited: nobody would own the session.
@@ -592,7 +626,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
       return { ok: false, error: 'begin-failed', detail: e instanceof Error ? e.message : String(e) };
     }
     offEarlyAbort();
-    const s: Session = {
+    const s: S = {
       info: {
         sessionId, kind: req.kind, artifactId: req.artifactId, agent: req.agent, intent: req.intent,
         revision: 0, committedRevision: 0, lastVersionId: null, state: 'open', commitPending: false,
@@ -680,7 +714,7 @@ export function createSessionRegistry(opts: SessionRegistryOptions): SessionRegi
       // Committed: recorded whatever happens to the session next.
       s.info.committedRevision = req.revision;
       s.info.lastVersionId = out.versionId;
-      return { ok: true, versionId: out.versionId, revision: req.revision };
+      return { ok: true, versionId: out.versionId, revision: req.revision, ...(out.notes?.length ? { notes: out.notes } : {}) };
     }).then((result) => {
       s.info.commitPending = false;
       changed();

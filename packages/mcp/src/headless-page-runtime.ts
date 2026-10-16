@@ -37,7 +37,7 @@ export interface PageRuntimeConfig {
 /** The control object the driver calls into, by Runtime.evaluate / callFunctionOn. */
 export interface PageRuntimeControl {
   defineHandler(ruleKey: string, name: string, fn: unknown): string;
-  apply(patchId: string, rule: Rule, ruleKey: string, bundleHash: string | null): boolean;
+  apply(patchId: string, rule: Rule, ruleKey: string, bundleHash: string | null, applyId?: string | null): boolean;
   remove(ruleKey: string): boolean;
   resolve(id: number, value: unknown): boolean;
   /** Rejects a pending api call: the driver's store failed. */
@@ -125,11 +125,15 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', fn, { once: true });
     else fn();
   };
-  const makeApi = (patchId: string, ruleKey: string): Core.CoreApi & Record<string, unknown> => {
+  const makeApi = (patchId: string, ruleKey: string, applyId: string | null): Core.CoreApi & Record<string, unknown> => {
+    // Every event the preview reports carries the version tag it was applied
+    // with (PreviewRule.applyId), so the session can drop a late one from a
+    // version it has since replaced.
+    const tag = applyId ? { applyId } : {};
     // D15: every unsupported member records an event, including a read of
     // an absent one, so the session can mark the rule `partial`.
     const unsupported = (member: string): void => {
-      emit('unsupported-api', { specId: ruleKey, member, path: location.pathname });
+      emit('unsupported-api', { specId: ruleKey, member, path: location.pathname, ...tag });
     };
     const refusal = (member: string) => (): Promise<{ ok: false; error: string }> => {
       unsupported(member);
@@ -175,7 +179,7 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
       reportEvent(kind: string, payload?: Record<string, unknown>) {
         // Every engine event carries the page's path, as the browser's
         // page-preload stamps it.
-        emit(kind, { ...(payload || {}), path: location.pathname });
+        emit(kind, { ...(payload || {}), path: location.pathname, ...tag });
       },
       onReady,
     };
@@ -211,7 +215,7 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
       handlers[name] = fn as HandlerFn;
       return name;
     },
-    apply(patchId, rule, ruleKey, bundleHash) {
+    apply(patchId, rule, ruleKey, bundleHash, applyId) {
       remove(ruleKey);
       const handlers = compiled.get(ruleKey);
       compiled.delete(ruleKey);
@@ -219,7 +223,7 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
         // One stub control per preview (the browser runs every preview on one
         // stub): its api is per preview, so storage keys by the preview's
         // shim and an unsupported-api event names the preview.
-        const previewControl = ShimCore.run({ spec: { id: ruleKey, rules: [] } }, makeApi(patchId, ruleKey));
+        const previewControl = ShimCore.run({ spec: { id: ruleKey, rules: [] } }, makeApi(patchId, ruleKey, typeof applyId === 'string' && applyId ? applyId : null));
         previews.set(ruleKey, previewControl);
         const deploy = typeof bundleHash === 'string' ? { bundleHash, current: deployId } : undefined;
         previewControl.applyExtraRule(rule, ruleKey, ruleKey, handlers, deploy);

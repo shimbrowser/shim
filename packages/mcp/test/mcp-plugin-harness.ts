@@ -50,13 +50,15 @@ const mcp = JSON.parse(read('.mcp.json')) as { mcpServers?: Record<string, { com
 const server = mcp.mcpServers?.shim;
 check('one server, named shim, run with node', !!server && server.command === 'node' && Object.keys(mcp.mcpServers ?? {}).length === 1);
 // The build script is plain CommonJS beside the package; required by computed path.
-const build = require(path.join(ROOT, 'scripts', 'build.js')) as { OUT_FILE: string };
+const build = require(path.join(ROOT, 'scripts', 'build.js')) as { OUT_FILE: string; CLI_OUT_FILE: string };
 const built = path.relative(ROOT, build.OUT_FILE).split(path.sep).join('/');
 check('it starts exactly the file the build writes', server?.args?.[0] === `\${CLAUDE_PLUGIN_ROOT}/${built}`, `${server?.args?.[0] ?? ''} vs ${built}`);
 const files = pkg.files as string[];
 check('the package ships the plugin, its config, the skills and the bundle',
   ['dist', '.claude-plugin', '.mcp.json', 'skills'].every((f) => files.includes(f)), files.join(','));
 check('the bin is the bundle', (pkg.bin as Rec)['shim-mcp'] === `./${built}`);
+const builtCli = path.relative(ROOT, build.CLI_OUT_FILE).split(path.sep).join('/');
+check('the shim bin is the CLI bundle', (pkg.bin as Rec).shim === `./${builtCli}`, String((pkg.bin as Rec).shim));
 
 console.log('the guide:');
 // Normalized: a Windows checkout (core.autocrlf) has CRLF line endings.

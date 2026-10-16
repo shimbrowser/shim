@@ -56,10 +56,10 @@ check('encoding is deterministic', JSON.stringify(encodeWorkingCopy(folder)) ===
 check('an empty folder encodes', encodeWorkingCopy({}).files.length === 0 && Object.keys(decodeWorkingCopy(encodeWorkingCopy({}))).length === 0);
 
 console.log('paths:');
-for (const bad of ['', '/etc/passwd', 'C:/x', '..', '../x', 'a/../b', 'a//b', './a', 'a/.', 'a\\b', 'a\0b', '__proto__', 'x/__proto__/y', 'a'.repeat(600)]) {
+for (const bad of ['', '/etc/passwd', 'C:/x', '..', '../x', 'a/../b', 'a//b', './a', 'a/.', 'a\\b', 'a\0b', '__proto__', 'x/__proto__/y', 'a'.repeat(1025)]) {
   check(`refuses ${JSON.stringify(bad.length > 40 ? bad.slice(0, 20) + '…' : bad)}`, workingCopyPathProblem(bad) !== null);
 }
-for (const good of ['shim.json', 'handlers/notes.js', '.shim-state.json', 'a/b/c.txt', 'name with spaces.js']) {
+for (const good of ['shim.json', 'handlers/notes.js', '.shim-state.json', 'a/b/c.txt', 'name with spaces.js', `${'d/'.repeat(200)}${'a'.repeat(620)}`]) {
   check(`accepts ${JSON.stringify(good)}`, workingCopyPathProblem(good) === null);
 }
 

@@ -1,9 +1,9 @@
-// Pure console buffer + formatters for the "console visibility during
-// authoring" feature (CLAUDE.md §16 companion — the read_console tool and
-// live rule-status feedback both build on this). No imports: this module is
-// consumed by both a later Electron `console-message` listener (main
-// process) and a bare-node harness, and staying import-free keeps it trivial
-// to unit test and impossible to accidentally couple to Electron/DOM types.
+// Pure console buffer + formatters for console visibility during authoring
+// (the read_console tool and the console block in every preview's evidence,
+// shim-core design D11). One implementation for every host: the Shim
+// browser's main process feeds it from Electron's console messages, the
+// headless driver (@shimbrowser/mcp) from CDP's. No imports, so it stays
+// trivial to unit test and can't couple to Electron or DOM types.
 
 export const RING_CAP = 200;
 export const MSG_CAP = 500;
@@ -29,9 +29,10 @@ export interface ConsoleFeed {
 
 // Same virtual-URL shape page-preload.ts's PATCH_HANDLER_URL_RE matches
 // (committed handlers via compileBag's `filename:`, previews via the
-// //# sourceURL pragma). Duplicated here because this module is pure main-
-// side and page-preload is a preload; if the sourceURL shape ever changes,
-// change BOTH (cross-ref comment lives on both regexes).
+// //# sourceURL pragma; the headless driver compiles under the same one).
+// Duplicated here because this module is host-agnostic and page-preload is a
+// preload; if the sourceURL shape ever changes, change BOTH (cross-ref
+// comment lives on both regexes).
 const HANDLER_URL_RE = /shim:\/\/patches\/(?:[^/\s]+)\/handlers\/([^/.\s]+)/;
 
 export function tagFor(source: string, message: string): string {

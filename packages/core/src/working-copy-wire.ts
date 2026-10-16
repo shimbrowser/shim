@@ -58,7 +58,9 @@ export class WorkingCopyWireError extends Error {
   }
 }
 
-const MAX_PATH_LENGTH = 512;
+// A composition's own path bound (compositions/authoring/file-model.ts'
+// MAX_COMPOSITION_PATH_CHARS): every path it can hold must cross the wire.
+const MAX_PATH_LENGTH = 1024;
 
 /** Why a folder-relative path is unsafe, or null when it is fine. */
 export function workingCopyPathProblem(path: string): string | null {

@@ -17,13 +17,22 @@
 //     when no engine world exists, and a failing store rejects the page's
 //     call instead of answering undefined;
 //   - load failures map to Chromium's net error codes;
-//   - the engine bundle the driver injects is the built page bundle.
+//   - the engine bundle the driver injects is the built page bundle;
+//   - Playwright is found from the caller's install (SHIM_PLAYWRIGHT_DIR,
+//     the working directory, CLAUDE_PROJECT_DIR, a global install, then
+//     `npm root -g`), not only beside the bundle; a miss is
+//     playwright-missing with the exact install command, a never-downloaded
+//     Chromium is chromium-missing with the command for the Playwright found,
+//     and missing Linux libraries are system-deps-missing (install-deps).
 //
 // The driver itself runs against a real Chromium in
 // playwright-conformance-harness.ts (its own CI job).
 //
 //   node out/packages/mcp/test/headless-host-harness.js
 
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import vm from 'vm';
 import { BUILTIN_KINDS } from '@shimbrowser/core/spec-lint';
 import { coveredCapabilities } from '@shimbrowser/core/page-host-conformance';
@@ -34,7 +43,10 @@ import {
 import type { HeadlessStorage } from '../src/playwright-page-host';
 import { pageRuntimeSource } from '../src/headless-page-runtime';
 import type { PageRuntimeControl } from '../src/headless-page-runtime';
-import { PLAYWRIGHT_MISSING } from '../src/playwright-launch';
+import {
+  PLAYWRIGHT_INSTALL_COMMAND, PLAYWRIGHT_MISSING, HeadlessUnavailableError, chromiumInstallCommand, globalPrefixDirs,
+  headlessReadiness, launchFailure, loadPlaywright, locatePlaywright, playwrightSearchDirs, systemDepsInstallCommand, type RequireFrom,
+} from '../src/playwright-launch';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string): void {
@@ -91,7 +103,11 @@ const tick = (ms = 20): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // The page runtime over a stand-in engine: just enough ShimCore to boot, with
 // the api a preview gets captured from run(). `send` is the binding.
-interface PreviewApi { storage: { set(k: string, v: unknown): Promise<unknown>; get(k: string): Promise<unknown> } }
+interface PreviewApi {
+  storage: { set(k: string, v: unknown): Promise<unknown>; get(k: string): Promise<unknown> };
+  reportEvent(kind: string, payload?: Record<string, unknown>): void;
+  db?: unknown;
+}
 function bootRuntime(send: (payload: string) => void): { control: PageRuntimeControl | undefined; captured: { api: PreviewApi | null } } {
   const captured: { api: PreviewApi | null } = { api: null };
   const sandbox: Record<string, unknown> = {
@@ -129,8 +145,8 @@ async function main(): Promise<void> {
     }
     const builtin = new Set<string>(BUILTIN_KINDS);
     check('every advertised kind is a built-in kind', HEADLESS_CAPABILITIES.mutationKinds.every((k) => builtin.has(k)));
-    check('no iframe rules, no host api members, no component identity, no engine inspection',
-      !HEADLESS_CAPABILITIES.iframeRules && HEADLESS_CAPABILITIES.apiMembers.length === 0
+    check('no iframe rules, no spec css, no host api members, no component identity, no engine inspection',
+      !HEADLESS_CAPABILITIES.iframeRules && !HEADLESS_CAPABILITIES.specCss && HEADLESS_CAPABILITIES.apiMembers.length === 0
       && !HEADLESS_CAPABILITIES.componentIdentity && !HEADLESS_CAPABILITIES.engineInspection);
     check('the capability object is frozen', Object.isFrozen(HEADLESS_CAPABILITIES) && Object.isFrozen(HEADLESS_CAPABILITIES.mutationKinds));
     const covered = coveredCapabilities() as Set<string>;
@@ -226,6 +242,28 @@ async function main(): Promise<void> {
         const refusedIds = [Number(readCall?.id) + 1, Number(readCall?.id) + 2];
         check('…nor left a pending entry behind', refusedIds.every((id) => !control.resolve(id, 'late')));
       }
+      // A preview's events carry the version tag it was applied with, so the
+      // session can drop a late one from a version it replaced.
+      const eventsOf = (key: string): Array<Record<string, unknown>> => {
+        const out: Array<Record<string, unknown>> = [];
+        for (const m of posted) {
+          if (m.type !== 'event' || typeof m.payload !== 'object' || m.payload === null) continue;
+          const event: Record<string, unknown> = { ...(m.payload as Record<string, unknown>), kind: m.kind };
+          if (event.specId === key) out.push(event);
+        }
+        return out;
+      };
+      const untaggedApi = captured.api;
+      control.apply('shim-a', { id: 'r', anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] }, 'rk2', null, 'sess:7');
+      const tagged = captured.api;
+      tagged?.reportEvent('rule-witness', { specId: 'rk2', ruleId: 'r', witness: { v: 1 } });
+      void tagged?.db;
+      const stamped = eventsOf('rk2');
+      check('an engine event and an unsupported-api event both carry the preview\'s applyId', stamped.length === 2
+        && stamped.every((e) => e.applyId === 'sess:7') && stamped.some((e) => e.kind === 'unsupported-api'), JSON.stringify(stamped));
+      untaggedApi?.reportEvent('rule-status', { specId: 'rk' });
+      const untagged = eventsOf('rk');
+      check('…and a preview applied without one carries none', untagged.length > 0 && untagged.every((e) => !('applyId' in e)), JSON.stringify(untagged));
     }
   }
 
@@ -280,6 +318,15 @@ async function main(): Promise<void> {
   }
 
   console.log('driver over a scripted CDP session');
+  {
+    const { page, cdp } = fakePage(true);
+    const host = await attachPlaywrightPageHost(page, { engineBundle: '' });
+    host.applyPreview({ patchId: 'p', ruleKey: 'preview:p:r', applyId: 'sess:3', rule: { id: 'r', anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] } });
+    await tick();
+    const applyExpr = cdp.sends.map((x) => String(x.params.expression ?? '')).find((e) => e.includes('.apply("p"')) ?? '';
+    check('the driver hands the preview\'s applyId to the page runtime', applyExpr.endsWith(', null, "sess:3")'), applyExpr);
+    await host.detach();
+  }
   {
     // Previews queued while no engine world exists: detach must not wait out
     // each one's world wait in turn.
@@ -399,7 +446,93 @@ async function main(): Promise<void> {
   }
 
   console.log('launch');
-  check('a missing Playwright install has an actionable message', /npm install playwright/.test(PLAYWRIGHT_MISSING) && /playwright install chromium/.test(PLAYWRIGHT_MISSING));
+  check('a missing Playwright install has an actionable message', PLAYWRIGHT_MISSING.includes(PLAYWRIGHT_INSTALL_COMMAND)
+    && /npm install -D playwright/.test(PLAYWRIGHT_MISSING) && /does not bundle/.test(PLAYWRIGHT_MISSING));
+  check('the install command is global, then its own Chromium', PLAYWRIGHT_INSTALL_COMMAND === 'npm install -g playwright && playwright install chromium');
+  {
+    const missing = launchFailure(new Error("browserType.launch: Executable doesn't exist at /x/chrome-headless-shell\nLooks like Playwright was just installed"), '/pw/node_modules/playwright');
+    check('a never-downloaded Chromium is chromium-missing', missing instanceof HeadlessUnavailableError && missing.code === 'chromium-missing', missing.message);
+    check('…with the found Playwright\'s own CLI (versions match)', missing instanceof HeadlessUnavailableError
+      && missing.install === `node "${path.join('/pw/node_modules/playwright', 'cli.js')}" install chromium` && missing.message.includes(missing.install));
+    const depsMessage = 'browserType.launch: \n' +
+      '╔══════════════════════════════════════════════════════╗\n' +
+      '║ Host system is missing dependencies to run browsers. ║\n' +
+      '║ Please install them with the following command:      ║\n' +
+      '║     sudo npx playwright install-deps                 ║\n' +
+      '║ Alternatively, use apt:                              ║\n' +
+      '║     sudo apt-get install libnss3 libatk1.0-0         ║\n' +
+      '╚══════════════════════════════════════════════════════╝';
+    const deps = launchFailure(new Error(depsMessage), '/pw/node_modules/playwright');
+    check('missing Linux libraries are system-deps-missing, not chromium-missing', deps instanceof HeadlessUnavailableError && deps.code === 'system-deps-missing', deps.message);
+    check('…with install-deps from the found Playwright\'s CLI', deps instanceof HeadlessUnavailableError
+      && deps.install === `node "${path.join('/pw/node_modules/playwright', 'cli.js')}" install-deps chromium` && deps.message.includes(deps.install));
+    check('…and npx install-deps without a package folder', systemDepsInstallCommand(null) === 'npx playwright install-deps chromium');
+    const download = launchFailure(new Error("browserType.launch: Executable doesn't exist at /x\nPlease run the following command to download new browsers:\n    npx playwright install"), null);
+    check('a download hint alone still reads as chromium-missing', download instanceof HeadlessUnavailableError && download.code === 'chromium-missing', download.message);
+    const other = launchFailure(new Error('spawn EACCES'), null);
+    check('any other launch failure stays an error, never a misleading install hint', !(other instanceof HeadlessUnavailableError) && /spawn EACCES/.test(other.message));
+    check('without a package folder the command is npx', chromiumInstallCommand(null) === 'npx playwright install chromium');
+    const real = path.dirname(require.resolve('playwright/package.json'));
+    check('Playwright ships cli.js at its package root (what chromiumInstallCommand runs)', fs.existsSync(path.join(real, 'cli.js')));
+  }
+
+  console.log('finding Playwright');
+  {
+    const dirs = playwrightSearchDirs({ SHIM_PLAYWRIGHT_DIR: '/pw', CLAUDE_PROJECT_DIR: '/proj' }, '/cwd');
+    check('the search order is explicit dir, own resolution, cwd, project dir', JSON.stringify(dirs) === '["/pw",null,"/cwd","/proj"]', JSON.stringify(dirs));
+    check('duplicates are searched once', JSON.stringify(playwrightSearchDirs({ CLAUDE_PROJECT_DIR: '/cwd/' }, '/cwd')) === '[null,"/cwd"]');
+    check('a global install is searched after the project', JSON.stringify(playwrightSearchDirs({ CLAUDE_PROJECT_DIR: '/proj' }, '/cwd', ['/g/lib']))
+      === '[null,"/cwd","/proj","/g/lib"]');
+    check('global prefix on POSIX: <node prefix>/lib', JSON.stringify(globalPrefixDirs({}, '/home/u/.nvm/versions/node/v22/bin/node', 'linux'))
+      === '["/home/u/.nvm/versions/node/v22/lib"]');
+    check('npm\'s configured prefix first', JSON.stringify(globalPrefixDirs({ npm_config_prefix: '/opt/npm' }, '/usr/bin/node', 'darwin'))
+      === '["/opt/npm/lib","/usr/lib"]');
+    check('global prefix on Windows: the node folder itself', JSON.stringify(globalPrefixDirs({}, 'C:\\Program Files\\nodejs\\node.exe', 'win32'))
+      === JSON.stringify(['C:\\Program Files\\nodejs']));
+    // The plugin case: the bundle's own require can't see the project.
+    const tried: Array<string | null> = [];
+    const fake: RequireFrom = (dir) => (id) => {
+      tried.push(dir);
+      if (dir === '/proj' && id === 'playwright') return { chromium: 'from-project' };
+      throw new Error(`Cannot find module '${id}'`);
+    };
+    let npmAsked = 0;
+    const npmRoot = (): string | null => { npmAsked += 1; return null; };
+    const found = loadPlaywright({ env: { CLAUDE_PROJECT_DIR: '/proj' }, cwd: '/cwd', requireFrom: fake, globalDirs: [], npmGlobalDir: npmRoot }) as unknown as { chromium: string };
+    check('an install only the project has is found', found.chromium === 'from-project' && JSON.stringify(tried) === '[null,"/cwd","/proj"]', JSON.stringify(tried));
+    check('npm is not asked when a cheaper place has it', npmAsked === 0);
+    let missing: unknown = null;
+    try { loadPlaywright({ env: {}, cwd: '/cwd', requireFrom: fake, globalDirs: ['/g/lib'], npmGlobalDir: npmRoot }); } catch (e) { missing = e; }
+    check('nowhere at all is PLAYWRIGHT_MISSING, as playwright-missing with the install command', missing instanceof HeadlessUnavailableError
+      && missing.message === PLAYWRIGHT_MISSING && missing.code === 'playwright-missing' && missing.install === PLAYWRIGHT_INSTALL_COMMAND);
+    check('…after asking npm once, last', npmAsked === 1);
+    tried.length = 0;
+    const globalFake: RequireFrom = (dir) => (id) => {
+      tried.push(dir);
+      if (dir === '/npm/global' && id === 'playwright') return { chromium: 'from-npm-root' };
+      throw new Error(`Cannot find module '${id}'`);
+    };
+    const fromNpm = loadPlaywright({ env: {}, cwd: '/cwd', requireFrom: globalFake, globalDirs: ['/g/lib'], npmGlobalDir: () => '/npm/global' }) as unknown as { chromium: string };
+    check('`npm root -g` finds a global install the prefix guess missed', fromNpm.chromium === 'from-npm-root' && JSON.stringify(tried) === '[null,"/cwd","/g/lib","/npm/global"]', JSON.stringify(tried));
+    const notReady = headlessReadiness(() => { throw new HeadlessUnavailableError('playwright-missing', PLAYWRIGHT_MISSING, PLAYWRIGHT_INSTALL_COMMAND); });
+    check('readiness without Playwright: unavailable, why, and the command', !notReady.available && notReady.error === 'playwright-missing'
+      && notReady.install === PLAYWRIGHT_INSTALL_COMMAND && notReady.reason === PLAYWRIGHT_MISSING);
+    const ready = headlessReadiness(() => ({ module: {} as never, packageDir: '/pw' }));
+    check('readiness with Playwright names where it was found', ready.available && ready.playwright === '/pw');
+    // The real resolver, from a folder outside this repo.
+    const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-pw-'));
+    try {
+      const pkg = path.join(proj, 'node_modules', 'playwright');
+      fs.mkdirSync(pkg, { recursive: true });
+      fs.writeFileSync(path.join(pkg, 'package.json'), '{"name":"playwright","main":"index.js"}');
+      fs.writeFileSync(path.join(pkg, 'index.js'), 'module.exports = { stub: true };');
+      const real = locatePlaywright({ env: { SHIM_PLAYWRIGHT_DIR: proj }, cwd: proj });
+      check('SHIM_PLAYWRIGHT_DIR resolves from that folder\'s node_modules', (real.module as unknown as { stub?: boolean }).stub === true);
+      check('…and says where the package is', real.packageDir !== null && fs.realpathSync(real.packageDir) === fs.realpathSync(pkg), String(real.packageDir));
+    } finally {
+      fs.rmSync(proj, { recursive: true, force: true });
+    }
+  }
 
   if (failures) {
     console.error(`\n✗ headless-host: ${failures} check(s) failed`);

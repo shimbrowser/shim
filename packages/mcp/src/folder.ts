@@ -25,6 +25,10 @@
 //     because the folder IS the composition: a re-checkout removes every
 //     visible file the composition no longer has. A folder that merely holds
 //     a manifest.json (a web app, an extension) is never treated as one.
+//     Where the composition now has a file and the folder holds a folder,
+//     that folder goes too when the removals empty it; when it holds
+//     anything the checkout wouldn't remove (hidden content no checkout
+//     wrote, a symlink), the checkout is refused before anything changes.
 //   - Every path written is checked against the folder root, and no
 //     existing file or folder below the root on the way to it may be a
 //     symlink (a crafted or stale folder could otherwise redirect a write
@@ -290,6 +294,41 @@ function isRegularFile(abs: string): boolean {
   }
 }
 
+// A folder standing where a composition checkout needs a file: the folders
+// to remove (deepest first) once the checkout's removals have emptied them,
+// or the first entry under it that would stay. Removable is exactly what the
+// removal step deletes: a regular file the composition no longer has that is
+// visible or that an earlier checkout wrote. Anything else — a hidden file no
+// checkout wrote, a symlink, a file the composition still has — stays.
+function emptiedFolders(abs: string, rel: string, files: FolderInput, previousHidden: ReadonlySet<string>): { folders: string[] } | { stays: string } {
+  const folders: string[] = [];
+  const walk = (dirAbs: string, dirRel: string): string | null => {
+    for (const entry of fs.readdirSync(dirAbs, { withFileTypes: true })) {
+      const childAbs = path.join(dirAbs, entry.name);
+      const childRel = `${dirRel}/${entry.name}`;
+      if (entry.isDirectory()) {
+        const stays = walk(childAbs, childRel);
+        if (stays !== null) return stays;
+        continue;
+      }
+      const removable = entry.isFile() && !(childRel in files) && (!hasHiddenSegment(childRel) || previousHidden.has(childRel));
+      if (!removable) return childRel;
+    }
+    folders.push(dirAbs);
+    return null;
+  };
+  const stays = walk(abs, rel);
+  return stays === null ? { folders } : { stays };
+}
+
+function isFolder(abs: string): boolean {
+  try {
+    return fs.lstatSync(abs).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** Writes a composition checkout (manifest.json + its files) into `dir`. */
 export function writeCompositionCheckout(dir: string, files: FolderInput): CheckoutWrite {
   const root = path.resolve(dir);
@@ -320,6 +359,19 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
         'ask the user to rename or remove it in Shim, then check out again',
     );
   }
+  // Paths are distinct in the composition but may not be on disk: macOS and
+  // Windows fold case (and macOS Unicode normalization), so "A.js" and
+  // "a.js" — or a folder "Lib/" next to "lib/" — would land on one entry, and
+  // reading the checkout back would lose one as a deleted file. Refuse before
+  // touching the disk.
+  const collision = foldCollision(Object.keys(files));
+  if (collision) {
+    throw new FolderError(
+      'unsafe-path',
+      `the composition holds "${collision[0]}" and "${collision[1]}", which name the same file or folder on a disk that ignores case — ` +
+        'ask the user to rename one in Shim, then check out again',
+    );
+  }
   const targets = Object.keys(files).sort().map((rel) => [rel, resolveInside(root, rel)] as const);
   // The composition's own hidden files.
   const hidden = Object.keys(files).filter(hasHiddenSegment).sort();
@@ -340,6 +392,24 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
         'check out into an empty folder',
     );
   }
+  // A file the composition has where the folder holds a folder (an earlier
+  // checkout's app.js/util.js, now a top-level app.js): the rename can't
+  // replace a folder, so it must be gone first. Decided before any removal,
+  // so a folder that would keep something refuses the checkout with the
+  // earlier one intact rather than half-deleted.
+  const emptied: string[] = [];
+  for (const [rel, abs] of targets) {
+    if (!isFolder(abs)) continue;
+    const plan = emptiedFolders(abs, rel, files, previousHidden);
+    if ('stays' in plan) {
+      throw new FolderError(
+        'not-a-working-copy',
+        `the composition has a file "${rel}" where ${root} holds a folder, and that folder still holds "${plan.stays}", which no earlier checkout wrote — ` +
+          'move it out of the way, or check out into an empty folder',
+      );
+    }
+    emptied.push(...plan.folders);
+  }
   fs.mkdirSync(root, { recursive: true });
   // The folder is the composition: what it no longer has goes — visible
   // files, and hidden ones an earlier checkout wrote.
@@ -351,6 +421,8 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
     fs.unlinkSync(abs);
     removed.push(rel);
   }
+  // …then the folders that stood where a file goes, now empty.
+  for (const abs of emptied) fs.rmdirSync(abs);
   const written: string[] = [];
   for (const [rel, abs] of targets) {
     const content = files[rel];
@@ -363,14 +435,54 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
   return { dir: root, written, removed };
 }
 
-/** Which kind of working copy a checkout's files are. */
-export function checkoutKind(files: FolderInput): WorkingCopyKind {
-  return SHIM_JSON in files ? 'shim' : 'composition';
+/**
+ * Two of `paths` (or a folder along them, or the checkout marker) that a
+ * case- and normalization-insensitive disk would treat as one entry; null
+ * when there are none.
+ */
+export function foldCollision(paths: readonly string[]): [string, string] | null {
+  const fold = (p: string): string => p.normalize('NFC').toLowerCase();
+  // Every entry the checkout makes, by folded name: a file (each path, and
+  // the marker) or a folder (each path's parent folders). Two spellings of
+  // one entry collide, and so does a file and a folder of one name, however
+  // spelled.
+  const entries = new Map<string, { name: string; file: boolean }>([[fold(COMPOSITION_MARKER), { name: COMPOSITION_MARKER, file: true }]]);
+  const add = (name: string, file: boolean): [string, string] | null => {
+    const key = fold(name);
+    const other = entries.get(key);
+    if (other === undefined) { entries.set(key, { name, file }); return null; }
+    if (other.name !== name || other.file || file) return [other.name, name];
+    return null;
+  };
+  for (const rel of [...paths].sort()) {
+    const segments = rel.split('/');
+    for (let i = 1; i < segments.length; i++) {
+      const hit = add(segments.slice(0, i).join('/'), false);
+      if (hit) return hit;
+    }
+    const hit = add(rel, true);
+    if (hit) return hit;
+  }
+  return null;
 }
 
-/** Which kind of working copy a folder on disk holds (null: neither). */
+/**
+ * Which kind of working copy a checkout's files are. A composition always
+ * carries manifest.json and a shim checkout never does, while a composition
+ * may hold a file of its own named shim.json — so the manifest decides.
+ */
+export function checkoutKind(files: FolderInput): WorkingCopyKind {
+  return MANIFEST_JSON in files ? 'composition' : 'shim';
+}
+
+/**
+ * Which kind of working copy a folder on disk holds (null: neither). The
+ * composition marker comes first: a composition checkout may hold its own
+ * shim.json.
+ */
 export function folderKind(dir: string): WorkingCopyKind | null {
+  if (fs.existsSync(path.join(dir, COMPOSITION_MARKER))) return 'composition';
   if (fs.existsSync(path.join(dir, SHIM_JSON))) return 'shim';
-  if (fs.existsSync(path.join(dir, COMPOSITION_MARKER)) || fs.existsSync(path.join(dir, MANIFEST_JSON))) return 'composition';
+  if (fs.existsSync(path.join(dir, MANIFEST_JSON))) return 'composition';
   return null;
 }
