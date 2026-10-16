@@ -201,19 +201,27 @@ export function scanRuleHandlers(
   return findings;
 }
 
-/** A rule's verification level on a host (D15): `full` only when every signal in its witness was checked there. */
-export type VerificationLevel = 'full' | 'partial';
+/**
+ * A rule's verification level on a host (D15): `full` only when every signal in
+ * its witness was checked there, `partial` when something couldn't be, and
+ * `none` when the rule matched nothing (it is in the preview's `noMatch[]`), so
+ * there was nothing to verify. It never says the rule looks right.
+ */
+export type VerificationLevel = 'full' | 'partial' | 'none';
 
 /**
- * `partial` when the host could not check something: the witness carries
- * component identity and the host has none, or a handler used an api member
- * the host lacks (an `unsupported-api` event fired for the rule).
+ * `none` when the rule matched nothing; otherwise `partial` when the host could
+ * not check something: the witness carries component identity and the host has
+ * none, or a handler used an api member the host lacks (an `unsupported-api`
+ * event fired for the rule).
  */
 export function verificationLevel(
   witness: Witness | undefined,
   capabilities: PageHostCapabilities,
   unsupportedApiFired: boolean,
+  matchedNothing = false,
 ): VerificationLevel {
+  if (matchedNothing) return 'none';
   if (unsupportedApiFired) return 'partial';
   if (!capabilities.componentIdentity && witness?.component !== undefined) return 'partial';
   return 'full';
