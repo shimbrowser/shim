@@ -36,7 +36,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type { PageHost, PreviewRule, PageRuntimeEvent, PageConsoleMessage, PageLoadOutcome } from '@shimbrowser/core/page-host';
 import { runShimCli, USAGE, EXIT_OK, EXIT_PROBLEM, EXIT_USAGE, type ShimCliContext } from '../src/shim-cli';
-import type { PreviewPage } from '../src/cli-commands';
+import { shellQuote, type PreviewPage } from '../src/cli-commands';
 import type { LaunchOutcome } from '../src/launch';
 import { HEADLESS_CAPABILITIES, type HeadlessStorage } from '../src/playwright-page-host';
 import { stableStringify } from '@shimbrowser/core/shim-folder';
@@ -272,6 +272,31 @@ async function main(): Promise<void> {
     fs.writeFileSync(pack, json({ format: 'shim-pack/1', name: 'p', shims: [] }));
     check('unpack refuses another .shim format', (await cli(r, 'unpack', pack, '-o', path.join(tmp, 'pack-out'))) === EXIT_PROBLEM
       && /shim-pack\/1/.test(r.err.join('\n')));
+    // The wrong input for the command: each refusal names the command that takes it.
+    const unpackedSpec = path.join(unpacked, 'shim.json');
+    check('unpack of a folder\'s shim.json suggests pack on its folder', (await cli(r, 'unpack', unpackedSpec, '-o', path.join(tmp, 'spec-out'))) === EXIT_USAGE
+      && /shim folder's shim\.json/.test(r.err[0] ?? '') && (r.err[0] ?? '').includes(`shim pack ${unpacked}`)
+      && !fs.existsSync(path.join(tmp, 'spec-out')), r.err);
+    check('unpack of a folder suggests pack', (await cli(r, 'unpack', unpacked)) === EXIT_USAGE
+      && /is a folder; unpack takes a \.shim file/.test(r.err[0] ?? '') && (r.err[0] ?? '').includes(`shim pack ${unpacked}`), r.err);
+    check('pack of a .shim file suggests unpack', (await cli(r, 'pack', exportedFile)) === EXIT_USAGE
+      && (r.err[0] ?? '').includes(`shim unpack ${exportedFile}`), r.err);
+    check('pack of a folder\'s shim.json points at the folder', (await cli(r, 'pack', unpackedSpec)) === EXIT_USAGE
+      && (r.err[0] ?? '').includes(`pass the folder instead: ${unpacked}`), r.err);
+    check('lint of a folder\'s shim.json points at the folder', (await cli(r, 'lint', unpackedSpec)) === EXIT_USAGE
+      && (r.err[0] ?? '').includes(`shim lint ${unpacked}`), r.err);
+    // A path with spaces and a quote stays one shell word in the suggestion.
+    const oddDir = path.join(tmp, "Joel's shims");
+    fs.mkdirSync(oddDir);
+    const oddFile = path.join(oddDir, 'my shim.shim');
+    fs.copyFileSync(exportedFile, oddFile);
+    check('a suggested command quotes a path with spaces and a quote', (await cli(r, 'pack', oddFile)) === EXIT_USAGE
+      && (r.err[0] ?? '').includes(`shim unpack ${shellQuote(oddFile)}`) && shellQuote(oddFile).startsWith("'"), r.err);
+    check('shellQuote leaves a plain path bare and escapes a quote',
+      shellQuote('/tmp/a-b_c.shim') === '/tmp/a-b_c.shim' && shellQuote("/tmp/x'y z") === "'/tmp/x'\\''y z'");
+    check('unpack into an unrelated folder says why and suggests a subfolder', (await cli(r, 'unpack', exportedFile, '-o', busy)) === EXIT_USAGE
+      && /only writes into an empty folder or one it unpacked before/.test(r.err[0] ?? '')
+      && (r.err[0] ?? '').includes(`--out ${path.join(busy, 'exported')}`) && fs.readdirSync(busy).length === 1, r.err);
 
     const blocker = path.join(tmp, 'not-a-folder');
     fs.writeFileSync(blocker, 'a file');
