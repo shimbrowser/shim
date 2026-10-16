@@ -204,6 +204,26 @@ console.log('checkout:');
   }
 }
 
+console.log('composition checkout, paths a case-insensitive disk folds together:');
+{
+  // An earlier checkout, to prove a refused one leaves it untouched.
+  const dir = tmp();
+  writeCompositionCheckout(dir, { 'manifest.json': '{}', 'index.html': 'page', 'A.js': 'upper' });
+  const before = JSON.stringify(readWorkingCopy(dir));
+  throwsCode('two files differing only in case are refused', 'unsafe-path',
+    () => writeCompositionCheckout(dir, { 'manifest.json': '{}', 'A.js': 'upper', 'a.js': 'lower' }));
+  throwsCode('…and two folders differing only in case', 'unsafe-path',
+    () => writeCompositionCheckout(dir, { 'manifest.json': '{}', 'Lib/x.js': 'x', 'lib/y.js': 'y' }));
+  throwsCode('…and a file named like a folder in another case', 'unsafe-path',
+    () => writeCompositionCheckout(dir, { 'manifest.json': '{}', 'App': 'x', 'app/y.js': 'y' }));
+  throwsCode('…and a case variant of the checkout marker', 'unsafe-path',
+    () => writeCompositionCheckout(dir, { 'manifest.json': '{}', [COMPOSITION_MARKER.toUpperCase()]: 'x' }));
+  throwsCode('…and two Unicode normalizations of one name', 'unsafe-path',
+    () => writeCompositionCheckout(dir, { 'manifest.json': '{}', 'café.js': 'nfc', 'café.js': 'nfd' }));
+  check('a refused checkout leaves the earlier one as it was', JSON.stringify(readWorkingCopy(dir)) === before);
+  check('distinct names still check out', writeCompositionCheckout(tmp(), { 'manifest.json': '{}', 'a.js': 'x', 'ab.js': 'y', 'lib/a.js': 'z' }).written.length === 4);
+}
+
 console.log('composition re-checkout, folder → file:');
 {
   // An earlier checkout had app.js/util.js (and a hidden file it wrote under
