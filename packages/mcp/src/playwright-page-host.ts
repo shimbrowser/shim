@@ -404,8 +404,21 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
     return evaluateIn(code, contextId);
   }
 
-  async function compileHandler(contextId: number, ruleKey: string, name: string, source: string): Promise<void> {
+  async function compileHandler(contextId: number, patchId: string, ruleKey: string, name: string, source: string): Promise<void> {
     const objectGroup = `shim-compile-${ruleKey}`;
+    const rt = `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}]`;
+    // One instance per shim, name and source in the document, as the Shim
+    // browser keeps it: reuse it rather than evaluating the source (and a
+    // stored module's top-level code) again. A shared instance keeps the
+    // sourceURL of the rule that compiled it, so an async throw from it names
+    // that rule; the engine attributes a throw from the call itself by rule.
+    const shareKey = `${patchId}\u0000${name}\u0000${source}`;
+    const reused = await cdp.send('Runtime.evaluate', {
+      expression: `${rt}.defineShared(${JSON.stringify(ruleKey)}, ${JSON.stringify(name)}, ${JSON.stringify(shareKey)})`,
+      contextId,
+      returnByValue: true,
+    });
+    if (reused.result.value === true) return;
     try {
       const res = await cdp.send('Runtime.evaluate', { expression: handlerSource(source, ruleKey, name), contextId, objectGroup });
       if (res.exceptionDetails) {
@@ -422,9 +435,9 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
       const fnId = res.result.objectId;
       if (fnId) {
         await cdp.send('Runtime.callFunctionOn', {
-          functionDeclaration: `function (fn) { return globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].defineHandler(${JSON.stringify(ruleKey)}, ${JSON.stringify(name)}, fn); }`,
+          functionDeclaration: `function (fn, key) { ${rt}.shareHandler(key, fn); return ${rt}.defineHandler(${JSON.stringify(ruleKey)}, ${JSON.stringify(name)}, fn); }`,
           executionContextId: contextId,
-          arguments: [{ objectId: fnId }],
+          arguments: [{ objectId: fnId }, { value: shareKey }],
           returnByValue: true,
         });
       } else {
@@ -450,7 +463,7 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
     const { patchId, rule, ruleKey, bundleHash, applyId } = preview;
     for (const [name, source] of Object.entries(rule.handlers ?? {})) {
       if (typeof source !== 'string') continue;
-      await compileHandler(contextId, ruleKey, name, source);
+      await compileHandler(contextId, patchId, ruleKey, name, source);
     }
     await cdp.send('Runtime.evaluate', {
       expression: `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].apply(${JSON.stringify(patchId)}, ${JSON.stringify(rule)}, ${JSON.stringify(ruleKey)}, ${JSON.stringify(bundleHash ?? null)}, ${JSON.stringify(applyId ?? null)})`,

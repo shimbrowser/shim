@@ -49,7 +49,7 @@ import {
   checkoutShim, packShim, anchorDigest, referencedHandlerNames, nameMap, ShimFolderError,
   SHIM_STATE_FILE, SHIM_STATE_FORMAT, type ShimFile, type ShimState, type RuleState, type FolderInput,
 } from '@shimbrowser/core/shim-folder';
-import { moduleToExpression } from '@shimbrowser/core/handler-source';
+import { handlerWorlds, moduleToExpression } from '@shimbrowser/core/handler-source';
 import { diffWorkingCopy } from '@shimbrowser/core/working-copy-diff';
 import { decodeWorkingCopy, encodeWorkingCopy, WorkingCopyWireError } from '@shimbrowser/core/working-copy-wire';
 import {
@@ -246,12 +246,13 @@ export function newShimId(now: number = Date.now(), random: () => number = Math.
 /** A rule as the page needs it: its handler modules inlined as expressions. */
 function previewRule(rule: Rule, stored: Record<string, string>): Rule {
   const names = referencedHandlerNames(rule);
+  const worlds = handlerWorlds([rule]);
   const handlers: Record<string, string> = { ...(rule.handlers || {}) };
   for (const name of names) {
     const module = Object.hasOwn(stored, name) ? stored[name] : undefined;
     // Own properties only: a handler named `constructor` or `toString` must
     // not resolve through Object.prototype and skip its stored module.
-    if (!Object.hasOwn(handlers, name) && typeof module === 'string') handlers[name] = moduleToExpression(module);
+    if (!Object.hasOwn(handlers, name) && typeof module === 'string') handlers[name] = moduleToExpression(module, worlds.get(name) ?? 'isolated');
   }
   return Object.keys(handlers).length ? { ...rule, handlers } : { ...rule };
 }
