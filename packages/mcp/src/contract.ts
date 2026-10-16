@@ -55,17 +55,21 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
     name: 'shim_list_tabs',
     description:
       "List the Shim browser's open tabs per window: each tab's tabId (what shim_open_session targets), url, " +
-      'title, whether it is the active tab, and for a site tab the shims that run on its host (id and name), for ' +
-      'a composition tab its compositionId. Also lists every composition (id, name, mount).',
+      'title, whether it is the active tab, and for a site tab the shims that run on its host (id and name) and ' +
+      'connect ("asks": opening a session shows the user a card; "allowed": they allowed this site until Shim ' +
+      'quits, so none comes), for a composition tab its compositionId. Also lists every composition (id, name, ' +
+      'mount, connect).',
     input_schema: { type: 'object', properties: {} },
   },
   shim_open_session: {
     name: 'shim_open_session',
     description:
-      'Open an authoring session on one shim (against one of Shim\'s site tabs) or one composition. The user is ' +
-      'asked in Shim to allow it (up to two minutes); this call waits for the answer, and nothing shows here ' +
-      'meanwhile, so first tell the user to switch to Shim and allow the "coding agent wants to connect" card in ' +
-      'its sidebar. Name an existing shim with ' +
+      'Open an authoring session on one shim (against one of Shim\'s site tabs) or one composition. Unless the ' +
+      'user already allowed that site (or composition) until Shim quits — shim_list_tabs says connect: "allowed" — ' +
+      'they are asked in Shim to allow it (up to two minutes) and this call waits for the answer, so first tell the ' +
+      'user to switch to Shim and allow the "coding agent wants to connect" card in its sidebar; with connect: ' +
+      '"allowed" no card comes, so don\'t. The answer\'s consent says which happened ("asked" or "remembered"). ' +
+      'Name an existing shim with ' +
       'shimId, start a new one on the tab\'s site with newShimName, name a composition with compositionId, or ' +
       'start a new composition with newCompositionName (and optionally the mount you propose for its ' +
       'compose://<mount> address; the user can change it before allowing, and the answer says which they chose). ' +
