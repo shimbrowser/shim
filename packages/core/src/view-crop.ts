@@ -1,12 +1,12 @@
 // Pure crop-rect math for view_page's element-scoped screenshots (§16).
-// Separated from author-brokers.ts so the padding / minimum-size / viewport
-// clamping rules are bare-node testable (scripts/view-crop-harness.ts) —
-// the broker owns the Electron halves (executeJavaScript measurement,
-// capturePage) and delegates the geometry here.
+// Separate so the padding / minimum-size / viewport clamping rules are
+// bare-node testable (test/view-crop-harness.ts) — page-host-tools.ts
+// measures the element and captures through a PageHost, and delegates the
+// geometry here.
 
 // The element's measured viewport rect plus the viewport bounds, all CSS px
 // (what getBoundingClientRect + window.inner{Width,Height} report — the same
-// DIP space Electron's capturePage rect parameter expects).
+// space a PageHost screenshot clip takes).
 export interface CropMeasurement {
   x: number;
   y: number;
