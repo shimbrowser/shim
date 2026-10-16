@@ -23,6 +23,7 @@ import {
   injectReplaceRootRule, removeReplaceRootRule, injectRouteEnvRule, removeRouteEnvRule,
   tagReplaceRootAnchor, stripReplaceRootToken, tagMountedNode,
 } from './css-sheets';
+import { adoptIfRefused } from './style-mirror';
 import { normalizeOutputs, trimStackForEvent } from './engine-internal';
 import type { HandlerMap } from './engine-internal';
 import type { Rule, Spec } from './types';
@@ -207,6 +208,10 @@ export function routeRule(rule: Rule, spec: Spec, api: CoreApi, handlers: Handle
     shadow.appendChild(base);
     for (const n of outputs) shadow.appendChild(n);
     body.appendChild(host);
+    // Strict-CSP pages refuse the base <style>; refusal is only observable
+    // once connected, and the adopted fallback then travels with the shadow
+    // root across heal re-appends (style-mirror.ts).
+    adoptIfRefused(base);
     // Tab title: the hard-load shell has an empty <title> and on soft nav the
     // site's own title would linger. `mutation.title` declares the route's; the
     // previous value is restored on unmount either way (handlers that set

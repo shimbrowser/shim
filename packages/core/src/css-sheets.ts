@@ -4,7 +4,14 @@
 // DOM manipulation over fully-encapsulated module-level state (`tier1RuleNodes`,
 // `replaceRootRuleNodes`), so it has no dependency back on the engine core.
 // `firstGreaterIndex` is covered by scripts/css-priority-harness.
+//
+// Every write to an engine <style> is followed by a style-mirror sync: on a
+// page whose CSP refuses inline <style> (style-src without 'unsafe-inline')
+// the element's text is mirrored into an adopted constructable sheet, so the
+// text nodes here stay the single source of truth for order, update and
+// teardown (style-mirror.ts; scripts/strict-csp-css-harness).
 import type { Spec } from './types';
+import { syncStyleMirror, syncStyleOwner } from './style-mirror';
 
 // All shim CSS lives inside one named cascade layer, `shim`. This is what
 // makes "your local layer wins over the site" a guarantee rather than a
@@ -36,6 +43,7 @@ export function injectStyle(id: string, css: string): void {
   style.setAttribute('data-shim', id);
   style.textContent = css;
   (document.head || document.documentElement).appendChild(style);
+  syncStyleMirror(style);
 }
 
 // Tier-1 CSS built-ins (`hide`, `restyle`) target elements via a shared
@@ -80,6 +88,7 @@ export function injectTier1Rule(token: string, cssBody: string, priority = 0): v
   if (existing) {
     existing.node.nodeValue = text;
     existing.priority = priority;
+    syncStyleOwner(existing.node.parentNode);
     return;
   }
   const node = document.createTextNode(text);
@@ -97,6 +106,7 @@ export function injectTier1Rule(token: string, cssBody: string, priority = 0): v
   const idx = firstGreaterIndex(priorities, priority);
   sheet.insertBefore(node, children[idx] || null); // out-of-range → append
   tier1RuleNodes.set(token, { node, priority });
+  syncStyleMirror(sheet);
 }
 // First index whose value is strictly greater than `priority`, else the
 // array length (append). Pure — exported for scripts/css-priority-harness.js.
@@ -117,8 +127,10 @@ function nodeToEntry(node: Node): Tier1RuleEntry | null {
 export function removeTier1Rule(token: string): void {
   const entry = tier1RuleNodes.get(token);
   if (!entry) return;
+  const owner = entry.node.parentNode;
   entry.node.remove();
   tier1RuleNodes.delete(token);
+  syncStyleOwner(owner);
 }
 export function tagElement(el: Element, token: string): void {
   const current = el.getAttribute('data-shim-css') || '';
@@ -164,14 +176,18 @@ export function injectReplaceRootRule(token: string): void {
   // dispatch path) so the rule excludes them.
   const text = layered(`[data-shim-replace-root~="${token}"] > *:not([data-shim-mounted~="${token}"]) { display: none !important; }`);
   const node = document.createTextNode(text);
-  ensureReplaceRootSheet().appendChild(node);
+  const sheet = ensureReplaceRootSheet();
+  sheet.appendChild(node);
   replaceRootRuleNodes.set(token, node);
+  syncStyleMirror(sheet);
 }
 export function removeReplaceRootRule(token: string): void {
   const node = replaceRootRuleNodes.get(token);
   if (!node) return;
+  const owner = node.parentNode;
   node.remove();
   replaceRootRuleNodes.delete(token);
+  syncStyleOwner(owner);
 }
 
 // Route-only environment pinning. The shadow root isolates a route page's
@@ -189,8 +205,10 @@ export function injectRouteEnvRule(token: string): void {
     layered(`html:has(> body[data-shim-replace-root~="${token}"]) { margin: 0 !important; padding: 0 !important; font-size: 16px !important; background: #fff !important; }`) +
     layered(`body[data-shim-replace-root~="${token}"] { margin: 0 !important; padding: 0 !important; max-width: none !important; width: auto !important; min-height: 100vh !important; background: #fff !important; display: block !important; }`);
   const node = document.createTextNode(text);
-  ensureReplaceRootSheet().appendChild(node);
+  const sheet = ensureReplaceRootSheet();
+  sheet.appendChild(node);
   replaceRootRuleNodes.set(key, node);
+  syncStyleMirror(sheet);
 }
 export function removeRouteEnvRule(token: string): void {
   removeReplaceRootRule(`${token}::env`);
