@@ -10,6 +10,7 @@
 
 import type { Rule, Spec, Anchor } from './types';
 import type { CoreApi } from './api';
+import { nextFrame } from './next-frame';
 
 export function bridgeRule(rule: Rule, spec: Spec, api: CoreApi): () => void {
   if (!api.bridge?.forwardRule) {
@@ -52,11 +53,13 @@ export function bridgeRule(rule: Rule, spec: Spec, api: CoreApi): () => void {
     }
   };
 
-  let scanHandle = 0;
+  // One scan per frame, or per fallback tick in a page that gets no frames
+  // (next-frame.ts).
+  let cancelScan: (() => void) | null = null;
   const scheduleScan = () => {
-    if (scanHandle) return;
-    scanHandle = requestAnimationFrame(() => {
-      scanHandle = 0;
+    if (cancelScan) return;
+    cancelScan = nextFrame(() => {
+      cancelScan = null;
       scan();
     });
   };
@@ -72,9 +75,9 @@ export function bridgeRule(rule: Rule, spec: Spec, api: CoreApi): () => void {
 
   return function teardownBridgeRule() {
     observer.disconnect();
-    if (scanHandle) {
-      cancelAnimationFrame(scanHandle);
-      scanHandle = 0;
+    if (cancelScan) {
+      cancelScan();
+      cancelScan = null;
     }
   };
 }
