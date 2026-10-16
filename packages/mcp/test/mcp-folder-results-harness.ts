@@ -220,6 +220,10 @@ console.log('composition checkout, paths a case-insensitive disk folds together:
     () => writeCompositionCheckout(dir, { 'manifest.json': '{}', [COMPOSITION_MARKER.toUpperCase()]: 'x' }));
   throwsCode('…and two Unicode normalizations of one name', 'unsafe-path',
     () => writeCompositionCheckout(dir, { 'manifest.json': '{}', 'café.js': 'nfc', 'café.js': 'nfd' }));
+  throwsCode('…and one name as both a file and a folder', 'unsafe-path',
+    () => writeCompositionCheckout(dir, { 'manifest.json': '{}', 'app': 'x', 'app/x.js': 'y' }));
+  throwsCode('…and a file under the checkout marker', 'unsafe-path',
+    () => writeCompositionCheckout(dir, { 'manifest.json': '{}', [`${COMPOSITION_MARKER}/x.js`]: 'x' }));
   check('a refused checkout leaves the earlier one as it was', JSON.stringify(readWorkingCopy(dir)) === before);
   check('distinct names still check out', writeCompositionCheckout(tmp(), { 'manifest.json': '{}', 'a.js': 'x', 'ab.js': 'y', 'lib/a.js': 'z' }).written.length === 4);
 }

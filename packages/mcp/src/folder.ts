@@ -442,16 +442,26 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
  */
 export function foldCollision(paths: readonly string[]): [string, string] | null {
   const fold = (p: string): string => p.normalize('NFC').toLowerCase();
-  const seen = new Map<string, string>([[fold(COMPOSITION_MARKER), COMPOSITION_MARKER]]);
+  // Every entry the checkout makes, by folded name: a file (each path, and
+  // the marker) or a folder (each path's parent folders). Two spellings of
+  // one entry collide, and so does a file and a folder of one name, however
+  // spelled.
+  const entries = new Map<string, { name: string; file: boolean }>([[fold(COMPOSITION_MARKER), { name: COMPOSITION_MARKER, file: true }]]);
+  const add = (name: string, file: boolean): [string, string] | null => {
+    const key = fold(name);
+    const other = entries.get(key);
+    if (other === undefined) { entries.set(key, { name, file }); return null; }
+    if (other.name !== name || other.file || file) return [other.name, name];
+    return null;
+  };
   for (const rel of [...paths].sort()) {
     const segments = rel.split('/');
-    for (let i = 1; i <= segments.length; i++) {
-      const prefix = segments.slice(0, i).join('/');
-      const key = fold(prefix);
-      const other = seen.get(key);
-      if (other === undefined) seen.set(key, prefix);
-      else if (other !== prefix) return [other, prefix];
+    for (let i = 1; i < segments.length; i++) {
+      const hit = add(segments.slice(0, i).join('/'), false);
+      if (hit) return hit;
     }
+    const hit = add(rel, true);
+    if (hit) return hit;
   }
   return null;
 }
