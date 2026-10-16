@@ -31,19 +31,29 @@ browser.
    turns it on for this run, and the user can also turn it on in Shim's Settings. If
    neither mode is available, give the user the install command `shim_status` names.
 2. **Pick the tab.** `shim_list_tabs` lists every open tab with its `tabId`, URL and, for a
-   site tab, the shims that already run on its host. Work against the tab showing the page
-   the user means.
+   site tab, the shims that already run on its host and `connect`: `"asks"` (opening a
+   session shows the user a card) or `"allowed"` (they allowed this site until Shim quits,
+   so no card comes). Compositions carry `connect` the same way. Work against the tab
+   showing the page the user means.
 3. **Open a session.** `shim_open_session { tabId, intent, shimId | newShimName, dir }`.
    - `shimId` refines an existing shim; `newShimName` starts a new one on the tab's site
      (it is kept only if you commit).
    - `intent` is one or two sentences of what you set out to do. The user sees it on the
      card in Shim and it is recorded in the shim's chat when you commit.
-   - The user is asked in Shim to allow the session, and the call waits (up to two
-     minutes) with nothing on screen here. So **before** calling, tell the user in one
+   - When the tab's `connect` is `"asks"`, the user is asked in Shim to allow the session
+     and the call waits (up to two minutes). So **before** calling, tell the user in one
      line to switch to Shim and allow the "coding agent wants to connect" card at the top
-     of its sidebar. If they decline, do not retry unless they ask you to.
+     of its sidebar. When it is `"allowed"`, no card comes: don't tell them to look. The
+     answer's `consent` says which happened (`"asked"` or `"remembered"`). If they
+     decline, do not retry unless they ask you to.
    - With `dir` (an absolute path to an empty folder, or an earlier checkout) the shim is
      checked out at once. Otherwise call `shim_checkout { dir }`.
+   - **Where the folder goes.** Unless the user names a folder, use your working directory
+     plus the shim's name, lowercased and hyphenated: started in `~/shim-sessions`, a shim
+     named "Test hide" goes in `~/shim-sessions/test-hide` (add `-2`, `-3` if that folder
+     holds something else). Never a temp or scratch folder: the user opens, packs
+     (`shim pack`) and previews (`shim preview`) the folder there after you're done. Tell
+     the user the folder in your first reply after the checkout.
 4. **Edit the folder** (section 2): `shim.json` and `handlers/<name>.js`.
 5. **Preview.** `shim_preview` sends the whole folder; Shim lints it, applies the
    difference to the live page, waits for it to settle and answers with a **revision** and
@@ -56,8 +66,10 @@ browser.
    shim. `summary` is what changed and why, in a few sentences — it becomes your reply in
    the shim's chat. If the work declares something sensitive (a redirect target, a remote
    database connection) the user approves it in Shim first, and the call waits. Any call
-   that waits on a card in Shim (this one, the API map, a composition's hosts) shows
-   nothing here while it waits: when you expect a card, tell the user to look at Shim first.
+   that waits on a card in Shim (this one, the API map, a composition's hosts) can sit
+   for up to two minutes: when you expect a card, tell the user to look at Shim first.
+   While it waits, Shim also bounces its dock icon and posts a notification if it is
+   behind another app, and the call reports the wait as progress.
 8. **End.** `shim_end_session`. Anything previewed after the last commit is discarded and
    the page returns to the shim as committed.
 
@@ -161,9 +173,9 @@ Every `shim_preview` answers `{ revision, applied, evidence }`. On an applied pr
 | Field | What it says |
 |---|---|
 | `changes` | what the folder changed: `add-rule <id>`, `update-rule <id>`, `remove-rule <id>`, `set-settings`, … |
-| `rules[]` | per changed rule: `status` — did the anchor resolve, how many elements, via which anchor, and the matched element's **measured box** (`W×Hpx at (x, y)`, viewport CSS px, measured after your mutation applied); and `verification` (`full` or `partial`) |
+| `rules[]` | per changed rule: `status` — did the anchor resolve, how many elements, via which anchor, and the matched element's **measured box** (`W×Hpx at (x, y)`, viewport CSS px, measured after your mutation applied); and `verification`: `full` (every check the rule carries ran on this host), `partial` (something went unchecked) or `none` (it matched nothing, so nothing was verified). None of them says the rule looks right |
 | `errors[]` | handler exceptions: `{ ruleId, handler, message, stack }` |
-| `noMatch[]` | anchors that resolved nothing |
+| `noMatch[]` | every changed rule whose anchor resolved nothing (its status says matched 0) |
 | `warnings[]` | lint warnings (unknown fields, brittle anchors, an observer that watches what it mutates) and unused handler files |
 | `notes[]` | outcomes Shim reports about consent and capabilities |
 | `console` | errors and warnings the page logged since the previous preview |
@@ -175,7 +187,7 @@ malformed folder): nothing was applied. Fix and preview again.
 Read the evidence, then:
 
 - **A handler threw** → fix the bug in its file.
-- **Matched 0 elements** → the anchor is wrong. Re-locate with `query_page` /
+- **Matched 0 elements** (the rule is in `noMatch`, `verification: none`) → the anchor is wrong. Re-locate with `query_page` /
   `inspect_element`; never re-send the same anchor hoping for a different result.
 - **A `[site]` error storm in `console`** right after your change usually means your handler
   caused it (a fetch burst, broken hydration, a loop) — fix the cause.
@@ -731,7 +743,9 @@ this section is what differs.
    hosts and an empty `index.html`, and is **kept only if you commit**: end the session
    without a commit and it is deleted, its address freed.
 3. **Check out** (with `dir`, or `shim_checkout { dir }`): `manifest.json` plus every file of
-   the composition, flat. Use an empty folder.
+   the composition, flat. Use an empty folder, placed like a shim's (section 1): your
+   working directory plus the composition's name, never a temp or scratch folder, and
+   tell the user where it is.
 4. **Edit, then `shim_preview`.** Shim validates the folder, saves the changed files onto the
    composition and reloads its page. If the manifest adds a host (or changes a host's
    `mint`), the user is asked in Shim first and the preview waits; allowed, the page can
@@ -905,7 +919,9 @@ A refused preview answers `applied: false` with `error` and `problems`:
   `api.example.com` but never `api.example.net` — and either the mint host itself or a host
   `probe_request` may reach; otherwise `test-host-not-allowed` before any card), the status
   it got. It never returns the token or any body. Each call
-  asks again.
+  asks again, unless the user chose "allow for this session" on that host's card: then
+  later calls against it run without a card until they revoke it or the session ends.
+  When you expect a card, tell the user to look at Shim first.
 - The API map tools (section 4) work the same, except `replay_endpoint` runs GET and HEAD
   only (`read-only`).
 - **`inspect_storage`** and **`query_db`** (section 4) read the composition's own saved

@@ -12,7 +12,9 @@
 //     component-identity witness on a host without component identity, and
 //     `full` otherwise;
 //   - the evidence helpers (preview-evidence.ts) word a rule status and a
-//     view_page caption as the Shim browser always has.
+//     view_page caption as the Shim browser always has, and build noMatch[]
+//     from the engine's events plus every rule whose status matched 0;
+//   - a rule that matched nothing is `none`, never `full`.
 //
 //   node out/packages/core/test/capability-preflight-harness.js
 
@@ -20,7 +22,7 @@ import {
   preflightSpec, scanHandlerSource, scanRuleHandlers, unsupportedApiMembers, verificationLevel, UNSUPPORTED,
 } from '../src/capability-preflight';
 import type { PageHostCapabilities } from '../src/page-host';
-import { describeRuleStatus, previewKey, shimViewPageCaption } from '../src/preview-evidence';
+import { describeRuleStatus, previewKey, previewNoMatch, previewMatchedNothing, shimViewPageCaption } from '../src/preview-evidence';
 import type { Spec, Rule } from '../src/types';
 
 let failures = 0;
@@ -137,6 +139,48 @@ console.log('verification level');
   check('partial: an unsupported-api event fired', verificationLevel(plain, HEADLESS, true) === 'partial');
   check('partial: component identity the host cannot check', verificationLevel(component as never, HEADLESS, false) === 'partial');
   check('full: component identity on a host that checks it', verificationLevel(component as never, BROWSER, false) === 'full');
+  check('none: the rule matched nothing, whatever else holds', verificationLevel(plain, HEADLESS, true, true) === 'none'
+    && verificationLevel(component as never, BROWSER, false, true) === 'none');
+}
+
+console.log('noMatch evidence');
+{
+  const hide = (id: string, value: string): Rule => ({ id, anchor: css(value), mutations: [{ kind: 'hide' }] });
+  const dead = hide('dead', '.gone');
+  const live = hide('live', '.here');
+  const ids = (list: Array<{ ruleId: string | undefined }>): string => list.map((n) => n.ruleId).join(',');
+  check('a 0-match status lands in noMatch with no event (the late-timer case)',
+    JSON.stringify(previewNoMatch([], [{ rule: dead, status: { matched: 0 } }, { rule: live, status: { matched: 2 } }]))
+      === JSON.stringify([{ ruleId: 'dead', selector: '.gone' }]));
+  check('the engine\'s event and the status count once',
+    ids(previewNoMatch([{ ruleId: 'dead', selector: '.gone' }], [{ rule: dead, status: { matched: 0 } }])) === 'dead');
+  check('a duplicate event counts once', ids(previewNoMatch([{ ruleId: 'dead', selector: '.gone' }, { ruleId: 'dead', selector: '.gone' }], [])) === 'dead');
+  check('an event for a rule matching now is dropped (it rendered after the engine looked)',
+    ids(previewNoMatch([{ ruleId: 'live', selector: '.here' }], [{ rule: live, status: { matched: 1 } }])) === '');
+  check('an event for a rule this preview has no status for is kept',
+    ids(previewNoMatch([{ ruleId: 'other', selector: '.x' }], [{ rule: live, status: { matched: 1 } }])) === 'other');
+  check('no status yet is not a verdict', ids(previewNoMatch([], [{ rule: dead, status: undefined }])) === '' && !previewMatchedNothing({ rule: dead, status: undefined }));
+  const removed: Rule = { id: 'rm', anchor: css('.ad'), mutations: [{ kind: 'remove' }] };
+  check('a rule that matched earlier in the preview (a remove) is not a no-match',
+    ids(previewNoMatch([], [{ rule: removed, status: { matched: 0 }, peakMatched: 1 }])) === '');
+  check('…even when the engine\'s timer saw it gone and reported a miss',
+    ids(previewNoMatch([{ ruleId: 'rm', selector: '.ad' }], [{ rule: removed, status: { matched: 0 }, peakMatched: 1 }])) === '');
+  const witnessed: Rule = { id: 'w', anchor: { ...css('.promo'), witness: { v: 1, tag: 'div' } }, mutations: [{ kind: 'hide' }] } as Rule;
+  check('a witnessed rule at 0 waits for the engine\'s verdict (no-match or quarantine)',
+    ids(previewNoMatch([], [{ rule: witnessed, status: { matched: 0 } }])) === ''
+      && ids(previewNoMatch([{ ruleId: 'w', selector: '.promo' }], [{ rule: witnessed, status: { matched: 0 } }])) === 'w');
+  check('a quarantined rule is left to quarantined[]', ids(previewNoMatch([], [{ rule: dead, status: { matched: 0 } }], new Set(['dead']))) === '');
+  const zeroIsNormal: Rule[] = [
+    { id: 'route', anchor: css('body'), mutations: [{ kind: 'mount-route', path: '/x', handler: 'h' }] },
+    { id: 'redirect', mutations: [{ kind: 'redirect' }] },
+    { id: 'rewrite', mutations: [{ kind: 'rewrite-response' }] },
+    { id: 'intercept', mutations: [{ kind: 'intercept' }] },
+    { id: 'framed', anchor: { ...css('.in-frame'), iframe: { kind: 'css', value: 'iframe' } }, mutations: [{ kind: 'hide' }] },
+  ] as Rule[];
+  check('routes, network / module kinds and iframe rules never infer a no-match from a 0',
+    ids(previewNoMatch([], zeroIsNormal.map((rule) => ({ rule, status: { matched: 0 } })))) === '');
+  check('a selector-less anchor reads as an empty selector', JSON.stringify(previewNoMatch([], [{ rule: { id: 'n', anchor: { primary: { kind: 'aria', role: 'button' } }, mutations: [{ kind: 'hide' }] } as Rule, status: { matched: 0 } }]))
+    === JSON.stringify([{ ruleId: 'n', selector: '' }]));
 }
 
 console.log('evidence wording');
