@@ -117,6 +117,7 @@ export function cardWaitMessage(cards: readonly unknown[]): string | null {
     'replay-write': on('allow the request to'),
     reach: on('allow the composition to read'),
     'mint-host': on('allow the token check on'),
+    'read-override': on('allow the request to'),
   };
   const what = asks[first.card] ?? 'answer the card';
   const more = cards.length > 1 ? ` (and ${cards.length - 1} more)` : '';
