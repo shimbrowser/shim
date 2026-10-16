@@ -25,6 +25,7 @@ import { makeStatusReporter } from './rule-status';
 import { makeReconciler } from './rule-reconcile';
 import type { Rule, Anchor } from './types';
 import type { CoreApi, CoreHandlerApi, HostApiMembers } from './api';
+import { nextFrame } from './next-frame';
 
 // --- Own-DOM guard ----------------------------------------------------------
 //
@@ -340,15 +341,17 @@ export function applyRule(
     reporter.reportStatusIfChanged();
   };
 
-  // rAF-coalesce the observer — React-style reconcilers can fire hundreds of
+  // Frame-coalesce the observer — React-style reconcilers can fire hundreds of
   // mutation batches per second during normal re-rendering, and each scan runs a
   // `querySelectorAll` per rule. One scan per frame is plenty for self-healing
-  // and keeps the renderer's CPU baseline low.
-  let scanHandle = 0;
+  // and keeps the renderer's CPU baseline low. nextFrame falls back to a timer
+  // when the page gets no frames (hidden or behind another window), so a page
+  // that re-renders there is still re-shimmed.
+  let cancelScan: (() => void) | null = null;
   const scheduleScan = () => {
-    if (scanHandle) return;
-    scanHandle = requestAnimationFrame(() => {
-      scanHandle = 0;
+    if (cancelScan) return;
+    cancelScan = nextFrame(() => {
+      cancelScan = null;
       scan();
     });
   };
@@ -370,9 +373,9 @@ export function applyRule(
 
   return function teardownRule() {
     observer.disconnect();
-    if (scanHandle) {
-      cancelAnimationFrame(scanHandle);
-      scanHandle = 0;
+    if (cancelScan) {
+      cancelScan();
+      cancelScan = null;
     }
     reconciler.stop();
     for (const [anchor, entry] of rs.state) {

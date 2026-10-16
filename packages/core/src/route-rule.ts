@@ -28,6 +28,7 @@ import type { HandlerMap } from './engine-internal';
 import type { Rule, Spec } from './types';
 import type { CoreApi, CoreRouteMountApi, HostApiMembers, RouteMatch } from './api';
 import { errMessage } from './error';
+import { nextFrame } from './next-frame';
 
 // routeRule's single mounted-route record — see mountRoute/unmountRoute.
 interface MountedRoute {
@@ -332,12 +333,13 @@ export function routeRule(rule: Rule, spec: Spec, api: CoreApi, handlers: Handle
   // Light self-heal: if a framework re-render detaches our mounted root while
   // the route is still active, re-attach it. The replace-root CSS keeps the
   // site's own (re-rendered) body children hidden on its own, so this only has
-  // to worry about our own node going missing.
-  let healHandle = 0;
+  // to worry about our own node going missing. nextFrame: a frame, or a
+  // fallback tick in a page that gets no frames (next-frame.ts).
+  let cancelHeal: (() => void) | null = null;
   const observer = new MutationObserver(() => {
-    if (!mounted || healHandle) return;
-    healHandle = requestAnimationFrame(() => {
-      healHandle = 0;
+    if (!mounted || cancelHeal) return;
+    cancelHeal = nextFrame(() => {
+      cancelHeal = null;
       if (!mounted || !document.body) return;
       tagReplaceRootAnchor(document.body, token);
       for (const n of mounted.outputs) {
@@ -357,7 +359,7 @@ export function routeRule(rule: Rule, spec: Spec, api: CoreApi, handlers: Handle
     window.removeEventListener('popstate', onPopState);
     window.removeEventListener('pageshow', onPageShow);
     observer.disconnect();
-    if (healHandle) { cancelAnimationFrame(healHandle); healHandle = 0; }
+    if (cancelHeal) { cancelHeal(); cancelHeal = null; }
     unmountRoute();
   };
 }
