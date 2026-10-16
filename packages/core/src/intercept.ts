@@ -1,5 +1,5 @@
 // intercept — module-boundary interception for AMD-loaded (RequireJS-style)
-// site modules (docs/2026-08-04-intercept-design.md is the design doc; this
+// site modules. This
 // module is PURE / Electron-free, mirroring `rewrite-response.ts`'s shape:
 // non-DOM rule, table + registry, conditional install, and the SAME
 // handler-source-splice discipline via `transformLiteral` — a `wrap` handler
@@ -20,7 +20,7 @@
 // Wiring (main-process IPC, page-preload injection, spec-lint hookup) is a
 // later task; this file only produces the table/wrapper-builder primitives
 // and has zero Electron/DOM dependencies, so it is bare-node testable
-// end-to-end (scripts/intercept-harness.ts), including running the built
+// end-to-end (a bare-node harness), including running the built
 // infra source against a hand-rolled fake DOM + a tiny synchronous AMD
 // loader in a `vm` sandbox.
 
@@ -479,7 +479,7 @@ function buildInterceptInfraSrc(): string {
   // document.documentElement is reliably NULL at the exact moment this IIFE
   // runs (proven empirically: a document-start webFrame.executeJavaScript
   // injection races the HTML parser's creation of <html>, and the race is
-  // lost every time, not just occasionally — scripts/intercept-wrap-harness.js
+  // lost every time, not just occasionally — a wrap harness
   // caught this live). A bare try/catch here would silently and PERMANENTLY
   // break api.modules.invoke for the whole page load. The stats observer
   // (intercept-install.ts's observeStats) hits the identical race and now

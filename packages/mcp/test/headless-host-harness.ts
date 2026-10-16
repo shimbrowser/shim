@@ -1,6 +1,6 @@
 // Harness for the headless PageHost's browser-free parts
 // (packages/mcp/src/playwright-page-host.ts, headless-page-runtime.ts,
-// playwright-launch.ts; shim-core design D9 / D15):
+// playwright-launch.ts):
 //
 //   - HEADLESS_CAPABILITIES is exactly D15's headless set, and every kind it
 //     advertises is a real mutation kind covered by a conformance case (a

@@ -1,4 +1,4 @@
-// Opening a page for the headless PageHost (shim-core design D9). Playwright
+// Opening a page for the headless PageHost. Playwright
 // is an OPTIONAL peer dependency of @shimbrowser/mcp: attach mode (driving the
 // Shim browser) never loads it, so it is required lazily here, only when a
 // headless page is asked for, and a missing install is a readable error.

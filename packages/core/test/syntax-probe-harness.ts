@@ -1,8 +1,8 @@
 // Harness for core's Node-free syntax probe (packages/core/src/syntax-probe.ts).
 //
 // spec-lint used `new vm.Script(code)` to syntax-check rewrite-response
-// transforms and intercept wraps. Core imports no Node builtin (shim-core
-// design D4), so `syntaxProbe` rebuilds the check from an eval parse and a
+// transforms and intercept wraps. Core imports no Node builtin,
+// so `syntaxProbe` rebuilds the check from an eval parse and a
 // `new Function` parse. This pins it to vm.Script: same accept / reject AND the
 // same error message, over a corpus that covers the places the two grammars
 // could drift (top-level return and new.target, directive prologues, hashbangs,

@@ -15,7 +15,7 @@ import { syncStyleMirror, syncStyleOwner } from './style-mirror';
 
 // All shim CSS lives inside one named cascade layer, `shim`. This is what
 // makes "your local layer wins over the site" a guarantee rather than a
-// specificity gamble (CLAUDE.md §6). The load-bearing CSS rule: for
+// specificity gamble. The load-bearing CSS rule: for
 // `!important` declarations, a *layered* style beats an *un-layered* style —
 // regardless of selector specificity or source order. Virtually every real
 // site ships un-layered CSS, so a shim `!important` rule in `@layer shim`
@@ -109,7 +109,7 @@ export function injectTier1Rule(token: string, cssBody: string, priority = 0): v
   syncStyleMirror(sheet);
 }
 // First index whose value is strictly greater than `priority`, else the
-// array length (append). Pure — exported for scripts/css-priority-harness.js.
+// array length (append). Pure — exported for a harness.
 export function firstGreaterIndex(priorities: number[], priority: number): number {
   for (const [i, p] of priorities.entries()) {
     if (p > priority) return i;

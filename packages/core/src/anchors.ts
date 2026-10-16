@@ -1,6 +1,6 @@
 // Anchor resolution. The engine asks `resolveAll(rule.anchor)` every scan;
 // we walk `primary` and return whatever it resolves to (the rebase engine
-// will later layer fallbacks + witness fingerprints on top — CLAUDE.md §8).
+// will later layer fallbacks + witness fingerprints on top).
 //
 // Today three kinds are supported:
 //   - `css`        — raw CSS selector. `{ kind: "css", value: "[data-foo]" }`.
@@ -80,7 +80,7 @@ type ScanRoot = { getElementsByTagName?(tag: string): ArrayLike<Element> };
 // only happen within the same level (which the resolver doesn't know
 // about).
 //
-// Witness-fingerprint validation (§8, §14): when the anchor carries a
+// Witness-fingerprint validation: when the anchor carries a
 // `witness`, every rung's matches are filtered through it before being
 // trusted — "primary resolved, but the matched element doesn't look like
 // what we anchored to at commit time, fall through anyway." Anchors
@@ -357,7 +357,7 @@ function escapeAttrValue(v: string): string {
   return v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-// --- Auto-rebase support (§14): synthesize a fresh anchor + find a drifted
+// --- Auto-rebase support: synthesize a fresh anchor + find a drifted
 // element by its witness. Used by the engine's rebase pass to re-point a rule
 // whose primary selector died, deterministically (no LLM). ---
 
@@ -524,7 +524,7 @@ function stableClassesOf(el: AnchorElement): string[] {
 // anchor even shared broadly, and single-element authoring just loses the
 // uniqueness ranking on a shared utility, which is harmless.
 //
-// This narrower check exists for exactly one caller: CLAUDE.md §16's "hide
+// This narrower check exists for exactly one caller: the Shim browser's "hide
 // all like this" commits a MULTI-match anchor on purpose, with no witness
 // and no pre-commit confirm — so a bare layout utility that also matches
 // everything OTHER developers styled with the same class (`.flex` on a
@@ -549,18 +549,18 @@ function stableClassesOf(el: AnchorElement): string[] {
 //   handful of times on a page (one header), while a class actually used as
 //   a utility matches everywhere. `UTILITY_PREFIX_MATCH_THRESHOLD` is
 //   chosen well below the absolute `GROUP_ANCHOR_MAX_MATCHES` cap
-//   (src/main/shim-this.ts, 500) precisely so this catches the utility case
+//   (the Shim browser's, 500) precisely so this catches the utility case
 //   long before the absolute cap would. NOTE: these two numbers live in two
 //   different files with no compile-time link between them — there is
 //   nothing that fails to build if one changes without the other. The
 //   invariant ("prefix threshold well below the absolute cap") is enforced
 //   only by this comment and the harness fixtures in
-//   packages/core/test/anchor-synthesis-harness.ts / scripts/shim-this-harness.ts; keep
+//   packages/core/test/anchor-synthesis-harness.ts and the Shim browser's own; keep
 //   them ordered by hand.
 //
 // Both are deliberately biased toward "reject" over "silently commit
 // something too broad" — a false rejection here just falls through to a
-// safer anchor (src/main/shim-this.ts's `pickHideAnchor` degrade path), so
+// safer anchor (the Shim browser's `pickHideAnchor` degrade path), so
 // erring toward "reject" (on the keyword side) costs nothing, and gating
 // the prefix side on breadth is what keeps that bias from misfiring on
 // genuinely narrow semantic names. Accepted gap: this is NOT an exhaustive
@@ -684,7 +684,7 @@ function witnessRecoverDetail(w: Witness | null | undefined, root: ScanRoot | Do
     // Engine-injected nodes (and their subtrees) are never recovery targets:
     // without this, a shim's own injected output can satisfy the witness
     // it's sitting next to and get silently re-anchored onto the engine's
-    // own DOM (CLAUDE.md §6/§12). Skip BEFORE scoring so an injected node
+    // own DOM. Skip BEFORE scoring so an injected node
     // can't count toward the ambiguity/uniqueness decisions below either.
     if (isEngineInjected(el)) continue;
     const verdict = witness.matchWitness(w, el);
@@ -731,7 +731,7 @@ function witnessRecover(w: Witness | null | undefined, root: ScanRoot | Document
 }
 
 // `positionalPath` is exported alongside the ladder for one specific
-// consumer: page-preload's computeAnchorLadder (CLAUDE.md §16) appends a
+// consumer: page-preload's computeAnchorLadder appends a
 // positional rung itself when `suggestAnchorLadder`'s own LADDER_MAX cap
 // sliced it away (an element with ≥4 stronger-but-crowd-matching rungs would
 // otherwise have NO unique candidate at all for "hide only this" — the exact
@@ -760,7 +760,7 @@ function shouldAppendPositional(annotatedLadder: Array<{ matches?: number }>): b
 }
 
 // `looksGeneratedClass` is also exported for one caller outside this file:
-// `selectGroupAnchor` (src/main/shim-this.ts, CLAUDE.md §16) runs it against
+// the Shim browser's `selectGroupAnchor` runs it against
 // a `data-attr` candidate's ATTRIBUTE NAME (minus the `data-` prefix), not a
 // class — a scoped-style attribute like Vue's `data-v-7ba5bd90` is exactly
 // the same "generated identifier" shape a hashed class is, and without this

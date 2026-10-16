@@ -1,5 +1,5 @@
 // Shared domain model for the patch engine — the runtime shape of a patch
-// spec (CLAUDE.md §5) and the anchor-ladder verification types (§8). Defined
+// spec and the anchor-ladder verification types. Defined
 // here (a dependency-free leaf) so every engine file and every downstream
 // consumer stage imports ONE source of truth. Fields are optional where the
 // engine tolerates their absence at runtime; do not tighten a field to
@@ -23,7 +23,7 @@ export interface AnchorSpec {
 }
 
 // Plain-JSON fiber descriptor (component-id.ts). `mapped` is stamped at
-// capture when sourcemap translation renamed the path (§8 Stage B).
+// capture when sourcemap translation renamed the path (sourcemap Stage B).
 export interface ComponentDescriptor {
   v?: number;
   path: string[];
@@ -54,7 +54,7 @@ export interface MountSpec {
   align?: 'above' | 'below';
 }
 
-// Declarative node tree for the Tier-2 `inject-element` kind (CLAUDE.md §6).
+// Declarative node tree for the Tier-2 `inject-element` kind.
 // The ROOT must carry `tag`; children may be text-only ({ text } → bare text
 // node). A node with both `text` and `children` puts the text first. Lives
 // here (not inject-kinds.ts) so Mutation can reference it without a cycle.
@@ -66,7 +66,7 @@ export interface InjectNode {
   children?: InjectNode[];
 }
 
-// A single mutation. `kind` is the builtins (CLAUDE.md §6) plus rare
+// A single mutation. `kind` is the builtins plus rare
 // per-patch declarative kinds, so it stays `string`; the engine narrows on it.
 // The named optional fields are every field a builtin reads.
 export interface Mutation {
@@ -103,7 +103,7 @@ export interface Rule {
 }
 
 // The runtime patch spec. `priority` / `__cssPriority` / `bundleHash` are
-// stamped onto the spec at runtime by the registry/preload (CLAUDE.md §6 §12),
+// stamped onto the spec at runtime by the registry/preload,
 // so they live here as optional rather than in a separate type.
 export interface Spec {
   id: string;
@@ -115,14 +115,14 @@ export interface Spec {
   // runtime-stamped `__cssPriority` below.
   css?: string;
   settings?: unknown[];
-  // Per-shim SQLite storage declaration (shim-db foundation §4). Loose
+  // Per-shim SQLite storage declaration. Loose
   // boundary like `settings` above: validated main-side
-  // (src/main/shim-db/schema.ts's validateStorageDecl), opaque to the
+  // (the Shim browser's validateStorageDecl), opaque to the
   // engine — never read at runtime, only at commit/rebase time.
   storage?: unknown;
-  // Remote database connection declarations (shim-db remote-transport §1).
+  // Remote database connection declarations.
   // Same loose boundary as `storage` above: validated main-side
-  // (src/main/shim-db/connections.ts's validateConnectionsDecl), opaque to
+  // (the Shim browser's validateConnectionsDecl), opaque to
   // the engine. Never carries a connection URL — that's main-only custody in
   // `shim_settings` (connections.ts), never on the spec.
   connections?: unknown;
@@ -131,15 +131,15 @@ export interface Spec {
   // A distilled, human-readable statement of what this shim is for (Spec A).
   // Optional + back-compat: absent = today's behavior. Travels on export.
   intent?: string;
-  // Global shims v2 (design 2026-08-08): marks this spec as a shared
-  // identity with per-host rule implementations (src/main/host-impls.ts).
+  // Global shims: marks this spec as a shared
+  // identity with per-host rule implementations.
   // Optional + back-compat: absent = a normal, single-host shim — `true`
   // is the sole discriminator, never inferred from other fields.
   global?: boolean;
-  // Auto mode (design 2026-08-10): a per-host impl promoted to be the
+  // Auto mode: a per-host impl promoted to be the
   // shim's shared DEFAULT, applied on every host (the "runs everywhere"
   // opt-in). Optional + back-compat: absent = today's behavior — no
-  // default, every host starts dormant until adopted (§22).
+  // default, every host starts dormant until adopted.
   default?: { rules: Rule[]; handlers?: Record<string, string> };
   // Auto mode: the shared code-space — name → function source, injected
   // into every host impl as `api.shared`. Optional + back-compat: absent =
@@ -147,7 +147,7 @@ export interface Spec {
   sharedHandlers?: Record<string, string>;
   // Auto mode: per-shim toggle to headlessly auto-adopt each new domain
   // (global-shim-only). Optional + back-compat: absent = today's
-  // behavior — adoption stays manual (§22's "learn this site" prompt).
+  // behavior — adoption stays manual (the "learn this site" prompt).
   // `true` is the sole discriminator, never inferred from other fields.
   autoMode?: boolean;
   bundleHash?: string;

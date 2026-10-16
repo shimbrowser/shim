@@ -1,4 +1,4 @@
-// Turning Shim's tool results into MCP content (shim-core design D11, §9).
+// Turning Shim's tool results into MCP content.
 //
 // A page tool answers exactly what Shim's own worker sees: a string (usually
 // JSON) or content blocks in the Anthropic shape — text, and for view_page a

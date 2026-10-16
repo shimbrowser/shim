@@ -6,7 +6,7 @@
 //   shim-mcp               auto: a Shim tab attaches; a url opens a headless
 //                          session while no Shim browser is reachable
 //   shim-mcp --attach      attach mode only: drive the running Shim browser
-//   shim-mcp --headless    headless mode only (shim-core design D9, D15): each
+//   shim-mcp --headless    headless mode only: each
 //                          session opens its own Playwright Chromium
 //                          (`--visible` shows its window). Also
 //                          SHIM_MCP_MODE=auto|attach|headless and

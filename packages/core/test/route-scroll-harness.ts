@@ -1,5 +1,5 @@
 // Diagnostic harness for the pure virtual-route scroll store (packages/core/src/
-// route-scroll.ts — CLAUDE.md §6). Bare node, no DOM:
+// route-scroll.ts). Bare node, no DOM:
 //
 //   node out/packages/core/test/route-scroll-harness.js
 //

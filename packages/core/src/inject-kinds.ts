@@ -1,5 +1,5 @@
 // Pure logic for the Tier-2 declarative injection kinds — `inject-element`
-// and `inject-html` (CLAUDE.md §6). Static-only by contract: no event
+// and `inject-html`. Static-only by contract: no event
 // handlers, no scripts — behavior belongs in `script` handlers where
 // api.cleanup + self-healing apply. Validation/scan run in main (spec-lint)
 // with no DOM; builder/strip/placement run in the page's isolated world.

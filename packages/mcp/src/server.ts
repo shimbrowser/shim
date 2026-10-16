@@ -1,4 +1,4 @@
-// The @shimbrowser/mcp server (shim-core design D2, D6, D10, D11, D14): a
+// The @shimbrowser/mcp server: a
 // stdio MCP server that drives authoring sessions on the running Shim
 // browser through its control endpoint.
 //

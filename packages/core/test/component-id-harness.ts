@@ -87,7 +87,7 @@ function tMatch() {
   check('no expected → applicable:false', matchComponent(null, cid(['X'])).applicable === false, '');
 }
 
-// Sourcemap-symbol consumption (§8 Stage B): descriptors stored in original-name
+// Sourcemap-symbol consumption (sourcemap Stage B): descriptors stored in original-name
 // space, live fibers compared through the deploy's {minified: original} map.
 function tSymbols() {
   console.log('symbol translation (cross-deploy renames):');

@@ -1,4 +1,4 @@
-// A host's capability contract, checked against a shim (shim-core design D15):
+// A host's capability contract, checked against a shim:
 // anything outside what a host supports is rejected, never silently
 // different. Three layers, because only declared features can be seen before
 // anything runs:

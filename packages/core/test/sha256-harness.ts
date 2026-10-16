@@ -2,7 +2,7 @@
 // crypto output, byte for byte. Stored `spec.bundleHash` values were minted by
 // `crypto.createHash('sha256').update(s).digest('hex').slice(0, 16)`; if the
 // pure-JS path ever disagrees, every committed shim reads as deployed-over at
-// once (design D4). Also checks computeDeployId end to end against the old
+// once. Also checks computeDeployId end to end against the old
 // Node formula, so a change to how deploy-id joins URLs is caught too.
 
 import crypto from 'crypto';

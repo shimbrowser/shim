@@ -1,5 +1,5 @@
 // Harness for the PageHost conformance suite's own definition
-// (packages/core/src/page-host-conformance.ts, shim-core design D12 / D15) —
+// (packages/core/src/page-host-conformance.ts) —
 // the parts that need no browser: the fixture site answers what the cases
 // expect (a deploy renames the entry script and moves the rebase targets;
 // /strict carries the strict policy), the deploy ids of the two builds

@@ -1,4 +1,4 @@
-// The data tools (shim-core design D2, §5): read what an artifact has saved
+// The data tools: read what an artifact has saved
 // — inspect_storage, query_db — and, for a shim in a pack, a sibling's
 // source — read_sibling_shim. ONE definition per tool, here, for every
 // caller:
@@ -60,8 +60,8 @@ const WORKER_INSPECT_STORAGE: ToolDefinition = {
   },
 };
 
-// Read-only SQL escape hatch for a shim declaring spec.storage (§ api.db,
-// shim-db foundation). inspect_storage answers "what's saved"; this
+// Read-only SQL escape hatch for a shim declaring spec.storage
+// (api.db). inspect_storage answers "what's saved"; this
 // answers "how many rows match X" / "what does row Y actually look like" —
 // questions api.storage's simple KV shape can't express and inspect_storage's
 // full dump doesn't scale to. SELECT-only by design: the broker classifies
@@ -119,7 +119,7 @@ const WORKER_QUERY_DB: ToolDefinition = {
   },
 };
 
-// Read a pack sibling's full source on demand (§21). The ambient digest
+// Read a pack sibling's full source on demand. The ambient digest
 // (# Pack siblings) carries every sibling's shape; this returns one
 // sibling's complete spec + handler source + recent chat when the model
 // actually needs depth — before rebuilding something a sibling already

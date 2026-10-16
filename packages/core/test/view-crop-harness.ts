@@ -1,6 +1,6 @@
 // Diagnostic harness for view_page's element-scoped crop geometry
 // (packages/core/src/view-crop.ts) — the padding / minimum-size / viewport-clamp
-// rules behind the authoring loop's visual-verification screenshots (§16).
+// rules behind the authoring loop's visual-verification screenshots.
 // Bare node. Run when touching the crop math:
 //
 //   node out/packages/core/test/view-crop-harness.js

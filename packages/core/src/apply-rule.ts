@@ -49,7 +49,7 @@ import { nextFrame } from './next-frame';
 //
 // Accepted residual: this only registers OUTPUT A HANDLER RETURNED (the mountOn/
 // state bookkeeping path). A handler that opts out of self-healing by returning
-// nothing (CLAUDE.md §6, "empty return = mounted once") but still appends DOM by
+// nothing ("empty return = mounted once") but still appends DOM by
 // hand — `el.appendChild(...)` without returning it — produces DOM this registry
 // never learns about, so if that DOM happens to match the rule's own anchor
 // selector the loop this guard exists to prevent can still occur. Not closable
@@ -91,7 +91,7 @@ export function applyRule(
   const reporter = makeStatusReporter(rule, spec, api, rs);
   const reconciler = makeReconciler(rule, spec, api, rs, mountedOutputRoots);
 
-  // Relative reorder (§6): "immediately before/after Y" is a whole-sibling
+  // Relative reorder: "immediately before/after Y" is a whole-sibling
   // ordering, not a single-element style — CSS `order` is a sort key across ALL
   // siblings (default 0), so the engine stamps EVERY child of the shared parent
   // with an explicit order matching the desired sequence. DOM (source) order is
@@ -270,19 +270,19 @@ export function applyRule(
     const [singleNode] = nodes;
     rs.resolvedEl = nodes.length === 1 ? (singleNode ?? null) : null;
 
-    // Witness capture (§8): a rule without a witness that resolves to exactly ONE
+    // Witness capture: a rule without a witness that resolves to exactly ONE
     // element gets fingerprinted, and the fingerprint is reported up. During
     // authoring previews the loop attaches it to the rule before commit; for
     // committed rules the event is groundwork for the rebase pass to backfill.
     // Once per applyRule lifecycle — the shape doesn't change scan-to-scan, and
     // re-emitting on churn would be noise. Multi-match rules skip capture: one
-    // witness can't describe N different elements (§8 v1 scope).
+    // witness can't describe N different elements (v1 scope).
     if (!witnessCaptured && !rule.anchor?.witness && nodes.length === 1 && singleNode) {
       witnessCaptured = true;
       const el = singleNode;
       const w = witnessMod.buildWitness(el);
       if (w && typeof api.reportEvent === 'function') {
-        // Enrich with framework-component-identity via the main-world bridge (§8)
+        // Enrich with framework-component-identity via the main-world bridge
         // before emitting — the isolated world can't read fibers itself. Resolves
         // null on non-React pages / no bridge, in which case the witness simply
         // omits `component`. The slight defer is harmless: this event is
@@ -295,7 +295,7 @@ export function applyRule(
         const verifyFn = api.componentId && api.componentId.verify;
         if (typeof verifyFn === 'function') {
           // Store the identity in ORIGINAL-name space when the deploy's symbol
-          // map is available (§8 Stage B): `Wc` → `TrackRow`. That's what makes
+          // map is available (sourcemap Stage B): `Wc` → `TrackRow`. That's what makes
           // the witness deploy-durable — the next build renames Wc to Xd, but
           // both translate back to TrackRow. No map (or Discovery not finished
           // yet) → raw names, exactly the pre-Stage-B behavior.

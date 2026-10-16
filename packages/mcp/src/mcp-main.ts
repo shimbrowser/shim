@@ -8,7 +8,7 @@
 //                  the plugin runs, so one entry serves people with Shim and
 //                  people without it.
 //   --attach       attach mode only: drive the running Shim browser
-//   --headless     headless mode only (shim-core design D9, D15): each
+//   --headless     headless mode only: each
 //                  session opens its own Playwright Chromium
 //   --visible      headless sessions show their window
 //   Also SHIM_MCP_MODE=auto|attach|headless and SHIM_HEADLESS_VISIBLE=1.

@@ -1,6 +1,6 @@
 // Harness for the Claude Code plugin and its authoring guide
-// (packages/mcp/.claude-plugin, .mcp.json, skills/shim-authoring/SKILL.md,
-// shim-core design D7): the manifest is well formed and versioned with the
+// (packages/mcp/.claude-plugin, .mcp.json, skills/shim-authoring/SKILL.md):
+// the manifest is well formed and versioned with the
 // package; .mcp.json starts exactly the file the build writes; the package
 // ships the plugin's files; the guide is a valid skill and stays in step with
 // the code — every mutation kind spec-lint accepts, every anchor kind, every

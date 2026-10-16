@@ -1,4 +1,4 @@
-// The headless driver's in-page half (shim-core design D9): the code that runs
+// The headless driver's in-page half: the code that runs
 // in the Playwright page's CDP isolated world, right after the
 // @shimbrowser/core page bundle (global `ShimCore`). It is the counterpart of
 // the Shim browser's page-preload for authoring previews, and nothing else:
@@ -12,10 +12,10 @@
 //     event;
 //   - the runtime error reporter (window error / unhandledrejection, attributed
 //     by the handler's sourceURL), the same filter the browser's preload uses;
-//   - the handler-fetch budget (CLAUDE.md §13), pacing same-site fetches.
+//   - the handler-fetch budget, pacing same-site fetches.
 //
 // Handlers are NOT compiled here. The driver compiles each one with
-// Runtime.evaluate in this world (the path the A5 spike proved under a strict
+// Runtime.evaluate in this world (the path the real-browser spike (D12) proved under a strict
 // CSP) and hands the function in through `defineHandler` (D4).
 //
 // `installPageRuntime` is serialized with Function.prototype.toString and
@@ -296,7 +296,7 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
     emit('handler-error', { specId: attr.specId, handlerName: attr.handlerName, message, stack: trimStack(stack) });
   });
 
-  // --- handler-fetch budget (CLAUDE.md §13) --------------------------------------
+  // --- handler-fetch budget --------------------------------------
   // Wraps this world's fetch only (the page's own is another realm). Same-site
   // requests over budget are delayed, never rejected.
   {

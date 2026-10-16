@@ -1,5 +1,5 @@
 // Pure-JS SHA-256 (FIPS 180-4) over a string's UTF-8 bytes, so the engine can
-// fingerprint a deploy without Node's `crypto` (design D4: no Node in the
+// fingerprint a deploy without Node's `crypto` (no Node in the
 // engine — it has to run anywhere there is a DOM).
 //
 // Byte-for-byte contract: `sha256Hex(s)` equals

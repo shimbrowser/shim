@@ -1,4 +1,4 @@
-// Route-pattern matcher for the `mount-route` mutation kind (§7 Tier 4).
+// Route-pattern matcher for the `mount-route` mutation kind (Tier 4).
 //
 // Compiles a path pattern like `/budgets`, `/budgets/:id`, `/budgets/:id?`,
 // or `/files/*` into a tester that, given a concrete pathname, returns

@@ -1,4 +1,4 @@
-// The working copy on disk (shim-core design D10). The agent edits a folder;
+// The working copy on disk. The agent edits a folder;
 // this reads the whole folder for a preview and writes a checkout into it —
 // a shim's (shim.json + handlers/) or a composition's (manifest.json + its
 // flat files).

@@ -1,4 +1,4 @@
-// Framework-component-identity — the strongest anchor signal (CLAUDE.md §8).
+// Framework-component-identity — the strongest anchor signal.
 //
 // React/Vue/Angular attach the component instance that rendered a DOM node to
 // the node as an expando (React: `__reactFiber$<rand>` / `__reactInternalInstance$<rand>`).
@@ -8,7 +8,7 @@
 // (Tailwind/CSS-modules churn). That makes it the rung the css/data/aria/text
 // ladder has been missing on framework SPAs, which is most of Shim's surface.
 //
-// World boundary (proven by scripts/fiber-isolation-spike.js): these expandos
+// World boundary (proven by a fiber-isolation spike): these expandos
 // are visible ONLY from the page's main world, never the engine's isolated
 // world (contextIsolation). So identity is extracted by a main-world helper
 // (FIBER_WALK_SRC, injected into the page by page-preload) and only the
@@ -116,7 +116,7 @@ function componentScore(expected: ComponentDescriptor | null | undefined, actual
   return score;
 }
 
-// --- Sourcemap-symbol translation (§8, Stage B "consume the map") -----------
+// --- Sourcemap-symbol translation (Stage B "consume the map") -----------
 //
 // Component names read from a fiber are the CURRENT deploy's minified names
 // (`Wc`); the durable, legible identity is the ORIGINAL name (`TrackRow`).

@@ -1,4 +1,4 @@
-// The page tools (shim-core design D2, §5): the authoring tools that only
+// The page tools: the authoring tools that only
 // need a page — screenshot, query, inspect, evaluate, console, reload,
 // verify, interact. ONE definition per tool, here, for every caller:
 //
@@ -124,7 +124,7 @@ const SHIM_QUERY_PAGE: ToolDefinition = {
   },
 };
 
-// Read the page console captured during this turn (§16). The emit feedback
+// Read the page console captured during this turn. The emit feedback
 // already carries errors/warnings since the last apply automatically; this is
 // the on-demand deeper pull — info-level logs, full repetition, longer
 // history. Read-only, main-side; no page interaction.

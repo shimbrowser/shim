@@ -157,6 +157,11 @@ npm test                                # from the repository root: every harnes
 
 The build fails if anything in the page bundle imports a Node builtin.
 
+## Design decisions
+
+Comments in both packages cite the design decisions they rest on as `D1`…`D16`;
+[DECISIONS.md](DECISIONS.md) lists them.
+
 ## License
 
 Licensed under the Apache License 2.0. Copyright Artificial Apps, LLC. See

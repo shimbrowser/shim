@@ -1,4 +1,4 @@
-// The headless host's file-backed `api.storage` (shim-core design D5, D15):
+// The headless host's file-backed `api.storage`:
 // what handlers store while a headless session runs survives the session, in
 // one JSON file the session names — never in the Shim browser's profile
 // (invariant 10: headless never reads persist:user).

@@ -1,4 +1,4 @@
-// The settle-delayed reconciler for an anchored rule (§12/§14). After the page
+// The settle-delayed reconciler for an anchored rule. After the page
 // has had a beat to render (React hydration, async content), it looks once at
 // how the rule resolved and acts — refresh the baseline hash, promote a working
 // fallback, recover via witness/component-id, or emit no-match/quarantine.
@@ -110,7 +110,7 @@ export function makeReconciler(
     try { currentBundle = spec.__bundleHashFn(); } catch (_) { currentBundle = null; }
     const baselineStale = typeof currentBundle === 'string' && currentBundle !== spec.bundleHash;
     const deploy = typeof spec.bundleHash === 'string' && baselineStale;
-    // Per-shim auto-repair (§14). On by default; when off, a deploy that breaks
+    // Per-shim auto-repair. On by default; when off, a deploy that breaks
     // the anchor is NOT silently re-pointed — it surfaces as no-match /
     // quarantine so the user decides. The baseline refresh below (primary path)
     // still runs either way: it only tracks the bundle hash, never changes an
@@ -124,7 +124,7 @@ export function makeReconciler(
     // be judged "deployed since last reconciled" once it has a baseline, and a
     // clean primary resolution is when we record one.
     if (rs.state.size > 0 && rs.matchedSource === 'primary') {
-      // Component-identity verification (§8). The sync resolve path filters by
+      // Component-identity verification. The sync resolve path filters by
       // the witness's tag/attr/text/child signals but CAN'T read fibers, so the
       // strongest signal is checked here via the main-world bridge. A confident
       // mismatch means the selector latched onto the wrong element (right
@@ -141,7 +141,7 @@ export function makeReconciler(
       if (rs.resolvedEl && expectedComponent &&
           api.componentId && typeof api.componentId.verify === 'function') {
         const actual = await api.componentId.verify(rs.resolvedEl);
-        // Dual raw/translated scoring (§8 Stage B): the stored identity may be
+        // Dual raw/translated scoring (sourcemap Stage B): the stored identity may be
         // in original-name space (new witnesses) or minified space (pre-map
         // witnesses); matchComponent takes the max of comparing the live fiber
         // names raw and translated through the deploy's symbol map, so neither
@@ -220,7 +220,7 @@ export function makeReconciler(
     if (rs.state.size === 0) {
       const hasWitness = !!rule.anchor?.witness;
       const recoveryNotes: string[] = [];
-      // Component-identity recovery (§8), tried first because it's the strongest
+      // Component-identity recovery, tried first because it's the strongest
       // signal: the selector died, but the component that rendered the target
       // may still be on the page. The main-world helper scans for nodes whose
       // fiber identity matches the captured one; a UNIQUE match re-anchors. This

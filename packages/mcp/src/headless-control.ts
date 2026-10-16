@@ -1,4 +1,4 @@
-// MCP headless mode's "Shim" (shim-core design D2, D9, D14, D15): an
+// MCP headless mode's "Shim": an
 // in-process ControlClient that answers the same routes the Shim browser's
 // control endpoint does — so server.ts drives a headless session through
 // exactly the code path, wire encoding and reply shapes it drives an attached
@@ -137,7 +137,7 @@ function exclusiveLeases(onRelease: (key: string) => void): SessionLeases & { is
   };
 }
 
-// The browser's control route bounds (src/main/control/router.ts): the
+// The browser's control route bounds: the
 // registry keeps every successful commitId as a retry key, and a summary
 // lands in the .shim's authoring history.
 export const MAX_COMMIT_ID_LENGTH = 256;

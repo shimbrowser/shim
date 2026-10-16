@@ -2,13 +2,13 @@
 // does `code` parse as a classic SCRIPT, with exactly the diagnostics
 // `new vm.Script(code)` gives? spec-lint runs it over rewrite-response
 // transforms and intercept wraps so a malformed one is rejected at emit /
-// commit / import instead of poisoning the shared install script (§6). It
-// used to be `vm.Script`; core imports no Node builtin (shim-core design D4),
+// commit / import instead of poisoning the shared install script. It
+// used to be `vm.Script`; core imports no Node builtin,
 // so the same check is built from two parses the language itself offers.
 // Nothing in `code` ever runs: pass 1's first statement throws before any of
 // it, and declaration instantiation only creates bindings and uncalled
 // function objects; pass 2 constructs a function it never calls. (Handler
-// source is trusted code anyway, CLAUDE.md §13; this is a parse, not a gate.)
+// source is trusted code anyway; this is a parse, not a gate.)
 //
 //   1. Script grammar, sloppy, via a DIRECT eval inside an arrow function
 //      created at global scope (by one indirect eval). The eval'd source is

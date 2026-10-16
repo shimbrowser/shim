@@ -1,4 +1,4 @@
-// Deploy identity for the §12 auto-rebase gate — a page fingerprint that is
+// Deploy identity for the auto-rebase deploy gate — a page fingerprint that is
 // STABLE ACROSS ROUTES of a code-split SPA but changes on every deploy.
 //
 // Why this exists (found live on a real SPA): the gate originally reused the
@@ -30,7 +30,7 @@
 // so per-route keys are correct there. Two hashes, two jobs.
 //
 // Pure + bare-node testable (packages/core/test/deploy-id-harness.ts); the preload only
-// contributes DOM collection. No Node builtins (design D4): the hash is the
+// contributes DOM collection. No Node builtins: the hash is the
 // pure-JS ./sha256, pinned to Node crypto's output by sha256-harness.
 
 import { must } from './assert';
@@ -40,7 +40,7 @@ import { sha256Hex } from './sha256';
 // Suffix List, imprecise for multi-part suffixes (a.co.uk vs b.co.uk read as
 // the same site). Here the failure mode of a false-same is merely including a
 // third-party script in the hash (possible route noise on exotic TLDs), not a
-// trust decision — acceptable until the PSL-backed version lands (§15).
+// trust decision — acceptable until the PSL-backed version lands.
 function sameRegistrableDomain(a: string, b: string): boolean {
   if (!a || !b) return false;
   if (a === b) return true;

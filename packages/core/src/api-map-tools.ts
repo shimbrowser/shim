@@ -1,4 +1,4 @@
-// The API map tools for an external session (shim-core design D2, D13, §5):
+// The API map tools for an external session:
 // what @shimbrowser/mcp registers statically so an agent driving a session
 // (Claude Code) can read the host sites' recorded API — Shim's Discovery
 // map — and check an endpoint still answers. ONE definition per tool, here.

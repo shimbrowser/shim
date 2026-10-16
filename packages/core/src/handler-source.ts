@@ -1,4 +1,4 @@
-// Handler source forms (CLAUDE.md §5). A handler is authored rule-local as a
+// Handler source forms. A handler is authored rule-local as a
 // bare function EXPRESSION (`rule.handlers[name]`, the LLM's convention) and
 // stored, exported and shipped by name as a CJS MODULE (`module.exports =
 // <expr>;`) — patch_files, a `.shim` file's top-level `handlers` map, a shim
@@ -17,7 +17,7 @@ const MODULE_SUFFIX = ';\n';
 /**
  * `(<expression>\n)` — the source that evaluates to a rule-local handler.
  * The `)` sits on its own line: an expression may end in a `// comment`,
- * which runs to end-of-line (the `//# sourceURL=` trap, CLAUDE.md §17) and
+ * which runs to end-of-line (the `//# sourceURL=` trap) and
  * would swallow a closer on the same line, so the handler never compiles.
  */
 export function handlerExpressionSource(expression: string): string {

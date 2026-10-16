@@ -1,5 +1,5 @@
 // Pure compile + precondition logic for the Tier-1 layout kinds — `reorder`
-// and `reshape` (CLAUDE.md §6). Sugar + apply-time feedback: each kind
+// and `reshape`. Sugar + apply-time feedback: each kind
 // compiles deterministically to a Tier-1 CSS body (engine.ts injects it via
 // the shared token machinery), and the precondition evaluators produce
 // diagnostics (`rule-status` note field) when the compiled CSS cannot take

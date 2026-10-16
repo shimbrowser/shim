@@ -1,4 +1,4 @@
-// The working-copy differ (shim-core design D10): an attached session sends
+// The working-copy differ: an attached session sends
 // its whole shim folder; the host diffs it against the session's working
 // state and applies the difference through the existing emit path. This is
 // that diff — (previous working spec + stored handler modules, new folder)

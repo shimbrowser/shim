@@ -1,5 +1,5 @@
 // Which mode the MCP server runs in, and whether each mode can be used right
-// now (shim-core design D9, D15; C5). Pure: the probes take their reads as
+// now. Pure: the probes take their reads as
 // arguments, so a harness drives them without a Shim or a Playwright.
 //
 //   auto (default)  one server for both: a session on a Shim tab (tabId)
@@ -8,7 +8,7 @@
 //                   while Shim IS reachable is refused unless the call asks
 //                   for headless, and every open answer names its mode.
 //   attach          only the running Shim browser (--attach, or
-//                   SHIM_MCP_MODE=attach): the pre-C5 default.
+//                   SHIM_MCP_MODE=attach): the earlier default.
 //   headless        only a Playwright Chromium per session (--headless, or
 //                   SHIM_MCP_MODE=headless).
 

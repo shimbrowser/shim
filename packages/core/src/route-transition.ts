@@ -1,4 +1,4 @@
-// Pure classifier for a mount-route path change (CLAUDE.md §6 nested
+// Pure classifier for a mount-route path change (nested
 // sub-routes). The engine's evaluate() reconciles mounted-state against the
 // current path by asking this what to do; extracted from the closure so it is
 // bare-node testable (routeRule itself needs a DOM). No dependencies, no

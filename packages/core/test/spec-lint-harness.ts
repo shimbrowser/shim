@@ -97,7 +97,7 @@ res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.v
 check('hide on .video-card (a utility class, not the player) does NOT warn', !res.warnings.some((w) => /media element/.test(w)), JSON.stringify(res.warnings));
 
 // Player-class alternatives are token-bounded: a class that CONTAINS a player
-// class name but isn't it must not draw a false warning (Codex #316 feedback).
+// class name but isn't it must not draw a false warning.
 for (const sel of ['.video-stream-thumbnail', '.video-js-poster', '.html5-video-preview', '[data-id="video-stream-preview"]']) {
   res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: sel } }, mutations: [{ kind: 'hide' }] }] });
   check(`hide on "${sel}" (contains but does not select a player class) does NOT warn`,
@@ -113,7 +113,7 @@ for (const sel of ['.video-stream', '.player > .html5-main-video', '.video-js'])
 res = lintSpec({ rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.video-stream' } }, mutations: [{ kind: 'restyle', properties: { opacity: '0.5' } }] }] });
 check('restyle on .video-stream does NOT warn (only hide/remove blank the player)', !res.warnings.some((w) => /media element/.test(w)), JSON.stringify(res.warnings));
 
-console.log('api.ai without the "ai" permission declared (§19)');
+console.log('api.ai without the "ai" permission declared');
 const AI_HANDLER = 'async function tag({ anchor, api }) { const r = await api.ai.complete({ prompt: "x" }); }';
 res = lintSpec({
   rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.row' } }, mutations: [{ kind: 'script', handler: 'tag' }], handlers: { tag: AI_HANDLER } }],
@@ -183,7 +183,7 @@ res = lintSpec({
 check('positional reorder target warns', res.warnings.some((w) => /positional/.test(w)), JSON.stringify(res.warnings));
 check('positional reorder target is NOT an error', res.errors.length === 0, JSON.stringify(res.errors));
 
-console.log('inject lint (§6): payload-shape errors, static-only enforcement');
+console.log('inject lint: payload-shape errors, static-only enforcement');
 function tInjectLint(): void {
   const mk = (mut: Record<string, unknown>) => lintSpec({
     id: 's', match: { hosts: ['x.test'] },
@@ -204,7 +204,7 @@ function tInjectLint(): void {
 }
 tInjectLint();
 
-console.log('rewrite-response lint (§6, docs/2026-08-04-rewrite-response-design.md)');
+console.log('rewrite-response lint');
 function tRewriteLint(): void {
   const VALID_MUT = { kind: 'rewrite-response', endpoint: { method: 'GET', path: '/list/tracks' }, transform: 'filterHeard' };
   const CLEAN_SRC = 'function filterHeard(json, ctx) { json.tracks = json.tracks.filter(function (t) { return !t.heard; }); return json; }';
@@ -273,7 +273,7 @@ function tRewriteLint(): void {
   const bogusField = mk({ ...VALID_MUT, bogusField: 1 }, { filterHeard: CLEAN_SRC });
   check('unknown extra field on the mutation still warns', bogusField.warnings.some((w) => /bogusField/.test(w)), JSON.stringify(bogusField.warnings));
 
-  // Fix 1a: syntax-check the bound transform source itself. A malformed
+  // Syntax-check the bound transform source itself. A malformed
   // source (missing brace) previously passed lint/commit untouched, then
   // poisoned rewrite-install.ts's ONE shared generated wrapper script at
   // install time — one bad rule's syntax error killed every rewrite rule on
@@ -312,7 +312,7 @@ function tRewriteLint(): void {
 }
 tRewriteLint();
 
-console.log('intercept lint (§6, docs/2026-08-04-intercept-design.md)');
+console.log('intercept lint');
 function tInterceptLint(): void {
   const mk = (mut: Record<string, unknown>, ruleHandlers?: Record<string, string>) => lintSpec({
     id: 's', match: { hosts: ['x.test'] },
@@ -423,7 +423,7 @@ check('observer without DOM writes is silent', res.warnings.length === 0, JSON.s
 res = lintSpec(scriptRule('function decorate({ anchor }) { anchor.appendChild(document.createElement("b")); return anchor.lastChild; }'));
 check('DOM writes without observer is silent', res.warnings.length === 0, JSON.stringify(res.warnings));
 
-console.log('observer-loop heuristic — widened regexes (§ finding 2/3)');
+console.log('observer-loop heuristic — widened regexes');
 res = lintSpec(scriptRule(`function decorate({ anchor }) {
   var o = new MutationObserver(function () { anchor.setAttribute('data-x', String(Date.now())); });
   o.observe(anchor, { attributes: true });
@@ -484,7 +484,7 @@ check('flags a guard-less observer+write, no rule prefix', (() => {
 check('null on the safe disconnect/re-observe pattern', observerLoopWarning('decorate', SAFE_HANDLER) === null);
 check('null on plain code', observerLoopWarning('h', 'function h() { return 1; }') === null);
 
-console.log('spec.connections — engine-enum ERROR (shim-db remote-transport §8, cheap same-turn feedback)');
+console.log('spec.connections — engine-enum ERROR (cheap same-turn feedback)');
 res = lintSpec({ connections: [{ name: 'warehouse', engine: 'oracle' }], rules: [] });
 check('unknown engine flagged as error', res.errors.length === 1 && /connections\[0\]/.test(res.errors[0] || '') && /oracle/.test(res.errors[0] || ''), JSON.stringify(res.errors));
 check('error names the supported engines', /postgres.*mysql.*mariadb.*mssql.*sqlite-remote/.test(res.errors[0] || ''), JSON.stringify(res.errors));

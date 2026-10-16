@@ -1,6 +1,6 @@
 // Pure console buffer + formatters for console visibility during authoring
-// (the read_console tool and the console block in every preview's evidence,
-// shim-core design D11). One implementation for every host: the Shim
+// (the read_console tool and the console block in every preview's evidence).
+// One implementation for every host: the Shim
 // browser's main process feeds it from Electron's console messages, the
 // headless driver (@shimbrowser/mcp) from CDP's. No imports, so it stays
 // trivial to unit test and can't couple to Electron or DOM types.

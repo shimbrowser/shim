@@ -1,5 +1,5 @@
-// The headless PageHost (shim-core design §5 / D5 / D9): one Playwright
-// Chromium page, driven the way the A5 spike proved works under a strict CSP.
+// The headless PageHost: one Playwright
+// Chromium page, driven the way the real-browser spike (D12) proved works under a strict CSP.
 //
 //   Page.addScriptToEvaluateOnNewDocument { worldName }   the @shimbrowser/core
 //       page bundle + the page runtime (headless-page-runtime.ts) in a CDP
@@ -40,7 +40,7 @@ export const REQUIRES_SHIM_BROWSER = 'requires-shim-browser';
 /**
  * The headless v1 capability set (D15): tiers 1–4 minus the routing kind, no
  * iframe rules, no host api members beyond `storage` / `cleanup`, and no
- * component identity. Preflight (C3) rejects a spec that declares anything
+ * component identity. Preflight rejects a spec that declares anything
  * outside it; an undeclared use fails in its own shape at runtime.
  */
 export const HEADLESS_CAPABILITIES: PageHostCapabilities = Object.freeze({
@@ -77,7 +77,7 @@ export interface HeadlessStorage {
   list(scope: StorageScope): Promise<Record<string, unknown>>;
 }
 
-/** An in-memory HeadlessStorage (the default; C3's session swaps in a file-backed one). */
+/** An in-memory HeadlessStorage (the default; a headless session swaps in a file-backed one). */
 export function memoryStorage(): HeadlessStorage {
   const buckets = new Map<string, Map<string, string>>();
   const bucket = (scope: StorageScope): Map<string, string> => {
@@ -219,7 +219,7 @@ function formatConsoleArg(arg: RemoteValue): string {
 // A handler compiled the way the Shim browser's preload compiles it — the
 // same handlerExpressionSource wrap + trailing sourceURL layout, so stack line
 // and column numbers match across hosts and a source ending in a `// comment`
-// can't swallow the closing paren (the pragma must end its line, CLAUDE.md §17).
+// can't swallow the closing paren (the pragma must end its line).
 function handlerSource(source: string, ruleKey: string, name: string): string {
   return `${handlerExpressionSource(source)}\n//# sourceURL=shim://patches/${ruleKey}/handlers/${name}.js\n`;
 }

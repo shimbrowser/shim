@@ -1,5 +1,4 @@
-// shim-cli-e2e-harness — the `shim` command line as it ships (shim-core
-// design C4; D8, D9, D10, D11): builds @shimbrowser/mcp's bundles and runs
+// shim-cli-e2e-harness — the `shim` command line as it ships: builds @shimbrowser/mcp's bundles and runs
 // dist/shim.js as a child process against a local fixture site in a real
 // Playwright Chromium.
 //

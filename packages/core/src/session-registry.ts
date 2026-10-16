@@ -1,4 +1,4 @@
-// The authoring session registry (shim-core design D1, D6, D14): an agent
+// The authoring session registry: an agent
 // outside the host (Claude Code, through the Shim browser's control endpoint
 // or @shimbrowser/mcp's headless mode) owns one artifact for a while and
 // drives the same turn machinery an internal turn drives. One implementation
@@ -9,8 +9,7 @@
 // SessionBackend, the ownership behind the host's lease registry (any
 // SessionLeases — the Shim browser passes its artifact lease registry,
 // headless an in-process one), and the clock behind injectable timers, so
-// every ordering rule below is bare-node harness-pinned
-// (scripts/session-registry-harness.ts).
+// every ordering rule below is bare-node harness-pinned.
 //
 // Invariants:
 //   - Ownership. open() takes the artifact's 'turn' lease without preempting
@@ -234,7 +233,7 @@ export interface SessionBackend<H = unknown, L extends SessionLease = SessionLea
   // ('artifact-busy' for an ArtifactBusyError, 'target-changed' for a
   // TargetChangedError, its own code for a BeginRefusal).
   begin(args: BeginArgs<L>): Promise<H>;
-  // The session's working copy as files (design D10), as of the latest
+  // The session's working copy as files, as of the latest
   // applied revision. Optional: a kind without one answers
   // 'checkout-unavailable'.
   checkout?(handle: H, signal: AbortSignal): Promise<BackendCheckout>;

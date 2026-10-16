@@ -1,5 +1,4 @@
-// Witness fingerprints — the verification layer of the anchor ladder
-// (CLAUDE.md §8, §14).
+// Witness fingerprints — the verification layer of the anchor ladder.
 //
 // A witness is a small shape-snapshot of the element a rule anchored to,
 // captured at authoring time (the agentic loop's live preview is the
@@ -34,7 +33,7 @@ const WITNESS_VERSION = 1;
 // a candidate, so a witness captured from a sparse element (no id, no
 // text) still verifies on what it has.
 //
-// NOTE: framework-component-identity (`witness.component`, §8) is NOT scored
+// NOTE: framework-component-identity (`witness.component`) is NOT scored
 // here. It can't be read synchronously (it lives in the page's main world,
 // reachable only via the async bridge), and it's a *veto* signal — a confident
 // component mismatch means the wrong element, full stop, even if a data-testid
@@ -100,7 +99,7 @@ function textStemOf(el: Element) {
 
 // Build a witness from a live element. Returns a plain-JSON object safe
 // to embed in the spec. `opts.component` (a descriptor from the main-world
-// fiber bridge — §8) is attached when supplied; the isolated world can't read
+// fiber bridge) is attached when supplied; the isolated world can't read
 // fibers itself, so the engine fetches it via api.componentId and passes it in
 // here at capture time. Omitted on non-React pages (bridge resolves null).
 function buildWitness(el: Element, opts: { component?: ComponentDescriptor } = {}) {

@@ -15,7 +15,7 @@
 // downstream. Prefer it over a bare `!` non-null assertion, which fails silently.
 //
 // The engine owns it so @shimbrowser/core imports nothing outside itself
-// (shim-core design D4/D5); src/shared/assert re-exports it for the rest of
+// itself; the Shim browser re-exports it for the rest of
 // the app, so there is still one implementation.
 export function must<T>(value: T | null | undefined, what: string): T {
   if (value == null) {

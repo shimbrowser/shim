@@ -1,5 +1,5 @@
-// Harness for the page tools' one definition (packages/core/src/page-tools.ts,
-// shim-core design D2): every roster names each tool after its key, every
+// Harness for the page tools' one definition (packages/core/src/page-tools.ts):
+// every roster names each tool after its key, every
 // input schema is a well-formed object schema, the session roster covers
 // every page tool, and each session schema accepts every property either
 // worker's schema has (same name, same type) — so one static MCP definition
