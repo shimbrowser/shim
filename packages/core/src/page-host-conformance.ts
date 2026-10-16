@@ -9,8 +9,9 @@
 //
 // Cases (D15): apply (every supported kind and mount strategy), re-render
 // survival, SPA navigation, anchor recovery after a simulated deploy,
-// teardown, a throwing handler, plus api.storage, the page tools, and a page
-// with a strict CSP (the real-browser spike's compile path (D12), through the real driver).
+// teardown, a throwing handler, plus api.storage, the page tools, a page
+// with a strict CSP (the real-browser spike's compile path (D12), through the
+// real driver), shared handler modules, and a dead anchor's preview evidence.
 //
 // The suite owns its site: `conformanceFixture(path, state)` answers every
 // request, and the runner serves it (any HTTP server; the case only needs the
@@ -27,6 +28,8 @@ import { computeDeployId } from './deploy-id';
 import { viewPageOnHost, evaluateOnHost, MAX_SHOT_WIDTH } from './page-host-tools';
 import { errMessage } from './error';
 import { moduleToExpression } from './handler-source';
+import { previewNoMatch, type NoMatchEntry, type RuleStatusEvent } from './preview-evidence';
+import { verificationLevel } from './capability-preflight';
 
 // --- the fixture site -------------------------------------------------------
 
@@ -185,6 +188,7 @@ export const CONFORMANCE_CAPABILITIES = [
   'mount:inline', 'mount:portal', 'mount:overlay', 'mount:shadow', 'self-healing',
   'witness:capture', 'witness:verify', 'rebase:refresh', 'rebase:promote', 'rebase:recover', 'rebase:quarantine',
   'api.storage', 'api.cleanup', 'handler-errors', 'console', 'spa-navigation', 'teardown', 'page-tools', 'strict-csp',
+  'no-match',
 ] as const;
 export type ConformanceCapability = (typeof CONFORMANCE_CAPABILITIES)[number];
 
@@ -396,6 +400,16 @@ const H = {
 }`,
   boom: `function boom() {
   throw new Error('conf-boom');
+}`,
+  slowMount: `function slowMount({ anchor }) {
+  return new Promise(function (resolve) {
+    setTimeout(function () {
+      const s = document.createElement('i');
+      s.className = 'conf-slow';
+      anchor.appendChild(s);
+      resolve(s);
+    }, 800);
+  });
 }`,
   lateBoom: `function lateBoom({ anchor }) {
   setTimeout(function later() {
@@ -827,8 +841,8 @@ const pageToolsCase: ConformanceCase = {
 const strictCspCase: ConformanceCase = {
   id: 'strict-csp',
   title: 'handlers compile and run on a page whose CSP forbids eval and inline style',
-  // `strict-csp` vouches for handler compile and mount under the policy; the
-  // tier-1 check below pins a gap both hosts share.
+  // `strict-csp` vouches for handler compile and mount under the policy, and
+  // for tier-1 CSS landing under it on every host.
   covers: ['strict-csp', 'script'],
   async run(kit) {
     if (!(await kit.load('/strict'))) return;
@@ -843,14 +857,12 @@ const strictCspCase: ConformanceCase = {
     const matched = await kit.event((e) => e.kind === 'rule-status' && e.specId === conformanceRuleKey('strict-hide') && e.matched === 1);
     kit.check('a tier-1 rule resolved its anchor', matched !== null);
     await kit.sleep(300);
-    // Pinned as found (2026-10-02), identical on both hosts: the engine's
-    // tier-1 <style> element is refused by a style-src without
-    // 'unsafe-inline', even inserted from an isolated world, so the rule
-    // matches but its CSS never lands. An engine gap shared by every host,
-    // not a host difference; a CSP-immune stylesheet path in the engine
-    // (constructable sheets) flips this check on both hosts together.
+    // The engine's tier-1 <style> element is refused by a style-src without
+    // 'unsafe-inline' (even inserted from an isolated world), and the style
+    // mirror (style-mirror.ts) re-adopts its text as a constructable sheet,
+    // which style-src doesn't govern: the rule's CSS lands on every host.
     const display = await kit.read(`getComputedStyle(document.querySelector('#strict-ad')).display`);
-    kit.check('tier-1 CSS under a strict style-src is refused alike on every host (known engine gap)', display === 'block', display);
+    kit.check('tier-1 CSS under a strict style-src lands on every host (the style mirror)', display === 'none', display);
   },
 };
 
@@ -894,8 +906,68 @@ const sharedModuleCase: ConformanceCase = {
   },
 };
 
+// Both hosts collect a preview's evidence 2 s after applying it. The engine's
+// own rule-no-match runs on a page timer 1.5 s after setup, which a page in a
+// background window fires late, so the evidence must not hang on it: a dead
+// anchor's status (matched 0) arrives as the rule is set up, and noMatch[] is
+// read from it.
+const PREVIEW_SETTLE_MS = 2000;
+
+const noMatchCase: ConformanceCase = {
+  id: 'dead-anchor',
+  title: 'a dead anchor reaches the preview evidence within the settle window',
+  covers: ['no-match'],
+  async run(kit) {
+    if (!(await kit.load('/apply'))) return;
+    const dead = { id: 'dead', anchor: css('#conf-does-not-exist'), mutations: [{ kind: 'hide' }] } satisfies Rule;
+    const live = { id: 'live', anchor: css('#ad'), mutations: [{ kind: 'hide' }] } satisfies Rule;
+    const deadKey = kit.apply(dead);
+    const liveKey = kit.apply(live);
+    await kit.sleep(PREVIEW_SETTLE_MS);
+    const seen = kit.events.slice();
+    const last = (key: string): RuleStatusEvent | undefined => {
+      const all = seen.filter((e) => e.kind === 'rule-status' && e.specId === key);
+      return all.at(-1) as RuleStatusEvent | undefined;
+    };
+    const previewed = [{ rule: dead, status: last(deadKey), peakMatched: 0 }, { rule: live, status: last(liveKey), peakMatched: 1 }];
+    kit.check('the dead rule\'s status (matched 0) arrived within the window', last(deadKey)?.matched === 0, last(deadKey));
+    kit.check('the live rule\'s status shows its match', last(liveKey)?.matched === 1, last(liveKey));
+
+    const ids = (list: NoMatchEntry[]): string => list.map((n) => `${n.ruleId}:${n.selector}`).join(',');
+    const fromStatus = previewNoMatch([], previewed);
+    kit.check('noMatch lists the dead rule even with no rule-no-match event yet', ids(fromStatus) === 'dead:#conf-does-not-exist', fromStatus);
+    const reported = seen
+      .filter((e) => e.kind === 'rule-no-match' && (e.specId === deadKey || e.specId === liveKey))
+      .map((e) => ({ ruleId: e.ruleId, selector: typeof e.selector === 'string' ? e.selector : undefined }));
+    const both = previewNoMatch(reported, previewed);
+    kit.check('…and once when the engine\'s event did arrive', ids(both) === 'dead:#conf-does-not-exist', { reported, both });
+    kit.check('a dead rule\'s verification is none, not full',
+      verificationLevel(undefined, kit.host.capabilities, false, true) === 'none'
+      && verificationLevel(undefined, kit.host.capabilities, false, false) !== 'none');
+
+    const late = await kit.event((e) => e.kind === 'rule-no-match' && e.specId === deadKey, 8000);
+    kit.check('the engine still reports the dead anchor itself', late?.ruleId === 'dead', late);
+    kit.check('…and never the live one', !kit.events.some((e) => e.kind === 'rule-no-match' && e.specId === liveKey));
+
+    // A preview replaced while its handler is still mounting: the old
+    // version's mount must not land, nor report a match under the key the
+    // replacement (a dead anchor) now owns.
+    const slowRule = { id: 'slow', anchor: css('#lead'), mutations: [{ kind: 'script', handler: 'slowMount' }], handlers: { slowMount: H.slowMount } } satisfies Rule;
+    const slowKey = kit.apply(slowRule);
+    await kit.sleep(100);
+    const replacedAt = kit.events.length;
+    kit.apply({ ...slowRule, anchor: css('#conf-also-missing') });
+    await kit.sleep(PREVIEW_SETTLE_MS);
+    const after = kit.events.slice(replacedAt).filter((e) => e.kind === 'rule-status' && e.specId === slowKey);
+    kit.check('a replaced version\'s late mount reports no match under the replacement\'s key',
+      after.length > 0 && after.every((e) => e.matched === 0), after);
+    kit.check('…and leaves nothing on the page', (await kit.read(`document.querySelectorAll('.conf-slow').length`)) === 0);
+    kit.remove(slowKey);
+  },
+};
+
 export const CONFORMANCE_CASES: readonly ConformanceCase[] = [
-  applyCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, strictCspCase, sharedModuleCase,
+  applyCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, strictCspCase, sharedModuleCase, noMatchCase,
 ];
 
 /** Every capability some case vouches for. */

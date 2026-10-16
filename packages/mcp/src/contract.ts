@@ -55,23 +55,29 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
     name: 'shim_list_tabs',
     description:
       "List the Shim browser's open tabs per window: each tab's tabId (what shim_open_session targets), url, " +
-      'title, whether it is the active tab, and for a site tab the shims that run on its host (id and name), for ' +
-      'a composition tab its compositionId. Also lists every composition (id, name, mount).',
+      'title, whether it is the active tab, and for a site tab the shims that run on its host (id and name) and ' +
+      'connect ("asks": opening a session shows the user a card; "allowed": they allowed this site until Shim ' +
+      'quits, so none comes), for a composition tab its compositionId. Also lists every composition (id, name, ' +
+      'mount, connect).',
     input_schema: { type: 'object', properties: {} },
   },
   shim_open_session: {
     name: 'shim_open_session',
     description:
-      'Open an authoring session on one shim (against one of Shim\'s site tabs) or one composition. The user is ' +
-      'asked in Shim to allow it (up to two minutes); this call waits for the answer, and nothing shows here ' +
-      'meanwhile, so first tell the user to switch to Shim and allow the "coding agent wants to connect" card in ' +
-      'its sidebar. Name an existing shim with ' +
+      'Open an authoring session on one shim (against one of Shim\'s site tabs) or one composition. Unless the ' +
+      'user already allowed that site (or composition) until Shim quits — shim_list_tabs says connect: "allowed" — ' +
+      'they are asked in Shim to allow it (up to two minutes) and this call waits for the answer, so first tell the ' +
+      'user to switch to Shim and allow the "coding agent wants to connect" card in its sidebar; with connect: ' +
+      '"allowed" no card comes, so don\'t. The answer\'s consent says which happened ("asked" or "remembered"). ' +
+      'Name an existing shim with ' +
       'shimId, start a new one on the tab\'s site with newShimName, name a composition with compositionId, or ' +
       'start a new composition with newCompositionName (and optionally the mount you propose for its ' +
       'compose://<mount> address; the user can change it before allowing, and the answer says which they chose). ' +
       'A composition\'s page opens in Shim as the preview; tabId is optional. Something new is kept only if you ' +
       'commit. Pass dir to check the work out into that folder ' +
-      'right away (same as shim_checkout). While the session is open the shim or composition is yours alone; Shim ' +
+      'right away (same as shim_checkout); unless the user named a folder, use <your working directory>/<name> (the ' +
+      'shim or composition name, lowercased and hyphenated), never a temp or scratch folder, and tell the user ' +
+      'where it is. While the session is open the shim or composition is yours alone; Shim ' +
       'ends it after 10 idle minutes, or when the user stops it or starts their own turn on it. ' +
       'Headless (no Shim browser needed): pass url instead of tabId. The session opens that page in its own ' +
       'Chromium, with no logins, and works on the .shim file shimFile (loaded when it exists; with newShimName, ' +
@@ -88,7 +94,7 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
         compositionId: { type: 'string', description: 'Instead of a shim: the composition to work on (shim_list_tabs lists them).' },
         newCompositionName: { type: 'string', description: 'Instead of compositionId: create a new composition with this name (a manifest and an empty index.html to start from). It is kept only if you commit.' },
         mount: { type: 'string', description: 'With newCompositionName: the address to propose, compose://<mount> — lowercase letters, digits and hyphens, not starting with a hyphen, and not already taken. Omitted: Shim suggests one from the name. The user may change it.' },
-        dir: { type: 'string', description: 'Optional absolute folder to check the working copy out into once the session opens.' },
+        dir: { type: 'string', description: 'Optional absolute folder to check the working copy out into once the session opens. Default to <your working directory>/<name> unless the user named one; never a temp or scratch folder.' },
         url: { type: 'string', description: 'Headless mode only, instead of tabId: the http(s) page to open.' },
         shimFile: { type: 'string', description: 'Headless mode only, instead of shimId: the absolute path of the .shim file to work on. Commits write it.' },
         mode: {
@@ -110,7 +116,7 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
     input_schema: {
       type: 'object',
       properties: {
-        dir: { type: 'string', description: 'Absolute path of the folder to write. Created if missing.' },
+        dir: { type: 'string', description: 'Absolute path of the folder to write. Created if missing. Unless the user named one, <your working directory>/<name>, never a temp or scratch folder.' },
         sessionId: SESSION_ID,
       },
       required: ['dir'],

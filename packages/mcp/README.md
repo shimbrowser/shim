@@ -130,7 +130,8 @@ never applied with different behavior.
   `partial`.
 - **Every rule's evidence carries a verification level.** `full` means every check the rule
   carries ran on this host, so the rule behaves the same in Shim. `partial` means something
-  went unchecked. Treat a `partial` rule as unverified until you try it in Shim.
+  went unchecked. Treat a `partial` rule as unverified until you try it in Shim. `none` means
+  the rule matched nothing (it is also in `noMatch`), so there was nothing to verify.
 
 Tools that need the Shim browser answer `requires-shim-browser` in a headless session:
 opening a shim from Shim's library, compositions and their tools (`probe_request`,
@@ -244,7 +245,7 @@ that file alone.
 ## Build and test
 
 ```sh
-npm run build -w @shimbrowser/mcp   # dist/shim-mcp.js and dist/shim.js
+npm run build -w @shimbrowser/mcp   # dist/shim-mcp.js and dist/shim.js (the root's npm run build does this too)
 npm test                            # from the repository root: every harness
 ```
 

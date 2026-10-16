@@ -359,6 +359,19 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
         'ask the user to rename or remove it in Shim, then check out again',
     );
   }
+  // Paths are distinct in the composition but may not be on disk: macOS and
+  // Windows fold case (and macOS Unicode normalization), so "A.js" and
+  // "a.js" — or a folder "Lib/" next to "lib/" — would land on one entry, and
+  // reading the checkout back would lose one as a deleted file. Refuse before
+  // touching the disk.
+  const collision = foldCollision(Object.keys(files));
+  if (collision) {
+    throw new FolderError(
+      'unsafe-path',
+      `the composition holds "${collision[0]}" and "${collision[1]}", which name the same file or folder on a disk that ignores case — ` +
+        'ask the user to rename one in Shim, then check out again',
+    );
+  }
   const targets = Object.keys(files).sort().map((rel) => [rel, resolveInside(root, rel)] as const);
   // The composition's own hidden files.
   const hidden = Object.keys(files).filter(hasHiddenSegment).sort();
@@ -420,6 +433,37 @@ export function writeCompositionCheckout(dir: string, files: FolderInput): Check
   }
   replaceFile(path.join(root, COMPOSITION_MARKER), `${JSON.stringify({ format: MARKER_FORMAT, hidden })}\n`);
   return { dir: root, written, removed };
+}
+
+/**
+ * Two of `paths` (or a folder along them, or the checkout marker) that a
+ * case- and normalization-insensitive disk would treat as one entry; null
+ * when there are none.
+ */
+export function foldCollision(paths: readonly string[]): [string, string] | null {
+  const fold = (p: string): string => p.normalize('NFC').toLowerCase();
+  // Every entry the checkout makes, by folded name: a file (each path, and
+  // the marker) or a folder (each path's parent folders). Two spellings of
+  // one entry collide, and so does a file and a folder of one name, however
+  // spelled.
+  const entries = new Map<string, { name: string; file: boolean }>([[fold(COMPOSITION_MARKER), { name: COMPOSITION_MARKER, file: true }]]);
+  const add = (name: string, file: boolean): [string, string] | null => {
+    const key = fold(name);
+    const other = entries.get(key);
+    if (other === undefined) { entries.set(key, { name, file }); return null; }
+    if (other.name !== name || other.file || file) return [other.name, name];
+    return null;
+  };
+  for (const rel of [...paths].sort()) {
+    const segments = rel.split('/');
+    for (let i = 1; i < segments.length; i++) {
+      const hit = add(segments.slice(0, i).join('/'), false);
+      if (hit) return hit;
+    }
+    const hit = add(rel, true);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 /**

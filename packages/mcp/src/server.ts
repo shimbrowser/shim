@@ -83,6 +83,45 @@ export interface ShimMcpDeps {
   // auto / headless: whether a headless session can open a page (Playwright
   // found), with the install command when not.
   headlessReadiness?(): HeadlessReadiness;
+  // How soon, then how often, a call waiting on the user in Shim reports it
+  // as MCP progress (when the client asked for progress). Default 2 s, 5 s.
+  waitNotices?: { firstMs: number; everyMs: number };
+  now?(): number;
+}
+
+// The attach card's two minutes (Shim's CONSENT_TIMEOUT_MS): how long an
+// open waits for the user before Shim answers consent-timeout.
+export const ATTACH_CARD_TIMEOUT_MS = 2 * 60_000;
+const DEFAULT_WAIT_NOTICES = { firstMs: 2_000, everyMs: 5_000 };
+
+// Session tools that never wait on a card: no progress watch for them.
+const NO_CARD_TOOLS: ReadonlySet<string> = new Set(['shim_status', 'shim_launch', 'shim_list_tabs', 'shim_checkout', 'shim_end_session']);
+
+// "1:52" — whole seconds left, never negative.
+export function clockLeft(ms: number): string {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  return `${Math.floor(total / 60)}:${(total % 60).toString().padStart(2, '0')}`;
+}
+
+// What a card from GET /sessions/:id/cards asks of the user, for a progress
+// message: what to do, and on which sites.
+export function cardWaitMessage(cards: readonly unknown[]): string | null {
+  const first = cards.find(isRecord);
+  if (!first || typeof first.card !== 'string') return null;
+  const hosts = Array.isArray(first.hosts) ? first.hosts.filter((h): h is string => typeof h === 'string').join(', ') : '';
+  const on = (what: string): string => (hosts ? `${what} ${hosts}` : what);
+  const asks: Record<string, string> = {
+    commit: 'approve the commit',
+    'site-names': 'share the list of sites with an API map',
+    sources: on('allow access to'),
+    'replay-write': on('allow the request to'),
+    reach: on('allow the composition to read'),
+    'mint-host': on('allow the token check on'),
+  };
+  const what = asks[first.card] ?? 'answer the card';
+  const more = cards.length > 1 ? ` (and ${cards.length - 1} more)` : '';
+  const left = typeof first.msLeft === 'number' ? ` (${clockLeft(first.msLeft)} left)` : '';
+  return `waiting for you in Shim: ${what} on the card in its sidebar${more}${left}`;
 }
 
 export interface CallToolResult {
@@ -531,6 +570,9 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           ...(Array.isArray(opened.warnings) ? { warnings: opened.warnings } : {}),
           // A new composition's address, as the user allowed it.
           ...(typeof opened.mount === 'string' ? { mount: opened.mount } : {}),
+          // 'asked': the user allowed it on the card just now; 'remembered':
+          // an earlier "allow … until quit" did, and no card was shown.
+          ...(opened.consent === 'asked' || opened.consent === 'remembered' ? { consent: opened.consent } : {}),
         };
         if (dir) {
           // The session is open whatever happens to the checkout: a failed
@@ -614,9 +656,63 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
+  // While an attach-mode call waits on the user in Shim — an open on its
+  // attach card, a session call on a commit / API map / reach / token-check
+  // card — the agent's own "look at Shim" line has long scrolled by, and the
+  // call shows nothing. So when the client asked for progress, the wait is
+  // reported as MCP progress: what the card asks and how long it has left.
+  // A session call reports only while Shim lists a card for that session
+  // (GET /sessions/:id/cards); an open reports while it is still waiting, in
+  // words that hold whether or not a card is up. Returns the stop function.
+  function watchWait(name: string, input: Record<string, unknown>, send: (progress: number, message: string) => void): () => void {
+    let target: string | null = null;
+    if (name === 'shim_open_session') {
+      if (serverMode === 'headless' || input.mode === 'headless' || (input.url !== undefined && input.mode !== 'attach')) return () => {};
+    } else {
+      if (NO_CARD_TOOLS.has(name)) return () => {};
+      const id = str(input, 'sessionId') ?? current;
+      if (!id || sessions.get(id)?.mode !== 'attach') return () => {};
+      target = id;
+    }
+    const now = deps.now ?? Date.now;
+    const { firstMs, everyMs } = deps.waitNotices ?? DEFAULT_WAIT_NOTICES;
+    const started = now();
+    let stopped = false;
+    let progress = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = async (): Promise<void> => {
+      let message: string | null = null;
+      if (target === null) {
+        message = `waiting for Shim: if its sidebar shows a "coding agent wants to connect" card, allow it there (${clockLeft(started + ATTACH_CARD_TIMEOUT_MS - now())} left)`;
+      } else {
+        try {
+          const reply = await client('attach').request('GET', sessionPath(target, 'cards'), undefined, { timeoutMs: 5_000 });
+          if (reply.body.ok === true && Array.isArray(reply.body.cards)) message = cardWaitMessage(reply.body.cards);
+        } catch {
+          // An older Shim without the route, or a hiccup: report nothing.
+        }
+      }
+      if (stopped) return;
+      if (message !== null) {
+        progress += 1;
+        send(progress, message);
+      }
+      timer = setTimeout(() => { void tick(); }, everyMs);
+    };
+    timer = setTimeout(() => { void tick(); }, firstMs);
+    return () => {
+      stopped = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+  }
+
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra): Promise<CallToolResult> => {
     const name = request.params.name;
     const input = isRecord(request.params.arguments) ? request.params.arguments : {};
+    const progressToken = request.params._meta?.progressToken;
+    const stopWatch = progressToken === undefined ? () => {} : watchWait(name, input, (progress, message) => {
+      extra.sendNotification({ method: 'notifications/progress', params: { progressToken, progress, message } }).catch(() => {});
+    });
     try {
       let content: McpContent[];
       if (isSessionToolName(name)) content = await runSessionTool(name, input);
@@ -636,6 +732,8 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       }
       if (e instanceof FolderError) return failureResult(e.code, e.message, deps.maxOutputTokens);
       return failureResult('internal-error', e instanceof Error ? e.message : String(e), deps.maxOutputTokens);
+    } finally {
+      stopWatch();
     }
   });
 

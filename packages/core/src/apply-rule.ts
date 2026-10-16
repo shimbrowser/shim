@@ -79,6 +79,11 @@ export function applyRule(
   // (state map, matchedSource, resolvedEl, witnessRejection, relativeReorderNote).
   const rs = makeRuleState();
   const inFlight = new WeakSet<Element>();
+  // Set by teardownRule. A mount still awaiting a handler when the rule tears
+  // down (a preview replaced, a shim toggled off) must not land afterwards:
+  // its outputs would outlive the rule, and its status would read as the
+  // replacement's (the same ruleKey) in a host's preview evidence.
+  let tornDown = false;
   // Witness capture fires at most once per lifecycle.
   let witnessCaptured = false;
 
@@ -192,6 +197,12 @@ export function applyRule(
       const { placed, cleanup } = applyStrategy(raw as HTMLElement[], el as HTMLElement, mut);
       outputs.push(...placed);
       if (cleanup) cleanups.push(cleanup);
+      // Its tier-1 tokens stay: a replacement under the same spec and rule id
+      // stamps the same token names, so stripping here could undo its work.
+      if (tornDown) {
+        teardownEntry({ outputs, cleanups });
+        return;
+      }
     }
     rs.state.set(el, { outputs, cleanups });
     // Register with the module-level own-DOM registry (see above) so no rule's
@@ -329,6 +340,7 @@ export function applyRule(
       reporter.noteLargeCoverAtMount(el);
       mountOn(el).finally(() => {
         inFlight.delete(el);
+        if (tornDown) return;
         // mountOn updates state.size as it inserts. Re-report so the inspector
         // sees the bump even when the surrounding scan() found no further
         // changes.
@@ -369,6 +381,7 @@ export function applyRule(
   });
 
   return function teardownRule() {
+    tornDown = true;
     observer.disconnect();
     if (scanHandle) {
       cancelAnimationFrame(scanHandle);

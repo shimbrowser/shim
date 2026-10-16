@@ -55,7 +55,7 @@ import { decodeWorkingCopy, encodeWorkingCopy, WorkingCopyWireError } from '@shi
 import {
   preflightSpec, scanRuleHandlers, verificationLevel, UNSUPPORTED_API_EVENT, type UnsupportedFeature,
 } from '@shimbrowser/core/capability-preflight';
-import { describeRuleStatus, previewKey, shimViewPageCaption } from '@shimbrowser/core/preview-evidence';
+import { describeRuleStatus, previewKey, previewNoMatch, shimViewPageCaption } from '@shimbrowser/core/preview-evidence';
 import { createConsoleFeed, formatAutoBlock, formatConsoleRead, type ConsoleFeed } from '@shimbrowser/core/console-feed';
 import {
   viewPageOnHost, queryPageByScript, inspectElementByScript, evaluateOnHost, expressionProblem,
@@ -531,6 +531,10 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
 
     const appliedAt = now();
     const emitKeys = new Map<string, Rule>();
+    // Each emitted key's version (applyId): a replaced version's handler can
+    // still report after this apply (a mount the engine doesn't cancel), and
+    // its events are not this preview's evidence.
+    const versions = new Map<string, string | undefined>();
     const nextById = new Map((next.rules || []).map((r) => [r.id, r]));
     // The working state first: an event the page reports for a preview below
     // (a witness) is matched against it.
@@ -540,6 +544,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         const rule = nextById.get(op.rule.id) ?? op.rule;
         const p = previewFor(handle, rule);
         emitKeys.set(p.ruleKey, rule);
+        versions.set(p.ruleKey, p.applyId);
         apply(handle, p);
       } else if (op.op === 'remove-rule' && op.ruleId) {
         const key = previewKey(handle.source.spec.id, op.ruleId);
@@ -550,28 +555,44 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
 
     await settle(signal);
 
-    const mine = handle.events.filter((t) => t.at >= appliedAt && typeof t.event.specId === 'string' && emitKeys.has(t.event.specId));
+    const mine = handle.events.filter((t) => t.at >= appliedAt && typeof t.event.specId === 'string' && emitKeys.has(t.event.specId)
+      && (typeof t.event.applyId !== 'string' || t.event.applyId === versions.get(t.event.specId)));
     const errors = mine
       .filter((t) => t.event.kind === 'handler-error')
       .map(({ event: e }) => ({ ruleId: e.ruleId, handler: e.handlerName, message: e.message, stack: e.stack }));
-    const noMatch = mine
-      .filter((t) => t.event.kind === 'rule-no-match')
-      .map(({ event: e }) => ({ ruleId: e.ruleId, selector: e.selector }));
     const lastStatus = new Map<string, PageRuntimeEvent>();
+    const peak = new Map<string, number>();
     for (const { event: e } of mine) {
-      if (e.kind === 'rule-status' && e.specId) lastStatus.set(e.specId, e);
+      if (e.kind !== 'rule-status' || !e.specId) continue;
+      lastStatus.set(e.specId, e);
+      if (typeof e.matched === 'number') peak.set(e.specId, Math.max(peak.get(e.specId) ?? 0, e.matched));
     }
     const quarantined = mine
       .filter((t) => t.event.kind === 'rule-quarantined')
       .map(({ event: e }) => ({ ruleId: e.ruleId, ...(typeof e.selector === 'string' && e.selector ? { selector: e.selector } : {}) }));
+    const previewed = [...emitKeys].map(([key, rule]) => ({
+      key,
+      rule,
+      status: lastStatus.get(key) as Parameters<typeof describeRuleStatus>[1],
+      peakMatched: peak.get(key) ?? 0,
+    }));
+    const noMatch = previewNoMatch(
+      mine
+        .filter((t) => t.event.kind === 'rule-no-match')
+        .map(({ event: e }) => ({ ruleId: e.ruleId, selector: typeof e.selector === 'string' ? e.selector : undefined })),
+      previewed,
+      new Set(quarantined.flatMap((q) => (typeof q.ruleId === 'string' ? [q.ruleId] : []))),
+    );
+    const noMatchIds = new Set(noMatch.map((n) => n.ruleId));
 
-    const rules = [...emitKeys].map(([key, rule]) => {
-      const status = lastStatus.get(key);
+    const rules = previewed.map(({ key, rule, status }) => {
       const live = (handle.working.rules || []).find((r) => r.id === rule.id);
       return {
         ruleId: rule.id,
-        status: describeRuleStatus(rule, status as Parameters<typeof describeRuleStatus>[1]),
-        verification: verificationLevel(live?.anchor?.witness, handle.host.capabilities, (handle.unsupported.get(key)?.size ?? 0) > 0),
+        status: describeRuleStatus(rule, status),
+        verification: verificationLevel(
+          live?.anchor?.witness, handle.host.capabilities, (handle.unsupported.get(key)?.size ?? 0) > 0, noMatchIds.has(rule.id),
+        ),
       };
     });
 
