@@ -24,6 +24,14 @@
     "@modelcontextprotocol/sdk": "1.32.0",
     "@shimbrowser/core": "0.7.0-dev"
   },
+  "peerDependencies": {
+    "playwright": ">=1.50.0"
+  },
+  "peerDependenciesMeta": {
+    "playwright": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "esbuild": "0.28.2",
     "typescript": "6.0.3"

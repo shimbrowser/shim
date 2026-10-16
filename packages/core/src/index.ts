@@ -20,7 +20,7 @@ export { buildWitness, matchWitness, WITNESS_VERSION } from './witness';
 export {
   COMPONENT_ID_VERSION, buildHelperSrc, componentScore, matchComponent, translateComponent,
 } from './component-id';
-export { computeDeployId, sameRegistrableDomain } from './deploy-id';
+export { computeDeployId, deployIdForDocument, sameRegistrableDomain } from './deploy-id';
 export { sha256Hex } from './sha256';
 export { matcher, matchPath, normalizePath } from './route-match';
 export { createFetchBudget } from './fetch-budget';

@@ -69,6 +69,16 @@ export interface PreviewRule {
    * it as `specId`.
    */
   ruleKey: string;
+  /**
+   * The deploy baseline the rule was committed under (the spec's
+   * `bundleHash`, CLAUDE.md §12). When set, the preview runs behind the same
+   * deploy gate a committed rule does: against a page whose deploy identity
+   * differs, the rebase ladder (refresh, promote, witness recovery,
+   * quarantine) reports through runtime events, as it would for the
+   * committed shim. Absent, a preview never sees a deploy. A rebase reported
+   * for a preview is evidence only; nothing is persisted.
+   */
+  bundleHash?: string;
 }
 
 /**

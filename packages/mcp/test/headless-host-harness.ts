@@ -1,0 +1,414 @@
+// Harness for the headless PageHost's browser-free parts
+// (packages/mcp/src/playwright-page-host.ts, headless-page-runtime.ts,
+// playwright-launch.ts; shim-core design D9 / D15):
+//
+//   - HEADLESS_CAPABILITIES is exactly D15's headless set, and every kind it
+//     advertises is a real mutation kind covered by a conformance case (a
+//     capability is "yes" for headless only while its cases exist and pass);
+//   - the page runtime serializes to a self-contained script (it is injected
+//     with Function.prototype.toString, so a reference outside its body or a
+//     bundler helper would only fail inside the page);
+//   - memoryStorage keeps the browser's api.storage semantics, per shim and
+//     origin;
+//   - the page runtime rejects an api call the driver's store failed;
+//   - the page runtime refuses arguments structured clone would (functions,
+//     symbols, cycles, BigInts) without reaching the store;
+//   - over a scripted CDP session: detach does not wait out queued previews
+//     when no engine world exists, and a failing store rejects the page's
+//     call instead of answering undefined;
+//   - load failures map to Chromium's net error codes;
+//   - the engine bundle the driver injects is the built page bundle.
+//
+// The driver itself runs against a real Chromium in
+// playwright-conformance-harness.ts (its own CI job).
+//
+//   node out/packages/mcp/test/headless-host-harness.js
+
+import vm from 'vm';
+import { BUILTIN_KINDS } from '@shimbrowser/core/spec-lint';
+import { coveredCapabilities } from '@shimbrowser/core/page-host-conformance';
+import type { Page } from 'playwright';
+import {
+  HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER, attachPlaywrightPageHost, memoryStorage, netErrorCode, readEngineBundle, remoteObjectValue,
+} from '../src/playwright-page-host';
+import type { HeadlessStorage } from '../src/playwright-page-host';
+import { pageRuntimeSource } from '../src/headless-page-runtime';
+import type { PageRuntimeControl } from '../src/headless-page-runtime';
+import { PLAYWRIGHT_MISSING } from '../src/playwright-launch';
+
+let failures = 0;
+function check(label: string, cond: boolean, detail?: string): void {
+  if (cond) console.log(`  ✓ ${label}`);
+  else { failures++; console.error(`  ✗ ${label}${detail ? ` — ${detail}` : ''}`); }
+}
+
+
+// A scripted Page + CDP session: enough of each for attachPlaywrightPageHost
+// to attach, queue previews, answer api calls and detach, with every CDP
+// send recorded. `world: false` makes the engine world never appear.
+interface FakeCdp {
+  sends: Array<{ method: string; params: Record<string, unknown> }>;
+  emit(event: string, payload: unknown): void;
+}
+function fakePage(world: boolean): { page: Page; cdp: FakeCdp } {
+  const listeners = new Map<string, Array<(p: unknown) => void>>();
+  const sends: FakeCdp['sends'] = [];
+  const session = {
+    on(event: string, fn: (p: unknown) => void) {
+      const list = listeners.get(event) ?? [];
+      list.push(fn);
+      listeners.set(event, list);
+    },
+    send(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+      sends.push({ method, params });
+      if (method === 'Page.getFrameTree') return Promise.resolve({ frameTree: { frame: { id: 'main' } } });
+      if (method === 'Page.addScriptToEvaluateOnNewDocument') return Promise.resolve({ identifier: 's1' });
+      if (method === 'Page.createIsolatedWorld') {
+        return world ? Promise.resolve({ executionContextId: 7 }) : Promise.reject(new Error('no world'));
+      }
+      if (method === 'Runtime.evaluate') return Promise.resolve({ result: { type: 'undefined' } });
+      return Promise.resolve({});
+    },
+    detach: () => Promise.resolve(),
+  };
+  const page = {
+    context: () => ({ newCDPSession: () => Promise.resolve(session) }),
+    isClosed: () => false,
+    url: () => 'https://x.test/',
+    on() { /* no page events */ },
+    off() { /* no page events */ },
+  };
+  return {
+    page: page as unknown as Page,
+    cdp: {
+      sends,
+      emit(event, payload) { for (const fn of listeners.get(event) ?? []) fn(payload); },
+    },
+  };
+}
+
+const tick = (ms = 20): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+// The page runtime over a stand-in engine: just enough ShimCore to boot, with
+// the api a preview gets captured from run(). `send` is the binding.
+interface PreviewApi { storage: { set(k: string, v: unknown): Promise<unknown>; get(k: string): Promise<unknown> } }
+function bootRuntime(send: (payload: string) => void): { control: PageRuntimeControl | undefined; captured: { api: PreviewApi | null } } {
+  const captured: { api: PreviewApi | null } = { api: null };
+  const sandbox: Record<string, unknown> = {
+    location: { origin: 'https://x.test', pathname: '/', hostname: 'x.test', href: 'https://x.test/' },
+    document: { readyState: 'complete', addEventListener() { /* unused */ } },
+    addEventListener() { /* unused */ },
+    fetch: () => Promise.resolve(null),
+    console,
+    b: send,
+    ShimCore: {
+      run: (_spec: unknown, api: PreviewApi) => {
+        captured.api = api;
+        return { applyExtraRule() { /* no-op */ }, teardownAll() { /* no-op */ } };
+      },
+      createFetchBudget: () => ({ take: () => ({ delayMs: 0, throttled: false }) }),
+      deployIdForDocument: () => null,
+      sameRegistrableDomain: () => true,
+    },
+  };
+  sandbox.window = sandbox;
+  sandbox.top = sandbox;
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(pageRuntimeSource({ binding: 'b', globalName: 'g', unsupportedError: REQUIRES_SHIM_BROWSER }), sandbox);
+  return { control: sandbox.g as PageRuntimeControl | undefined, captured };
+}
+
+async function main(): Promise<void> {
+  console.log('capabilities (D15)');
+  {
+    const kinds = [...HEADLESS_CAPABILITIES.mutationKinds].sort();
+    const d15 = ['hide', 'restyle', 'reorder', 'reshape', 'script', 'inject-element', 'inject-html', 'remove', 'replace-root'].sort();
+    check('mutation kinds are D15\'s headless set', JSON.stringify(kinds) === JSON.stringify(d15), kinds.join(','));
+    for (const k of ['mount-route', 'redirect', 'rewrite-response', 'intercept']) {
+      check(`${k} is not advertised`, !HEADLESS_CAPABILITIES.mutationKinds.includes(k));
+    }
+    const builtin = new Set<string>(BUILTIN_KINDS);
+    check('every advertised kind is a built-in kind', HEADLESS_CAPABILITIES.mutationKinds.every((k) => builtin.has(k)));
+    check('no iframe rules, no host api members, no component identity, no engine inspection',
+      !HEADLESS_CAPABILITIES.iframeRules && HEADLESS_CAPABILITIES.apiMembers.length === 0
+      && !HEADLESS_CAPABILITIES.componentIdentity && !HEADLESS_CAPABILITIES.engineInspection);
+    check('the capability object is frozen', Object.isFrozen(HEADLESS_CAPABILITIES) && Object.isFrozen(HEADLESS_CAPABILITIES.mutationKinds));
+    const covered = coveredCapabilities() as Set<string>;
+    const uncovered = HEADLESS_CAPABILITIES.mutationKinds.filter((k) => !covered.has(k));
+    check('every advertised kind has a conformance case', uncovered.length === 0, uncovered.join(','));
+    for (const cap of ['mount:portal', 'mount:overlay', 'mount:shadow', 'self-healing', 'witness:capture', 'witness:verify',
+      'rebase:refresh', 'rebase:promote', 'rebase:recover', 'api.storage', 'api.cleanup']) {
+      check(`D15 "yes" row ${cap} has a conformance case`, covered.has(cap));
+    }
+    check('the unsupported refusal names the browser', REQUIRES_SHIM_BROWSER === 'requires-shim-browser');
+  }
+
+  console.log('page runtime');
+  {
+    const src = pageRuntimeSource({ binding: 'b', globalName: 'g', unsupportedError: REQUIRES_SHIM_BROWSER });
+    let parsed = true;
+    try { new vm.Script(src); } catch { parsed = false; }
+    check('serializes to a script that parses', parsed);
+    check('carries no module or bundler references', !/\brequire\(|\bimport\(|__toESM|__name\(|exports\./.test(src), src.slice(0, 200));
+    // Run it where it must refuse to boot: no engine bundle in scope. It
+    // must touch nothing outside its own body (a stray outer reference would
+    // throw a ReferenceError here).
+    const sandbox: Record<string, unknown> = {};
+    sandbox.window = sandbox;
+    sandbox.top = sandbox;
+    sandbox.globalThis = sandbox;
+    let threw: unknown = null;
+    try { vm.runInNewContext(src, sandbox); } catch (e) { threw = e; }
+    check('without the engine in scope it does nothing and throws nothing', threw === null && sandbox.g === undefined, String(threw));
+  }
+
+  console.log('memoryStorage');
+  {
+    const s = memoryStorage();
+    const a = { patchId: 'shim-a', origin: 'https://x.test' };
+    const b = { patchId: 'shim-b', origin: 'https://x.test' };
+    const otherOrigin = { patchId: 'shim-a', origin: 'https://y.test' };
+    check('a missing key reads null', (await s.get(a, 'k')) === null);
+    const value = { n: 1, list: [1, 'two'] };
+    check('set answers the value', (await s.set(a, 'k', value)) === value);
+    check('get reads a copy of it', JSON.stringify(await s.get(a, 'k')) === JSON.stringify(value) && (await s.get(a, 'k')) !== value);
+    check('another shim on the origin does not see it', (await s.get(b, 'k')) === null);
+    check('the same shim on another origin does not see it', (await s.get(otherOrigin, 'k')) === null);
+    await s.set(a, 'k2', 'v2');
+    check('list returns the bucket', JSON.stringify(await s.list(a)) === JSON.stringify({ k: value, k2: 'v2' }));
+    check('delete answers true for a row', (await s.delete(a, 'k')) === true);
+    check('delete answers false when nothing was there', (await s.delete(a, 'k')) === false);
+    check('undefined stores as null', (await s.set(a, 'u', undefined)) === undefined && (await s.get(a, 'u')) === null);
+  }
+
+  console.log('page runtime api calls');
+  {
+    const posted: Array<Record<string, unknown>> = [];
+    const { control, captured } = bootRuntime((payload) => { posted.push(JSON.parse(payload) as Record<string, unknown>); });
+    check('the runtime boots over a stand-in engine', control !== undefined);
+    if (control) {
+      control.apply('shim-a', { id: 'r', anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] }, 'rk', null);
+      const api = captured.api;
+      check('a preview gets an api', api !== null);
+      if (api) {
+        const write = api.storage.set('k', 1);
+        const writeCall = posted.find((m) => m.type === 'call' && m.method === 'storage.set');
+        check('a storage write posts a call to the driver', typeof writeCall?.id === 'number');
+        control.reject(Number(writeCall?.id), 'storage.set failed: disk full');
+        let rejected: unknown = null;
+        try { await write; } catch (e) { rejected = e; }
+        check('a call the driver rejects rejects the handler\'s promise with its message',
+          rejected !== null && (rejected as { message?: unknown }).message === 'storage.set failed: disk full', String(rejected));
+        const read = api.storage.get('k');
+        const readCall = posted.find((m) => m.type === 'call' && m.method === 'storage.get');
+        control.resolve(Number(readCall?.id), 'v');
+        check('a call the driver resolves still resolves with its value', (await read) === 'v');
+        check('a settled call cannot be settled again', !control.reject(Number(readCall?.id), 'late'));
+        // Arguments JSON cannot carry: the call rejects at once and leaves
+        // nothing pending, rather than hanging the handler forever.
+        const settles = async (p: Promise<unknown>): Promise<unknown> => {
+          const timeout = Symbol('timeout');
+          const out = await Promise.race([p.then(() => 'resolved', (e: unknown) => e), tick(200).then(() => timeout)]);
+          return out === timeout ? 'pending' : out;
+        };
+        // The error comes from the runtime's realm: match on its message.
+        const failedWith = (e: unknown): boolean => typeof e === 'object' && e !== null
+          && /^storage\.set failed: /.test(String((e as { message?: unknown }).message));
+        const before = posted.length;
+        const cyclic: Record<string, unknown> = {};
+        cyclic.self = cyclic;
+        const cyc = await settles(api.storage.set('k', cyclic));
+        check('a circular value rejects the call', failedWith(cyc), String(cyc));
+        const big = await settles(api.storage.set('k', 10n));
+        check('a BigInt value rejects the call', failedWith(big), String(big));
+        check('…and neither reached the driver', posted.length === before);
+        // The two refused calls took the next two ids after the read.
+        const refusedIds = [Number(readCall?.id) + 1, Number(readCall?.id) + 2];
+        check('…nor left a pending entry behind', refusedIds.every((id) => !control.resolve(id, 'late')));
+      }
+    }
+  }
+
+  console.log('page runtime refuses what structured clone would');
+  {
+    // The binding answers from a real store, the way the driver does, so a
+    // refused write can be seen to leave the stored value alone.
+    const store = memoryStorage();
+    const scope = { patchId: 'shim-a', origin: 'https://x.test' };
+    let reached = 0;
+    const box: { control: PageRuntimeControl | undefined } = { control: undefined };
+    const booted = bootRuntime((payload) => {
+      const msg = JSON.parse(payload) as { type?: unknown; id?: unknown; method?: unknown; args?: unknown };
+      if (msg.type !== 'call' || typeof msg.id !== 'number' || !Array.isArray(msg.args)) return;
+      reached++;
+      const id = msg.id;
+      const [key, value] = msg.args as [string, unknown];
+      const answer = msg.method === 'storage.set' ? store.set(scope, key, value) : store.get(scope, key);
+      void answer.then((v) => box.control?.resolve(id, v));
+    });
+    box.control = booted.control;
+    booted.control?.apply('shim-a', { id: 'r', anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] }, 'rk', null);
+    const api = booted.captured.api;
+    check('a preview gets an api', api !== null);
+    if (api) {
+      await api.storage.set('k', 'old');
+      const writes = reached;
+      const symbolValue: unknown = Symbol('s');
+      const cases: Array<[string, unknown]> = [
+        ['a top-level function', () => 1],
+        ['a nested function', { n: 1, deep: { fn: () => 1 } }],
+        ['a function in a list', [1, () => 1]],
+        ['a symbol', symbolValue],
+        ['a nested symbol', { s: symbolValue }],
+      ];
+      for (const [label, value] of cases) {
+        let rejected: unknown = null;
+        try { await api.storage.set('k', value); } catch (e) { rejected = e; }
+        check(`${label} rejects the write`, typeof rejected === 'object' && rejected !== null
+          && /^storage\.set failed: .*could not be cloned/.test(String((rejected as { message?: unknown }).message)), String(rejected));
+      }
+      check('…none of them reached the store', reached === writes, `${reached - writes} reached`);
+      check('…and the stored value is unchanged', (await api.storage.get('k')) === 'old');
+      const cyclic: Record<string, unknown> = { ok: true };
+      cyclic.self = cyclic;
+      let cyc: unknown = null;
+      try { await api.storage.set('k', cyclic); } catch (e) { cyc = e; }
+      check('a cycle still rejects (and the walk terminates)', cyc !== null);
+      await api.storage.set('k', { plain: [1, 'two', { three: null }] });
+      check('a plain value still writes', JSON.stringify(await api.storage.get('k')) === '{"plain":[1,"two",{"three":null}]}');
+    }
+  }
+
+  console.log('driver over a scripted CDP session');
+  {
+    // Previews queued while no engine world exists: detach must not wait out
+    // each one's world wait in turn.
+    const { page } = fakePage(false);
+    const host = await attachPlaywrightPageHost(page, { engineBundle: '', worldWaitMs: 1500 });
+    for (const n of [1, 2, 3]) {
+      host.applyPreview({ patchId: 'p', ruleKey: `preview:p:${n}`, rule: { id: `r${n}`, anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] } });
+    }
+    await tick();
+    const started = Date.now();
+    await host.detach();
+    const took = Date.now() - started;
+    check('detach with queued previews and no world returns at once', took < 500, `${took}ms`);
+  }
+  {
+    const failing: HeadlessStorage = {
+      get: () => Promise.resolve('stored'),
+      set: () => Promise.reject(new Error('disk full')),
+      delete: () => Promise.resolve(false),
+      list: () => Promise.resolve({}),
+    };
+    const { page, cdp } = fakePage(true);
+    const host = await attachPlaywrightPageHost(page, { engineBundle: '', storage: failing });
+    const call = (id: number, method: string, args: unknown[]): void => {
+      cdp.emit('Runtime.bindingCalled', {
+        name: '__shimCoreHost',
+        executionContextId: 7,
+        payload: JSON.stringify({ type: 'call', id, method, patchId: 'p', origin: 'https://x.test', args }),
+      });
+    };
+    call(1, 'storage.set', ['k', 1]);
+    call(2, 'storage.get', ['k']);
+    await tick();
+    const answers = cdp.sends
+      .filter((s) => s.method === 'Runtime.evaluate' && s.params.contextId === 7)
+      .map((s) => String(s.params.expression));
+    const answer1 = answers.find((e) => /\.(resolve|reject)\(1,/.test(e)) ?? '';
+    const answer2 = answers.find((e) => /\.(resolve|reject)\(2,/.test(e)) ?? '';
+    check('a store that fails rejects the page\'s call, naming the failure', answer1.includes('.reject(1,') && answer1.includes('disk full'), answer1);
+    check('a store that answers resolves it with the value', answer2.includes('.resolve(2, JSON.parse("\\"stored\\""))'), answer2);
+    await host.detach();
+  }
+  {
+    // A reply is exact JSON in the page: an own `__proto__` key stays an own
+    // key (an object literal would make it a prototype setter), at the top
+    // level, nested, and inside a list reply.
+    const tricky = '{"__proto__":{"flag":true},"nested":{"__proto__":{"deep":1}}}';
+    const store: HeadlessStorage = {
+      get: () => Promise.resolve(JSON.parse(tricky) as unknown),
+      set: (_s, _k, v) => Promise.resolve(v),
+      delete: () => Promise.resolve(false),
+      list: () => Promise.resolve({ row: JSON.parse(tricky) as unknown }),
+    };
+    const { page, cdp } = fakePage(true);
+    const host = await attachPlaywrightPageHost(page, { engineBundle: '', storage: store });
+    const call = (id: number, method: string, args: unknown[]): void => {
+      cdp.emit('Runtime.bindingCalled', {
+        name: '__shimCoreHost',
+        executionContextId: 7,
+        payload: JSON.stringify({ type: 'call', id, method, patchId: 'p', origin: 'https://x.test', args }),
+      });
+    };
+    call(11, 'storage.get', ['k']);
+    call(12, 'storage.list', []);
+    call(13, 'storage.set', ['k', JSON.parse(tricky) as unknown]);
+    await tick();
+    // Run each answer the driver sent in a context standing in for the
+    // engine world, capturing what the page's promise would resolve with.
+    const settled = new Map<number, unknown>();
+    const world: Record<string, unknown> = {};
+    world.globalThis = world;
+    world.__shimCoreRuntime = {
+      resolve: (id: number, value: unknown) => { settled.set(id, value); return true; },
+      reject: () => false,
+    };
+    for (const s of cdp.sends) {
+      if (s.method !== 'Runtime.evaluate' || s.params.contextId !== 7) continue;
+      const expr = String(s.params.expression);
+      if (/\.resolve\(1[123],/.test(expr)) vm.runInNewContext(expr, world);
+    }
+    // Exact: `__proto__` is an own data key, nothing is inherited from it,
+    // and the prototype is still the realm's Object.prototype (whose own
+    // prototype is null).
+    const ownProtoKey = (v: unknown): v is Record<string, unknown> => {
+      if (typeof v !== 'object' || v === null) return false;
+      const proto: unknown = Object.getPrototypeOf(v);
+      return Object.prototype.hasOwnProperty.call(v, '__proto__')
+        && typeof proto === 'object' && proto !== null && Object.getPrototypeOf(proto) === null;
+    };
+    const isExact = (v: unknown): boolean => ownProtoKey(v) && !('flag' in v)
+      && ownProtoKey(v.nested) && !('deep' in v.nested);
+    check('a get reply keeps an own __proto__ key and its prototype', isExact(settled.get(11)), JSON.stringify(settled.get(11)));
+    const listed = settled.get(12) as Record<string, unknown> | undefined;
+    check('…so does a list reply', isExact(listed?.row), JSON.stringify(listed));
+    check('…and a set reply', isExact(settled.get(13)), JSON.stringify(settled.get(13)));
+    await host.detach();
+  }
+
+  console.log('net errors');
+  check('refused', netErrorCode('net::ERR_CONNECTION_REFUSED') === -102);
+  console.log('evaluate results CDP cannot put in JSON');
+  check('a plain value passes through', remoteObjectValue({ value: { a: 1 } }) !== undefined && remoteObjectValue({ value: 3 }) === 3);
+  check('NaN', Number.isNaN(remoteObjectValue({ unserializableValue: 'NaN' })));
+  check('±Infinity', remoteObjectValue({ unserializableValue: 'Infinity' }) === Infinity && remoteObjectValue({ unserializableValue: '-Infinity' }) === -Infinity);
+  check('-0', Object.is(remoteObjectValue({ unserializableValue: '-0' }), -0));
+  check('a bigint', remoteObjectValue({ unserializableValue: '12345678901234567890n' }) === 12345678901234567890n);
+  check('aborted', netErrorCode('net::ERR_ABORTED') === -3);
+  check('name not resolved', netErrorCode('net::ERR_NAME_NOT_RESOLVED') === -105);
+  check('unknown reads as ERR_FAILED', netErrorCode('net::ERR_SOMETHING_NEW') === -2 && netErrorCode('') === -2);
+
+  console.log('engine bundle');
+  {
+    let bundle = '';
+    try { bundle = readEngineBundle(); } catch (e) { check('the page bundle is built', false, String(e)); }
+    check('the driver injects the ShimCore page bundle', bundle.includes('ShimCore'));
+    check('…which exports the deploy identity the runtime gates rebase on', bundle.includes('deployIdForDocument'));
+  }
+
+  console.log('launch');
+  check('a missing Playwright install has an actionable message', /npm install playwright/.test(PLAYWRIGHT_MISSING) && /playwright install chromium/.test(PLAYWRIGHT_MISSING));
+
+  if (failures) {
+    console.error(`\n✗ headless-host: ${failures} check(s) failed`);
+    process.exit(1);
+  }
+  console.log('\n✓ headless-host: all checks passed');
+}
+
+main().catch((e: unknown) => {
+  console.error(e);
+  process.exit(1);
+});
