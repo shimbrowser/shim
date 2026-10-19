@@ -703,7 +703,11 @@ Don't repeat it.
 **Never hammer the site.** One request per row (a 100-call burst on mount) gets the user
 rate-limited and their account throttled. Prefer fields already in a list response, cache
 per item in `api.storage`, fetch lazily for what the user interacts with, and back off on
-4xx/5xx instead of retrying.
+4xx/5xx instead of retrying. Every preview of a composition reloads its page, so a page
+that caches nothing re-sends all its requests each time: Shim warns
+(`requestWarnings`, below) when one site gets more than 20 requests in a minute or answers
+like a rate limit (429, 503, or a 206 to a request that asked for no range). When you see
+one, stop previewing against that site for a while and cache before you go on.
 
 ## 8. Committing and reporting
 
@@ -883,6 +887,7 @@ A composition preview answers `{ revision, applied, evidence }`:
 | `notes[]` | the user's answers (a host allowed), declined hosts |
 | `console` | errors and warnings the page logged since the previous preview |
 | `aiUnavailable` | the page called `api.ai` (above) |
+| `requestWarnings` | one site got a burst of requests (20 or more in a minute) or answered like a rate limit — slow down and cache (section 7) |
 | `pageAway` | the preview tab left the composition: nothing was written — `reload_page`, then preview again |
 
 A refused preview answers `applied: false` with `error` and `problems`:
@@ -902,7 +907,9 @@ A refused preview answers `applied: false` with `error` and `problems`:
   method, host, path template, status — never a body. By default only calls from
   documents running your latest code. **A data feature is verified when its call is here
   with a 2xx status** and the page shows the result (a DOM check plus a screenshot); a
-  call that failed, or none at all, means it isn't working yet.
+  call that failed, or none at all, means it isn't working yet. Its `warnings`, and
+  `interact_page`'s `requestWarnings`, carry the same burst and rate-limit warnings as the
+  preview evidence.
 - **`probe_request { host, path }`** — one GET of your own through the composition's real
   fetch path, answering the status and up to 20,000 characters of the body. The host must
   be declared in the manifest, allowed by the user (the preview's card), **and** granted to

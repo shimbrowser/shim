@@ -78,6 +78,9 @@ export interface InteractDeps {
   callsSince(cursor: number): string[];
   linkCursor(): number;
   linksSince(cursor: number): string[];
+  // Request-burst / rate-limit warnings that hold right now
+  // (compositions/burst-watch.ts). Absent: none are reported.
+  requestWarnings?(): string[];
   now(): number;
   // Select-all is Meta+A on macOS, Ctrl+A elsewhere.
   mac: boolean;
@@ -99,6 +102,8 @@ export interface InteractReport {
   consoleErrors: string[];
   calls: string[];
   linksNotOpened: string[];
+  // Too many requests to one site, or answers that look like a rate limit.
+  requestWarnings?: string[];
   note?: string;
 }
 
@@ -287,6 +292,8 @@ export async function runInteract(input: unknown, deps: InteractDeps): Promise<I
     calls: deps.callsSince(callCursor).slice(0, 10),
     linksNotOpened: deps.linksSince(linkCursor),
   };
+  const warnings = deps.requestWarnings?.() ?? [];
+  if (warnings.length > 0) report.requestWarnings = warnings;
   if (report.steps.some((s) => s.navigated)) report.note = 'the page navigated; later actions did not run — the DOM change count restarted with the new document';
   return report;
 }
