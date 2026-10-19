@@ -860,9 +860,14 @@ Nothing throws: every call resolves `{ ok: false, error }` on a refusal — rend
 
 Shim holds the composition for your session exactly as for its own build:
 
-- **Writes are refused**: `api.storage.set / delete`, `api.db.run`, and any write through
-  `api.fetch` answer `authoring-read-only`. Tables you declare are created only when you
-  commit. Verify everything up to the save; say plainly that the save itself could not be
+- **`api.storage` is a scratch copy** in the preview: it reads the composition's saved data
+  plus what the preview wrote during your session, and its writes never reach the saved
+  data — not even when you commit; they're dropped when the session ends. So a cache works
+  while you build (a page that stores what it fetched won't fetch it again on every
+  preview), but don't take a stored value as proof the real save works.
+- **Other writes are refused**: `api.db.run` and any write through `api.fetch` answer
+  `authoring-read-only`. Tables you declare are created only when you commit. Verify
+  everything up to a database save; say plainly that the save itself could not be
   exercised.
 - **Secret settings read `null`**, so the preview shows your unset-value path.
 - **`api.ai` is refused**: every call resolves
@@ -934,7 +939,8 @@ A refused preview answers `applied: false` with `error` and `problems`:
 - **`inspect_storage`** and **`query_db`** (section 4) read the composition's own saved
   data: its `api.storage` rows, its declared tables (`dbSchema`), and each declared remote
   connection and whether the user configured it. While you build, the page's own writes
-  are refused, so what they show is the data as of the last commit. `read_sibling_shim` is
+  never reach that data (`api.storage` writes go to the preview's scratch copy), so what
+  they show is the data as of the last commit. `read_sibling_shim` is
   for shims (`shim-only`).
 
 ## 10. Headless mode
