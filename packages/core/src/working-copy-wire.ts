@@ -98,7 +98,10 @@ function base64ToBytes(data: string): Uint8Array | null {
   return out;
 }
 
-const strictUtf8 = new TextDecoder('utf-8', { fatal: true });
+// ignoreBOM: a leading byte-order mark stays in the text (as U+FEFF), so a
+// BOM-prefixed file decodes and re-encodes to the same bytes. The default
+// would drop it, and the file would come back three bytes short.
+const strictUtf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /** Encodes a folder for the wire, paths sorted so the bytes are deterministic. */
 export function encodeWorkingCopy(folder: FolderInput): WireWorkingCopy {

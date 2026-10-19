@@ -357,7 +357,9 @@ function stripBom(text: string): string {
 }
 
 function decode(path: string, content: string | Uint8Array, problems: string[]): string | null {
-  if (typeof content === 'string') return content;
+  // Text that crossed the wire keeps a leading BOM; a shim's files are read
+  // without one, as bytes are below.
+  if (typeof content === 'string') return stripBom(content);
   try {
     // fatal: malformed UTF-8 is an error, not U+FFFD; the BOM is stripped.
     return new TextDecoder('utf-8', { fatal: true }).decode(content);

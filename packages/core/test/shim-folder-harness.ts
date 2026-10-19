@@ -163,6 +163,16 @@ check('no state file, no witness, no version / bundleHash / priority',
   && !('version' in checkedSpec) && !('bundleHash' in checkedSpec) && !('priority' in checkedSpec));
 check('the working spec is not mutated', working.rules?.[0]?.anchor?.witness !== undefined && working.rules?.[0]?.handlers !== undefined);
 check('the checkout reads back as a folder', readShimFolder(checkout).spec.id === 'w');
+{
+  // Text that crossed the wire keeps a leading BOM (an editor's UTF-8-with-BOM
+  // save): shim.json still parses and a handler reads as it does from bytes.
+  const withBom: FolderInput = {};
+  for (const [p, v] of Object.entries(checkout)) withBom[p] = typeof v === 'string' ? `\ufeff${v}` : v;
+  const bomRead = readShimFolder(withBom);
+  const plainRead = readShimFolder(checkout);
+  check('a checkout whose text files start with a BOM reads the same as without',
+    JSON.stringify(bomRead.spec) === JSON.stringify(plainRead.spec) && JSON.stringify(bomRead.handlers) === JSON.stringify(plainRead.handlers));
+}
 
 console.log('handler names that are Object.prototype keys');
 const protoSpec: Spec = {

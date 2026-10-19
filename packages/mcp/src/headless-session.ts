@@ -856,6 +856,11 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         else noteOutcome(handle, event);
         if (event.kind === UNSUPPORTED_API_EVENT && typeof event.specId === 'string' && typeof event.member === 'string') {
           const live = handle.live.get(event.specId);
+          // Only the live version's own calls count: a replaced version's
+          // handler that resumes later (its applyId stamped on the event)
+          // must not mark the replacement partial, as the evidence's other
+          // event filters already hold.
+          if (!live || (typeof event.applyId === 'string' && event.applyId !== live.applyId)) return;
           let members = handle.unsupported.get(event.specId);
           if (!members) {
             members = new Set();

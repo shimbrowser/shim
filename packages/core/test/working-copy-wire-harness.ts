@@ -53,6 +53,18 @@ check('text round-trips', back['handlers/notes.js'] === folder['handlers/notes.j
 const png = back['logo.png'];
 check('bytes round-trip exactly', png instanceof Uint8Array && sameBytes(png, binary));
 check('encoding is deterministic', JSON.stringify(encodeWorkingCopy(folder)) === JSON.stringify(wire));
+{
+  // A leading UTF-8 byte-order mark is part of the file: it must survive
+  // the trip, for text and for a binary-typed asset that happens to be UTF-8.
+  const bomText = new Uint8Array([0xef, 0xbb, 0xbf, 0x61, 0x62, 0x63]);
+  const bomBlob = new Uint8Array([0xef, 0xbb, 0xbf, 0x00, 0x01, 0x7f]);
+  const bomWire = encodeWorkingCopy({ 'bom.txt': bomText, 'bom.bin': bomBlob, 'bom-string.txt': '\ufeffhi' });
+  const bomBack = decodeWorkingCopy(JSON.parse(JSON.stringify(bomWire)));
+  const asBytes = (v: string | Uint8Array | undefined): Uint8Array => (typeof v === 'string' ? new TextEncoder().encode(v) : v ?? new Uint8Array());
+  check('a BOM-prefixed text file round-trips byte for byte', sameBytes(asBytes(bomBack['bom.txt']), bomText), JSON.stringify(bomWire.files));
+  check('…and a BOM-prefixed binary one', sameBytes(asBytes(bomBack['bom.bin']), bomBlob));
+  check('…and text that starts with U+FEFF keeps it', bomBack['bom-string.txt'] === '\ufeffhi');
+}
 check('an empty folder encodes', encodeWorkingCopy({}).files.length === 0 && Object.keys(decodeWorkingCopy(encodeWorkingCopy({}))).length === 0);
 
 console.log('paths:');
