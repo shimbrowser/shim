@@ -56,9 +56,10 @@ check('it starts exactly the file the build writes', server?.args?.[0] === `\${C
 const files = pkg.files as string[];
 check('the package ships the plugin, its config, the skills and the bundle',
   ['dist', '.claude-plugin', '.mcp.json', 'skills'].every((f) => files.includes(f)), files.join(','));
-check('the bin is the bundle', (pkg.bin as Rec)['shim-mcp'] === `./${built}`);
+// No "./" prefix: npm 11 drops such a bin path at publish (npm-pack-harness).
+check('the bin is the bundle', (pkg.bin as Rec)['shim-mcp'] === built);
 const builtCli = path.relative(ROOT, build.CLI_OUT_FILE).split(path.sep).join('/');
-check('the shim bin is the CLI bundle', (pkg.bin as Rec).shim === `./${builtCli}`, String((pkg.bin as Rec).shim));
+check('the shim bin is the CLI bundle', (pkg.bin as Rec).shim === builtCli, String((pkg.bin as Rec).shim));
 
 console.log('the guide:');
 // Normalized: a Windows checkout (core.autocrlf) has CRLF line endings.
