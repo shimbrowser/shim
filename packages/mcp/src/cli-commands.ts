@@ -342,6 +342,12 @@ export interface PreviewDeps {
   openPage(url: string, storage: HeadlessStorage, opts: { visible: boolean }): Promise<PreviewPage>;
   /** How long the page gets to react before the evidence is read (default: the session's). */
   settleMs?: number;
+  /**
+   * Called once the preview has settled and its evidence is read, before the
+   * screenshot and before the page closes: a caller inspecting the previewed
+   * page (its own checks, input) does it here. A throw ends the preview.
+   */
+  whileOpen?(page: PreviewPage): Promise<void>;
 }
 
 export interface PreviewOptions {
@@ -520,6 +526,7 @@ export async function previewFolder(opts: PreviewOptions, deps: PreviewDeps): Pr
     }
 
     const current = held.page;
+    if (deps.whileOpen && current) await deps.whileOpen(current);
     if (opts.screenshot && current) {
       const file = path.resolve(opts.screenshot);
       // A file the CLI can't write is a usage problem (exit 2), like pack and
