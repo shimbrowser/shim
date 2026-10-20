@@ -412,7 +412,15 @@ injects once per element. Both are **static by contract**: scripts, `on*` attrib
 
 The handler receives `{ anchor, mutation, rule, spec, api }` and returns the DOM node (or
 nodes) it created. Returning them opts into **self-healing**: if the site's re-render
-removes them, the engine runs the handler again. Mount strategies:
+removes them, the engine runs the handler again.
+
+A handler may be `async` (return a Promise). The engine awaits it and mounts what it
+resolves to, and a rejection is reported as a handler error, as a throw is. Until it
+settles, that element doesn't count in the rule's match count and isn't handled again. So
+a handler that awaits `api.db` or `api.fetch` before building anything shows nothing, and
+can read as `matched 0` in a preview that settles first. Build and return the root
+synchronously (a placeholder), then fill it in from an un-awaited async step that checks
+the root is still connected. Mount strategies:
 
 - `inline` (default) — your output goes where you put it. Cheapest; only for static DOM.
 - `portal` — the engine parks your output in a floating root positioned at the anchor
@@ -628,6 +636,13 @@ target. Shim fingerprints the matched element on its own (a **witness**) and ref
 apply a rule whose anchor later resolves to a different-looking element — it holds the rule
 for repair instead of mis-attaching. You never write witnesses.
 
+A witness is captured only when the anchor resolves to **exactly one** element. A rule
+whose anchor matches several (every row, or one target plus a hidden duplicate such as a
+second copy of a price) commits without one and can't re-find its target after a redesign.
+If the rule means one element, narrow the anchor until it matches exactly one before you
+commit. Committing the rule again unchanged captures
+nothing (`nothing-to-commit`).
+
 ```json
 { "kind": "data-attr", "name": "data-testid", "value": "submit-btn" }
 { "kind": "data-attr", "name": "data-track-id" }
@@ -677,8 +692,14 @@ shims' and earlier sessions' too) and never cleared, so it may already hold keys
 a value you didn't just write as evidence, and prefer keys unique to this shim.
 `api.settings` has no values, `api.ai` calls are refused (below), and `api.db`,
 `api.storage.pack`, `api.storage.global` and `api.shared` are absent. Handlers must render a
-usable state in every one of those cases anyway; check the data path after commit (open the
-session again if you need to), and say in your summary what you could only verify that way.
+usable state in every one of those cases anyway, and say in your summary what you could only
+verify after a commit.
+
+**After `shim_commit`, the committed rules run on the session's tab with the shim's real
+`api`**: `api.db`, its saved `api.storage` and settings (`api.ai` stays refused). So check
+the data path in the same session: commit, `reload_page`, use the feature, then read what
+landed with `query_db` / `inspect_storage` and look with `view_page`. Previewing again
+puts the preview `api` back for the rules you change.
 
 **`api.ai` is refused while your session is open.** On the session's tab, every `api.ai`
 call from a previewed handler — and from the shim's committed rules there — resolves
@@ -716,8 +737,33 @@ Don't repeat it.
   ], "indexes": [{ "name": "plays_track_idx", "columns": ["track_id"] }] }] }
   ```
 
-  Names are lowercase `snake_case`; types `text | integer | real | blob`. Additive changes
-  apply on commit. Then `await api.db.query(sql, params)` (reads only; `{ ok, rows,
+  Names are lowercase `snake_case`; types `text | integer | real | blob`. A column may also
+  set `"unique": true` and a `"default"` (a string, number or `null`); an index may set
+  `"unique": true`, over one column or several. Additive changes apply on commit, with two
+  limits. A column added to an existing table can't be `unique` or `primaryKey`: add a
+  unique index instead. It can't be `notNull` without a non-null `default` either. Such a
+  column is skipped with a note.
+
+  To record something once (one row per item per day, say), let a unique index enforce it
+  and write with `INSERT OR IGNORE`, or with
+  `INSERT … ON CONFLICT(cols) DO UPDATE SET …` to keep the latest. Both are plain writes, so
+  they never ask:
+
+  ```json
+  { "name": "price_points", "columns": [
+    { "name": "asin", "type": "text", "notNull": true },
+    { "name": "day", "type": "text", "notNull": true },
+    { "name": "price", "type": "real" },
+    { "name": "seen_at", "type": "integer", "notNull": true, "default": 0 }
+  ], "indexes": [{ "name": "price_points_once", "columns": ["asin", "day"], "unique": true }] }
+  ```
+
+  ```js
+  await api.db.run('INSERT OR IGNORE INTO price_points (asin, day, price, seen_at) VALUES (?, ?, ?, ?)',
+    [asin, day, price, Date.now()]);
+  ```
+
+  A unique index can't be created over rows that already break it: dedupe them first. Then `await api.db.query(sql, params)` (reads only; `{ ok, rows,
   truncated? }`, capped by default at 5,000 rows / 1 MB; a shim that really needs bigger
   reads raises its own caps with `"storage": { "limits": { "maxRows": 20000,
   "maxResultBytes": 5000000 }, "tables": [...] }`, up to 100,000 rows / 20 MB — prefer
@@ -725,8 +771,9 @@ Don't repeat it.
   and DDL; `{ ok, changes, lastInsertRowid }`). Parameterized (`?`) only, one statement per
   call. Destructive DDL waits on the user's approval. Errors to handle: `not-declared`,
   `approval-required`, `denied`, `classification: …`, `rejected: …`, `sqlite: …`,
-  `bad-params: …`. **`api.db` is absent while previewing** — your preview shows the
-  handler's `api.db &&` fallback; the data path works after commit.
+  `bad-params: …`. **`api.db` is absent while previewing**: your preview shows the
+  handler's `api.db &&` fallback. After `shim_commit` the committed rules have it on the
+  same tab, so verify the data path there (above).
 - **Remote databases** — `connections: [{ "name": "warehouse", "engine": "postgres" }]`
   (`postgres | mysql | mariadb | mssql | sqlite-remote | supabase`) names a database the
   user already runs; they paste its URL into the shim's Settings, never you. Each entry
