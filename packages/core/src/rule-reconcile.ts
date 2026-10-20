@@ -22,6 +22,20 @@ export interface Reconciler {
   stop(): void;
 }
 
+// Why a rule with no witness can't self-heal, and what fixes it. The usual
+// cause is an anchor that matched several elements when the rule was
+// previewed: apply-rule captures a witness only from a single match (one
+// fingerprint can't describe N elements), so committing the same rule again
+// captures nothing either. The fix is a change to the rule — an anchor that
+// resolves to exactly the one element — previewed and committed.
+export function unwitnessedRecoveryWarning(ruleId: string | undefined): string {
+  return `[shim] rule "${ruleId ?? ''}" cannot auto-recover: its anchor has no witness. `
+    + 'A witness is captured only while the anchor resolves to exactly one element, so a rule '
+    + 'whose anchor matched several elements when it was previewed never gets one, and committing '
+    + 'it unchanged captures nothing. To make it recoverable, narrow the anchor to the one '
+    + 'element, preview it, and commit that change.';
+}
+
 export function makeReconciler(
   rule: Rule,
   spec: RuntimeSpec,
@@ -314,13 +328,10 @@ export function makeReconciler(
           return;
         }
       } else if (canRebase && !hasWitness) {
-        // No witness at all (e.g. a prior bad commit dropped it): recovery is
-        // structurally impossible and the rule can only ever report no-match.
-        // Say so where a human debugging "why isn't this healing" will look.
-        console.warn(
-          `[shim] rule "${rule.id}" cannot auto-recover: no witness on the anchor `
-          + '(re-commit the rule while it resolves to re-capture one)',
-        );
+        // No witness at all: recovery is structurally impossible and the rule
+        // can only ever report no-match. Say so where a human debugging "why
+        // isn't this healing" will look.
+        console.warn(unwitnessedRecoveryWarning(rule.id));
       }
       lastRecoveryDetail = recoveryNotes.length ? recoveryNotes.join('; ') : null;
       // Late-render grace (one retry) for the two paths about to ESCALATE —

@@ -629,7 +629,8 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       const live = (handle.working.rules || []).find((r) => r.id === rule.id);
       return {
         ruleId: rule.id,
-        status: describeRuleStatus(rule, status),
+        // The working rule carries any witness this preview captured.
+        status: describeRuleStatus(rule, status, { witnessed: live?.anchor?.witness !== undefined }),
         verification: verificationLevel(
           live?.anchor?.witness, handle.host.capabilities, (handle.unsupported.get(key)?.size ?? 0) > 0, noMatchIds.has(rule.id),
         ),

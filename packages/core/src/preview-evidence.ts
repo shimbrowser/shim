@@ -27,7 +27,10 @@ export function previewKey(patchId: string, ruleId: string): string {
 // this emit produced. mount-route rules report matched: 0 whenever the
 // current path isn't the route — that's the normal resting state, not a
 // failure, so it gets its own wording.
-export function describeRuleStatus(rule: Rule | undefined, status: RuleStatusEvent | undefined): string {
+// `opts.witnessed`: this preview captured a witness for the rule (a
+// `rule-witness` event the host collected apart from the status), so a status
+// line that later reads several matches doesn't claim the rule has none.
+export function describeRuleStatus(rule: Rule | undefined, status: RuleStatusEvent | undefined, opts: { witnessed?: boolean } = {}): string {
   const isRoute = (rule?.mutations || []).some((m) => m?.kind === 'mount-route');
   // `redirect` rules are handled in main (the network hook rewrites the
   // navigation before the page loads), so the engine never emits a DOM
@@ -97,7 +100,21 @@ export function describeRuleStatus(rule: Rule | undefined, status: RuleStatusEve
     box = ` — ${status.matched > 1 ? 'first match' : 'anchor'} ${boxText(status.box)}`;
   }
   const note = typeof status.note === 'string' && status.note ? ` — NOTE: ${status.note}` : '';
-  return `matched ${status.matched} element(s) via ${status.matchedVia || 'primary'}${box}${note}`;
+  return `matched ${status.matched} element(s) via ${status.matchedVia || 'primary'}${box}${note}${opts.witnessed ? '' : unwitnessedNote(rule, status.matched)}`;
+}
+
+// The engine fingerprints an anchor's target (its witness) only from a single
+// match, so an anchored rule that matched several elements commits with none:
+// after a site redesign it can't re-find its target and only ever reports
+// no-match. Said at preview time, while narrowing the anchor is still cheap —
+// a rule meant for several elements (every row, every card) can ignore it.
+export const UNWITNESSED_MULTI_MATCH_NOTE =
+  ' — NOTE: several matches, so Shim captures no witness for this rule and it cannot self-heal after a site redesign; '
+  + 'if it targets one element, narrow the anchor until it matches exactly one';
+
+function unwitnessedNote(rule: Rule | undefined, matched: number): string {
+  if (matched <= 1 || !rule?.anchor || rule.anchor.witness || rule.anchor.iframe) return '';
+  return UNWITNESSED_MULTI_MATCH_NOTE;
 }
 
 /** One `noMatch[]` entry: a rule whose anchor resolved nothing. */
