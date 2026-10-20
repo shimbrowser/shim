@@ -1,10 +1,12 @@
 // Harness for the Claude Code plugin and its authoring guide
-// (packages/mcp/.claude-plugin, .mcp.json, skills/shim-authoring/SKILL.md):
+// (packages/mcp/.claude-plugin, .mcp.json, skills/shim-authoring/SKILL.md and
+// its references/):
 // the manifest is well formed and versioned with the
 // package; .mcp.json starts exactly the file the build writes; the package
 // ships the plugin's files; the guide is a valid skill and stays in step with
-// the code — every mutation kind spec-lint accepts, every anchor kind, every
-// remote engine and every tool the server registers is documented, the
+// the code — the core links every reference file and stays small, every
+// mutation kind spec-lint accepts, every anchor kind, every remote engine and
+// every tool the server registers is documented, the
 // internal loop's vocabulary (emit ops, edit-handler) is not, and the guide's
 // worked example is a folder that packs cleanly.
 //
@@ -63,13 +65,28 @@ check('the shim bin is the CLI bundle', (pkg.bin as Rec).shim === builtCli, Stri
 
 console.log('the guide:');
 // Normalized: a Windows checkout (core.autocrlf) has CRLF line endings.
-const skill = read('skills/shim-authoring/SKILL.md').replace(/\r\n/g, '\n');
-const fm = /^---\n([\s\S]*?)\n---\n/.exec(skill);
+const core = read('skills/shim-authoring/SKILL.md').replace(/\r\n/g, '\n');
+const refDir = path.join(ROOT, 'skills', 'shim-authoring', 'references');
+const refs = fs.readdirSync(refDir).filter((f) => f.endsWith('.md')).sort();
+// The guide is the core plus the reference files the agent reads on demand;
+// every content check below runs over all of it.
+const skill = [core, ...refs.map((f) => read(`skills/shim-authoring/references/${f}`).replace(/\r\n/g, '\n'))].join('\n\n');
+const fm = /^---\n([\s\S]*?)\n---\n/.exec(core);
 const front = fm?.[1] ?? '';
 const name = /^name:\s*(.+)$/m.exec(front)?.[1]?.trim();
 const description = /^description:\s*(.+)$/m.exec(front)?.[1]?.trim() ?? '';
 check('frontmatter names the skill after its folder', name === 'shim-authoring');
 check('a description that says when to use it', description.length > 80 && description.length <= 1024 && /Use whenever/.test(description));
+check('the guide has reference files', refs.length > 0);
+for (const f of refs) {
+  check(`the core links references/${f}`, core.includes(`\`references/${f}\``));
+}
+for (const linked of new Set([...skill.matchAll(/`references\/([\w-]+\.md)`/g)].map((m) => m[1] ?? ''))) {
+  check(`links to references/${linked} name a real file`, refs.includes(linked));
+}
+// The core loads whole on every session; detail belongs in a reference file.
+const CORE_BUDGET_BYTES = 32_000;
+check(`the core stays under ${CORE_BUDGET_BYTES} bytes`, Buffer.byteLength(core) <= CORE_BUDGET_BYTES, String(Buffer.byteLength(core)));
 
 for (const kind of BUILTIN_KINDS) {
   check(`documents mutation kind "${kind}"`, skill.includes(`"kind": "${kind}"`), kind);
