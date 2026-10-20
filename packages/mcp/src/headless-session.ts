@@ -121,6 +121,13 @@ export interface HeadlessBackendOptions {
    * was committed with instead of capturing a fresh one.
    */
   seedWitnesses?: Record<string, RuleState>;
+  /**
+   * The committed anchor digests of rules that have no witness (a folder's
+   * .shim-state.json anchors, by rule id). With seedWitnesses, they tell a
+   * preview which added rules are unchanged since the commit, so those run
+   * behind the deploy baseline.
+   */
+  seedAnchors?: Record<string, string>;
 }
 
 /** A rule's broken reconciliation outcome: a recovery the engine reported but nothing applied, or a quarantine. */
@@ -151,8 +158,9 @@ export interface HeadlessHandle {
   bundleHash: string | undefined;
   /**
    * The committed anchor of each rule, by rule id (anchorDigest, witness
-   * aside): the rules that run behind `bundleHash`. Seeded witnesses count
-   * as committed, since .shim-state.json pins them to the committed anchor.
+   * aside): the rules that run behind `bundleHash`. Seeded witnesses and
+   * anchors count as committed, since .shim-state.json pins them to the
+   * committed anchor.
    */
   committedAnchors: Map<string, string>;
   envelope: Record<string, unknown>;
@@ -328,6 +336,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const writeShimFile = options.writeShimFile ?? writeAtomic;
   const seedWitnesses = options.seedWitnesses;
+  const seedAnchors = options.seedAnchors;
 
   // A rule new to the working state takes its seeded witness while its anchor
   // is the one the witness was captured for (HeadlessBackendOptions.seedWitnesses).
@@ -420,15 +429,19 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
   }
 
   // The committed anchors, by rule id: every committed rule's, then (for a
-  // rule the committed spec doesn't have) a seeded witness's — until this
-  // session commits, which rewrites what is committed.
-  function committedAnchorsOf(rules: Rule[] | undefined, seeds: Record<string, RuleState> | undefined): Map<string, string> {
+  // rule the committed spec doesn't have) a seeded witness's or seeded
+  // anchor's — until this session commits, which rewrites what is committed.
+  function committedAnchorsOf(rules: Rule[] | undefined, seeded: boolean): Map<string, string> {
     const out = new Map<string, string>();
     for (const rule of rules || []) {
       if (typeof rule?.id === 'string' && rule.anchor) out.set(rule.id, anchorDigest(rule.anchor));
     }
-    for (const [id, entry] of Object.entries(seeds ?? {})) {
+    if (!seeded) return out;
+    for (const [id, entry] of Object.entries(seedWitnesses ?? {})) {
       if (!out.has(id)) out.set(id, entry.anchorDigest);
+    }
+    for (const [id, digest] of Object.entries(seedAnchors ?? {})) {
+      if (!out.has(id)) out.set(id, digest);
     }
     return out;
   }
@@ -834,7 +847,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     }
     handle.version = version;
     handle.bundleHash = bundleHash;
-    handle.committedAnchors = committedAnchorsOf(spec.rules, undefined);
+    handle.committedAnchors = committedAnchorsOf(spec.rules, false);
     handle.envelope = { ...handle.envelope, authoringHistory: history };
     handle.storedHandlers = { ...file.handlers };
     handle.source = { ...handle.source, created: false };
@@ -863,7 +876,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         storedHandlers: { ...source.handlers },
         version: typeof source.spec.version === 'number' ? source.spec.version : 1,
         bundleHash: typeof source.spec.bundleHash === 'string' ? source.spec.bundleHash : undefined,
-        committedAnchors: committedAnchorsOf(source.spec.rules, seedWitnesses),
+        committedAnchors: committedAnchorsOf(source.spec.rules, true),
         envelope: { ...source.envelope },
         live: new Map(),
         applies: 0,

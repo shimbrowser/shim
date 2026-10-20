@@ -145,6 +145,48 @@ check('…and no envelope extras', !('userData' in out));
 out = packShim({ ...folder, '.DS_Store': 'x', 'handlers/.notes.js.swp': 'x' });
 check('hidden files are ignored', stableStringify(out) === stableStringify(EXPORT));
 
+console.log('state anchors: the committed anchor of a rule with no witness');
+{
+  const rowsAnchor = { primary: { kind: 'css', value: '.row' }, fallbacks: [{ kind: 'css', value: '[data-row]' }] };
+  const file = {
+    format: 'shim/1',
+    name: 'Rows',
+    spec: {
+      id: 'shim-rows',
+      bundleHash: 'deploy-1',
+      match: { hosts: ['example.com'] },
+      rules: [
+        { id: 'rows', anchor: rowsAnchor, mutations: [{ kind: 'restyle', properties: { color: 'red' } }] },
+        { id: 'buy', anchor: { primary: { kind: 'css', value: '.buy' }, witness: witness('buy') }, mutations: [{ kind: 'hide' }] },
+        { id: 'strip', mutations: [{ kind: 'rewrite-response', endpoint: { path: '/api' }, transform: 'strip' }] },
+      ],
+    },
+    handlers: { strip: TRANSFORM_MODULE },
+  };
+  const unpacked = unpackShim(file);
+  const st = parseJson(unpacked[SHIM_STATE_FILE]) as ShimState;
+  check('unpack records a witness-less rule\'s anchor digest under anchors',
+    st.anchors?.rows === anchorDigest(rowsAnchor as unknown as Anchor), JSON.stringify(st.anchors));
+  check('…and only for anchored rules with no witness (a witness stays in rules)',
+    Object.keys(st.anchors || {}).join() === 'rows' && Object.keys(st.rules).join() === 'buy');
+  check('a file with no witness-less anchored rule writes no anchors', !('anchors' in state));
+  check('readShimFolder returns them', readShimFolder(unpacked).state?.anchors?.rows === st.anchors?.rows);
+  check('unpack → pack is still lossless', stableStringify(packShim(unpacked)) === stableStringify(file));
+  check('…and pack → unpack writes the same anchors again', stableStringify(unpackShim(packShim(unpacked))) === stableStringify(unpacked));
+
+  // A state written before anchors existed: no anchors key at all.
+  const older = { ...st } as Record<string, unknown>;
+  delete older.anchors;
+  const olderFolder = { ...unpacked, [SHIM_STATE_FILE]: JSON.stringify(older) };
+  check('an older state file without anchors still reads', readShimFolder(olderFolder).state?.anchors === undefined
+    && readShimFolder(olderFolder).state?.bundleHash === 'deploy-1');
+  check('…and packs the same file', stableStringify(packShim(olderFolder)) === stableStringify(file));
+  rejects('anchors that is not an object', 'malformed-shim-state',
+    () => packShim({ ...unpacked, [SHIM_STATE_FILE]: JSON.stringify({ ...st, anchors: ['x'] }) }), '"anchors" must be an object');
+  rejects('an anchor digest that is not a string', 'malformed-shim-state',
+    () => packShim({ ...unpacked, [SHIM_STATE_FILE]: JSON.stringify({ ...st, anchors: { rows: 1 } }) }), 'anchors["rows"]');
+}
+
 console.log('checkout (attach mode) writes the working copy');
 const working: Spec = {
   id: 'w', version: 3, bundleHash: 'h', priority: 2, match: { hosts: ['example.com'] },

@@ -7,6 +7,9 @@
 //   (view_page, evaluate_in_page) → commit (the .shim file: version, witness,
 //   history, deploy baseline; api.storage in its file) → end → reopen the
 //   committed .shim (its rules run again, witnesses stay out of shim.json)
+//   then `shim preview` of an unpacked folder on a new deploy: witness-less
+//   rules whose anchor is unchanged refresh the baseline / promote a working
+//   fallback; a re-anchored one sees no deploy
 //
 // plus D15: a preview declaring an unsupported kind or declaration applies
 // nothing and answers `unsupported`; a handler using an unsupported member
@@ -33,7 +36,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createShimMcpServer } from '../src/server';
 import { createHeadlessControl } from '../src/headless-control';
-import { openHeadlessPage } from '../src/playwright-launch';
+import { openHeadlessPage, openLoadedHeadlessPage } from '../src/playwright-launch';
+import { previewFolder, unpackFile } from '../src/cli-commands';
+import type { PageRuntimeEvent } from '@shimbrowser/core/page-host';
 import type { HeadlessSessionPage } from '../src/headless-session';
 
 let failures = 0;
@@ -252,6 +257,62 @@ async function main(): Promise<void> {
     check('a .shim with an intercept rule is refused at open', refusedOpen.isError === true && (refusedOpen.content[0]?.text ?? '').startsWith('unsupported'), refusedOpen.content[0]?.text);
     check('no page was left open', (await control.request('GET', '/status')).body.sessions instanceof Array
       && ((await control.request('GET', '/status')).body.sessions as unknown[]).length === 0);
+
+    // --- shim preview of an unpacked folder on a new deploy -----------------
+    // Witness-less multi-match rules (two tracks), committed under a deploy
+    // baseline the page no longer has: .shim-state.json's anchors say which
+    // are unchanged, so those run behind the baseline as in Shim.
+    const trackRestyle = [{ kind: 'restyle', properties: { outlineOffset: '3px' } }];
+    const deployFile = path.join(tmp, 'deploy.shim');
+    fs.writeFileSync(deployFile, JSON.stringify({
+      format: 'shim/1',
+      name: 'Deploy',
+      spec: {
+        id: 'deploy-shim',
+        version: 3,
+        bundleHash: 'an-older-deploy',
+        match: { hosts: [`127.0.0.1:${port}`] },
+        rules: [
+          { id: 'refresh', anchor: { primary: { kind: 'css', value: '.track' } }, mutations: trackRestyle },
+          { id: 'promote', anchor: { primary: { kind: 'css', value: '.track-v1' }, fallbacks: [{ kind: 'css', value: 'li[data-id]' }] }, mutations: trackRestyle },
+          { id: 'edited', anchor: { primary: { kind: 'css', value: '.row-v1' }, fallbacks: [{ kind: 'css', value: 'ul.tracks > li' }] }, mutations: trackRestyle },
+        ],
+      },
+      handlers: {},
+    }));
+    const deployDir = path.join(tmp, 'deploy');
+    unpackFile(deployFile, deployDir);
+    const deploySpec = JSON.parse(fs.readFileSync(path.join(deployDir, 'shim.json'), 'utf8')) as { rules: Array<{ id: string; anchor: Record<string, unknown> }> };
+    const editedRule = deploySpec.rules.find((x) => x.id === 'edited');
+    if (editedRule) editedRule.anchor = { ...editedRule.anchor, primary: { kind: 'css', value: '.row-v2' } };
+    fs.writeFileSync(path.join(deployDir, 'shim.json'), JSON.stringify(deploySpec, null, 2));
+    const seen: PageRuntimeEvent[] = [];
+    const folderOutcome = await previewFolder({ dir: deployDir, url: `${origin}/` }, {
+      version: 'test',
+      async openPage(url, storage, opts) {
+        const opened = await openLoadedHeadlessPage(url, { visible: opts.visible, storage });
+        opened.host.onRuntimeEvent((e) => { seen.push(e); });
+        return {
+          host: opened.host,
+          close: () => opened.close(),
+          async screenshot() { /* not asked for */ },
+        };
+      },
+    });
+    // A baseline refresh names the preview (specId), not the rule.
+    const forRule = (id: string, kind: string): PageRuntimeEvent[] => seen.filter((e) => e.kind === kind && (e.ruleId === id || e.specId === `preview:deploy-shim:${id}`));
+    check('the folder preview applied', folderOutcome.applied === true, folderOutcome);
+    const refreshed = forRule('refresh', 'spec-bundle-update')[0];
+    check('an unchanged witness-less rule on a new deploy refreshes the baseline', typeof refreshed?.bundleHash === 'string'
+      && refreshed.bundleHash !== 'an-older-deploy', forRule('refresh', 'rule-status'));
+    const promotedEv = forRule('promote', 'rule-rebase')[0];
+    const promotedAnchor = isRecord(promotedEv?.anchor) && isRecord(promotedEv.anchor.primary) ? promotedEv.anchor.primary : {};
+    check('an unchanged witness-less rule with a dead primary promotes its working fallback', promotedEv?.strategy === 'promote'
+      && promotedAnchor.value === 'li[data-id]', seen.filter((e) => e.ruleId === 'promote'));
+    check('a re-anchored witness-less rule sees no deploy: no refresh, no promote',
+      forRule('edited', 'spec-bundle-update').length === 0 && forRule('edited', 'rule-rebase').length === 0, seen.filter((e) => e.ruleId === 'edited'));
+    check('…and still applies through its fallback', forRule('edited', 'rule-status').some((e) => typeof e.matched === 'number' && e.matched === 2),
+      seen.filter((e) => e.ruleId === 'edited'));
   } finally {
     await control.closeAll();
     await client.close();

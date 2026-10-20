@@ -399,15 +399,21 @@ function listOf(v: unknown): unknown[] {
  * whose anchor is unchanged gets back the witness .shim-state.json kept for
  * it (and the spec its bundleHash), so a selector that now lands on the wrong
  * element quarantines as it would in Shim instead of being re-fingerprinted.
+ * A rule whose anchor still matches its committed digest (a witness's, or
+ * for a rule with none, the state's `anchors`) runs behind that bundleHash,
+ * as the committed shim does; an edited anchor runs behind none.
  * The page closes and the throwaway file is removed before this resolves.
  */
 export async function previewFolder(opts: PreviewOptions, deps: PreviewDeps): Promise<PreviewOutcome> {
   const withState = readFolderWithState(opts.dir);
   let packed: ShimFile;
   let seedWitnesses: Record<string, RuleState> | undefined;
+  let seedAnchors: Record<string, string> | undefined;
   try {
     packed = packShim(withState);
-    seedWitnesses = readShimFolder(withState).state?.rules;
+    const state = readShimFolder(withState).state;
+    seedWitnesses = state?.rules;
+    seedAnchors = state?.anchors;
   } catch (e) {
     asCliError(e);
   }
@@ -471,6 +477,7 @@ export async function previewFolder(opts: PreviewOptions, deps: PreviewDeps): Pr
     backend: {
       ...(deps.settleMs !== undefined ? { settleMs: deps.settleMs } : {}),
       ...(seedWitnesses ? { seedWitnesses } : {}),
+      ...(seedAnchors ? { seedAnchors } : {}),
     },
   });
 

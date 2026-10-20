@@ -225,8 +225,9 @@ that never matched an element, a failed screenshot or launch. `2` a usage error,
 
 `shim.json` holds only what you author. Witnesses (the fingerprints that keep a rule from
 attaching to the wrong element), `version` and `bundleHash` are managed by the tools. `unpack`
-keeps them in `.shim-state.json` beside the folder so a round trip loses nothing. Leave
-that file alone.
+keeps them in `.shim-state.json` beside the folder so a round trip loses nothing, along with
+a digest of each rule's committed anchor, so `preview` can tell an unchanged rule (it runs
+behind the committed `bundleHash`, as in Shim) from one you re-anchored. Leave that file alone.
 
 ## Environment
 

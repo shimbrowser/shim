@@ -537,6 +537,42 @@ async function main(): Promise<void> {
     check('a changed anchor previews without one', sent('mark') !== undefined && sent('mark')?.rule.anchor?.witness === undefined
       && sent('mark')?.bundleHash === undefined);
     check('the witness that no longer verifies quarantines: exit 1', wcode === EXIT_PROBLEM && /quarantined[^\n]*\n {4}hide-promo/.test(r.out[0] ?? ''), r.out);
+
+    // Witness-less rules (a multi-match rule never captures one): the state's
+    // anchors say which are unchanged since the commit.
+    const rowsFile = path.join(tmp, 'rows.shim');
+    fs.writeFileSync(rowsFile, json({
+      format: 'shim/1',
+      name: 'Rows',
+      spec: {
+        ...BASE_SPEC,
+        version: 2,
+        bundleHash: 'deploy-1',
+        rules: [
+          { id: 'rows', anchor: { primary: { kind: 'css', value: '.track' }, fallbacks: [{ kind: 'css', value: '[data-track]' }] }, mutations: [{ kind: 'restyle', properties: { color: 'red' } }] },
+          { id: 'moved', anchor: css('.old-row'), mutations: [{ kind: 'hide' }] },
+        ],
+      },
+      handlers: {},
+    }));
+    await cli(r, 'unpack', rowsFile);
+    const rdir = path.join(tmp, 'rows');
+    const rspec = readJson(path.join(rdir, 'shim.json')) as { rules: Array<{ id: string; anchor: unknown }> };
+    const moved = rspec.rules.find((x) => x.id === 'moved');
+    if (moved) moved.anchor = css('.new-row');
+    fs.writeFileSync(path.join(rdir, 'shim.json'), json(rspec));
+    r.onApply = matchOne;
+    await cli(r, 'preview', rdir, '--url', 'https://site.test/');
+    const rpage = r.pages.at(-1);
+    const rsent = (id: string): PreviewRule | undefined => rpage?.applied.find((p) => p.rule.id === id);
+    check('an unchanged witness-less rule previews behind the deploy baseline', rsent('rows')?.bundleHash === 'deploy-1', rpage?.applied);
+    check('a re-anchored witness-less rule previews behind none', rsent('moved') !== undefined && rsent('moved')?.bundleHash === undefined, rpage?.applied);
+    const rstate = readJson(path.join(rdir, '.shim-state.json')) as Record<string, unknown>;
+    delete rstate.anchors;
+    fs.writeFileSync(path.join(rdir, '.shim-state.json'), json(rstate));
+    await cli(r, 'preview', rdir, '--url', 'https://site.test/');
+    check('an older state file without anchors previews witness-less rules behind none, as before',
+      r.pages.at(-1)?.applied.find((p) => p.rule.id === 'rows')?.bundleHash === undefined, r.pages.at(-1)?.applied);
     // A saved witness the engine refuses before its quarantine is reported:
     // the selector now resolves, the witness filters it to zero, and the
     // reconciler's quarantine lands after the session settles. No error, no

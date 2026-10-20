@@ -7,8 +7,10 @@
 //                        (`module.exports = <expr>;`, handler-source.ts).
 //   .shim-state.json     tool-managed, written by `unpack` only: per rule the
 //                        witness plus a digest of the anchor it was captured
-//                        for, the spec's `bundleHash` and `version`, and the
-//                        rest of the `.shim` envelope (name, opt-in data, …).
+//                        for, a digest of each witness-less rule's anchor
+//                        (`anchors`), the spec's `bundleHash` and `version`,
+//                        and the rest of the `.shim` envelope (name, opt-in
+//                        data, …).
 //
 // Three conversions:
 //   checkoutShim  working spec (+ stored handler modules) → folder, no state.
@@ -74,6 +76,14 @@ export interface ShimState {
   bundleHash?: string;
   /** Keyed by rule id. */
   rules: Record<string, RuleState>;
+  /**
+   * The committed anchor of each rule that has no witness (a multi-match
+   * rule never captures one), as anchorDigest() by rule id. A rule whose
+   * anchor still matches its digest is unchanged since the commit, so a
+   * preview runs it behind `bundleHash`. Optional: a file without it reads as
+   * one with no such rules, and a reader that predates it ignores it.
+   */
+  anchors?: Record<string, string>;
   /** The `.shim` envelope's other fields (userData, authoringHistory, …), in file order. */
   file?: Record<string, unknown>;
 }
@@ -298,6 +308,7 @@ export function unpackShim(fileContent: string | unknown): FolderFiles {
     }
   }
   const state: ShimState = { format: SHIM_STATE_FORMAT, rules: nameMap<RuleState>() };
+  const anchors = nameMap<string>();
   const seen = new Set<string>();
   rules.forEach((ruleValue, index) => {
     if (!isRecord(ruleValue)) { problems.push(`spec.rules[${index}] is not an object`); return; }
@@ -314,6 +325,8 @@ export function unpackShim(fileContent: string | unknown): FolderFiles {
     const anchor = ruleValue.anchor;
     if (isRecord(anchor) && anchor.witness !== undefined) {
       state.rules[id] = { anchorDigest: anchorDigest(anchor as unknown as Anchor), witness: anchor.witness as Witness };
+    } else if (isRecord(anchor)) {
+      anchors[id] = anchorDigest(anchor as unknown as Anchor);
     }
   });
   checkHandlerNames(Object.keys(modules), problems);
@@ -322,6 +335,7 @@ export function unpackShim(fileContent: string | unknown): FolderFiles {
   if (typeof parsed.name === 'string') state.name = parsed.name;
   if (typeof spec.version === 'number') state.version = spec.version;
   if (typeof spec.bundleHash === 'string') state.bundleHash = spec.bundleHash;
+  if (Object.keys(anchors).length) state.anchors = anchors;
   const envelope = nameMap<unknown>();
   for (const [key, value] of Object.entries(parsed)) {
     if (key === 'format' || key === 'name' || key === 'spec' || key === 'handlers') continue;
@@ -515,6 +529,14 @@ function parseState(text: string): ShimState {
     for (const [id, entry] of Object.entries(parsed.rules)) {
       if (!isRecord(entry) || typeof entry.anchorDigest !== 'string' || !isRecord(entry.witness)) {
         problems.push(`rules["${id}"] needs an "anchorDigest" string and a "witness" object`);
+      }
+    }
+  }
+  if (parsed.anchors !== undefined) {
+    if (!isRecord(parsed.anchors)) problems.push('"anchors" must be an object');
+    else {
+      for (const [id, digest] of Object.entries(parsed.anchors)) {
+        if (typeof digest !== 'string') problems.push(`anchors["${id}"] must be an anchor digest string`);
       }
     }
   }

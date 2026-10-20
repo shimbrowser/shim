@@ -10,7 +10,8 @@
 //     declaring an unsupported feature refused before any page opens, a page
 //     that fails to open, one session per .shim file;
 //   - begin applies the committed shim (handlers inlined; behind the deploy
-//     baseline only where a witness exists) and settles before it answers;
+//     baseline while a rule's anchor is the committed one, witness or not,
+//     with the spec's autoRepair: false) and settles before it answers;
 //   - preview: preflight is atomic (nothing applied, no revision), lint
 //     refuses, the evidence shape (rules with status + verification, errors,
 //     noMatch, console, changes), `partial` for an unsupported-api use and
@@ -70,7 +71,7 @@ import type {
   PageHost, PreviewRule, PageRuntimeEvent, PageConsoleMessage, PageLoadOutcome, LoadWaitOptions,
 } from '@shimbrowser/core/page-host';
 import { decodeWorkingCopy, encodeWorkingCopy } from '@shimbrowser/core/working-copy-wire';
-import type { FolderInput } from '@shimbrowser/core/shim-folder';
+import { unpackShim, anchorDigest, SHIM_STATE_FILE, type FolderInput, type ShimState } from '@shimbrowser/core/shim-folder';
 import { fileStorage, HEADLESS_STORAGE_FORMAT } from '../src/file-storage';
 import { createHeadlessControl, hostPatternMatches, MAX_COMMIT_ID_LENGTH, MAX_SUMMARY_LENGTH, type HeadlessControl } from '../src/headless-control';
 import { HEADLESS_CAPABILITIES, type HeadlessStorage } from '../src/playwright-page-host';
@@ -909,6 +910,8 @@ async function main(): Promise<void> {
     const sid = String(opened.sessionId);
     const host = r.hosts[0] as FakeHost;
     const last = (ruleId: string): PreviewRule | undefined => [...host.applied].reverse().find((p) => p.rule.id === ruleId);
+    // From here on the engine matches many elements, so it captures no witness.
+    host.onApply = (p, h) => h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: 2, matchedVia: 'primary', applyId: p.applyId });
     check('a witness-less committed rule runs behind the baseline', last('rows')?.bundleHash === 'deploy-1', last('rows'));
     check('an opted-out shim\'s committed rules carry autoRepair: false', last('rows')?.autoRepair === false && last('buy')?.autoRepair === false,
       [last('rows'), last('buy')]);
@@ -931,6 +934,9 @@ async function main(): Promise<void> {
     const saved = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { bundleHash?: string; autoRepair?: boolean } };
     check('the re-anchor commits', c.ok === true && typeof saved.spec.bundleHash === 'string', { c, spec: saved.spec });
     check('…keeping autoRepair off', saved.spec.autoRepair === false, saved.spec);
+    const unpackedState = JSON.parse(unpackShim(fs.readFileSync(shimFile, 'utf8'))[SHIM_STATE_FILE] ?? '{}') as ShimState;
+    check('the committed file unpacks with the witness-less rule\'s new anchor digest',
+      unpackedState.anchors?.rows === anchorDigest(css('.track-row')) && !('rows' in unpackedState.rules), unpackedState);
     const edited = reanchored.map((rule) => (rule.id === 'rows' ? { ...rule, mutations: [{ kind: 'restyle', css: { color: 'green' } }] } : rule));
     const pv4 = await preview(r, sid, { ...folder, 'shim.json': json({ ...spec, rules: edited }) } as Record<string, string>);
     check('once committed, the new anchor runs behind the committed baseline', pv4.applied === true && last('rows')?.bundleHash === saved.spec.bundleHash, last('rows'));
