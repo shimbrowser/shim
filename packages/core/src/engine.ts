@@ -34,6 +34,11 @@ interface PatchBundle {
   ruleHandlers?: ReadonlyMap<Rule, HandlerMap>;
   priority?: number;
   bundleHash?: string | (() => string | null);
+  // Spec rule ids to boot suppressed: a live preview already owns each of
+  // them (it arrived before this patch booted, or the patch re-booted under
+  // it). They are never set up until restoreRule, so the committed rule and
+  // its preview twin never run side by side, not even for one apply.
+  suppressedRuleIds?: readonly string[];
 }
 
 // An extra rule's deploy gate: the baseline it was committed under and the
@@ -167,12 +172,16 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
   // (never emitted by authoring, but the type allows it) key by index and are
   // simply not suppressible.
   const ruleTeardowns = new Map<string, () => void>();
-  const suppressedRuleIds = new Set<string>();
+  const hasRule = (ruleId: string): boolean => (spec.rules || []).some((r) => r.id === ruleId);
+  const suppressedRuleIds = new Set<string>((patch.suppressedRuleIds || []).filter(hasRule));
   let tornDown = false;
   api.onReady(() => {
     if (tornDown) return;
     for (const [i, rule] of (spec.rules || []).entries()) {
-      ruleTeardowns.set(rule.id || `__idx_${i}`, setupRule(rule, spec, api, mutations, handlers, compiledFor(rule)));
+      const key = rule.id || `__idx_${i}`;
+      // A preview twin claimed it before the document was ready (or at boot).
+      if (suppressedRuleIds.has(key) || ruleTeardowns.has(key)) continue;
+      ruleTeardowns.set(key, setupRule(rule, spec, api, mutations, handlers, compiledFor(rule)));
     }
   });
 
@@ -181,6 +190,11 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
   // authoring UI for live previews. Keyed rules can be updated in place (same key
   // replaces previous apply) and torn down via `removeExtraRule`.
   const extraTeardowns = new Map<string, () => void>();
+  // ruleKey → the latest apply still waiting for the document. A remove (or a
+  // newer apply) before DOMContentLoaded cancels it; without this a preview
+  // removed during load mounted anyway, with nothing left to undo it, beside
+  // the committed rule its removal had restored.
+  const pendingExtra = new Map<string, object>();
 
   return {
     applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string, extraRuleHandlers?: HandlerMap, deploy?: ExtraRuleDeploy, applyId?: string) {
@@ -189,12 +203,16 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
         effectiveSpec = { ...effectiveSpec, bundleHash: deploy.bundleHash, __bundleHashFn: deploy.current };
         if (deploy.autoRepair === false) effectiveSpec.autoRepair = false;
       }
+      const ticket = {};
+      if (ruleKey) pendingExtra.set(ruleKey, ticket);
       api.onReady(() => {
         // Setup waits for the document. A control torn down meanwhile (a host
         // letting go of the page, a patch removed mid-load) must not mount it:
         // nothing would be left to undo it.
         if (tornDown) return;
         if (ruleKey) {
+          if (pendingExtra.get(ruleKey) !== ticket) return;
+          pendingExtra.delete(ruleKey);
           const prev = extraTeardowns.get(ruleKey);
           if (prev) {
             prev();
@@ -206,8 +224,9 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
       });
     },
     removeExtraRule(ruleKey: string) {
+      const cancelled = pendingExtra.delete(ruleKey);
       const teardown = extraTeardowns.get(ruleKey);
-      if (!teardown) return false;
+      if (!teardown) return cancelled;
       teardown();
       extraTeardowns.delete(ruleKey);
       return true;
@@ -217,12 +236,18 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
     // no-op unless the id was suppressed by suppressRule on THIS control instance
     // — a commit re-boots the patch into a fresh control, so a stale restore from
     // the old preview teardown can't double-apply anything there.
+    // Suppression is by declaration, not by what is mounted yet: a rule whose
+    // setup is still waiting for the document (a preview sent during load) is
+    // marked so the deferred setup skips it. Without that the committed rule
+    // mounted at DOMContentLoaded beside its preview, and two script handlers
+    // observing one container fed each other until the page hung.
     suppressRule(ruleId: string) {
-      if (tornDown || !ruleId) return false;
+      if (tornDown || !ruleId || !hasRule(ruleId)) return false;
       const teardown = ruleTeardowns.get(ruleId);
-      if (!teardown) return false;
-      try { teardown(); } catch (err) { console.error('[shim] rule suppress failed', err); }
-      ruleTeardowns.delete(ruleId);
+      if (teardown) {
+        try { teardown(); } catch (err) { console.error('[shim] rule suppress failed', err); }
+        ruleTeardowns.delete(ruleId);
+      }
       suppressedRuleIds.add(ruleId);
       return true;
     },
@@ -232,7 +257,9 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
       const rule = (spec.rules || []).find((r) => r.id === ruleId);
       if (!rule) return;
       api.onReady(() => {
-        if (tornDown || suppressedRuleIds.has(ruleId)) return;
+        // The boot's own deferred setup may have run it already (restored
+        // before the document was ready): one instance, never two.
+        if (tornDown || suppressedRuleIds.has(ruleId) || ruleTeardowns.has(ruleId)) return;
         ruleTeardowns.set(ruleId, setupRule(rule, spec, api, mutations, handlers, compiledFor(rule)));
       });
     },
