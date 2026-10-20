@@ -109,8 +109,10 @@ async function testEvaluate(): Promise<void> {
   });
   const ok = await evaluateOnHost(host, '1 + 1', 100, 'engine');
   check('the result is the page-serialized JSON', 'result' in ok && ok.result === '{"n":2}', JSON.stringify(ok));
-  check('the expression runs awaited inside the wrapper, in the given world',
-    host.evals[0]?.world === 'engine' && (host.evals[0]?.code ?? '').includes('await (1 + 1)'));
+  check('the expression is probed, then runs awaited inside the wrapper, both in the given world',
+    host.evals.length === 2 && host.evals.every((e) => e.world === 'engine')
+    && (host.evals[0]?.code ?? '').includes('__shimNeverCalled') && (host.evals[1]?.code ?? '').includes('await (1 + 1'),
+    JSON.stringify(host.evals));
   const big = await evaluateOnHost(host, 'BIG', 100, 'main');
   check('a long result is truncated', 'result' in big && big.result.length === MAX_RESULT + '\n... (truncated)'.length);
   check('a page-side throw is an error', (await evaluateOnHost(host, 'THROWS', 100, 'main') as { error?: string }).error === 'nope');
@@ -118,6 +120,48 @@ async function testEvaluate(): Promise<void> {
     /^page returned non-JSON: not json/.test((await evaluateOnHost(host, 'GARBAGE', 100, 'main') as { error?: string }).error ?? ''));
   const hung = scriptedHost(() => new Promise(() => { /* never settles */ }));
   check('a hung page times out', (await evaluateOnHost(hung, '1', 20, 'main') as { error?: string }).error === 'evaluateInPage timeout');
+
+  // A host that really compiles and runs what it is given (this process's
+  // JS engine stands in for the page's): a syntax error rejects, as a page's
+  // compile failure does on every host.
+  let ran = 0;
+  const g = globalThis as { __evalRan?: () => void };
+  g.__evalRan = () => { ran++; };
+  const real = scriptedHost((code) => (0, eval)(code) as unknown);
+  const expr = await evaluateOnHost(real, '[1, 2].map((n) => n * 2)', 500, 'main');
+  check('a bare expression returns its value', 'result' in expr && expr.result === '[2,4]', JSON.stringify(expr));
+  const awaited = await evaluateOnHost(real, 'await Promise.resolve(7)', 500, 'main');
+  check('an expression can await', 'result' in awaited && awaited.result === '7', JSON.stringify(awaited));
+  const body = await evaluateOnHost(real, 'const x = 1; return x + 1', 500, 'main');
+  check('a statement body runs and returns its value', 'result' in body && body.result === '2', JSON.stringify(body));
+  const awaitBody = await evaluateOnHost(real, 'const v = await Promise.resolve(3);\nif (v > 2) { return { v }; }\nreturn null;', 500, 'main');
+  check('a multi-statement body can await and branch', 'result' in awaitBody && awaitBody.result === '{"v":3}', JSON.stringify(awaitBody));
+  const commented = await evaluateOnHost(real, '40 + 2 // the answer', 500, 'main');
+  check('a trailing line comment does not swallow the wrapper', 'result' in commented && commented.result === '42', JSON.stringify(commented));
+  const noReturn = await evaluateOnHost(real, 'let y = 5; y++', 500, 'main');
+  check('a body without return answers null', 'result' in noReturn && noReturn.result === 'null', JSON.stringify(noReturn));
+  const bodyThrow = await evaluateOnHost(real, "const e = 'conf'; throw new Error(e)", 500, 'main');
+  check('a body\'s throw is an error value', 'error' in bodyThrow && bodyThrow.error === 'conf', JSON.stringify(bodyThrow));
+  const broken = await evaluateOnHost(real, 'const = ;', 500, 'main');
+  check('input that compiles as neither is an error, not a throw', 'error' in broken && /SyntaxError|Unexpected/.test(broken.error), JSON.stringify(broken));
+  ran = 0;
+  await evaluateOnHost(real, '__evalRan()', 500, 'main');
+  check('the probe never runs the input: an expression runs once', ran === 1, String(ran));
+  ran = 0;
+  await evaluateOnHost(real, '__evalRan(); return 1', 500, 'main');
+  check('a body runs once', ran === 1, String(ran));
+  delete g.__evalRan;
+
+  // A probe that answers only after the timeout must not start the run.
+  let late = 0;
+  const slowProbe = scriptedHost((code) => {
+    if (code.includes('__shimNeverCalled')) return new Promise((r) => setTimeout(() => r('ok'), 40));
+    late++;
+    return JSON.stringify({ result: 1 });
+  });
+  const slow = await evaluateOnHost(slowProbe, '1', 10, 'main');
+  await new Promise((r) => setTimeout(r, 80));
+  check('a run never starts after its timeout', 'error' in slow && slow.error === 'evaluateInPage timeout' && late === 0, `${JSON.stringify(slow)} late=${late}`);
 }
 
 async function testQueryInspect(): Promise<void> {

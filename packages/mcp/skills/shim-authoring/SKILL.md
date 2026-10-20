@@ -231,7 +231,8 @@ All of them act on the session's tab.
   many elements the selector matches. Use it to confirm structure before writing a handler
   that works on descendants, and to measure reference elements.
 - **`evaluate_in_page { expression }`** — a read-only JavaScript REPL in the page's main
-  world (`await` works). Return primitives or plain objects, not DOM nodes. For counts
+  world. Pass an expression, or a statement body that `return`s its value (`await` works
+  in both). Return primitives or plain objects, not DOM nodes. For counts
   under a computed criterion, `getComputedStyle`, sampling site globals. Never use it to
   change the page — that is what the folder is for — and remember it runs as the user.
   Capped at 5000 characters in, 8000 out, 3 seconds.

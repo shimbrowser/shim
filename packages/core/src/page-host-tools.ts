@@ -223,30 +223,73 @@ export function expressionProblem(expression: unknown): string | null {
   return null;
 }
 
-/**
- * evaluate_in_page: runs `expression` inside an async wrapper that awaits it
- * and serializes the value (or the throw) in the page, so every host returns
- * the same JSON. The result is capped at MAX_RESULT characters.
- */
-export async function evaluateOnHost(host: PageHost, expression: string, timeoutMs: number, world: PageWorld): Promise<EvaluateResult> {
-  const wrapped = `(async () => {
+// evaluate_in_page takes either a single expression (`document.title`) or a
+// statement body that returns its value (`const n = 1; return n`). Which one
+// is decided by compiling, never by running: the probe puts the input as an
+// expression inside a function that is never called, so it resolves exactly
+// when that form compiles and nothing of the input runs. Every valid
+// expression is also a valid statement body (one whose value is dropped), so
+// the expression form is tried first; anything else runs as a body.
+const PROBE_OK = 'shim-evaluate-expression';
+
+/** The script that resolves when `expression` compiles as an expression; it never runs it. */
+export function expressionProbeSource(expression: string): string {
+  return `(function () {
+    return ${JSON.stringify(PROBE_OK)};
+    function __shimNeverCalled() { return async () => (${expression}
+    ); }
+  })()`;
+}
+
+/** The wrapper that runs `code` (an expression, or a statement body) awaited and serializes the outcome in the page. */
+export function evaluateWrapperSource(expression: string, form: 'expression' | 'body'): string {
+  // A newline before each closer, so a trailing // comment in the input
+  // can't swallow it.
+  const run = form === 'expression'
+    ? `await (${expression}
+      )`
+    : `await (async () => {
+${expression}
+      })()`;
+  return `(async () => {
     function __ss(v) {
       try { return JSON.stringify(v); }
       catch (_) { try { return JSON.stringify(String(v)); } catch (__) { return '"<unserializable>"'; } }
     }
     try {
-      const __r = await (${expression});
+      const __r = ${run};
       return __ss({ result: __r === undefined ? null : __r });
     } catch (err) {
       return __ss({ error: (err && (err.message || err.toString())) || String(err) });
     }
   })()`;
+}
+
+/**
+ * evaluate_in_page: runs `expression` — a single expression, or a statement
+ * body that `return`s its value — inside an async wrapper that awaits it and
+ * serializes the value (or the throw) in the page, so every host returns the
+ * same JSON. The result is capped at MAX_RESULT characters.
+ */
+export async function evaluateOnHost(host: PageHost, expression: string, timeoutMs: number, world: PageWorld): Promise<EvaluateResult> {
+  let settled = false;
+  const run = async (): Promise<string> => {
+    // A probe that fails to compile rejects; then the input runs as a body,
+    // and if it compiles as neither, the body's compile error is the answer.
+    const isExpression = await host.evaluate(expressionProbeSource(expression), world).then(() => true, () => false);
+    // A probe that outlived the timeout must not start the run after the
+    // caller was told it timed out.
+    if (settled) throw new Error('evaluateInPage timeout');
+    return await host.evaluate(evaluateWrapperSource(expression, isExpression ? 'expression' : 'body'), world) as string;
+  };
 
   let raw: string;
   try {
-    raw = await withTimeout(host.evaluate(wrapped, world) as Promise<string>, timeoutMs, 'evaluateInPage timeout');
+    raw = await withTimeout(run(), timeoutMs, 'evaluateInPage timeout');
   } catch (err) {
     return { error: errMessage(err) };
+  } finally {
+    settled = true;
   }
   let parsed: { error?: string; result?: unknown };
   try { parsed = JSON.parse(raw); } catch (_) {

@@ -68,8 +68,10 @@ function makeEvaluateTool(lead: string, emitToolName: string): ToolDefinition {
     name: 'evaluate_in_page',
     description:
       lead +
-      "Your expression is wrapped in an async " +
-      "IIFE so you can use `await`. Return primitives or plain objects, NOT " +
+      "Pass a single expression, or a statement body that `return`s its " +
+      "value (`const els = document.querySelectorAll('a'); return els.length`); " +
+      "either runs inside an async function, so `await` works. Return " +
+      "primitives or plain objects, NOT " +
       "DOM nodes — DOM nodes JSON-stringify to `{}` and won't help. Use " +
       "`el.textContent`, `el.tagName.toLowerCase()`, `Array.from(NodeList).map(...)` " +
       "etc. instead. DO NOT use this to mutate the page — that's what " +
@@ -81,7 +83,7 @@ function makeEvaluateTool(lead: string, emitToolName: string): ToolDefinition {
         expression: {
           type: 'string',
           description:
-            'A JavaScript expression to evaluate. Examples: ' +
+            'A JavaScript expression, or a statement body that `return`s its value. Examples: ' +
             '`document.querySelectorAll(".foo").length` — count, ' +
             '`getComputedStyle(document.querySelector("h1")).color` — read style, ' +
             '`Array.from(document.querySelectorAll("[role=button]")).map(b => b.textContent.trim()).slice(0, 10)` — sample.',

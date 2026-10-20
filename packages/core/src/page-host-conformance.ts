@@ -862,6 +862,17 @@ const pageToolsCase: ConformanceCase = {
     kit.check('evaluate (engine world) reads the DOM', 'result' in domFromEngine && domFromEngine.result === '"lead paragraph"', domFromEngine);
     const thrown = await evaluateOnHost(kit.host, `(() => { throw new Error('conf-eval'); })()`, 3000, 'main');
     kit.check('evaluate: a throw comes back as an error value', 'error' in thrown && thrown.error.includes('conf-eval'), thrown);
+    const body = await evaluateOnHost(kit.host, `const el = document.querySelector('#lead');\nconst t = await Promise.resolve(el.textContent);\nreturn t.toUpperCase();`, 3000, 'main');
+    kit.check('evaluate: a statement body runs and returns its value', 'result' in body && body.result === '"LEAD PARAGRAPH"', body);
+    const engineBody = await evaluateOnHost(kit.host, `const n = document.querySelectorAll('#list li').length; return n`, 3000, 'engine');
+    kit.check('evaluate (engine world): a statement body runs too', 'result' in engineBody && engineBody.result === '3', engineBody);
+    await kit.read('window.__confEvalRuns = 0');
+    await evaluateOnHost(kit.host, 'window.__confEvalRuns += 1', 3000, 'main');
+    await evaluateOnHost(kit.host, 'window.__confEvalRuns += 1; return 1', 3000, 'main');
+    const runs = await kit.read('window.__confEvalRuns');
+    kit.check('evaluate: choosing the form never runs the input twice', runs === 2, runs);
+    const broken = await evaluateOnHost(kit.host, 'const = ;', 3000, 'main');
+    kit.check('evaluate: input that is neither an expression nor a body is an error value', 'error' in broken && broken.error.length > 0, broken);
   },
 };
 
