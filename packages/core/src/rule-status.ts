@@ -145,12 +145,24 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
     // of authoring-time visual verification: "make X the same size as Y" is a
     // numbers problem, and the authoring feedback loop reads this straight out
     // of the rule-status event instead of eyeballing a screenshot. Zero matches
-    // → no box; multi-match → first element only (representative, and the common
-    // visual-tuning case is single-target).
+    // → no box. Multi-match → the first VISIBLE match's box plus a `visible`
+    // count: the first DOM-order match is often hidden (by the site, or by this
+    // very rule), and its 0×0 box told the agent nothing — live-caught on
+    // Amazon. With nothing visible the box stays the first match's.
     let box: { x: number; y: number; w: number; h: number } | undefined;
+    let visible: number | undefined;
     if (first) {
-      const r = first.getBoundingClientRect();
-      box = { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+      const toBox = (r: DOMRect) => ({ x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) });
+      box = toBox(first.getBoundingClientRect());
+      if (rs.state.size > 1) {
+        visible = 0;
+        let firstVisible: typeof box | undefined;
+        for (const el of rs.state.keys()) {
+          const b = toBox(el.getBoundingClientRect());
+          if (b.w > 0 && b.h > 0) { visible++; firstVisible ??= b; }
+        }
+        if (firstVisible) box = firstVisible;
+      }
     }
     api.reportEvent('rule-status', {
       specId: spec.id,
@@ -158,6 +170,7 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
       matched: rs.state.size,
       matchedVia: rs.matchedSource,
       ...(box ? { box } : {}),
+      ...(visible !== undefined ? { visible } : {}),
       ...(note ? { note } : {}),
       // Structured twin of the media half of `note` — main persists it as a
       // durable browsing-time "hiding the video player" warning. Absent

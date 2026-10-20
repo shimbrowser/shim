@@ -13,6 +13,8 @@ export interface RuleStatusEvent {
   matched?: number;
   matchedVia?: string;
   box?: { x: number; y: number; w: number; h: number };
+  /** Multi-match only: how many matches measure a non-empty box (`box` is the first of them). */
+  visible?: number;
   note?: unknown;
 }
 
@@ -81,10 +83,19 @@ export function describeRuleStatus(rule: Rule | undefined, status: RuleStatusEve
   // The box is the anchor's measured viewport rect AFTER the mutation
   // applied — for size/position work the model compares these numbers to
   // the reference element (inspect_element) instead of guessing from a
-  // screenshot. First match only when the rule anchored multiple elements.
-  const box = status.box
-    ? ` — ${status.matched > 1 ? 'first match' : 'anchor'} box ${status.box.w}×${status.box.h}px at (${status.box.x}, ${status.box.y})`
-    : '';
+  // screenshot. A multi-match status from an engine that counts visible
+  // matches names the counts and the first visible match's box (or says none
+  // is visible rather than printing a 0×0 box); an older one, the first match.
+  const boxText = (b: { x: number; y: number; w: number; h: number }) => `box ${b.w}×${b.h}px at (${b.x}, ${b.y})`;
+  let box = '';
+  if (status.matched > 1 && typeof status.visible === 'number') {
+    const hidden = status.matched - status.visible;
+    box = status.visible > 0
+      ? ` — ${status.visible} visible, ${hidden} hidden${status.box ? `; first visible match ${boxText(status.box)}` : ''}`
+      : ` — 0 visible, ${hidden} hidden (every match measures 0×0 after apply)`;
+  } else if (status.box) {
+    box = ` — ${status.matched > 1 ? 'first match' : 'anchor'} ${boxText(status.box)}`;
+  }
   const note = typeof status.note === 'string' && status.note ? ` — NOTE: ${status.note}` : '';
   return `matched ${status.matched} element(s) via ${status.matchedVia || 'primary'}${box}${note}`;
 }
