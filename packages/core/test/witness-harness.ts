@@ -40,6 +40,7 @@ interface ElOpts {
 // stubs; parent wired by caller.
 function el(tag: string, attrs: Record<string, string> = {}, { text = '', children = [], parent = null }: ElOpts = {}): Element {
   const node = {
+    nodeType: 1,
     tagName: tag.toUpperCase(),
     attributes: Object.entries(attrs).map(([name, value]) => ({ name, value })),
     children,
@@ -51,6 +52,9 @@ function el(tag: string, attrs: Record<string, string> = {}, { text = '', childr
     get textContent() {
       return text + children.map((c) => c.textContent).join('');
     },
+    // Own text first, then the children — the same order textContent reads.
+    // A plain (writable) property: some cases swap in their own child nodes.
+    childNodes: [{ nodeType: 3, data: text }, ...children] as unknown[],
   };
   for (const c of children) (c as unknown as { parentElement: Element | null }).parentElement = node as unknown as Element;
   // Stub is shaped like the subset of Element the witness code reads (see
@@ -218,6 +222,76 @@ function tStemVolatility() {
   // the signal into mush.
   const different = el('div', {}, { text: 'Recent Payments12Acme Corp' });
   check('different label still rejected', !matchWitness(w, different).pass, JSON.stringify(matchWitness(w, different)));
+}
+
+// The text stem is VISIBLE text only — the same extraction text anchors use.
+// textContent concatenates inline <script>/<style>/<template>/<noscript>
+// source, so a container with an inline style block got a CSS stem (live-
+// caught on Google /search by the auto-improve loop): a noisy signal that
+// shifted with every stylesheet tweak while the visible label held still.
+function tStemVisibleText() {
+  console.log('textStem visible text only:');
+  const card = () => el('div', { role: 'region' }, {
+    children: [
+      el('style', {}, { text: '.card{color:red}.card h2{font-weight:700}' }),
+      el('script', {}, { text: 'window.__init({cfg:1})' }),
+      el('h2', {}, { text: 'Recent payments' }),
+      el('template', {}, { text: 'Template body' }),
+      el('noscript', {}, { text: 'Enable JavaScript' }),
+      el('p', {}, { text: 'Acme Corp' }),
+    ],
+  });
+  const w = buildWitness(card())!;
+  check('capture skips script/style/template/noscript text', w.textStem === 'recent paymentsacme corp', JSON.stringify(w.textStem));
+
+  // The inline CSS/JS changes, the visible content doesn't: still the element.
+  const restyled = el('div', { role: 'region' }, {
+    children: [
+      el('style', {}, { text: '.x9{margin:0}' }),
+      el('h2', {}, { text: 'Recent payments' }),
+      el('p', {}, { text: 'Acme Corp' }),
+    ],
+  });
+  const v = matchWitness(w, restyled);
+  check('inline style/script churn leaves the stem matching', v.pass && !v.detail.some((d) => d.startsWith('text:')), JSON.stringify(v));
+
+  // Back-compat: a witness captured BEFORE the fix stored the textContent stem
+  // (CSS first). The same, unchanged element must still match it.
+  const legacy: Witness = { v: WITNESS_VERSION, tag: 'div', attrs: { role: 'region' }, textStem: '.card{color:red}.card h{font-weight:}win' };
+  const lv = matchWitness(legacy, card());
+  check('legacy textContent stem still matches the unchanged element', lv.pass && !lv.detail.some((d) => d.startsWith('text:')), JSON.stringify(lv));
+
+  check('new witnesses carry the visible-text marker', w.textStemFrom === 'visible', JSON.stringify(w));
+
+  // A NEW witness never takes the textContent retry: hidden text can hold an
+  // ordinary label. Captured: a payments div whose noscript says "Enable
+  // JavaScript"; after a deploy a generic rung resolves an invoices div whose
+  // noscript says "Recent payments". Id and visible stem both differ — the
+  // hidden label must not carry it over the threshold.
+  const section = el('section');
+  const payments = el('div', { id: 'payments' }, { children: [el('noscript', {}, { text: 'Enable JavaScript' })], parent: section });
+  (payments as unknown as { childNodes: unknown[] }).childNodes.push({ nodeType: 3, data: 'Recent payments' });
+  Object.defineProperty(payments, 'textContent', { get: () => 'Enable JavaScriptRecent payments' });
+  const pw = buildWitness(payments)!;
+  check('capture reads the visible label past the noscript', pw.textStem === 'recent payments', JSON.stringify(pw));
+  const invoices = el('div', { id: 'invoices' }, { children: [el('noscript', {}, { text: 'Recent payments' })], parent: el('section') });
+  (invoices as unknown as { childNodes: unknown[] }).childNodes.push({ nodeType: 3, data: 'Upcoming invoices' });
+  Object.defineProperty(invoices, 'textContent', { get: () => 'Recent paymentsUpcoming invoices' });
+  const iv = matchWitness(pw, invoices);
+  check('hidden-label collision does not verify a new witness', !iv.pass, JSON.stringify(iv));
+
+  // A genuinely different visible label still fails the stem.
+  const other = el('div', { role: 'region' }, { children: [el('h2', {}, { text: 'Upcoming invoices' })] });
+  const ov = matchWitness(w, other);
+  check('different visible label still misses the stem', ov.detail.some((d) => d.startsWith('text:')), JSON.stringify(ov));
+
+  // The capture walk stops early once the stem is settled; the result must be
+  // the stem the whole text gives (digit runs and whitespace across text-node
+  // boundaries included).
+  const parts = ['Quarterly revenue  ', '12', '34 by region  ', ' and product line ', '2026', ' detail', ' tail '.repeat(50)];
+  const long = el('section', {}, { children: parts.map((t) => el('span', {}, { text: t })) });
+  const full = parts.join('').toLowerCase().replace(/\d+/g, '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  check('early-stopped walk yields the full-text stem', buildWitness(long)!.textStem === full, JSON.stringify([buildWitness(long)!.textStem, full]));
 }
 
 // witnessRecover containment-chain collapse. The live failure this pins: a
@@ -417,6 +491,7 @@ tBuild();
 tMatchTolerance();
 tMatchRejection();
 tStemVolatility();
+tStemVisibleText();
 tRecoverChain();
 tLadder();
 tVolatileTextLenient();

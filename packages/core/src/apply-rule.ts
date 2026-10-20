@@ -287,10 +287,17 @@ export function applyRule(
         // null on non-React pages / no bridge, in which case the witness simply
         // omits `component`. The slight defer is harmless: this event is
         // groundwork the authoring loop / rebase pass consume async.
+        // `legacyTextStem` rides the EVENT only (never the stored witness):
+        // the element's textContent stem, the extraction unmarked pre-visible-
+        // text witnesses were built with, so a consumer judging this capture
+        // against one of those (auto re-anchor's content check) compares like
+        // with like. Sent only when it differs from the visible stem.
+        const legacyTextStem = witnessMod.legacyTextStemOf(el);
         const emit = () => api.reportEvent('rule-witness', {
           specId: spec.id,
           ruleId: rule.id,
           witness: w,
+          ...(legacyTextStem && legacyTextStem !== (w.textStem || '') ? { legacyTextStem } : {}),
         });
         const verifyFn = api.componentId && api.componentId.verify;
         // Document singletons (<html>/<head>/<body>) verify by tag alone

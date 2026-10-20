@@ -22,6 +22,7 @@
 import * as witness from './witness';
 import { errMessage } from './error';
 import { isEngineInjected } from './inject-kinds';
+import { NON_VISIBLE_TEXT_TAGS, visibleTextOf } from './visible-text';
 import type { Anchor, AnchorSpec, Witness } from './types';
 
 // A DOM-shaped element sufficient for anchor synthesis (suggestAnchorLadder
@@ -161,46 +162,6 @@ function resolveAllWithSource(anchor: Anchor, root: Document | Element = documen
   return { nodes: [] as Element[], source: null as string | null, witnessRejected, rejectedSample };
 }
 
-// Tags whose textContent is code/markup, not visible page text — excluded
-// from text-anchor matching (see the comment at the scan loop below).
-const NON_VISIBLE_TEXT_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
-
-// Visible text of an element: child-node walk that skips NON_VISIBLE_TEXT_TAGS
-// subtrees at EVERY level. Native textContent is not usable for text-anchor
-// matching because it concatenates script/style descendants — live-caught
-// twice on one page: (1) an inline module script containing a label string,
-// and (2) the engine's OWN tier-1 sheet in <head>, whose rule tokens embed
-// the rule id ("…-reorder-delta-first-…") — so the moment a rule named after
-// its anchor text first stamped, <head> (no visible matching descendant to
-// lose the deepest-filter to) became a second match and the single-match
-// guard refused every later restamp. Element-level tag exclusion alone can't
-// fix the ancestor case; only subtree-skipping text extraction can.
-//
-// Shaped as a structural view (not lib.dom's ChildNode) so bare-node harness
-// stubs — {nodeType, data} text nodes + stub elements — walk identically;
-// cast at the single entry choke point, same idiom as ScanRoot.
-interface TextWalkNode {
-  nodeType?: number;
-  data?: string;
-  tagName?: string;
-  childNodes?: ArrayLike<TextWalkNode>;
-}
-function visibleTextOf(el: Element): string {
-  let out = '';
-  const walk = (node: TextWalkNode): void => {
-    for (const child of Array.from(node.childNodes || [])) {
-      if (child.nodeType === 3) {
-        out += child.data || '';
-      } else if (child.nodeType === 1) {
-        if (NON_VISIBLE_TEXT_TAGS.has((child.tagName || '').toUpperCase())) continue;
-        walk(child);
-      }
-    }
-  };
-  walk(el as unknown as TextWalkNode);
-  return out;
-}
-
 function resolveOne(spec: AnchorSpec, root: Document | Element): Element[] {
   switch (spec.kind) {
     case 'css':
@@ -289,7 +250,7 @@ function resolveOne(spec: AnchorSpec, root: Document | Element): Element[] {
         if (i >= MAX_SCAN) break;
         // Script/style/template elements are never anchors themselves, and
         // their text must not leak into ANCESTOR matching either — see
-        // visibleTextOf above for the two live-caught failure modes. The
+        // visibleTextOf (visible-text.ts) for the two live-caught failure modes. The
         // native-textContent containment check first is a cheap prefilter:
         // visible text is a subset of textContent, so a full-text miss is a
         // definitive miss (exact mode still needs containment here, not

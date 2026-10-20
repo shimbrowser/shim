@@ -37,6 +37,11 @@ export interface Witness {
   tag: string;
   attrs?: Record<string, string>;
   textStem?: string;
+  // 'visible': textStem was read from visible text only (script/style/
+  // template/noscript skipped). Absent on witnesses captured before that —
+  // their stem is whole textContent, and matching keeps a textContent retry
+  // for them alone.
+  textStemFrom?: 'visible';
   childTags?: string[];
   parentTag?: string;
   component?: ComponentDescriptor;

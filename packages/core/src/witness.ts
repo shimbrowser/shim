@@ -23,6 +23,7 @@
 //     change can re-fingerprint old rules instead of mis-scoring them.
 
 import type { Witness, ComponentDescriptor } from './types';
+import { visibleTextOf } from './visible-text';
 
 const WITNESS_VERSION = 1;
 
@@ -107,10 +108,33 @@ function sharedPrefixLen(a: string, b: string) {
   while (i < n && a[i] === b[i]) i++;
   return i;
 }
+//
+// The stem reads VISIBLE text only (visible-text.ts — the extraction text
+// anchors use): textContent concatenates inline <script>/<style>/<template>/
+// <noscript> source, so a container holding an inline style block got CSS as
+// its stem — noise that shifted with every stylesheet tweak while the visible
+// label held still (live-caught on Google /search).
+function stemOf(raw: string) {
+  const text = raw.trim().replace(/\s+/g, ' ');
+  if (!text) return '';
+  return normalizeStemText(text.toLowerCase()).slice(0, TEXT_STEM_LEN);
+}
+// The walk stops once the normalized text runs past the stem length: the first
+// TEXT_STEM_LEN normalized chars can't change after that (a trailing digit run
+// or whitespace that later text extends is stripped/collapsed either way).
 function textStemOf(el: Element) {
-  const raw = (el.textContent || '').trim().replace(/\s+/g, ' ');
-  if (!raw) return '';
-  return normalizeStemText(raw.toLowerCase()).slice(0, TEXT_STEM_LEN);
+  return stemOf(visibleTextOf(el, (t) => normalizeStemText(t).length > TEXT_STEM_LEN));
+}
+// The pre-visible-text stem (whole textContent). Read for unmarked (pre-switch)
+// witnesses only: matchWitness's retry (see there), and the capture event's
+// `legacyTextStem` (apply-rule.ts), which lets a consumer comparing a fresh
+// capture against an unmarked stem compare like with like. Never stored.
+function legacyTextStemOf(el: Element) {
+  return stemOf(el.textContent || '');
+}
+function stemMatches(stem: string, expectedStem: string) {
+  const shared = sharedPrefixLen(stem, expectedStem);
+  return !!stem && (shared === Math.min(stem.length, expectedStem.length) || shared >= STEM_SHARED_PREFIX_MIN);
 }
 
 // Build a witness from a live element. Returns a plain-JSON object safe
@@ -141,7 +165,10 @@ function buildWitness(el: Element, opts: { component?: ComponentDescriptor } = {
   };
   if (Object.keys(attrs).length) witness.attrs = attrs;
   const stem = textStemOf(el);
-  if (stem) witness.textStem = stem;
+  if (stem) {
+    witness.textStem = stem;
+    witness.textStemFrom = 'visible';
+  }
   if (childTags.length) witness.childTags = childTags;
   const parentTag = el.parentElement?.tagName;
   if (parentTag) witness.parentTag = parentTag.toLowerCase();
@@ -231,8 +258,17 @@ function matchWitness(witness: Witness | null | undefined, el: Element | null | 
     //     identity. ≥12 shared chars is far beyond coincidence for normalized
     //     lowercase text, while sibling headings ("estimates …" vs "expenses
     //     …") diverge within a word or two and still fail.
-    const shared = sharedPrefixLen(stem, expectedStem);
-    if (stem && (shared === Math.min(stem.length, expectedStem.length) || shared >= STEM_SHARED_PREFIX_MIN)) {
+    //
+    // Generations: witnesses stored before the stem switched to visible text
+    // carry a textContent stem (inline CSS/JS first, where the element holds
+    // any) and no `textStemFrom` marker. For those alone a visible-stem miss
+    // gets one retry against the element's textContent stem — exactly the
+    // comparison the old engine made, so an old witness scores as it always
+    // did. A marked (new) witness never retries: hidden text can hold an
+    // ordinary label (a <noscript> "Recent payments"), and matching a visible
+    // stem against it would verify the wrong element.
+    const legacyStem = witness.textStemFrom !== 'visible';
+    if (stemMatches(stem, expectedStem) || (legacyStem && stemMatches(legacyTextStemOf(el), expectedStem))) {
       matched += WEIGHTS.textStem;
     } else {
       stemMissed = true;
@@ -295,4 +331,4 @@ function matchWitness(witness: Witness | null | undefined, el: Element | null | 
   return { pass: false, score, detail };
 }
 
-export { buildWitness, matchWitness, isDocumentSingletonTag, WITNESS_VERSION };
+export { buildWitness, matchWitness, isDocumentSingletonTag, legacyTextStemOf, WITNESS_VERSION };

@@ -35,12 +35,15 @@ interface ElOpts {
 }
 
 // Element stub. Supports the methods the rebase code calls: getAttribute,
-// attributes, textContent, children, parentElement, tagName.
+// attributes, textContent, children, parentElement, tagName — plus nodeType +
+// childNodes for the visible-text walk witness stems read.
 function el(tag: string, attrs: Record<string, string> = {}, { text = '', children = [], parent = null }: ElOpts = {}): Element {
   const node = {
+    nodeType: 1,
     tagName: tag.toUpperCase(),
     attributes: Object.entries(attrs).map(([name, value]) => ({ name, value })),
     children,
+    childNodes: [{ nodeType: 3, data: text }, ...children] as unknown[],
     parentElement: parent,
     getAttribute(n: string) {
       const f = this.attributes.find((a) => a.name === n);
