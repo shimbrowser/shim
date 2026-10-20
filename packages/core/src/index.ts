@@ -23,6 +23,7 @@ export {
 export { computeDeployId, deployIdForDocument, sameRegistrableDomain } from './deploy-id';
 export { sha256Hex } from './sha256';
 export { matcher, matchPath, normalizePath } from './route-match';
+export { hostMatches } from './host-match';
 export { createFetchBudget } from './fetch-budget';
 
 export type {
