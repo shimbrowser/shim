@@ -11,7 +11,8 @@
 // survival, SPA navigation, anchor recovery after a simulated deploy,
 // teardown, a throwing handler, plus api.storage, the page tools, a page
 // with a strict CSP (the real-browser spike's compile path (D12), through the
-// real driver), shared handler modules, and a dead anchor's preview evidence.
+// real driver), shared handler modules, a dead anchor's preview evidence, and
+// trusted input with its document token.
 //
 // The suite owns its site: `conformanceFixture(path, state)` answers every
 // request, and the runner serves it (any HTTP server; the case only needs the
@@ -30,6 +31,7 @@ import { errMessage } from './error';
 import { moduleToExpression } from './handler-source';
 import { previewNoMatch, type NoMatchEntry, type RuleStatusEvent } from './preview-evidence';
 import { verificationLevel } from './capability-preflight';
+import { clickCommands, keyCommands, locateScript, selectScript, type LocateResult } from './interact';
 
 // --- the fixture site -------------------------------------------------------
 
@@ -100,12 +102,55 @@ const APP_JS = `
 })();
 `;
 
-function page(title: string, body: string, deploy: FixtureDeploy): string {
+function page(title: string, body: string, deploy: FixtureDeploy, extraScript?: string): string {
   return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>
 <link rel="stylesheet" href="/assets/site.css">
 <script src="/assets/app.v${deploy}.js"></script>
-</head><body>${body}</body></html>`;
+${extraScript ? `<script src="${extraScript}"></script>\n` : ''}</head><body>${body}</body></html>`;
 }
+
+// The input page: controls that record, as DOM attributes any world can
+// read, whether each event they saw was trusted. #in-steal moves focus away
+// on mousedown and #in-hover raises an overlay over itself on mouseover —
+// the two ways a page can change what the next input command reaches.
+const INPUT_BODY = `
+<button id="in-btn" class="box">press me</button>
+<input id="in-field" type="text">
+<input id="in-ro" type="text" readonly value="fixed">
+<button id="in-disabled" class="box" disabled>off</button>
+<select id="in-select"><option value="a">A</option><option value="b">B</option></select>
+<input id="in-steal" type="text" placeholder="steals focus">
+<input id="in-other" type="text">
+<button id="in-hover" class="box">hover me</button>
+<div id="in-overlay" style="display:none;position:fixed;background:#fc0;z-index:10">overlay</div>
+<div style="height:3000px">tall</div>
+`;
+
+const INPUT_JS = `
+(function () {
+  function $(id) { return document.getElementById(id); }
+  function mark(el, name, ev) { el.setAttribute('data-' + name, ev.isTrusted ? 'trusted' : 'untrusted'); }
+  function count(el, name) { el.setAttribute('data-' + name, String(Number(el.getAttribute('data-' + name) || 0) + 1)); }
+  function wire() {
+    $('in-btn').addEventListener('click', function (e) { count($('in-btn'), 'clicks'); mark($('in-btn'), 'click', e); });
+    $('in-field').addEventListener('input', function (e) { mark($('in-field'), 'input', e); });
+    $('in-field').addEventListener('keydown', function (e) { $('in-field').setAttribute('data-last-key', e.key); mark($('in-field'), 'key', e); });
+    $('in-disabled').addEventListener('click', function () { count($('in-disabled'), 'clicks'); });
+    $('in-select').addEventListener('change', function (e) { mark($('in-select'), 'change', e); });
+    $('in-steal').addEventListener('mousedown', function (e) { e.preventDefault(); $('in-other').focus(); });
+    $('in-hover').addEventListener('mouseover', function () {
+      var r = $('in-hover').getBoundingClientRect(), o = $('in-overlay');
+      o.style.left = (r.left - 4) + 'px'; o.style.top = (r.top - 4) + 'px';
+      o.style.width = (r.width + 8) + 'px'; o.style.height = (r.height + 8) + 'px';
+      o.style.display = 'block';
+    });
+    $('in-hover').addEventListener('click', function () { count($('in-hover'), 'clicks'); });
+    $('in-overlay').addEventListener('click', function () { count($('in-overlay'), 'clicks'); });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wire);
+  else wire();
+})();
+`;
 
 const APPLY_BODY = `
 <div id="ad" class="box ad">buy now</div>
@@ -177,6 +222,8 @@ export function conformanceFixture(pathname: string, state: FixtureState): Fixtu
     case '/deploy': return html(page('deploy', deployBody(state.deploy), state.deploy));
     case '/fold': return html(page('fold', FOLD_BODY, state.deploy));
     case '/strict': return html(page('strict', STRICT_BODY, state.deploy), STRICT_CSP);
+    case '/input': return html(page('input', INPUT_BODY, state.deploy, '/assets/input.js'));
+    case '/assets/input.js': return asset('text/javascript; charset=utf-8', INPUT_JS);
     case '/assets/site.css': return asset('text/css; charset=utf-8', SITE_CSS);
     case '/assets/app.v1.js':
     case '/assets/app.v2.js': return asset('text/javascript; charset=utf-8', APP_JS);
@@ -207,7 +254,7 @@ export const CONFORMANCE_CAPABILITIES = [
   'mount:inline', 'mount:portal', 'mount:overlay', 'mount:shadow', 'self-healing',
   'witness:capture', 'witness:verify', 'rebase:refresh', 'rebase:promote', 'rebase:recover', 'rebase:quarantine',
   'api.storage', 'api.cleanup', 'handler-errors', 'console', 'spa-navigation', 'teardown', 'page-tools', 'strict-csp',
-  'no-match',
+  'no-match', 'trusted-input',
 ] as const;
 export type ConformanceCapability = (typeof CONFORMANCE_CAPABILITIES)[number];
 
@@ -1152,8 +1199,150 @@ const noMatchCase: ConformanceCase = {
   },
 };
 
+
+// Trusted input (PageHost.input) and the document token: the events reach
+// the page as a user's, `stillPinned` runs before every command (and its
+// answer stops the rest), a page that moves focus or covers the target
+// between commands is observable at that point, a failed command ends the
+// batch with an exact count, and the channel works again afterwards.
+const inputCase: ConformanceCase = {
+  id: 'trusted-input',
+  title: 'trusted input: click, type, keys, wheel, pinning, focus theft, overlay, failure; document token',
+  covers: ['trusted-input'],
+  async run(kit) {
+    const { host } = kit;
+    const input = host.input?.bind(host);
+    kit.check('input is present exactly when trustedInput is advertised', (input !== undefined) === host.capabilities.trustedInput);
+    if (!input) return;
+    if (!(await kit.load('/input'))) return;
+    const attr = async (id: string, name: string): Promise<unknown> => kit.read(`document.getElementById(${JSON.stringify(id)}).getAttribute(${JSON.stringify('data-' + name)})`);
+    const locate = async (selector: string): Promise<{ x: number; y: number } | null> => {
+      let loc: unknown;
+      try { loc = await host.evaluate(locateScript(selector), 'engine'); } catch { return null; }
+      const l = loc as LocateResult;
+      return !('error' in l) && l.count === 1 && typeof l.x === 'number' && typeof l.y === 'number' ? { x: l.x, y: l.y } : null;
+    };
+    const always = (): boolean => true;
+
+    // Document token: stable within a document, new with a new one.
+    const token1 = await host.documentToken();
+    await kit.read(`history.pushState({}, '', '/input#moved'); location.hash`);
+    const token2 = await host.documentToken();
+    kit.check('the document token is stable across a same-document URL change', typeof token1 === 'string' && token1.length > 0 && token1 === token2, { token1, token2 });
+
+    // A trusted click.
+    const btn = await locate('#in-btn');
+    kit.check('the engine world locates the button', btn !== null);
+    if (!btn) return;
+    const seen: number[] = [];
+    const click = await input(clickCommands(btn.x, btn.y), (i) => { seen.push(i); return true; });
+    kit.check('a click batch reports every command sent', click.outcome === 'done' && click.sent === 3, click);
+    kit.check('stillPinned ran before each command, in order', seen.join() === '0,1,2', seen);
+    kit.check('the page saw one trusted click', (await kit.until(async () => ((await attr('in-btn', 'clicks')) === '1' ? true : null), 2000)) === true
+      && (await attr('in-btn', 'click')) === 'trusted', { clicks: await attr('in-btn', 'clicks'), click: await attr('in-btn', 'click') });
+
+    // Typing and a key.
+    const field = await locate('#in-field');
+    if (field) {
+      const typed = await input([...clickCommands(field.x, field.y), { method: 'Input.insertText', params: { text: 'hello' } }, ...keyCommands('ArrowLeft')], always);
+      kit.check('a typing batch completes', typed.outcome === 'done', typed);
+      kit.check('the text arrived as trusted input', (await kit.read(`document.getElementById('in-field').value`)) === 'hello' && (await attr('in-field', 'input')) === 'trusted');
+      kit.check('the key arrived as a trusted keydown', (await attr('in-field', 'last-key')) === 'ArrowLeft' && (await attr('in-field', 'key')) === 'trusted');
+    } else kit.check('the engine world locates the field', false);
+
+    // Disabled / read-only, as the locate script reports them, and a trusted
+    // click on a disabled control does nothing.
+    const ro = await host.evaluate(locateScript('#in-ro'), 'engine').catch(() => null) as LocateResult | null;
+    const off = await host.evaluate(locateScript('#in-disabled'), 'engine').catch(() => null) as LocateResult | null;
+    kit.check('a read-only field is not editable', ro !== null && !('error' in ro) && ro.editable === false, ro);
+    kit.check('a disabled control reads disabled', off !== null && !('error' in off) && off.disabled === true, off);
+    if (off && !('error' in off) && typeof off.x === 'number' && typeof off.y === 'number') {
+      await input(clickCommands(off.x, off.y), always);
+      await kit.sleep(100);
+      kit.check('a trusted click on a disabled control fires nothing', (await attr('in-disabled', 'clicks')) === null);
+    }
+
+    // <select> is set through the DOM: its events are untrusted, and say so.
+    const set = await host.evaluate(selectScript('#in-select', 'b'), 'engine').catch((e: unknown) => ({ error: errMessage(e) }));
+    kit.check('select sets the value through the DOM, untrusted', isRecord(set) && set.ok === true
+      && (await kit.read(`document.getElementById('in-select').value`)) === 'b' && (await attr('in-select', 'change')) === 'untrusted', set);
+
+    // Pinning: a false answer stops the batch before the command it guards.
+    const clicksBefore = await attr('in-btn', 'clicks');
+    const btn2 = await locate('#in-btn');
+    if (btn2) {
+      const pinned = await input(clickCommands(btn2.x, btn2.y), (i) => i < 1);
+      kit.check('a pin change stops the batch with an exact count', pinned.outcome === 'stopped' && pinned.sent === 1, pinned);
+      const abort = new AbortController();
+      const aborted = await input(clickCommands(btn2.x, btn2.y), async (i) => {
+        if (i === 1) abort.abort();
+        await new Promise((r) => setTimeout(r, 10));
+        return !abort.signal.aborted;
+      });
+      kit.check('an asynchronous stillPinned is awaited: an abort mid-batch stops it', aborted.outcome === 'stopped' && aborted.sent === 1, aborted);
+      const threw = await input(clickCommands(btn2.x, btn2.y), (i) => { if (i === 1) throw new Error('boom'); return true; });
+      kit.check('a throwing stillPinned stops the batch', threw.outcome === 'stopped' && threw.sent === 1, threw);
+      await kit.sleep(100);
+      kit.check('…and no stopped batch clicked', (await attr('in-btn', 'clicks')) === clicksBefore);
+    }
+
+    // Focus theft: the page moves focus on mousedown; a focus check before
+    // the text goes out sees it, and the text never reaches the other field.
+    const steal = await locate('#in-steal');
+    if (steal) {
+      const deepFocus = async (): Promise<unknown> => host.evaluate(`(() => { let a = document.activeElement; while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement; return a ? a.id : null; })()`, 'engine').catch(() => null);
+      const commands = [...clickCommands(steal.x, steal.y), { method: 'Input.insertText', params: { text: 'leak' } } as const];
+      const stolen = await input(commands, async (i) => (i < 3 ? true : (await deepFocus()) === 'in-steal'));
+      kit.check('focus moved by the page between commands is seen before the text goes out', stolen.outcome === 'stopped' && stolen.sent === 3, { stolen, focus: await deepFocus() });
+      kit.check('…and the text reached no field', (await kit.read(`document.getElementById('in-other').value + document.getElementById('in-steal').value`)) === '');
+    } else kit.check('the engine world locates the focus thief', false);
+
+    // An overlay raised by mouseover: a hit test before the press sees it.
+    const hover = await locate('#in-hover');
+    if (hover) {
+      const hit = (): Promise<boolean> => host.evaluate(`(() => { const t = document.getElementById('in-hover'); const h = document.elementFromPoint(${hover.x}, ${hover.y}); return !!h && (h === t || t.contains(h)); })()`, 'engine').then((v) => v === true, () => false);
+      const covered = await input(clickCommands(hover.x, hover.y), async (i) => (i === 0 ? true : hit()));
+      kit.check('an overlay raised by the first command is seen before the press', covered.outcome === 'stopped' && covered.sent === 1, covered);
+      await kit.sleep(100);
+      kit.check('…and neither the target nor the overlay was clicked', (await attr('in-hover', 'clicks')) === null && (await attr('in-overlay', 'clicks')) === null);
+    } else kit.check('the engine world locates the hover target', false);
+
+    // Wheel: a trusted wheel at the viewport's centre scrolls the page.
+    await kit.read('window.scrollTo(0, 0); window.scrollY');
+    const vp = await kit.read('({ w: window.innerWidth, h: window.innerHeight })');
+    if (isRecord(vp) && typeof vp.w === 'number' && typeof vp.h === 'number') {
+      const wheel = await input([{ method: 'Input.dispatchMouseEvent', params: { type: 'mouseWheel', x: Math.round(vp.w / 2), y: Math.round(vp.h / 2), deltaX: 0, deltaY: 400 } }], always);
+      const moved = await kit.until(async () => { const y = await kit.read('window.scrollY'); return typeof y === 'number' && y > 0 ? y : null; }, 3000);
+      kit.check('a trusted wheel scrolls the page', wheel.outcome === 'done' && moved !== null, { wheel, moved });
+    } else kit.check('the viewport is measurable', false, vp);
+
+    // A command the channel rejects ends the batch with the count before it,
+    // and the channel works again for the next batch.
+    const btn3 = await locate('#in-btn');
+    if (btn3) {
+      const clicks = await attr('in-btn', 'clicks');
+      const failed = await input([
+        { method: 'Input.dispatchMouseEvent', params: { type: 'mouseMoved', x: btn3.x, y: btn3.y } },
+        { method: 'Input.dispatchMouseEvent', params: { type: 'not-a-mouse-event', x: btn3.x, y: btn3.y } },
+        { method: 'Input.dispatchMouseEvent', params: { type: 'mousePressed', x: btn3.x, y: btn3.y, button: 'left', clickCount: 1 } },
+      ], always);
+      kit.check('a rejected command fails the batch with the count before it', failed.outcome === 'failed' && failed.sent === 1 && typeof failed.error === 'string', failed);
+      const again = await input(clickCommands(btn3.x, btn3.y), always);
+      const after = await kit.until(async () => { const c = await attr('in-btn', 'clicks'); return c !== clicks ? c : null; }, 2000);
+      kit.check('the channel works again after a failure', again.outcome === 'done' && after === String(Number(clicks) + 1), { again, clicks, after });
+    }
+
+    kit.check('an empty batch is done with nothing sent', JSON.stringify(await input([], always)) === JSON.stringify({ sent: 0, outcome: 'done' }));
+
+    if (!(await kit.load('/input'))) return;
+    const token3 = await host.documentToken();
+    kit.check('a new document has a new token', typeof token3 === 'string' && token3 !== token1, { token1, token3 });
+  },
+};
+
 export const CONFORMANCE_CASES: readonly ConformanceCase[] = [
   applyCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, cropScrollCase, strictCspCase, sharedModuleCase, noMatchCase,
+  inputCase,
 ];
 
 /** Every capability some case vouches for. */

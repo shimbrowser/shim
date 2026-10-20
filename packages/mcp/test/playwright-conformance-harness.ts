@@ -10,7 +10,8 @@
 // unsupported members failing in their own shape (with an `unsupported-api`
 // event each), the engine's world staying invisible to the page, attaching to
 // a page that is already loaded, the view_page downscale and scrolled crop,
-// detach tearing previews down, and openHeadlessPage's first load.
+// detach tearing previews down (and ending input), and openHeadlessPage's
+// first load.
 //
 // Needs a downloaded Chromium, so it is excluded from `npm test` and runs in
 // its own tests.yml job under plain Node:
@@ -270,6 +271,9 @@ async function main(): Promise<void> {
       check('a detached host reads as closed', host.isClosed());
       check('…with no URL', host.url() === '');
       check('…the page itself stays open', !page.isClosed());
+      const lateInput = await host.input?.([{ method: 'Input.dispatchMouseEvent', params: { type: 'mouseMoved', x: 1, y: 1 } }], () => true);
+      check('input on a detached host fails with nothing sent, never a throw', lateInput?.outcome === 'failed' && lateInput.sent === 0, lateInput);
+      check('…and it has no document token', (await host.documentToken()) === null);
       const after = await page.evaluate(() => ({
         adDisplay: getComputedStyle(document.querySelector('#ad') as Element).display,
         injected: !!document.querySelector('#detach-injected'),

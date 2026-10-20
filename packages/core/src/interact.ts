@@ -21,6 +21,8 @@
 //     calls the page made, links it tried to open), never the page's own
 //     account.
 
+import type { PageInputCommand } from './page-host';
+
 export const MAX_ACTIONS = 10;
 export const MAX_TEXT = 2000;
 export const DEFAULT_SETTLE_MS = 300;
@@ -56,7 +58,7 @@ export type LocateResult =
   | { count: number; x?: number; y?: number; visible?: boolean; covered?: string | null; disabled?: boolean; tag?: string; editable?: boolean };
 
 /** One CDP input command (Input.dispatchMouseEvent / dispatchKeyEvent / insertText). */
-export interface CdpCommand { method: string; params: Record<string, unknown> }
+export type CdpCommand = PageInputCommand;
 
 /** A document's identity as the host reports it; compared with `===`. */
 export type InteractDocument = number | string;
@@ -188,7 +190,8 @@ export function interactActivity(input: unknown): string | null {
   }).join(', ');
 }
 
-function clickCommands(x: number, y: number): CdpCommand[] {
+/** A trusted left click at viewport (x, y): move, press, release. */
+export function clickCommands(x: number, y: number): CdpCommand[] {
   const base = { x, y, button: 'left', clickCount: 1 };
   return [
     { method: 'Input.dispatchMouseEvent', params: { type: 'mouseMoved', x, y } },
@@ -197,7 +200,8 @@ function clickCommands(x: number, y: number): CdpCommand[] {
   ];
 }
 
-function keyCommands(key: string): CdpCommand[] {
+/** A trusted press of one of KEYS (down, up). */
+export function keyCommands(key: string): CdpCommand[] {
   const k = KEYS[key];
   if (!k) return [];
   // A key that types a character goes down as 'keyDown' with its text (so
@@ -211,9 +215,11 @@ function keyCommands(key: string): CdpCommand[] {
   ];
 }
 
-// Select-all in the focused field. The editing command is named outright: a
-// Meta/Ctrl+A key event alone doesn't select over CDP on macOS.
-function selectAllCommands(mac: boolean): CdpCommand[] {
+/**
+ * Select-all in the focused field. The editing command is named outright: a
+ * Meta/Ctrl+A key event alone doesn't select over CDP on macOS.
+ */
+export function selectAllCommands(mac: boolean): CdpCommand[] {
   const modifiers = mac ? 4 : 2;
   return [
     { method: 'Input.dispatchKeyEvent', params: { type: 'rawKeyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers, commands: ['selectAll'] } },

@@ -38,6 +38,7 @@ const HEADLESS: PageHostCapabilities = {
   apiMembers: [],
   componentIdentity: false,
   engineInspection: false,
+  trustedInput: true,
 };
 const BROWSER: PageHostCapabilities = {
   mutationKinds: [...HEADLESS.mutationKinds, 'mount-route', 'redirect', 'rewrite-response', 'intercept'],
@@ -46,6 +47,7 @@ const BROWSER: PageHostCapabilities = {
   apiMembers: ['db', 'ai', 'settings', 'fetch', 'storage.pack', 'storage.global', 'shared', 'modules'],
   componentIdentity: true,
   engineInspection: true,
+  trustedInput: true,
 };
 
 const css = (value: string) => ({ primary: { kind: 'css' as const, value } });

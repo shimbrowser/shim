@@ -8,8 +8,8 @@
 // touch it: the page-away guard, reload budgets and allowed reload
 // destinations belong to the session that holds the host.
 //
-// Pure types plus one constant. No Node, no Electron: the shapes below are
-// what any Chromium driver can produce.
+// Pure types, two constants and the input loop drivers share. No Node, no
+// Electron: the shapes below are what any Chromium driver can produce.
 
 import type { Rule } from './types';
 
@@ -199,7 +199,31 @@ export interface PageHostCapabilities {
   componentIdentity: boolean;
   /** `inspection` is present (the engine serves query_page / inspect_element). */
   engineInspection: boolean;
+  /** `input` is present: trusted mouse, keyboard and text input, as a user's. */
+  trustedInput: boolean;
 }
+
+/**
+ * One trusted input command, in the Chrome DevTools Protocol's `Input`
+ * domain shape (`Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`,
+ * `Input.insertText`). Coordinates are viewport CSS px.
+ */
+export interface PageInputCommand {
+  method: 'Input.dispatchMouseEvent' | 'Input.dispatchKeyEvent' | 'Input.insertText';
+  params: Record<string, unknown>;
+}
+
+/**
+ * How an input batch ended. `sent` counts the commands the page took, in
+ * order, so a caller can report exactly what happened before a stop or a
+ * failure. Never a throw.
+ */
+export type PageInputResult =
+  | { sent: number; outcome: 'done' }
+  /** `stillPinned` answered false (or threw) before command `sent`; nothing after it went out. */
+  | { sent: number; outcome: 'stopped' }
+  /** Command `sent` could not be delivered (the page closed, the input channel failed); nothing after it went out. */
+  | { sent: number; outcome: 'failed'; error: string };
 
 export interface PageHost {
   readonly capabilities: PageHostCapabilities;
@@ -240,4 +264,60 @@ export interface PageHost {
 
   /** Engine-served page inspection; present exactly when `capabilities.engineInspection`. */
   readonly inspection?: PageInspection;
+
+  /**
+   * Trusted input (the page sees `isTrusted` events, as from a user);
+   * present exactly when `capabilities.trustedInput`. Sends `commands` in
+   * order, awaiting `stillPinned(i)` right before command `i` and stopping
+   * the moment it answers false — a handler of an earlier command can
+   * navigate, move focus or cover the target. Batches on one page never
+   * interleave. Whoever calls it decides what may be clicked.
+   */
+  input?(commands: readonly PageInputCommand[], stillPinned: (index: number) => boolean | Promise<boolean>): Promise<PageInputResult>;
+
+  /**
+   * An opaque identity of the page's current document: a new one for every
+   * new document (a load, a reload, a navigation), the same across
+   * same-document URL changes (pushState, fragments). Null when the page has
+   * no document the host can read (closed, mid-load).
+   */
+  documentToken(): Promise<string | null>;
+}
+
+/**
+ * The script a host may evaluate in its engine world to serve
+ * `documentToken`: a random token minted once per document, kept in that
+ * world (the page's own scripts can neither read nor reset it).
+ */
+export const DOCUMENT_TOKEN_SCRIPT = `(() => {
+  const key = '__shimDocumentToken';
+  if (typeof globalThis[key] !== 'string') {
+    globalThis[key] = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  }
+  return globalThis[key];
+})()`;
+
+/**
+ * Sends `commands` through `send` with the PageHost.input contract (a
+ * driver's shared loop): `stillPinned` before each command, the first
+ * failure ends the batch, nothing ever throws.
+ */
+export async function sendInputCommands(
+  commands: readonly PageInputCommand[],
+  stillPinned: (index: number) => boolean | Promise<boolean>,
+  send: (command: PageInputCommand) => Promise<void>,
+): Promise<PageInputResult> {
+  for (let i = 0; i < commands.length; i++) {
+    let pinned: boolean;
+    try { pinned = await stillPinned(i); } catch { pinned = false; }
+    if (!pinned) return { sent: i, outcome: 'stopped' };
+    const command = commands[i];
+    if (!command) return { sent: i, outcome: 'failed', error: 'missing command' };
+    try {
+      await send(command);
+    } catch (err) {
+      return { sent: i, outcome: 'failed', error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+  return { sent: commands.length, outcome: 'done' };
 }

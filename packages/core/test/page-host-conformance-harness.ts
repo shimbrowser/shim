@@ -3,7 +3,8 @@
 // the parts that need no browser: the fixture site answers what the cases
 // expect (a deploy renames the entry script and moves the rebase targets;
 // /strict carries the strict policy), the deploy ids of the two builds
-// differ, every case is well-formed, and the suite stays a pure module.
+// differ, every case is well-formed, the suite stays a pure module, and the
+// input loop drivers share (page-host.ts sendInputCommands) keeps its contract.
 // The cases themselves run in real browsers: scripts/electron-conformance-
 // harness.ts and packages/mcp/test/playwright-conformance-harness.ts.
 //
@@ -14,6 +15,7 @@ import {
   conformanceRuleKey, formatConformanceResults,
 } from '../src/page-host-conformance';
 import type { ConformanceCaseResult } from '../src/page-host-conformance';
+import { sendInputCommands, type PageInputCommand } from '../src/page-host';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string): void {
@@ -40,6 +42,10 @@ console.log('fixture site');
   check('/app/other is the same client-rendered shell as /app', conformanceFixture('/app/other', { deploy: 1 }).body === conformanceFixture('/app', { deploy: 1 }).body);
   check('both builds serve the same app script', conformanceFixture('/assets/app.v1.js', { deploy: 1 }).body === conformanceFixture('/assets/app.v2.js', { deploy: 2 }).body);
   check('unknown paths are 404', conformanceFixture('/nope', { deploy: 1 }).status === 404);
+  const inputPage = conformanceFixture('/input', { deploy: 1 });
+  check('/input loads its recorder script from the site (no inline script)', inputPage.status === 200 && inputPage.body.includes('<script src="/assets/input.js">')
+    && conformanceFixture('/assets/input.js', { deploy: 1 }).contentType.startsWith('text/javascript'));
+  check('/input has every control the input case drives', ['in-btn', 'in-field', 'in-ro', 'in-disabled', 'in-select', 'in-steal', 'in-other', 'in-hover', 'in-overlay'].every((id) => inputPage.body.includes(`id="${id}"`)));
   const b1 = fixtureDeployId('http://127.0.0.1:4000', 1);
   const b2 = fixtureDeployId('http://127.0.0.1:4000', 2);
   check('the two builds have distinct deploy ids', typeof b1 === 'string' && typeof b2 === 'string' && b1 !== b2, `${b1} ${b2}`);
@@ -73,8 +79,30 @@ console.log('report');
   check('prints the failure detail', lines.includes('FAIL  bad  — why'));
 }
 
-if (failures) {
-  console.error(`\n✗ page-host-conformance: ${failures} check(s) failed`);
-  process.exit(1);
+async function inputLoop(): Promise<void> {
+  const sent: string[] = [];
+  const cmd = (type: string): PageInputCommand => ({ method: 'Input.dispatchMouseEvent', params: { type } });
+  const send = async (c: PageInputCommand): Promise<void> => { if (c.params.type === 'bad') throw new Error('rejected'); sent.push(String(c.params.type)); };
+  const done = await sendInputCommands([cmd('a'), cmd('b')], () => true, send);
+  check('every command sent: done with the full count', done.outcome === 'done' && done.sent === 2 && sent.join() === 'a,b');
+  sent.length = 0;
+  const stopped = await sendInputCommands([cmd('a'), cmd('b'), cmd('c')], async (i) => i < 2, send);
+  check('a false stillPinned stops before its command', stopped.outcome === 'stopped' && stopped.sent === 2 && sent.join() === 'a,b');
+  sent.length = 0;
+  const threw = await sendInputCommands([cmd('a'), cmd('b')], (i) => { if (i === 1) throw new Error('x'); return true; }, send);
+  check('a throwing stillPinned stops too', threw.outcome === 'stopped' && threw.sent === 1);
+  sent.length = 0;
+  const failed = await sendInputCommands([cmd('a'), cmd('bad'), cmd('c')], () => true, send);
+  check('a failed command ends the batch with the count before it', failed.outcome === 'failed' && failed.sent === 1 && failed.error === 'rejected' && sent.join() === 'a');
 }
-console.log('\n✓ page-host-conformance: all checks passed');
+
+
+void (async () => {
+  console.log('input loop');
+  await inputLoop();
+  if (failures) {
+    console.error(`\n✗ page-host-conformance: ${failures} check(s) failed`);
+    process.exit(1);
+  }
+  console.log('\n✓ page-host-conformance: all checks passed');
+})();

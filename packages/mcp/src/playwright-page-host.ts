@@ -25,7 +25,9 @@ import type { CDPSession, Page, Request } from 'playwright';
 import type {
   PageHost, PageHostCapabilities, PageWorld, ScreenshotOptions, ScreenshotResult, PreviewRule,
   PageRuntimeEvent, PageConsoleMessage, PageLoadOutcome, LoadWaitOptions, Unsubscribe,
+  PageInputCommand, PageInputResult,
 } from '@shimbrowser/core/page-host';
+import { DOCUMENT_TOKEN_SCRIPT, sendInputCommands } from '@shimbrowser/core/page-host';
 import { handlerExpressionSource } from '@shimbrowser/core/handler-source';
 import { pageRuntimeSource } from './headless-page-runtime';
 import { imageSize } from './results';
@@ -55,6 +57,9 @@ export const HEADLESS_CAPABILITIES: PageHostCapabilities = Object.freeze({
   apiMembers: Object.freeze([]),
   componentIdentity: false,
   engineInspection: false,
+  // CDP Input.* on the host's own session: the same trusted events the Shim
+  // browser sends.
+  trustedInput: true,
 });
 
 // --- api.storage ---------------------------------------------------------------
@@ -580,6 +585,31 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
     });
   }
 
+  // Trusted input: CDP Input.* on the host's session, one batch at a time.
+  let inputQueue: Promise<unknown> = Promise.resolve();
+  const sendCdp = cdp.send.bind(cdp) as unknown as (method: string, params: Record<string, unknown>) => Promise<unknown>;
+  function input(commands: readonly PageInputCommand[], stillPinned: (index: number) => boolean | Promise<boolean>): Promise<PageInputResult> {
+    const run = inputQueue.then(async (): Promise<PageInputResult> => {
+      if (detached || page.isClosed()) return { sent: 0, outcome: 'failed', error: 'page is closed' };
+      return sendInputCommands(commands, stillPinned, async (c) => {
+        if (detached || page.isClosed()) throw new Error('page is closed');
+        await sendCdp(c.method, c.params);
+      });
+    });
+    inputQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  async function documentToken(): Promise<string | null> {
+    if (detached || page.isClosed()) return null;
+    try {
+      const token = await evaluate(DOCUMENT_TOKEN_SCRIPT, 'engine');
+      return typeof token === 'string' ? token : null;
+    } catch {
+      return null;
+    }
+  }
+
   const subscribe = <T>(set: Set<(v: T) => void>, listener: (v: T) => void): Unsubscribe => {
     set.add(listener);
     return () => { set.delete(listener); };
@@ -611,6 +641,8 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
       else void page.goto(url, { waitUntil: 'commit' }).catch(() => undefined);
     },
     waitForLoad,
+    input,
+    documentToken,
     async detach() {
       if (detached) return;
       detached = true;

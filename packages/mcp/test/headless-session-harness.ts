@@ -148,6 +148,7 @@ function fakeHost(startUrl: string): FakeHost {
     onConsole(l) { consoleL.add(l); return () => { consoleL.delete(l); }; },
     reload(u) { host.reloads.push(u); if (u) url = u; world = {}; },
     async waitForLoad(o): Promise<PageLoadOutcome> { host.loadWaits.push(o); return host.loadOutcome; },
+    async documentToken() { return null; },
   };
   return host;
 }

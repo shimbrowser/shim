@@ -99,6 +99,7 @@ function fakePage(startUrl: string, onApply: OnApply, shotError: () => Error | n
     onConsole(l) { consoleL.add(l); return () => { consoleL.delete(l); }; },
     reload() { /* stays put */ },
     async waitForLoad(): Promise<PageLoadOutcome> { return { kind: 'finished' }; },
+    async documentToken() { return null; },
   };
   page.host = host;
   return page;
