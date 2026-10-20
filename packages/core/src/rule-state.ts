@@ -32,6 +32,13 @@ export interface RuleRuntimeState {
   // Written by apply-rule's restamp path, read by the status reporter's
   // layoutNote. Reset to null each restamp pass.
   relativeReorderNote: string | null;
+  // Matches that passed the rule's fingerprint on the latest scan — what the
+  // reconciler judges resolution by. `state.size` can be larger: a script
+  // rule's member that stopped verifying stays mounted (apply-rule.ts).
+  verifiedCount: number;
+  // Mounted members of a set-witnessed rule that no longer verify (kept, not
+  // torn down). Reported on rule-status.
+  unverifiedCount: number;
 }
 
 export function makeRuleState(): RuleRuntimeState {
@@ -41,5 +48,7 @@ export function makeRuleState(): RuleRuntimeState {
     resolvedEl: null,
     witnessRejection: null,
     relativeReorderNote: null,
+    verifiedCount: 0,
+    unverifiedCount: 0,
   };
 }

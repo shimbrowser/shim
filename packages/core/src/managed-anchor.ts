@@ -14,6 +14,7 @@
 // `setWitness`; readers call that `conflicted` (fingerprintKind).
 
 import type { Anchor } from './types';
+import { sha256Hex } from './sha256';
 
 export const ENGINE_MANAGED_ANCHOR_KEYS = ['witness', 'setWitness'] as const;
 export type EngineManagedAnchorKey = typeof ENGINE_MANAGED_ANCHOR_KEYS[number];
@@ -93,4 +94,23 @@ export function fingerprintKind(anchor: unknown): FingerprintKind {
   if (element) return 'element';
   if (set) return 'set';
   return 'none';
+}
+
+/**
+ * Deterministic JSON: object keys sorted, arrays kept in order, undefined
+ * dropped. Used for digests and for "did this change" comparisons.
+ */
+export function stableStringify(value: unknown): string {
+  if (value === undefined) return 'null';
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).filter((k) => obj[k] !== undefined).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
+}
+
+/** sha256 of the anchor without its engine-managed fields — what a stored witness is pinned to. */
+export function anchorDigest(anchor: Anchor | undefined): string {
+  if (!anchor) return sha256Hex('null');
+  return sha256Hex(stableStringify(withoutManagedKeys(anchor)));
 }

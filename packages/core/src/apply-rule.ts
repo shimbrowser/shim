@@ -17,7 +17,9 @@ import {
 } from './css-sheets';
 import { desiredSequence, REORDER_SIBLING_CAP } from './layout-kinds';
 import { dispatchMutation, injectStripNotes } from './dispatch-mutation';
-import { enrichWitness } from './witness-enrich';
+import { makeCaptureController } from './witness-capture';
+import { fingerprintKind } from './managed-anchor';
+import { matchSetWitness } from './set-witness';
 import type { HandlerMap, MutationRegistry, RuntimeSpec } from './engine-internal';
 import { makeRuleState } from './rule-state';
 import { makeStatusReporter } from './rule-status';
@@ -79,13 +81,37 @@ export function applyRule(
   // (state map, matchedSource, resolvedEl, witnessRejection, relativeReorderNote).
   const rs = makeRuleState();
   const inFlight = new WeakSet<Element>();
+  // The same members, iterable (a revoke must reach mounts still in flight).
+  const inFlightMembers = new Set<Element>();
   // Set by teardownRule. A mount still awaiting a handler when the rule tears
   // down (a preview replaced, a shim toggled off) must not land afterwards:
   // its outputs would outlive the rule, and its status would read as the
   // replacement's (the same ruleKey) in a host's preview evidence.
   let tornDown = false;
-  // Witness capture fires at most once per lifecycle.
-  let witnessCaptured = false;
+  // Per-member mount generation: bumped when a member is revoked (it stopped
+  // verifying against the rule's set witness), so a mountOn still awaiting a
+  // handler for it tears its own outputs down instead of landing.
+  const generation = new WeakMap<Element, number>();
+  const isOwned = (node: Element): boolean => isShimOwnedElement(node, mountedOutputRoots);
+  // Witness capture (witness-capture.ts): what this lifecycle observed decides
+  // the fingerprint — one member at once → element witness, several → set
+  // witness — reported as rule-witness events. A rule that already carries a
+  // fingerprint captures nothing.
+  const capture = makeCaptureController(rule, spec.id, api, {
+    isOwned,
+    schedule: (run) => nextFrame(run),
+    queryAll: (selector) => Array.from(document.querySelectorAll(selector)),
+  });
+  // A set-witnessed rule (not conflicted) whose member stops verifying has
+  // that member's mount torn down — but only when no mutation of the rule can
+  // change the member's own signals: tier-1 kinds stamp only data-shim-css
+  // (excluded from every signal) and inject kinds add shim-owned DOM
+  // (excluded too). A script / replace-root rule's member that stops
+  // verifying stays mounted and is counted unverified: its own handler may be
+  // what changed it, and tearing it down would flap.
+  const setWitnessed = fingerprintKind(rule.anchor) === 'set';
+  const TEARDOWN_SAFE_KINDS = new Set(['hide', 'restyle', 'reorder', 'reshape', 'inject-element', 'inject-html']);
+  const revokeOnUnverify = setWitnessed && (rule.mutations || []).every((m) => TEARDOWN_SAFE_KINDS.has(m.kind));
 
   const reporter = makeStatusReporter(rule, spec, api, rs);
   const reconciler = makeReconciler(rule, spec, api, rs, mountedOutputRoots);
@@ -165,6 +191,7 @@ export function applyRule(
   // — cleaned by the teardown sweep, not re-derived per-scan).
 
   async function mountOn(el: Element): Promise<void> {
+    const gen = generation.get(el) ?? 0;
     const outputs: HTMLElement[] = [];
     const cleanups: Array<() => void> = [];
     // Per-mount api proxy. Handlers call `api.cleanup(fn)` to register tear-down
@@ -203,12 +230,29 @@ export function applyRule(
         teardownEntry({ outputs, cleanups });
         return;
       }
+      // The member was revoked while this mount awaited: undo it here.
+      if ((generation.get(el) ?? 0) !== gen) {
+        teardownEntry({ outputs, cleanups });
+        stripAnchorTokens(el);
+        return;
+      }
     }
     rs.state.set(el, { outputs, cleanups });
     // Register with the module-level own-DOM registry (see above) so no rule's
     // anchor resolution — this rule's or any other patch's — can ever re-match
     // this mount's output and re-dispatch onto it.
     for (const o of outputs) mountedOutputRoots.add(o);
+  }
+
+  // Strip the tier-1 / replace-root tokens this rule stamped on one anchor.
+  function stripAnchorTokens(anchor: Element): void {
+    for (const mut of rule.mutations || []) {
+      if (mut.kind === 'hide' || mut.kind === 'restyle' || mut.kind === 'reorder' || mut.kind === 'reshape') {
+        stripToken(anchor, `shim-${spec.id}-${rule.id}-${mut.kind}`);
+      } else if (mut.kind === 'replace-root') {
+        stripReplaceRootToken(anchor, `shim-${spec.id}-${rule.id}-replace-root`);
+      }
+    }
   }
 
   function teardownEntry(entry: { outputs: HTMLElement[]; cleanups: Array<() => void> }) {
@@ -238,7 +282,7 @@ export function applyRule(
     // The shared `Rule` type keeps it optional to also describe those anchor-less
     // rule shapes.
     const { nodes: resolvedNodes, source, witnessRejected, rejectedSample } =
-      anchors.resolveAllWithSource(rule.anchor as Anchor);
+      anchors.resolveAllWithSource(rule.anchor as Anchor, document, { isOwned });
     // Own-DOM guard (see above): drop any candidate that's inside DOM the engine
     // itself mounted before anything downstream sees it — witness capture, the
     // mount loop, tier-1 stamping (`hide`/`restyle` go through the same `nodes`
@@ -269,43 +313,55 @@ export function applyRule(
     const [singleNode] = nodes;
     rs.resolvedEl = nodes.length === 1 ? (singleNode ?? null) : null;
 
-    // Witness capture: a rule without a witness that resolves to exactly ONE
-    // element gets fingerprinted, and the fingerprint is reported up. During
-    // authoring previews the loop attaches it to the rule before commit; for
-    // committed rules the event is groundwork for the rebase pass to backfill.
-    // Once per applyRule lifecycle — the shape doesn't change scan-to-scan, and
-    // re-emitting on churn would be noise. Multi-match rules skip capture: one
-    // witness can't describe N different elements (v1 scope).
-    if (!witnessCaptured && !rule.anchor?.witness && nodes.length === 1 && singleNode) {
-      witnessCaptured = true;
-      const el = singleNode;
-      const w = witnessMod.buildWitness(el);
-      if (w && typeof api.reportEvent === 'function') {
-        // Enrich with framework-component-identity via the main-world bridge
-        // before emitting — the isolated world can't read fibers itself. The
-        // wait is bounded (witness-enrich.ts): the witness is emitted once,
-        // inside the host's preview window, with `component` only when both
-        // the bridge and the symbol map answered in time. Document singletons
-        // (<html>/<head>/<body>) verify by tag alone (witness.ts): a component
-        // identity on one would re-scope a page-level rule to the page type it
-        // was captured on, so they are never enriched.
-        // `legacyTextStem` rides the EVENT only (never the stored witness):
-        // the element's textContent stem, the extraction unmarked pre-visible-
-        // text witnesses were built with, so a consumer judging this capture
-        // against one of those (auto re-anchor's content check) compares like
-        // with like. Sent only when it differs from the visible stem.
-        const legacyTextStem = witnessMod.legacyTextStemOf(el);
-        const enrichment = witnessMod.isDocumentSingletonTag(w.tag) ? Promise.resolve(w) : enrichWitness(el, w, api);
-        void enrichment.then((enriched) => {
-          api.reportEvent('rule-witness', {
-            specId: spec.id,
-            ruleId: rule.id,
-            witness: enriched,
-            ...(legacyTextStem && legacyTextStem !== (enriched.textStem || '') ? { legacyTextStem } : {}),
-          });
-        });
+    // The verified count (what the reconciler reads): members that passed
+    // the rule's fingerprint this scan. Mounted-but-unverified members (a
+    // script rule's, kept rather than torn down) are counted apart.
+    rs.verifiedCount = nodes.length;
+    const verified = new Set(nodes);
+    let unverified = 0;
+    // A member is judged by its own fingerprint, never by the selector alone:
+    // a rule's own output can make the selector stop matching a member that
+    // still verifies (an injection filling `.slot:empty`), and revoking it
+    // would re-inject on the next scan, forever.
+    // Set-witnessed rules only: a conflicted rule's element witness decides.
+    const stillMember = (el: Element): boolean => setWitnessed && !!rule.anchor?.setWitness
+      && document.contains(el) && matchSetWitness(rule.anchor.setWitness, el, isOwned).pass;
+    // A conflicted rule's mount must still pass its element witness (that
+    // witness decides for it); any other rule's connected mount stays a
+    // success, as it always was — its own script may have rewritten the very
+    // signals its witness recorded.
+    const elementWitness = fingerprintKind(rule.anchor) === 'conflicted' ? rule.anchor?.witness : undefined;
+    const stillMounted = (el: Element): boolean => document.contains(el)
+      && (!elementWitness || witnessMod.matchWitness(elementWitness, el).pass);
+    let retained = 0;
+    for (const [anchor, entry] of rs.state) {
+      if (verified.has(anchor)) continue;
+      // Still a member: healthy, and counted as verified for the reconciler.
+      if (stillMember(anchor)) { retained += 1; continue; }
+      // A rule without a set witness keeps counting a mount its own output
+      // took out of the selector's result (an injection filling
+      // `#slot:empty`, a script rewriting its anchor's text) as success.
+      if (!setWitnessed && stillMounted(anchor)) { retained += 1; continue; }
+      if (revokeOnUnverify) {
+        teardownEntry(entry);
+        stripAnchorTokens(anchor);
+        rs.state.delete(anchor);
+        generation.set(anchor, (generation.get(anchor) ?? 0) + 1);
+      } else if (setWitnessed) {
+        unverified += 1;
       }
     }
+    // A member revoked while its mount is still in flight.
+    if (revokeOnUnverify) {
+      for (const el of inFlightMembers) {
+        if (!verified.has(el) && !stillMember(el)) generation.set(el, (generation.get(el) ?? 0) + 1);
+      }
+    }
+    rs.unverifiedCount = unverified;
+    rs.verifiedCount = nodes.length + retained;
+
+    // Witness capture sees every match BEFORE anything below mounts on it.
+    capture.observe(nodes);
     for (const el of nodes) {
       if (inFlight.has(el)) continue;
       const existing = rs.state.get(el);
@@ -319,11 +375,13 @@ export function applyRule(
         rs.state.delete(el);
       }
       inFlight.add(el);
+      inFlightMembers.add(el);
       // Measure viewport coverage BEFORE mountOn stamps display:none / detaches
       // the node — post-apply the box is 0x0 (see mediaHideKind's comment).
       reporter.noteLargeCoverAtMount(el);
       mountOn(el).finally(() => {
         inFlight.delete(el);
+        inFlightMembers.delete(el);
         if (tornDown) return;
         // mountOn updates state.size as it inserts. Re-report so the inspector
         // sees the bump even when the surrounding scan() found no further
@@ -368,6 +426,7 @@ export function applyRule(
 
   return function teardownRule() {
     tornDown = true;
+    capture.stop();
     observer.disconnect();
     if (cancelScan) {
       cancelScan();
@@ -376,13 +435,7 @@ export function applyRule(
     reconciler.stop();
     for (const [anchor, entry] of rs.state) {
       teardownEntry(entry);
-      for (const mut of rule.mutations || []) {
-        if (mut.kind === 'hide' || mut.kind === 'restyle' || mut.kind === 'reorder' || mut.kind === 'reshape') {
-          stripToken(anchor, `shim-${spec.id}-${rule.id}-${mut.kind}`);
-        } else if (mut.kind === 'replace-root') {
-          stripReplaceRootToken(anchor, `shim-${spec.id}-${rule.id}-replace-root`);
-        }
-      }
+      stripAnchorTokens(anchor);
     }
     rs.state.clear();
     for (const mut of rule.mutations || []) {

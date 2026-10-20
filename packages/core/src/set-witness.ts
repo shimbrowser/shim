@@ -360,3 +360,48 @@ export function membersNested(members: readonly Element[]): boolean {
   }
   return false;
 }
+
+// --- Identity-predicate recovery (D8) ----------------------------------------
+//
+// After a deploy kills a set-witnessed rule's selector, the identity predicate
+// is the ONLY automatic way back: it is queried completely (no scan cap), and
+// the result is accepted only when every element in it scores ≥
+// RECOVER_SET_THRESHOLD on the full set witness (the predicate itself is the
+// hard gate — it is the query), the members don't nest unless the captured set
+// did, and the count stays in band: at least 2 when ≥3 were captured (a lone
+// survivor of a list is not the list), at least 1 for a set of 2 (the hidden
+// duplicate case), at most max(4n, n + 50). Anything else refuses, and the
+// rule escalates to the manual banner. Conservative heuristic verification,
+// not proof.
+
+export const RECOVER_SET_THRESHOLD = 0.75;
+
+export type SetRecovery =
+  | { ok: true; nodes: Element[]; selector: string }
+  | { ok: false; reason: string };
+
+export function recoverSetByIdentity(
+  sw: SetWitness,
+  queryAll: (selector: string) => Element[],
+  isOwned: OwnedPredicate = notOwned,
+): SetRecovery {
+  if (sw.v !== SET_WITNESS_VERSION) return { ok: false, reason: 'set witness of unknown version' };
+  const selector = sw.identity;
+  if (!selector) return { ok: false, reason: 'no identity predicate (filter-only set witness)' };
+  let found: Element[];
+  try { found = queryAll(selector); } catch { return { ok: false, reason: 'identity predicate is not a valid selector' }; }
+  const nodes = found.filter((el) => !isOwned(el));
+  const n = Math.max(1, sw.count);
+  const min = n >= 3 ? 2 : 1;
+  const max = Math.max(4 * n, n + 50);
+  if (nodes.length < min) return { ok: false, reason: `identity predicate found ${nodes.length} (needs ≥${min} of a set of ${n})` };
+  if (nodes.length > max) return { ok: false, reason: `identity predicate found ${nodes.length}, over the band (≤${max} for a set of ${n})` };
+  if (!sw.nested && membersNested(nodes)) return { ok: false, reason: 'identity predicate found nested members; the captured set had none' };
+  for (const el of nodes) {
+    const verdict = matchSetWitness(sw, el, isOwned);
+    if (!verdict.pass || verdict.score < RECOVER_SET_THRESHOLD) {
+      return { ok: false, reason: `a member scored ${verdict.score.toFixed(2)} (< ${RECOVER_SET_THRESHOLD}) on the set witness` };
+    }
+  }
+  return { ok: true, nodes, selector };
+}

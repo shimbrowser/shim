@@ -7,7 +7,9 @@
 //
 //   - a changed rule → `update-rule` carrying the whole rule with its
 //     handlers inline as expressions (handler-source.ts); a new rule →
-//     `add-rule`; a deleted one → `remove-rule`. An unchanged rule gets no op.
+//     `add-rule`; a deleted one → `remove-rule`. An unchanged rule gets no op,
+//     except a `cardinality: 'many'` rule still without a fingerprint, which
+//     is re-applied so the next preview can capture its set witness.
 //   - applyDelta can only replace in place or append, so a rule that moved
 //     (or that sits after a new one) is removed and re-emitted, which
 //     appends it. The resulting rule order is the folder's.
@@ -261,7 +263,12 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
     // through another rule). A rule that held none inline runs the stored
     // module under its own world's convention, so it has nothing to update.
     const held = before?.handlers;
-    const changed = !before || ruleFingerprint(authored, modules) !== ruleFingerprint(before, previousModules(before, stored))
+    // A set rule (`cardinality: 'many'`) still without a fingerprint is
+    // re-applied on every preview even when unchanged: its last preview showed
+    // too few members, and once more are on the page (the agent scrolled), a
+    // fresh apply is what captures its set witness.
+    const recapture = !!before && authored.anchor?.cardinality === 'many' && before.anchor?.cardinality === 'many' && !hasManagedKeys(before.anchor);
+    const changed = !before || recapture || ruleFingerprint(authored, modules) !== ruleFingerprint(before, previousModules(before, stored))
       || Object.entries(rule.handlers || {}).some(([name, expression]) => !!held && Object.hasOwn(held, name) && held[name] !== expression);
     // Carry back every fingerprint the host holds for an unchanged anchor,
     // each to its own field (a set witness never lands in `witness`).

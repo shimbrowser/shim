@@ -20,6 +20,7 @@
 // witness-fingerprint shape, fallback ordering, and quarantine reasons.
 
 import * as witness from './witness';
+import { matchSetWitness } from './set-witness';
 import { errMessage } from './error';
 import { isEngineInjected } from './inject-kinds';
 import { NON_VISIBLE_TEXT_TAGS, visibleTextOf } from './visible-text';
@@ -115,16 +116,43 @@ interface RejectedSample {
 // (rule-no-match) apart from "selector found something that isn't the
 // thing" — the quarantine signal. `rejectedSample` carries the best-
 // scoring rejected candidate's detail for the quarantine report.
-function resolveAllWithSource(anchor: Anchor, root: Document | Element = document) {
+// Set witnesses (set-witness.ts): a rule whose anchor carries a set witness
+// and no element witness has EVERY match scored per member against it —
+// a member that doesn't verify is dropped, and a rung whose matches all fail
+// falls through exactly as for an element witness. An anchor carrying both
+// (conflicted: an older engine attached an element witness next to the set
+// one) filters with the element witness. `opts.isOwned` keeps shim-owned
+// descendants (a mount's own output) out of a member's signals.
+interface ResolveOptions {
+  isOwned?: (node: Element) => boolean;
+}
+
+function resolveAllWithSource(anchor: Anchor, root: Document | Element = document, opts: ResolveOptions = {}) {
   const primary = anchor?.primary;
   if (!primary) return { nodes: [] as Element[], source: null as string | null, witnessRejected: false };
   const w = anchor.witness || null;
+  const sw = !w && anchor.setWitness ? anchor.setWitness : null;
   let witnessRejected = false;
   let rejectedSample: RejectedSample | null = null;
 
   const tryRung = (spec: AnchorSpec, source: string) => {
     const found = resolveOne(spec, root);
     if (found.length === 0) return null;
+    if (sw) {
+      const members: Element[] = [];
+      for (const el of found) {
+        const verdict = matchSetWitness(sw, el, opts.isOwned);
+        if (verdict.pass) members.push(el);
+        else if (!rejectedSample || verdict.score > rejectedSample.score) {
+          rejectedSample = { score: verdict.score, detail: verdict.detail, source };
+        }
+      }
+      if (members.length === 0) {
+        witnessRejected = true;
+        return null;
+      }
+      return { nodes: members, source, witnessRejected: false };
+    }
     if (!w) return { nodes: found, source, witnessRejected: false };
     // Volatile-text leniency (witness.ts MatchWitnessOptions): when a
     // NON-text rung resolves exactly one element, the selector itself

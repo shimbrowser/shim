@@ -21,6 +21,7 @@ import type { Spec, Rule } from './types';
 import { fingerprintKind } from './managed-anchor';
 import type { ManagedFingerprint } from './managed-anchor';
 import { WITNESS_VERSION } from './witness';
+import { SET_WITNESS_VERSION } from './set-witness';
 import type { PageHostCapabilities, PageHostApiMember } from './page-host';
 import { PAGE_HOST_API_MEMBERS } from './page-host';
 import { referencedHandlerNames } from './shim-folder';
@@ -218,9 +219,9 @@ export type VerificationLevel = 'full' | 'partial' | 'none';
  * `unsupported-api` event fired for the rule); the anchor carries a
  * fingerprint this engine can't read (an unknown version), or both kinds at
  * once (conflicted: it needs a recapture); the element witness carries
- * component identity and the host has none; or a set witness, which this
- * engine does not verify yet. `fingerprint` is the rule's anchor (only its
- * engine-managed fields are read).
+ * component identity and the host has none. A set witness of a known version
+ * is verified per member on every host. `fingerprint` is the rule's anchor
+ * (only its engine-managed fields are read).
  */
 export function verificationLevel(
   fingerprint: ManagedFingerprint | undefined,
@@ -235,6 +236,7 @@ export function verificationLevel(
   const witness = fingerprint?.witness;
   if (witness && witness.v !== WITNESS_VERSION) return 'partial';
   if (!capabilities.componentIdentity && witness?.component !== undefined) return 'partial';
-  if (fingerprint?.setWitness) return 'partial';
+  const setWitness = fingerprint?.setWitness;
+  if (setWitness && setWitness.v !== SET_WITNESS_VERSION) return 'partial';
   return 'full';
 }

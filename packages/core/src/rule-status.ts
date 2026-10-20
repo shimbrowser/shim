@@ -128,13 +128,15 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
   let lastReportedCount = -1;
   let lastReportedSource: string | null = '__unset__';
   let lastReportedNote: string | null = null;
+  let lastReportedUnverified = 0;
   const reportStatusIfChanged = () => {
     const first: Element | undefined = rs.state.size ? rs.state.keys().next().value : undefined;
     const mediaHide = mediaHideKind();
     const note = [layoutNote(first), mediaHideNote(mediaHide)]
       .filter((n): n is string => Boolean(n)).join('; ') || null;
     if (rs.state.size === lastReportedCount && rs.matchedSource === lastReportedSource
-      && note === lastReportedNote) return;
+      && note === lastReportedNote && rs.unverifiedCount === lastReportedUnverified) return;
+    lastReportedUnverified = rs.unverifiedCount;
     lastReportedCount = rs.state.size;
     lastReportedSource = rs.matchedSource;
     lastReportedNote = note;
@@ -172,6 +174,9 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
       ...(box ? { box } : {}),
       ...(visible !== undefined ? { visible } : {}),
       ...(note ? { note } : {}),
+      // Mounted members of a set-witnessed script rule that no longer verify
+      // against its set witness (kept mounted, not torn down: apply-rule.ts).
+      ...(rs.unverifiedCount > 0 ? { unverified: rs.unverifiedCount } : {}),
       // Structured twin of the media half of `note` — main persists it as a
       // durable browsing-time "hiding the video player" warning. Absent
       // when the matched element is neither media nor a viewport-blanketing

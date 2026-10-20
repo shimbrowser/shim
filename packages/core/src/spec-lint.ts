@@ -84,7 +84,10 @@ const RULE_KEYS = new Set(['id', 'anchor', 'mutations', 'handlers']);
 // is deliberately cheap, same-turn feedback so the model sees the rejection
 // before the commit round-trip.
 const CONNECTION_ENGINES = new Set(['postgres', 'mysql', 'mariadb', 'mssql', 'sqlite-remote', 'supabase']);
-const ANCHOR_KEYS = new Set<string>(['primary', 'fallbacks', 'iframe', ...ENGINE_MANAGED_ANCHOR_KEYS]);
+const ANCHOR_KEYS = new Set<string>(['primary', 'fallbacks', 'iframe', 'cardinality', ...ENGINE_MANAGED_ANCHOR_KEYS]);
+// anchor.cardinality: the only authored value. 'many' marks an anchor meant
+// to match a set (every row, every card) — never fingerprinted as one element.
+const ANCHOR_CARDINALITIES = new Set(['many']);
 // Union across kinds: properties (restyle), handler/mount (script,
 // replace-root, mount-route), pattern/title (mount-route), from/to/exceptPaths
 // (redirect), position/before/after (reorder), layout/direction/columns/rows/
@@ -706,6 +709,10 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown): LintResult {
         }
       }
       lintPrimaryAnchor(rid, rule.anchor.primary, warnings);
+      const cardinality: unknown = rule.anchor.cardinality;
+      if (cardinality !== undefined && (typeof cardinality !== 'string' || !ANCHOR_CARDINALITIES.has(cardinality))) {
+        errors.push(`rule "${rid}": anchor "cardinality" must be "many" (an anchor meant to match a set of elements) or absent — got ${JSON.stringify(cardinality)}`);
+      }
     }
 
     // Same base-preserving iteration as rules above (throw on truthy non-array).

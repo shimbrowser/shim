@@ -818,6 +818,39 @@ async function main(): Promise<void> {
     await req(r, 'DELETE', `/sessions/${wid}`);
   }
 
+  console.log('a cardinality-many rule previewed with one row captures its set once more rows load');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'one-row.shim');
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile, create: { name: 'Rows' } });
+    const sid = String(opened.sessionId);
+    const host = r.hosts[0] as FakeHost;
+    // The fake engine: one row on the page at first, three once the agent scrolls.
+    let rows = 1;
+    host.onApply = (p, h) => {
+      h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: rows, matchedVia: 'primary', applyId: p.applyId });
+      const base = { kind: 'rule-witness', specId: p.ruleKey, ruleId: p.rule.id, witness: null, documentId: 'd1', rev: rows, applyId: p.applyId };
+      h.emit(rows === 1
+        ? { ...base, setWitness: null, captureNote: 'one-member' }
+        : { ...base, setWitness: { v: 1, tag: 'li', count: rows, nested: false } });
+    };
+    const folder = decodeWorkingCopy((await req(r, 'GET', `/sessions/${sid}/checkout`)).files);
+    const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown>;
+    spec.rules = [{ id: 'rows', anchor: { ...css('li.row'), cardinality: 'many' }, mutations: [{ kind: 'hide' }] }];
+    const files = { ...folder, 'shim.json': json(spec) } as Record<string, string>;
+    const p1 = await preview(r, sid, files);
+    const status1 = (isRecord(p1.evidence) && Array.isArray(p1.evidence.rules) ? p1.evidence.rules.filter(isRecord)[0]?.status : '') as string;
+    check('one row: no fingerprint, and the evidence says to load more and preview again', /load more items/.test(String(status1)), p1);
+    rows = 3;
+    const p2 = await preview(r, sid, decodeWorkingCopy((await req(r, 'GET', `/sessions/${sid}/checkout`)).files) as Record<string, string>);
+    check('the unchanged rule is re-applied on the repeat preview (not "unchanged")', p2.applied === true, p2);
+    const cm = await req(r, 'POST', `/sessions/${sid}/commit`, { revision: 2, commitId: 'r1', summary: 's' });
+    const saved = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { rules: Array<{ id: string; anchor?: { setWitness?: { count?: number }; witness?: unknown } }> } };
+    const rule = saved.spec.rules.find((x) => x.id === 'rows');
+    check('…and commits the set witness the second preview captured', cm.ok === true && rule?.anchor?.setWitness?.count === 3 && rule.anchor.witness === undefined, { cm, rule });
+    await req(r, 'DELETE', `/sessions/${sid}`);
+  }
+
   console.log('a witness the engine reports after the preview answered is still taken');
   {
     const r = rig();

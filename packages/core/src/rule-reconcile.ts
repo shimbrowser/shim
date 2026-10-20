@@ -11,6 +11,8 @@ import * as anchors from './anchors';
 import * as witnessMod from './witness';
 import * as componentId from './component-id';
 import { isShimOwnedElement } from './own-dom';
+import { fingerprintKind } from './managed-anchor';
+import { recoverSetByIdentity } from './set-witness';
 import { readSymbols, symbolsOf, withinBudget, ENRICH_BUDGET_MS } from './engine-internal';
 import type { RuntimeSpec } from './engine-internal';
 import type { RuleRuntimeState } from './rule-state';
@@ -22,18 +24,21 @@ export interface Reconciler {
   stop(): void;
 }
 
-// Why a rule with no witness can't self-heal, and what fixes it. The usual
-// cause is an anchor that matched several elements when the rule was
-// previewed: apply-rule captures a witness only from a single match (one
-// fingerprint can't describe N elements), so committing the same rule again
-// captures nothing either. The fix is a change to the rule — an anchor that
-// resolves to exactly the one element — previewed and committed.
+// Why a rule with no fingerprint can't self-heal, and what fixes it. The
+// engine fingerprints what a preview shows — one element at once gets an
+// element witness, two or more of one tag a set witness — so a rule ends up
+// with none when its preview matched elements of different tags, more than
+// the set cap, nothing at all, or it removes what it matches (a `remove`
+// rule over several elements). Committing it unchanged captures nothing
+// (there is nothing to commit); the fix is a changed rule, previewed with its
+// elements on the page, and committed.
 export function unwitnessedRecoveryWarning(ruleId: string | undefined): string {
-  return `[shim] rule "${ruleId ?? ''}" cannot auto-recover: its anchor has no witness. `
-    + 'A witness is captured only while the anchor resolves to exactly one element, so a rule '
-    + 'whose anchor matched several elements when it was previewed never gets one, and committing '
-    + 'it unchanged captures nothing. To make it recoverable, narrow the anchor to the one '
-    + 'element, preview it, and commit that change.';
+  return `[shim] rule "${ruleId ?? ''}" cannot auto-recover: its anchor has no fingerprint. `
+    + 'Shim captures one from the preview — an element witness when the anchor matches one element, a set witness '
+    + 'when it matches several of the same tag — and a rule whose preview matched mixed tags, nothing, or that removes '
+    + 'several elements never gets one; committing it unchanged captures nothing. To make it recoverable, change the '
+    + 'anchor (narrow it to one element, or to elements of one kind), preview it with those elements on the page, and '
+    + 'commit that change.';
 }
 
 export function makeReconciler(
@@ -86,6 +91,18 @@ export function makeReconciler(
     }
     return out;
   };
+  // Which fingerprint the rule carries (managed-anchor.ts): element, set,
+  // both (conflicted: an older engine attached an element witness beside a set
+  // witness — filter with the element one, recover with neither, flag a
+  // recapture), or none.
+  const kind = fingerprintKind(rule.anchor);
+  // The fingerprint a quarantine reports as `expected` (main summarizes it
+  // for a model; witness-summary.ts), and its kind, so the auto re-anchor
+  // gate can tell a set from an element.
+  const expectedFingerprint = (): Record<string, unknown> => ({
+    expected: rule.anchor?.witness || rule.anchor?.setWitness || null,
+    fingerprint: kind,
+  });
   const reportUnresolved = () => {
     if (typeof api.reportEvent !== 'function') return;
     if (rs.witnessRejection) {
@@ -93,7 +110,7 @@ export function makeReconciler(
         specId: spec.id,
         ruleId: rule.id,
         selector: rule.anchor?.primary?.value || '',
-        expected: rule.anchor?.witness || null,
+        ...expectedFingerprint(),
         seen: rs.witnessRejection.detail || [],
         rejectedVia: rs.witnessRejection.source || null,
         recovery: lastRecoveryDetail,
@@ -138,7 +155,7 @@ export function makeReconciler(
     // already current. This is what bootstraps the deploy gate: a shim can only
     // be judged "deployed since last reconciled" once it has a baseline, and a
     // clean primary resolution is when we record one.
-    if (rs.state.size > 0 && rs.matchedSource === 'primary') {
+    if (rs.verifiedCount > 0 && rs.matchedSource === 'primary') {
       // Component-identity verification. The sync resolve path filters by
       // the witness's tag/attr/text/child signals but CAN'T read fibers, so the
       // strongest signal is checked here via the main-world bridge. A confident
@@ -185,7 +202,7 @@ export function makeReconciler(
               specId: spec.id,
               ruleId: rule.id,
               selector: rule.anchor?.primary?.value || '',
-              expected: rule.anchor?.witness,
+              ...expectedFingerprint(),
               seen: [`component: expected [${expectedComponent.path.join(' > ')}], saw [${seen}]`],
               rejectedVia: 'primary',
             });
@@ -206,12 +223,14 @@ export function makeReconciler(
     // working fallback to primary and demote the dead primary (keep it as a
     // fallback — cheap insurance if the site A/B-flips back). Same bundle →
     // leave the ladder alone; matchedVia already surfaces it.
-    if (rs.state.size > 0 && typeof rs.matchedSource === 'string' &&
+    if (rs.verifiedCount > 0 && typeof rs.matchedSource === 'string' &&
         rs.matchedSource.startsWith('fallback:')) {
       // Not a deploy, or auto-repair off → leave the ladder as-is. The rule
       // still works via the fallback; matchedVia already surfaces that the
-      // primary is stale, so nothing is broken for the user to see.
-      if (!canRebase) return;
+      // primary is stale, so nothing is broken for the user to see. A
+      // conflicted rule is never re-pointed automatically either: it needs a
+      // recapture first.
+      if (!canRebase || kind === 'conflicted') return;
       const idx = parseInt(rs.matchedSource.slice('fallback:'.length), 10);
       // Same "only reached for anchored rules" invariant as scan()'s resolve
       // call — a 'fallback:N' matchedVia can only have been produced by a rule
@@ -220,7 +239,11 @@ export function makeReconciler(
       const fallbacks = Array.isArray(definiteAnchor.fallbacks) ? definiteAnchor.fallbacks : [];
       const promoted = fallbacks[idx];
       if (!promoted) return;
+      // Authored fields other than the ladder (cardinality, iframe) carry
+      // over unchanged; the fingerprint is decided below.
+      const { witness: _w, setWitness: _sw, primary: _p, fallbacks: _f, ...authored } = definiteAnchor;
       const newAnchor: Anchor = {
+        ...authored,
         primary: promoted,
         fallbacks: [definiteAnchor.primary, ...fallbacks.filter((_, i) => i !== idx)],
       };
@@ -228,11 +251,20 @@ export function makeReconciler(
       // COMPONENT, not the markup, so it stays valid across the promote (and,
       // stored in original-name space, across deploys). Rebuilding without it
       // silently dropped the strongest signal on every promotion.
-      const fresh = rs.resolvedEl
-        ? witnessMod.buildWitness(rs.resolvedEl, { component: definiteAnchor.witness?.component })
-        : null;
-      if (fresh) newAnchor.witness = fresh;
-      else if (definiteAnchor.witness) newAnchor.witness = definiteAnchor.witness;
+      // A set witness is never refreshed (it would ratchet onto whichever
+      // members survived): the promoted rule keeps the authored capture. Only
+      // an element witness is rebuilt from the element the fallback found.
+      // An authored set (`cardinality: 'many'`) never gets an element witness
+      // either: it keeps whatever set witness it has, or stays without one.
+      if (kind === 'set' && definiteAnchor.setWitness) {
+        newAnchor.setWitness = definiteAnchor.setWitness;
+      } else if (definiteAnchor.cardinality !== 'many') {
+        const fresh = rs.resolvedEl
+          ? witnessMod.buildWitness(rs.resolvedEl, { component: definiteAnchor.witness?.component })
+          : null;
+        if (fresh) newAnchor.witness = fresh;
+        else if (definiteAnchor.witness) newAnchor.witness = definiteAnchor.witness;
+      }
       emitRebase({
         strategy: 'promote',
         anchor: newAnchor,
@@ -246,9 +278,43 @@ export function makeReconciler(
     // recover the target by scanning for it; else emit the no-match / quarantine
     // signal (which is also the auto-repair-off behavior — the drift surfaces
     // instead of self-healing).
-    if (rs.state.size === 0) {
-      const hasWitness = !!rule.anchor?.witness;
+    if (rs.verifiedCount === 0) {
+      // Any fingerprint makes a deploy break a real one (quarantine below);
+      // only an element witness can be recovered from (component identity,
+      // then the witness scan). A set witness has no automatic recovery here,
+      // and a conflicted rule recovers with neither.
+      const hasWitness = kind !== 'none';
+      const elementRecovery = kind === 'element';
       const recoveryNotes: string[] = [];
+      // A set witness recovers only through its identity predicate
+      // (set-witness.ts recoverSetByIdentity): the predicate becomes the new
+      // primary, so its complete result is the recovered set by construction;
+      // the old rungs become fallbacks and the set witness is kept as is.
+      if (canRebase && kind === 'set' && rule.anchor?.setWitness) {
+        const rec = recoverSetByIdentity(
+          rule.anchor.setWitness,
+          (selector) => Array.from(document.querySelectorAll(selector)),
+          (el) => isShimOwnedElement(el, mountedOutputRoots),
+        );
+        if (rec.ok) {
+          const current = rule.anchor;
+          const primary: AnchorSpec = { kind: 'css', value: rec.selector };
+          emitRebase({
+            strategy: 'recover',
+            via: 'set-identity',
+            anchor: {
+              ...current,
+              primary,
+              fallbacks: mergeFallbacks([primary, current.primary], current.fallbacks),
+            },
+            from: summarizeAnchor(current),
+            to: summarizeAnchor({ primary }),
+          });
+          return;
+        }
+        recoveryNotes.push(`set-identity: ${rec.reason}`);
+      }
+      if (canRebase && kind === 'conflicted') recoveryNotes.push('conflicted fingerprints (element and set): needs a recapture, no automatic recovery');
       // Component-identity recovery, tried first because it's the strongest
       // signal: the selector died, but the component that rendered the target
       // may still be on the page. The main-world helper scans for nodes whose
@@ -258,7 +324,7 @@ export function makeReconciler(
       // (tag/attr/text scan) when there's no component witness or no unique hit.
       // Never for a document singleton: recovery would re-point a deliberately
       // scoped selector (`body.home`) onto whatever page renders the component.
-      const storedComponent = singletonWitness ? undefined : rule.anchor?.witness?.component;
+      const storedComponent = elementRecovery && !singletonWitness ? rule.anchor?.witness?.component : undefined;
       // The symbol map, bounded (ENRICH_BUDGET_MS). A map that hasn't arrived
       // in time skips the component arm for a MAPPED witness: its names are
       // original-space and only reach live fibers through the map, so a raw
@@ -325,7 +391,7 @@ export function makeReconciler(
             ? 'component-id: unique match is shim-created DOM'
             : `component-id: ${matches.length} matches (not unique)`);
       }
-      if (canRebase && hasWitness) {
+      if (canRebase && elementRecovery) {
         const rec = anchors.witnessRecoverDetail(rule.anchor?.witness, document);
         const rawFound = rec.el;
         // Same own-DOM guard as the component-identity arm above: the witness
@@ -408,7 +474,7 @@ export function makeReconciler(
             specId: spec.id,
             ruleId: rule.id,
             selector: rule.anchor?.primary?.value || '',
-            expected: rule.anchor?.witness,
+            ...expectedFingerprint(),
             seen: [],
             rejectedVia: null,
             recovery: lastRecoveryDetail,

@@ -77,6 +77,7 @@ for (const kind of BUILTIN_KINDS) {
 for (const anchor of ['data-attr', 'aria', 'text', 'css']) {
   check(`documents anchor kind "${anchor}"`, skill.includes(`{ "kind": "${anchor}"`));
 }
+check('documents the authored anchor cardinality ("many")', skill.includes('"cardinality": "many"') && /load more items/.test(skill));
 for (const engine of ['postgres', 'mysql', 'mariadb', 'mssql', 'sqlite-remote', 'supabase']) {
   check(`documents remote engine "${engine}"`, skill.includes(engine));
 }

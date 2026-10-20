@@ -72,6 +72,11 @@ export interface Anchor {
   iframe?: { kind: string; value: string };
   witness?: Witness;
   setWitness?: SetWitness;
+  // Authored: the anchor is meant to match a set of elements (every row,
+  // every card). The engine then never fingerprints it as one element: with
+  // ≥2 members observed in the preview it captures a set witness, with one it
+  // captures none (and the preview evidence says to load more items).
+  cardinality?: 'many';
 }
 
 export interface MountSpec {

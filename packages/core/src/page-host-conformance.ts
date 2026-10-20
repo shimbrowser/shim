@@ -24,7 +24,7 @@
 // and the Shim browser's Electron runner).
 
 import type { PageHost, PageRuntimeEvent, PageConsoleMessage, Unsubscribe } from './page-host';
-import type { AnchorSpec, Rule, Witness } from './types';
+import type { AnchorSpec, Rule, Witness, SetWitness } from './types';
 import { computeDeployId } from './deploy-id';
 import { viewPageOnHost, evaluateOnHost, MAX_SHOT_WIDTH } from './page-host-tools';
 import { errMessage } from './error';
@@ -198,6 +198,21 @@ const FOLD_BODY = `
 <div id="fold-far" class="box">far below</div>
 `;
 
+// A list whose rows share a site data-* value, plus a same-class impostor
+// elsewhere (another tag's child shape, another parent) — the set-witness case.
+const LIST_BODY = `
+<ul id="rows">
+  <li class="row" data-kind="row" data-i="1"><span class="t">Row one</span><b>1</b></li>
+  <li class="row" data-kind="row" data-i="2"><span class="t">Row two</span><b>2</b></li>
+  <li class="row" data-kind="row" data-i="3"><span class="t">Row three</span><b>3</b></li>
+</ul>
+<ol id="other"><li class="row"><em>not a row</em></li></ol>
+<div id="mixed"><p class="mix">p</p><span class="mix">span</span></div>
+<div id="slots"><div class="slot" data-kind="slot"></div><div class="slot" data-kind="slot"></div></div>
+<div id="lone-slot" data-kind="lone"></div>
+<p id="done-wrap"><button>Apply</button></p>
+`;
+
 const STRICT_BODY = `
 <style>#strict-ad { color: rgb(1, 2, 3); }</style>
 <div id="strict-ad" class="box">strict ad</div>
@@ -221,6 +236,7 @@ export function conformanceFixture(pathname: string, state: FixtureState): Fixtu
     case '/app/other': return html(page('app', '<div id="app"></div>', state.deploy));
     case '/deploy': return html(page('deploy', deployBody(state.deploy), state.deploy));
     case '/fold': return html(page('fold', FOLD_BODY, state.deploy));
+    case '/list': return html(page('list', LIST_BODY, state.deploy));
     case '/strict': return html(page('strict', STRICT_BODY, state.deploy), STRICT_CSP);
     case '/input': return html(page('input', INPUT_BODY, state.deploy, '/assets/input.js'));
     case '/assets/input.js': return asset('text/javascript; charset=utf-8', INPUT_JS);
@@ -252,7 +268,7 @@ export const CONFORMANCE_CAPABILITIES = [
   'hide', 'restyle', 'reorder', 'reshape',
   'script', 'inject-element', 'inject-html', 'remove', 'replace-root',
   'mount:inline', 'mount:portal', 'mount:overlay', 'mount:shadow', 'self-healing',
-  'witness:capture', 'witness:verify', 'rebase:refresh', 'rebase:promote', 'rebase:recover', 'rebase:quarantine',
+  'witness:capture', 'witness:verify', 'witness:set', 'rebase:refresh', 'rebase:promote', 'rebase:recover', 'rebase:quarantine',
   'api.storage', 'api.cleanup', 'handler-errors', 'console', 'spa-navigation', 'teardown', 'page-tools', 'strict-csp',
   'no-match', 'trusted-input',
 ] as const;
@@ -410,6 +426,16 @@ const ANCHOR_KINDS: ReadonlySet<string> = new Set<AnchorSpec['kind']>(['css', 'd
 
 // Handler source, authored as a shim would author it.
 const H = {
+  markDone: `function markDone({ anchor }) {
+  anchor.textContent = 'Done';
+}`,
+  rowTag: `function rowTag({ anchor }) {
+  const s = document.createElement('i');
+  s.className = 'conf-row-tag';
+  s.textContent = 'tagged';
+  anchor.appendChild(s);
+  return s;
+}`,
   note: `function note({ anchor }) {
   const s = document.createElement('span');
   s.className = 'conf-note';
@@ -1199,6 +1225,168 @@ const noMatchCase: ConformanceCase = {
   },
 };
 
+// Set witnesses: a multi-match rule's preview captures what every row shares
+// (re-emitted as rows are added, withdrawn for mixed tags), and a rule
+// carrying it applies only to members, never to a same-selector impostor.
+const setWitnessCase: ConformanceCase = {
+  id: 'set-witness',
+  title: 'a multi-match rule captures a set witness and vetoes non-members',
+  covers: ['witness:set'],
+  async run(kit) {
+    if (!(await kit.load('/list'))) return;
+    const rowsKey = kit.apply({ id: 'rows', anchor: css('#rows > li.row'), mutations: [{ kind: 'restyle', properties: { scrollMarginTop: '1.5px' } }] });
+    const first = await kit.event((e) => e.kind === 'rule-witness' && e.specId === rowsKey && isRecord(e.setWitness));
+    const sw = isRecord(first?.setWitness) ? first.setWitness : null;
+    kit.check('three rows at once → a set witness (no element witness)', sw !== null && sw.tag === 'li' && sw.count === 3 && first?.witness === null, first);
+    kit.check('…carrying the rows\' constant data-* and their identity predicate', isRecord(sw?.attrs) && sw.attrs['data-kind'] === 'row'
+      && sw.identity === 'li[data-kind="row"]', sw);
+    kit.check('…bound to its document, anchor and revision', typeof first?.documentId === 'string' && typeof first?.anchorDigest === 'string' && typeof first?.rev === 'number', first);
+    await kit.read(`(() => { const li = document.createElement('li'); li.className = 'row'; li.setAttribute('data-kind', 'row'); li.innerHTML = '<span class="t">Row four</span><b>4</b>'; document.querySelector('#rows').append(li); return true; })()`);
+    const grown = await kit.event((e) => e.kind === 'rule-witness' && e.specId === rowsKey && isRecord(e.setWitness) && e.setWitness.count === 4);
+    kit.check('a row added later re-emits the aggregate at a higher revision', !!grown && typeof grown.rev === 'number' && typeof first?.rev === 'number' && grown.rev > first.rev, grown);
+
+    const mixedKey = kit.apply({ id: 'mixed', anchor: css('#mixed .mix'), mutations: [{ kind: 'restyle', properties: {} }] });
+    const mixed = await kit.event((e) => e.kind === 'rule-witness' && e.specId === mixedKey);
+    kit.check('mixed tags → no fingerprint, with the reason', mixed?.witness === null && mixed?.setWitness === null && mixed?.captureNote === 'mixed-tags', mixed);
+
+    if (!sw) return;
+    const vetoKey = kit.apply({ id: 'veto', anchor: { primary: { kind: 'css', value: 'li.row' }, setWitness: sw as unknown as SetWitness }, mutations: [{ kind: 'restyle', properties: { scrollMarginLeft: '2.5px' } }] });
+    const marked = await kit.until(async () => {
+      const r = await kit.read(`(() => {
+        const rows = Array.from(document.querySelectorAll('#rows > li.row')).filter((e) => getComputedStyle(e).scrollMarginLeft === '2.5px').length;
+        const impostor = getComputedStyle(document.querySelector('#other > li')).scrollMarginLeft;
+        return rows >= 4 ? { rows, impostor } : null;
+      })()`);
+      return isRecord(r) ? r : null;
+    }, 8000);
+    kit.check('a set-witnessed rule applies to every member', marked?.rows === 4, marked);
+    kit.check('…and never to the impostor its selector also matches', marked?.impostor !== '2.5px', marked);
+    kit.check('…without capturing again', !kit.events.some((e) => e.kind === 'rule-witness' && e.specId === vetoKey));
+
+    // A mounted member that stops verifying: a script rule's stays (its own
+    // handler may be what changed it) and is reported unverified; the
+    // restyle rule's mount is torn down and its token stripped.
+    const tagKey = kit.apply({ id: 'tag', anchor: { primary: { kind: 'css', value: 'li.row' }, setWitness: sw as unknown as SetWitness }, mutations: [{ kind: 'script', handler: 'rowTag' }], handlers: { rowTag: H.rowTag } });
+    const tagged = await kit.until(async () => ((await kit.read(`document.querySelectorAll('#rows .conf-row-tag').length`)) === 4 ? true : null), 8000);
+    kit.check('the script rule mounted on every member', tagged === true);
+    await kit.read(`(() => {
+      const row = document.querySelector('#rows > li.row');
+      row.removeAttribute('data-kind');
+      row.setAttribute('aria-hidden', 'true');
+      for (const c of Array.from(row.children)) if (!c.classList.contains('conf-row-tag')) c.remove();
+      row.prepend(document.createElement('u'));
+      document.body.appendChild(document.createElement('div'));
+      return true;
+    })()`);
+    const revoked = await kit.until(async () => {
+      const r = await kit.read(`(() => {
+        const row = document.querySelector('#rows > li.row');
+        return { margin: getComputedStyle(row).scrollMarginLeft, css: row.getAttribute('data-shim-css') || '', tag: !!row.querySelector('.conf-row-tag') };
+      })()`);
+      return isRecord(r) && r.margin !== '2.5px' ? r : null;
+    }, 8000);
+    kit.check('a restyle member that stops verifying is torn down (token stripped)', revoked !== null && !String(revoked.css).includes('veto'), revoked);
+    kit.check('…while the script rule keeps its mount on it', revoked?.tag === true, revoked);
+    const unverified = await kit.event((e) => e.kind === 'rule-status' && e.specId === tagKey && e.unverified === 1, 8000);
+    kit.check('…and reports it unverified', unverified !== null, kit.events.filter((e) => e.kind === 'rule-status' && e.specId === tagKey).at(-1));
+
+    // A rule whose own output makes its selector stop matching (an injection
+    // filling `.slot:empty`) keeps its mounts: a member is judged by its
+    // fingerprint (own DOM excluded), never by the selector alone.
+    const slotCapKey = kit.apply({ id: 'slot-cap', anchor: css('#slots > .slot:empty'), mutations: [{ kind: 'restyle', properties: {} }] });
+    const slotCap = await kit.event((e) => e.kind === 'rule-witness' && e.specId === slotCapKey && isRecord(e.setWitness));
+    kit.remove(slotCapKey);
+    const slotSw = isRecord(slotCap?.setWitness) ? slotCap.setWitness : null;
+    kit.check('the empty slots captured a set witness', slotSw !== null && slotSw.count === 2, slotCap);
+    let slotKey = '';
+    if (slotSw) {
+      // Behind a stale deploy baseline, so the reconciler would escalate a
+      // rule it judged unresolved.
+      const stale = fixtureDeployId(kit.origin, 2);
+      slotKey = kit.apply({ id: 'slot-fill', anchor: { primary: { kind: 'css', value: '#slots > .slot:empty' }, setWitness: slotSw as unknown as SetWitness },
+        mutations: [{ kind: 'inject-element', placement: 'append', element: { tag: 'span', attrs: { class: 'conf-slot-fill' }, text: 'filled' } }] },
+        stale ? { bundleHash: stale } : {});
+      const filled = await kit.until(async () => ((await kit.read(`document.querySelectorAll('#slots .conf-slot-fill').length`)) === 2 ? true : null), 8000);
+      kit.check('the injection filled both slots', filled === true);
+      await kit.read(`(() => { for (const f of document.querySelectorAll('#slots .conf-slot-fill')) f.setAttribute('data-conf-first', '1'); return true; })()`);
+      for (let i = 0; i < 3; i++) {
+        await kit.read(`(() => { document.body.appendChild(document.createElement('div')); return true; })()`);
+        await kit.sleep(250);
+      }
+      const stable = await kit.read(`(() => { const f = document.querySelectorAll('#slots .conf-slot-fill'); return { count: f.length, first: Array.from(f).every((x) => x.getAttribute('data-conf-first') === '1') }; })()`);
+      kit.check('…and keeps the same outputs across later scans (no revoke / re-inject cycle)', isRecord(stable) && stable.count === 2 && stable.first === true, stable);
+      await kit.sleep(5000); // settle (1.5 s) + the deploy retry (2.5 s) + margin
+      const key = slotKey;
+      kit.check('…and the reconciler counts its retained members healthy (no quarantine, no no-match)',
+        !kit.events.some((e) => (e.kind === 'rule-quarantined' || e.kind === 'rule-no-match') && e.specId === key),
+        kit.events.filter((e) => e.specId === key).map((e) => e.kind));
+    }
+
+    // A conflicted rule (an element witness beside the set one) is judged by
+    // its element witness: once that rejects its mounted member, the set
+    // witness never keeps it alive, and the rule quarantines.
+    const conflictedKey = kit.apply({ id: 'conflicted', anchor: { primary: { kind: 'css', value: '#rows > li.row' }, witness: { v: 1, tag: 'li', attrs: { 'data-i': '2' } }, setWitness: sw as unknown as SetWitness },
+      mutations: [{ kind: 'restyle', properties: { scrollMarginBottom: '3.5px' } }] });
+    const one = await kit.event((e) => e.kind === 'rule-status' && e.specId === conflictedKey && e.matched === 1, 8000);
+    kit.check('a conflicted rule resolves through its element witness (one row)', one !== null, kit.events.filter((e) => e.specId === conflictedKey).at(-1));
+    await kit.read(`(() => { const r = document.querySelector('#rows > li.row[data-i="2"]'); r.setAttribute('data-i', '9'); r.appendChild(document.createElement('s')); return true; })()`);
+    const q = await kit.event((e) => e.kind === 'rule-quarantined' && e.specId === conflictedKey, 9000);
+    kit.check('…and quarantines once that rejects its member, whatever the set witness says', q?.fingerprint === 'conflicted', q);
+
+    // The single-element counterpart: an element-witnessed injection filling
+    // `#lone-slot:empty` stays a success after its own output takes it out of
+    // the selector's result — behind a stale baseline with auto-repair off,
+    // where a judged-unresolved rule would quarantine.
+    const loneCapKey = kit.apply({ id: 'lone-cap', anchor: css('#lone-slot:empty'), mutations: [{ kind: 'restyle', properties: {} }] });
+    const loneCap = await kit.event((e) => e.kind === 'rule-witness' && e.specId === loneCapKey && isRecord(e.witness));
+    kit.remove(loneCapKey);
+    const loneW = isRecord(loneCap?.witness) ? loneCap.witness : null;
+    kit.check('the lone slot captured an element witness', loneW !== null && loneW.tag === 'div', loneCap);
+    let loneKey = '';
+    const staleLone = fixtureDeployId(kit.origin, 2);
+    if (loneW && staleLone) {
+      loneKey = kit.apply({ id: 'lone-fill', anchor: { primary: { kind: 'css', value: '#lone-slot:empty' }, witness: loneW as unknown as Witness },
+        mutations: [{ kind: 'inject-element', placement: 'append', element: { tag: 'span', attrs: { class: 'conf-lone-fill' }, text: 'filled' } }] },
+        { bundleHash: staleLone, autoRepair: false });
+      const filled = await kit.until(async () => ((await kit.read(`document.querySelectorAll('#lone-slot .conf-lone-fill').length`)) === 1 ? true : null), 8000);
+      kit.check('the injection filled the lone slot', filled === true);
+      for (let i = 0; i < 3; i++) {
+        await kit.read(`(() => { document.body.appendChild(document.createElement('div')); return true; })()`);
+        await kit.sleep(250);
+      }
+      await kit.sleep(5000);
+      const key = loneKey;
+      kit.check('…and stays a success through the reconciler (no no-match, no quarantine)',
+        !kit.events.some((e) => (e.kind === 'rule-quarantined' || e.kind === 'rule-no-match') && e.specId === key)
+        && (await kit.read(`document.querySelectorAll('#lone-slot .conf-lone-fill').length`)) === 1,
+        kit.events.filter((e) => e.specId === key).map((e) => e.kind));
+    }
+
+    // A text-anchored script that rewrites its own target's text: the
+    // selector stops matching and the element witness would no longer pass,
+    // but the mount is a success, so no no-match or quarantine follows.
+    let doneKey = '';
+    const staleDone = fixtureDeployId(kit.origin, 2);
+    const doneCapKey = kit.apply({ id: 'done-cap', anchor: { primary: { kind: 'text', value: 'Apply' } }, mutations: [{ kind: 'restyle', properties: {} }] });
+    const doneCap = await kit.event((e) => e.kind === 'rule-witness' && e.specId === doneCapKey && isRecord(e.witness));
+    kit.remove(doneCapKey);
+    const doneW = isRecord(doneCap?.witness) ? doneCap.witness : null;
+    kit.check('the Apply button captured an element witness', doneW !== null && doneW.tag === 'button', doneCap);
+    if (doneW && staleDone) {
+      doneKey = kit.apply({ id: 'done', anchor: { primary: { kind: 'text', value: 'Apply' }, witness: doneW as unknown as Witness },
+        mutations: [{ kind: 'script', handler: 'markDone' }], handlers: { markDone: H.markDone } }, { bundleHash: staleDone });
+      const done = await kit.until(async () => ((await kit.read(`document.querySelector('#done-wrap button').textContent`)) === 'Done' ? true : null), 8000);
+      kit.check('the script rewrote its own target', done === true);
+      await kit.read(`(() => { document.body.appendChild(document.createElement('div')); return true; })()`);
+      await kit.sleep(5000);
+      const key = doneKey;
+      kit.check('…and stays a success through the reconciler (no no-match, no quarantine)',
+        !kit.events.some((e) => (e.kind === 'rule-quarantined' || e.kind === 'rule-no-match') && e.specId === key),
+        kit.events.filter((e) => e.specId === key).map((e) => e.kind));
+    }
+    for (const key of [rowsKey, mixedKey, vetoKey, tagKey, conflictedKey, ...(slotKey ? [slotKey] : []), ...(loneKey ? [loneKey] : []), ...(doneKey ? [doneKey] : [])]) kit.remove(key);
+  },
+};
 
 // Trusted input (PageHost.input) and the document token: the events reach
 // the page as a user's, `stillPinned` runs before every command (and its
@@ -1341,7 +1529,7 @@ const inputCase: ConformanceCase = {
 };
 
 export const CONFORMANCE_CASES: readonly ConformanceCase[] = [
-  applyCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, cropScrollCase, strictCspCase, sharedModuleCase, noMatchCase,
+  applyCase, setWitnessCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, cropScrollCase, strictCspCase, sharedModuleCase, noMatchCase,
   inputCase,
 ];
 

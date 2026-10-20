@@ -145,7 +145,7 @@ console.log('verification level');
   check('none: the rule matched nothing, whatever else holds', verificationLevel(plain, HEADLESS, true, true) === 'none'
     && verificationLevel(component, BROWSER, false, true) === 'none');
   check('partial: an element witness of an unknown version', verificationLevel({ witness: { v: 9, tag: 'div' } }, BROWSER, false) === 'partial');
-  check('partial: a set witness (not verified by this engine)', verificationLevel(set, BROWSER, false) === 'partial');
+  check('full: a set witness, verified per member on every host', verificationLevel(set, BROWSER, false) === 'full' && verificationLevel(set, HEADLESS, false) === 'full');
   check('partial: a set witness of an unknown version', verificationLevel({ setWitness: { v: 9, tag: 'li', count: 3, nested: false } }, BROWSER, false) === 'partial');
   check('partial: conflicted (both kinds)', verificationLevel({ ...plain, ...set }, BROWSER, false) === 'partial');
 }

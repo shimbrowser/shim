@@ -39,7 +39,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import type { Spec, Rule, Witness } from '@shimbrowser/core/types';
+import type { Spec, Rule } from '@shimbrowser/core/types';
 import type { PageHost, PageLoadOutcome, PageRuntimeEvent, PreviewRule, Unsubscribe } from '@shimbrowser/core/page-host';
 import type { SessionBackend, BackendPreview, BackendCheckout, BackendCommit, FinishInfo } from '@shimbrowser/core/session-registry';
 import type { DeltaOp } from '@shimbrowser/core/spec-delta';
@@ -51,12 +51,15 @@ import {
 } from '@shimbrowser/core/shim-folder';
 import { handlerWorlds, moduleToExpression } from '@shimbrowser/core/handler-source';
 import { diffWorkingCopy } from '@shimbrowser/core/working-copy-diff';
-import { hasManagedKeys, withManagedFingerprint } from '@shimbrowser/core/managed-anchor';
+import { hasManagedKeys, withManagedFingerprint, withoutManagedKeys } from '@shimbrowser/core/managed-anchor';
+import { readCaptureEvent, inCaptureBinding, supersedes, fingerprintOfCapture } from '@shimbrowser/core/capture-event';
+import type { CaptureEvent } from '@shimbrowser/core/capture-event';
 import { decodeWorkingCopy, encodeWorkingCopy, WorkingCopyWireError } from '@shimbrowser/core/working-copy-wire';
 import {
   preflightSpec, scanRuleHandlers, verificationLevel, UNSUPPORTED_API_EVENT, type UnsupportedFeature,
 } from '@shimbrowser/core/capability-preflight';
 import { describeRuleStatus, previewKey, previewNoMatch, shimViewPageCaption } from '@shimbrowser/core/preview-evidence';
+import type { StatusCapture } from '@shimbrowser/core/preview-evidence';
 import { createConsoleFeed, formatAutoBlock, formatConsoleRead, type ConsoleFeed } from '@shimbrowser/core/console-feed';
 import {
   viewPageOnHost, queryPageByScript, inspectElementByScript, evaluateOnHost, expressionProblem,
@@ -173,6 +176,12 @@ export interface HeadlessHandle {
   envelope: Record<string, unknown>;
   /** Live previews by ruleKey: what reload_page re-applies. */
   live: Map<string, PreviewRule>;
+  /**
+   * Each live preview version's latest capture (capture-event.ts), by
+   * ruleKey: kept while the preview runs, frozen at the preview's read
+   * boundary (its settle), reset when the key is applied again.
+   */
+  captures: Map<string, { applyId: string | undefined; event: CaptureEvent | null; frozen: boolean; freezeOnFirst: boolean }>;
   /** Preview versions minted (PreviewRule.applyId). */
   applies: number;
   /** Rules the engine last reported broken, by rule id: how, and the anchor digest it was reported against. A healthy report clears one. */
@@ -382,20 +391,54 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     return { key: event.specId, live, rule };
   }
 
-  // Witness capture: the engine fingerprinted a live rule that resolved
-  // exactly one element — at apply, or whenever the element appeared. Kept on
-  // the working rule for commit and on its live preview, so a replay onto a
-  // new document (reload_page, followDocument) filters by it as the committed
-  // shim will, instead of re-resolving the bare selector to whichever element
-  // matches first. The preview's deploy baseline is left as applied: a fresh
-  // witness is this deploy's, with nothing committed to rebase from.
+  // Witness capture: the engine fingerprints what a live rule showed (one
+  // element → element witness, several → set witness, or none with a reason)
+  // in rule-witness events, each replacing the rule's whole fingerprint state.
+  // The latest one inside the preview's binding (its applyId, the anchor it
+  // was applied with, the newest document) wins until the preview's read
+  // boundary freezes it (freezeCaptures). Kept on the working rule for commit
+  // and on its live preview, so a replay onto a new document (reload_page,
+  // followDocument) filters by it as the committed shim will, instead of
+  // re-resolving the bare selector. The preview's deploy baseline is left as
+  // applied: a fresh witness is this deploy's, with nothing committed to
+  // rebase from.
   function takeWitness(handle: HeadlessHandle, event: PageRuntimeEvent): void {
-    if (!isRecord(event.witness)) return;
+    const read = readCaptureEvent(event);
+    if (!read) return;
     const current = currentRuleFor(handle, event);
-    if (!current?.rule.anchor || !current.live.rule.anchor || current.live.rule.anchor.witness) return;
-    const witness = event.witness as unknown as Witness;
-    current.rule.anchor = { ...current.rule.anchor, witness };
-    handle.live.set(current.key, { ...current.live, rule: { ...current.live.rule, anchor: { ...current.live.rule.anchor, witness } } });
+    if (!current?.rule.anchor || !current.live.rule.anchor) return;
+    const entry = handle.captures.get(current.key);
+    if (!entry || entry.frozen || entry.applyId !== current.live.applyId) return;
+    const binding = { applyId: current.live.applyId ?? null, anchorDigest: anchorDigest(current.live.rule.anchor) };
+    if (!inCaptureBinding(read, binding) || !supersedes(read, entry.event)) return;
+    entry.event = read;
+    if (entry.freezeOnFirst) entry.frozen = true;
+    const fingerprint = fingerprintOfCapture(read);
+    current.rule.anchor = withManagedFingerprint(withoutManagedKeys(current.rule.anchor), fingerprint);
+    handle.live.set(current.key, {
+      ...current.live,
+      rule: { ...current.live.rule, anchor: withManagedFingerprint(withoutManagedKeys(current.live.rule.anchor), fingerprint) },
+    });
+  }
+
+  // The read boundary: what each of these previews captured so far is what
+  // the rule carries; later events are not this preview's evidence. A preview
+  // that captured nothing yet (its element hadn't appeared) takes the first
+  // capture that arrives, and freezes on it.
+  function freezeCaptures(handle: HeadlessHandle, keys: Iterable<string>): void {
+    for (const key of keys) {
+      const entry = handle.captures.get(key);
+      if (!entry) continue;
+      if (entry.event) entry.frozen = true;
+      else entry.freezeOnFirst = true;
+    }
+  }
+
+  // The status line's view of a preview's capture.
+  function statusCapture(handle: HeadlessHandle, key: string): StatusCapture | null {
+    const e = handle.captures.get(key)?.event;
+    if (!e) return null;
+    return { fingerprint: e.setWitness ? 'set' : e.witness ? 'element' : 'none', note: e.note };
   }
 
   // A live rule's latest reconciliation outcome (rule-reconcile): a recovery
@@ -433,12 +476,18 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
 
   function apply(handle: HeadlessHandle, preview: PreviewRule): void {
     handle.unsupported.delete(preview.ruleKey);
+    // A new version captures afresh; a replay of the same version (a new
+    // document) keeps what this version already settled.
+    if (handle.captures.get(preview.ruleKey)?.applyId !== preview.applyId) {
+      handle.captures.set(preview.ruleKey, { applyId: preview.applyId, event: null, frozen: false, freezeOnFirst: false });
+    }
     handle.live.set(preview.ruleKey, preview);
     handle.host.applyPreview(preview);
   }
 
   function remove(handle: HeadlessHandle, ruleKey: string): void {
     handle.live.delete(ruleKey);
+    handle.captures.delete(ruleKey);
     handle.unsupported.delete(ruleKey);
     handle.host.removePreview(ruleKey);
   }
@@ -612,6 +661,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     }
 
     await settle(signal);
+    freezeCaptures(handle, emitKeys.keys());
 
     const mine = handle.events.filter((t) => t.at >= appliedAt && typeof t.event.specId === 'string' && emitKeys.has(t.event.specId)
       && (typeof t.event.applyId !== 'string' || t.event.applyId === versions.get(t.event.specId)));
@@ -647,8 +697,8 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       const live = (handle.working.rules || []).find((r) => r.id === rule.id);
       return {
         ruleId: rule.id,
-        // The working rule carries any witness this preview captured.
-        status: describeRuleStatus(rule, status, { witnessed: live?.anchor?.witness !== undefined }),
+        // The working rule carries whatever this preview captured.
+        status: describeRuleStatus(rule, status, { capture: statusCapture(handle, key) }),
         verification: verificationLevel(
           live?.anchor, handle.host.capabilities, (handle.unsupported.get(key)?.size ?? 0) > 0, noMatchIds.has(rule.id),
         ),
@@ -901,6 +951,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         committedAnchors: committedAnchorsOf(source.spec.rules, true),
         envelope: { ...source.envelope },
         live: new Map(),
+        captures: new Map(),
         applies: 0,
         broken: new Map(),
         unreportedBroken: [],
@@ -941,6 +992,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       // The host applies asynchronously: settle (as preview and reload do) so
       // the agent's first view_page sees the committed shim, not the bare page.
       if (handle.live.size > 0) await settle(signal);
+      freezeCaptures(handle, handle.live.keys());
       return handle;
     },
     async checkout(handle): Promise<BackendCheckout> {

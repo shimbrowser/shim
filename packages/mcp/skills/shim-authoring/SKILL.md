@@ -170,8 +170,8 @@ Rules of the folder:
   the shared function in that site's own handler instead of editing it. Removing or
   renaming a shared function that any site's handlers still call is refused at commit. On
   any other shim `sharedHandlers` is `not-editable`.
-- **What never goes in the folder:** `version`, `bundleHash`, anchor `witness` fields and
-  inline `handlers` maps — Shim manages those. Writing one is refused as a malformed
+- **What never goes in the folder:** `version`, `bundleHash`, anchor `witness` and
+  `setWitness` fields and inline `handlers` maps — Shim manages those. Writing one is refused as a malformed
   folder. Hidden files (`.git`, `.shim-state.json`, editor swap files) are ignored; any
   other unexpected file is refused.
 - **Rules keep the folder's order.** Moving a rule in `shim.json` moves it in the shim.
@@ -655,16 +655,32 @@ never throws). List module ids with
 ## 6. Anchors
 
 `anchor.primary` says how to find the target; pick the kind that captures *why* this is the
-target. Shim fingerprints the matched element on its own (a **witness**) and refuses to
+target. Shim fingerprints what the anchor matched on its own (a **witness**) and refuses to
 apply a rule whose anchor later resolves to a different-looking element — it holds the rule
 for repair instead of mis-attaching. You never write witnesses.
 
-A witness is captured only when the anchor resolves to **exactly one** element. A rule
-whose anchor matches several (every row, or one target plus a hidden duplicate such as a
-second copy of a price) commits without one and can't re-find its target after a redesign.
-If the rule means one element, narrow the anchor until it matches exactly one before you
-commit. Committing the rule again unchanged captures
+The fingerprint follows what your preview showed. An anchor that resolved to **exactly one**
+element gets an element witness. One that matched **several elements of the same tag**
+(every search result, every comment) gets a set witness — what all of them share — and each
+match is checked against it. A rule whose matches mix tags (a `div` and a `span`), or a
+`remove` rule over several elements, commits with no fingerprint and can't re-find its targets
+after a redesign; the preview evidence says so. If the rule means one element (one target
+plus a hidden duplicate such as a second copy of a price is still two), narrow the anchor
+until it matches exactly one before you commit. Committing the rule again unchanged captures
 nothing (`nothing-to-commit`).
+
+**`anchor.cardinality: "many"`** — set it on an anchor meant to match a set of elements
+(every row, every card), especially when the page may show only one of them while you
+preview (a list that loads lazily). Such a rule is never fingerprinted as one element: with
+two or more members on the page it gets a set witness, and with one it gets none and the
+preview says "load more items and preview again" — scroll or expand until several are on
+the page, then preview again (no edit needed: such a rule, unchanged and still without a
+fingerprint, is re-applied on every preview). Leave it out for a rule meant for one element.
+
+```json
+{ "primary": { "kind": "data-attr", "name": "data-component-type", "value": "s-search-result" },
+  "cardinality": "many" }
+```
 
 ```json
 { "kind": "data-attr", "name": "data-testid", "value": "submit-btn" }

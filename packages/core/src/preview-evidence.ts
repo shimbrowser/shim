@@ -7,6 +7,8 @@
 // Pure: no Node, no DOM.
 
 import type { Rule } from './types';
+import { fingerprintKind, hasManagedKeys } from './managed-anchor';
+import type { CaptureNote } from './capture-event';
 
 /** The part of a `rule-status` runtime event a status line reads. */
 export interface RuleStatusEvent {
@@ -15,6 +17,8 @@ export interface RuleStatusEvent {
   box?: { x: number; y: number; w: number; h: number };
   /** Multi-match only: how many matches measure a non-empty box (`box` is the first of them). */
   visible?: number;
+  /** Set-witnessed rules: mounted members that no longer verify (kept mounted). */
+  unverified?: number;
   note?: unknown;
 }
 
@@ -27,10 +31,19 @@ export function previewKey(patchId: string, ruleId: string): string {
 // this emit produced. mount-route rules report matched: 0 whenever the
 // current path isn't the route — that's the normal resting state, not a
 // failure, so it gets its own wording.
-// `opts.witnessed`: this preview captured a witness for the rule (a
-// `rule-witness` event the host collected apart from the status), so a status
-// line that later reads several matches doesn't claim the rule has none.
-export function describeRuleStatus(rule: Rule | undefined, status: RuleStatusEvent | undefined, opts: { witnessed?: boolean } = {}): string {
+// `opts.capture`: what this preview's capture decided for the rule (the latest
+// `rule-witness` event the host collected apart from the status): an element
+// or set fingerprint, or none with the engine's reason. `opts.witnessed` is
+// the older boolean form (true reads as a fingerprint captured).
+export interface StatusCapture {
+  fingerprint: 'element' | 'set' | 'none';
+  note?: CaptureNote | null;
+}
+export function describeRuleStatus(
+  rule: Rule | undefined,
+  status: RuleStatusEvent | undefined,
+  opts: { witnessed?: boolean; capture?: StatusCapture | null } = {},
+): string {
   const isRoute = (rule?.mutations || []).some((m) => m?.kind === 'mount-route');
   // `redirect` rules are handled in main (the network hook rewrites the
   // navigation before the page loads), so the engine never emits a DOM
@@ -100,21 +113,44 @@ export function describeRuleStatus(rule: Rule | undefined, status: RuleStatusEve
     box = ` — ${status.matched > 1 ? 'first match' : 'anchor'} ${boxText(status.box)}`;
   }
   const note = typeof status.note === 'string' && status.note ? ` — NOTE: ${status.note}` : '';
-  return `matched ${status.matched} element(s) via ${status.matchedVia || 'primary'}${box}${note}${opts.witnessed ? '' : unwitnessedNote(rule, status.matched)}`;
+  const unverified = typeof status.unverified === 'number' && status.unverified > 0
+    ? ` — NOTE: ${status.unverified} mounted element(s) no longer match the rule's set fingerprint (kept, not re-applied)`
+    : '';
+  const capture = opts.capture ?? (opts.witnessed ? { fingerprint: 'element' as const } : null);
+  return `matched ${status.matched} element(s) via ${status.matchedVia || 'primary'}${box}${note}${unverified}${fingerprintNote(rule, status.matched, capture)}`;
 }
 
-// The engine fingerprints an anchor's target (its witness) only from a single
-// match, so an anchored rule that matched several elements commits with none:
-// after a site redesign it can't re-find its target and only ever reports
-// no-match. Said at preview time, while narrowing the anchor is still cheap —
-// a rule meant for several elements (every row, every card) can ignore it.
+// The engine fingerprints what a preview shows: one element at once gets an
+// element witness, two or more of one tag a set witness. A rule that ends a
+// preview with neither can't verify its targets or self-heal after a site
+// redesign, so the status line says why while fixing it is still cheap.
 export const UNWITNESSED_MULTI_MATCH_NOTE =
-  ' — NOTE: several matches, so Shim captures no witness for this rule and it cannot self-heal after a site redesign; '
+  ' — NOTE: several matches and no fingerprint captured, so this rule cannot self-heal after a site redesign; '
   + 'if it targets one element, narrow the anchor until it matches exactly one';
 
-function unwitnessedNote(rule: Rule | undefined, matched: number): string {
-  if (matched <= 1 || !rule?.anchor || rule.anchor.witness || rule.anchor.iframe) return '';
-  return UNWITNESSED_MULTI_MATCH_NOTE;
+export const CAPTURE_NOTES: Readonly<Record<CaptureNote, string>> = {
+  'one-member': ' — NOTE: the anchor is marked cardinality "many" but the preview showed one member, so Shim captured no fingerprint '
+    + 'and the rule cannot self-heal — load more items (scroll, expand) and preview again; an unchanged rule like this is re-applied on every preview',
+  'mixed-tags': ' — NOTE: the matches are elements of different tags, so Shim can\'t fingerprint them as a set and this rule cannot self-heal '
+    + 'after a site redesign; narrow the anchor to one kind of element',
+  'too-many': ' — NOTE: more than 1000 matches, too many to fingerprint as a set, so this rule cannot self-heal after a site redesign; '
+    + 'narrow the anchor',
+  'remove-rule': ' — NOTE: a remove rule matching several elements gets no fingerprint, so it cannot self-heal after a site redesign; '
+    + 'use hide instead if you can',
+};
+
+export const CONFLICTED_NOTE =
+  ' — NOTE: this rule carries both an element and a set fingerprint (an older Shim added one), so it cannot self-heal; '
+  + 'recapture it by previewing and committing a changed anchor';
+
+function fingerprintNote(rule: Rule | undefined, matched: number, capture: StatusCapture | null): string {
+  if (!rule?.anchor || rule.anchor.iframe) return '';
+  if (fingerprintKind(rule.anchor) === 'conflicted') return CONFLICTED_NOTE;
+  // Carries one already (a committed rule replayed with its fingerprint).
+  if (hasManagedKeys(rule.anchor)) return '';
+  if (capture && capture.fingerprint !== 'none') return '';
+  if (capture?.note) return CAPTURE_NOTES[capture.note];
+  return matched > 1 ? UNWITNESSED_MULTI_MATCH_NOTE : '';
 }
 
 /** One `noMatch[]` entry: a rule whose anchor resolved nothing. */
@@ -137,7 +173,7 @@ export interface PreviewedRule {
 // witness refused what the selector found: whether that is a no-match or a
 // quarantine is the engine's call, so it waits for the engine's event.
 function reportsDomMatches(rule: Rule): boolean {
-  if (rule.anchor?.iframe || rule.anchor?.witness) return false;
+  if (rule.anchor?.iframe || hasManagedKeys(rule.anchor)) return false;
   return !(rule.mutations || []).some((m) =>
     m?.kind === 'mount-route' || m?.kind === 'redirect' || m?.kind === 'rewrite-response' || m?.kind === 'intercept');
 }

@@ -31,9 +31,8 @@
 // text or bytes). Reading and writing disk is the caller's job.
 
 import type { Spec, Rule, Anchor, Witness, SetWitness } from './types';
-import { ENGINE_MANAGED_ANCHOR_KEYS, withoutManagedKeys, deleteManagedKeys } from './managed-anchor';
+import { ENGINE_MANAGED_ANCHOR_KEYS, deleteManagedKeys, anchorDigest } from './managed-anchor';
 import { SET_WITNESS_VERSION } from './set-witness';
-import { sha256Hex } from './sha256';
 import { moduleForExpression, handlerModuleProblem } from './handler-source';
 import { lintSpec, canonicalModule, HANDLER_REF_FIELDS } from './spec-lint';
 
@@ -165,24 +164,9 @@ function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-/**
- * Deterministic JSON: object keys sorted, arrays kept in order, undefined
- * dropped. Used for digests and for "did this change" comparisons.
- */
-export function stableStringify(value: unknown): string {
-  if (value === undefined) return 'null';
-  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
-  const obj = value as Record<string, unknown>;
-  const keys = Object.keys(obj).filter((k) => obj[k] !== undefined).sort();
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
-}
-
-/** sha256 of the anchor without its engine-managed fields — what a stored witness is pinned to. */
-export function anchorDigest(anchor: Anchor | undefined): string {
-  if (!anchor) return sha256Hex('null');
-  return sha256Hex(stableStringify(withoutManagedKeys(anchor)));
-}
+// stableStringify / anchorDigest live with the managed-key list (the engine
+// digests an anchor too, and must not load this module); re-exported here.
+export { stableStringify, anchorDigest } from './managed-anchor';
 
 /** The handler names a rule's mutations reference (handler / transform / wrap). */
 export function referencedHandlerNames(rule: Rule): string[] {

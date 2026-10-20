@@ -239,19 +239,35 @@ function tOrganicSponsored(): void {
   check('…but its complete result (30) is not the anchor\'s (20): not stored', !identityEquivalent([...organic, ...sponsored].map(asEl), organic.map(asEl)));
 }
 
-// The engine's element-witness paths read `anchor.witness` only: a rule
-// carrying just a set witness resolves exactly as a witness-less one (every
-// match trusted) — what an older engine does with the unknown field.
-function tOldEngineIgnores(): void {
-  console.log('engine paths ignore setWitness:');
-  const items = [h('li', { class: 'r' }), h('li', { class: 'r' }), h('div', { class: 'r' })];
+// Resolution: a rule carrying a set witness (and no element witness) has
+// every match scored per member; non-members are dropped, a rung whose
+// matches all fail falls through as a rejection. An anchor carrying both
+// (conflicted) filters with the element witness. A rule with neither trusts
+// every match, as an older engine does with a set-witnessed rule.
+function tResolveVeto(): void {
+  console.log('resolve: the per-member veto:');
+  const ul = h('ul');
+  const members = under(ul, [h('li', { class: 'r', 'data-kind': 'row' }, [h('span')]), h('li', { class: 'r', 'data-kind': 'row' }, [h('span')])]);
+  const impostor = h('div', { class: 'r' }, [h('p')]);
+  const items = [...members, impostor];
   const root = { querySelectorAll: () => items } as unknown as Document;
-  const setWitness: SetWitness = { v: 1, tag: 'li', count: 2, nested: false };
+  const setWitness = build(members);
   const withSet: Anchor = { primary: { kind: 'css', value: '.r' }, setWitness };
   const bare: Anchor = { primary: { kind: 'css', value: '.r' } };
   const a = resolveAllWithSource(withSet, root);
+  check('members pass, the impostor is dropped', a.nodes.length === 2 && !a.nodes.includes(asEl(impostor)) && !a.witnessRejected, a.nodes.length);
   const b = resolveAllWithSource(bare, root);
-  check('same matches as a witness-less anchor (no filtering, no rejection)', a.nodes.length === 3 && b.nodes.length === 3 && !a.witnessRejected, a);
+  check('without a fingerprint every match is trusted', b.nodes.length === 3);
+  const onlyImpostors = { querySelectorAll: () => [impostor, h('div', { class: 'r' })] } as unknown as Document;
+  const c = resolveAllWithSource(withSet, onlyImpostors);
+  check('a rung whose matches all fail is a rejection (quarantine path)', c.nodes.length === 0 && c.witnessRejected === true, c);
+  const conflicted: Anchor = { ...withSet, witness: { v: 1, tag: 'div' } };
+  const d = resolveAllWithSource(conflicted, root);
+  check('conflicted: the element witness filters (only the <div> passes its tag gate)', d.nodes.length === 1 && d.nodes[0] === asEl(impostor), d.nodes.length);
+  const ownedChild = h('div', {}, ['note']); ownedChild.owned = true;
+  const decorated = h('li', { class: 'r', 'data-kind': 'row' }, [ownedChild]);
+  const e = resolveAllWithSource(withSet, { querySelectorAll: () => [decorated] } as unknown as Document, { isOwned: owned });
+  check('a member\'s shim-owned output never counts against it', e.nodes.length === 1, e);
 }
 
 console.log('\n=== set-witness harness ===\n');
@@ -264,6 +280,6 @@ tGoogleMixed();
 tDataIndexOnly();
 tLimits();
 tOrganicSponsored();
-tOldEngineIgnores();
+tResolveVeto();
 if (failures) { console.error(`\n${failures} check(s) failed`); process.exit(1); }
 console.log('\nall set-witness checks passed');

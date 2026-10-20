@@ -141,6 +141,7 @@ function runVerify(symbols: () => Promise<Record<string, string> | null>): Promi
     rs.state.set(el, { outputs: [], cleanups: [] });
     rs.matchedSource = 'primary';
     rs.resolvedEl = el;
+    rs.verifiedCount = 1;
     const r = makeReconciler(rule, spec, api, rs, new Set());
     r.start();
     setTimeout(() => { r.stop(); resolve(events.map((e) => e.kind)); }, 1500 + ENRICH_BUDGET_MS + 600);
