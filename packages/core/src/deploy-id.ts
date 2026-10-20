@@ -115,4 +115,58 @@ function deployIdForDocument(doc: Document): string | null {
   }
 }
 
-export { computeDeployId, deployIdForDocument, sameRegistrableDomain };
+// --- Per-page-kind baselines --------------------------------------------
+//
+// The deploy id above is route-stable on a code-split SPA (one content-hashed
+// entry on every route), but NOT on a multi-page site whose page types each
+// load their own same-site bundle. Found live on Google: the homepage loads
+// `/xjs/_/js/k=xjs.hd.…/m=<home modules>` and /search loads
+// `/xjs/_/js/k=xjs.s.…/m=<search modules>` — same deploy, different ids. With
+// one baseline per shim, every crossing between the two page types read as a
+// deploy: rules legitimately absent from the other page ran the deploy-only
+// recovery scans and emitted `rule-quarantined`, and the baseline flip-flopped
+// on every navigation.
+//
+// So a baseline is only ever compared against the id of the SAME KIND of page:
+// the host keeps one baseline per `pagePathKey`, and a page kind with no
+// baseline yet can't judge a deploy (a miss stays a transient no-match — the
+// first clean resolve there records one). On an SPA every key converges on the
+// same id, so nothing is lost there.
+//
+// `pagePathKey` is coarse on purpose — /projects/123/estimates and
+// /projects/456 share a key: lowercase, query/hash stripped, duplicate slashes
+// collapsed, id-ish segments starred, two segments kept. The page-memory
+// escalation gate keys on the same function, so "a page kind" means one thing
+// to both gates.
+function isIdishSegment(segment: string): boolean {
+  if (/^\d+$/.test(segment)) return true; // all digits
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(segment)) return true; // uuid
+  if (/^[0-9a-f]{16,}$/.test(segment)) return true; // long pure hex (tokens, content hashes)
+  if (segment.length > 24) return true; // slugs-with-ids, opaque blobs
+  return false;
+}
+
+// `pathname` is `unknown`: callers hand it values straight off IPC payloads.
+// Garbage in → '/'.
+function pagePathKey(pathname: unknown): string {
+  if (typeof pathname !== 'string' || pathname === '') return '/';
+  let p = must(pathname.split(/[?#]/)[0], 'pathname split').toLowerCase();
+  p = p.replace(/\/{2,}/g, '/');
+  const segments = p
+    .split('/')
+    .filter(Boolean)
+    .map((seg) => (isIdishSegment(seg) ? '*' : seg))
+    .slice(0, 2);
+  return '/' + segments.join('/');
+}
+
+// The baseline a document on `pathname` is gated against: the one recorded for
+// its page kind, or null (no baseline → the engine detects no deploy).
+function baselineForPath(baselines: Record<string, string> | null | undefined, pathname: unknown): string | null {
+  if (!baselines || typeof baselines !== 'object') return null;
+  const key = pagePathKey(pathname);
+  const hit = Object.prototype.hasOwnProperty.call(baselines, key) ? baselines[key] : undefined;
+  return typeof hit === 'string' && hit ? hit : null;
+}
+
+export { computeDeployId, deployIdForDocument, sameRegistrableDomain, pagePathKey, baselineForPath };
