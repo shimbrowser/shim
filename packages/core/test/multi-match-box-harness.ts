@@ -13,7 +13,7 @@
 
 import { makeStatusReporter } from '../src/rule-status';
 import { makeRuleState } from '../src/rule-state';
-import { describeRuleStatus } from '../src/preview-evidence';
+import { describeRuleStatus, UNWITNESSED_MULTI_MATCH_NOTE } from '../src/preview-evidence';
 import type { CoreApi } from '../src/api';
 import type { RuleMountEntry } from '../src/engine-internal';
 import type { Rule, Spec } from '../src/types';
@@ -62,17 +62,20 @@ check('a single match keeps its box', JSON.stringify(s.box) === JSON.stringify({
 check('a single match carries no visible count (event unchanged)', !('visible' in s), JSON.stringify(s));
 
 console.log('evidence wording');
+// `rule` has no witness, so every multi-match line also carries the
+// unwitnessed note; the wording under test is what comes before it.
+const NOTE = UNWITNESSED_MULTI_MATCH_NOTE;
 check('mixed visibility names the counts and the first visible box',
   describeRuleStatus(rule, { matched: 18, matchedVia: 'primary', visible: 3, box: { x: 10, y: 20, w: 300, h: 40 } })
-  === 'matched 18 element(s) via primary — 3 visible, 15 hidden; first visible match box 300×40px at (10, 20)',
+  === 'matched 18 element(s) via primary — 3 visible, 15 hidden; first visible match box 300×40px at (10, 20)' + NOTE,
   describeRuleStatus(rule, { matched: 18, matchedVia: 'primary', visible: 3, box: { x: 10, y: 20, w: 300, h: 40 } }));
 check('none visible says so instead of a 0×0 box',
   describeRuleStatus(rule, { matched: 18, matchedVia: 'primary', visible: 0, box: { x: 0, y: 0, w: 0, h: 0 } })
-  === 'matched 18 element(s) via primary — 0 visible, 18 hidden (every match measures 0×0 after apply)',
+  === 'matched 18 element(s) via primary — 0 visible, 18 hidden (every match measures 0×0 after apply)' + NOTE,
   describeRuleStatus(rule, { matched: 18, matchedVia: 'primary', visible: 0, box: { x: 0, y: 0, w: 0, h: 0 } }));
 check('an event without a visible count reads as before',
   describeRuleStatus(rule, { matched: 2, matchedVia: 'primary', box: { x: 1, y: 2, w: 3, h: 4 } })
-  === 'matched 2 element(s) via primary — first match box 3×4px at (1, 2)');
+  === 'matched 2 element(s) via primary — first match box 3×4px at (1, 2)' + NOTE);
 check('a single match reads as before',
   describeRuleStatus(rule, { matched: 1, matchedVia: 'primary', box: { x: 1, y: 2, w: 3, h: 4 } })
   === 'matched 1 element(s) via primary — anchor box 3×4px at (1, 2)');
