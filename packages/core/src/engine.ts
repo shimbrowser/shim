@@ -12,6 +12,7 @@ import { isShimOwnedElement } from './own-dom';
 import { applyRule } from './apply-rule';
 import { routeRule } from './route-rule';
 import { bridgeRule } from './bridge-rule';
+import { taggedApi } from './tagged-api';
 import type { RuntimeSpec, MutationRegistry, HandlerMap } from './engine-internal';
 import type { Spec, Rule } from './types';
 import type { CoreApi } from './api';
@@ -56,7 +57,10 @@ interface PatchControl {
   // the baseline it was committed under, `current` the page's deploy identity
   // getter. Without it the rule never sees a deploy (the control's own spec
   // carries no baseline). PageHost previews of a committed rule pass it.
-  applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string, ruleHandlers?: HandlerMap, deploy?: ExtraRuleDeploy): void;
+  // `applyId` tags this application: every event the rule reports carries it
+  // (tagged-api.ts, PageHost PreviewRule.applyId), stamped at the producer, so
+  // a late event from a replaced application stays attributable to it.
+  applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string, ruleHandlers?: HandlerMap, deploy?: ExtraRuleDeploy, applyId?: string): void;
   removeExtraRule(ruleKey: string): boolean;
   // Preview twin-conflict guard (live-caught: a committed replace-root rule and
   // its own update-rule PREVIEW each hide everything except their own mounted
@@ -179,7 +183,7 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
   const extraTeardowns = new Map<string, () => void>();
 
   return {
-    applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string, extraRuleHandlers?: HandlerMap, deploy?: ExtraRuleDeploy) {
+    applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string, extraRuleHandlers?: HandlerMap, deploy?: ExtraRuleDeploy, applyId?: string) {
       let effectiveSpec: RuntimeSpec = specIdOverride ? { ...spec, id: specIdOverride } : spec;
       if (deploy) {
         effectiveSpec = { ...effectiveSpec, bundleHash: deploy.bundleHash, __bundleHashFn: deploy.current };
@@ -197,7 +201,7 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
             extraTeardowns.delete(ruleKey);
           }
         }
-        const teardown = setupRule(rule, effectiveSpec, api, mutations, handlers, extraRuleHandlers);
+        const teardown = setupRule(rule, effectiveSpec, taggedApi(api, applyId), mutations, handlers, extraRuleHandlers);
         if (ruleKey) extraTeardowns.set(ruleKey, teardown);
       });
     },

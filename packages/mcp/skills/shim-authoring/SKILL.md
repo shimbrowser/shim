@@ -185,6 +185,7 @@ Every `shim_preview` answers `{ revision, applied, evidence }`. On an applied pr
 | `notes[]` | outcomes Shim reports about consent and capabilities |
 | `console` | errors and warnings the page logged since the previous preview |
 | `aiUnavailable` | a handler called `api.ai` and was refused (section 7) |
+| `newDocument` | the tab loaded a new page since your last call, and what Shim did about it (below) |
 
 A refused preview answers `applied: false` with `rejected` or `error` (and `problems` for a
 malformed folder): nothing was applied. Fix and preview again.
@@ -263,6 +264,14 @@ All of them act on the session's tab.
   instead of a screenshot that could show an older frame. The other page tools and the
   preview's evidence still read the live page and carry a `tabWarning`. Ask the user to
   select the tab before you judge anything visual.
+- **A new page under you.** When the tab loads a new document on the site (a handler's
+  redirect, a link the user clicked), your previews are put back before your next preview
+  or page tool. In attach mode that result carries `newDocument`: how many previews were re-applied,
+  any that failed, and any committed rule you removed that is back on the page until you
+  commit the removal (only additions and changes are re-applied). A global shim's previews
+  are re-applied only on the host the session started on. A rule that first matches only
+  after such a re-apply commits without a witness, and the commit's `notes` say so: preview
+  that rule again while it matches one element to give it one.
 - **`verify_across_pages { routes? }`** — replays the working shim's rules against the
   *other* page-types the user has already visited on this site (feed, search, profile, …),
   offscreen, and reports per route and per rule whether each matched. A checklist over
