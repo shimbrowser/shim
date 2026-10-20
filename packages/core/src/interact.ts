@@ -1,30 +1,36 @@
-// src/main/compositions/authoring/interact.ts — interact_page: the build
-// worker drives its own preview the way a user would (click, type, pick an
-// option, press a key), so a requirement about behaviour has evidence. Pure
-// over its deps; the Electron half (interact-electron.ts) supplies trusted
-// CDP input and the isolated-world reads.
+// interact_page's batch runner: drive a page the way a user would (click,
+// type, pick an option, press a key) so a requirement about behaviour has
+// evidence. Pure over its deps; a host supplies trusted input and the
+// isolated-world reads (the page-side scripts below are what it runs).
+//
+// One runner for every session kind, behind a **document policy**: the
+// session decides which documents may take input and how a refusal reads
+// (a composition build requires a document its turn loaded; another session
+// supplies its own identity). Everything else is shared.
 //
 // Invariants:
-//   - Input only ever reaches a turn-bound document of the bound preview tab
-//     (turn-loads.ts): each action pins the load it located its target in,
-//     and re-checks the tab still shows that load, and that it is still an
-//     open turn-bound one, right before dispatching. A navigation, a stop, a
-//     page-away preview or a non-turn document ends the batch; the rest is
-//     reported as not run.
+//   - Input only ever reaches a document the policy accepts: each action
+//     pins the document it located its target in, and re-checks the page
+//     still shows that document, and that the policy still accepts it,
+//     right before dispatching. A navigation, a stop, a page-away guard
+//     answer or a refused document ends the batch; the rest is reported as
+//     not run.
 //   - A selector must match exactly one visible, enabled, uncovered element —
 //     nothing is clicked by guess.
-//   - The report is facts the main process observed (DOM changes, console
-//     errors, calls the page made, links it tried to open), never the page's
-//     own account.
+//   - The report is facts the host observed (DOM changes, console errors,
+//     calls the page made, links it tried to open), never the page's own
+//     account.
 
 export const MAX_ACTIONS = 10;
 export const MAX_TEXT = 2000;
 export const DEFAULT_SETTLE_MS = 300;
 export const MAX_SETTLE_MS = 3000;
 
-// Keys `press` accepts, with the CDP key-event fields each needs.
-// `key` is the DOM KeyboardEvent.key value when it differs from the action
-// name (a real spacebar sends " ", not "Space").
+/**
+ * Keys `press` accepts, with the CDP key-event fields each needs. `key` is
+ * the DOM KeyboardEvent.key value when it differs from the action name (a
+ * real spacebar sends " ", not "Space").
+ */
 export const KEYS: Readonly<Record<string, { code: string; keyCode: number; text?: string; key?: string }>> = {
   Enter: { code: 'Enter', keyCode: 13, text: '\r' },
   Escape: { code: 'Escape', keyCode: 27 },
@@ -44,45 +50,67 @@ export type InteractAction =
   | { select: string; value: string }
   | { press: string };
 
-// What locating a selector found (the isolated world's answer).
+/** What locating a selector found (the isolated world's answer). */
 export type LocateResult =
   | { error: string }
   | { count: number; x?: number; y?: number; visible?: boolean; covered?: string | null; disabled?: boolean; tag?: string; editable?: boolean };
 
-// One CDP command (Input.dispatchMouseEvent / dispatchKeyEvent / insertText).
+/** One CDP input command (Input.dispatchMouseEvent / dispatchKeyEvent / insertText). */
 export interface CdpCommand { method: string; params: Record<string, unknown> }
 
+/** A document's identity as the host reports it; compared with `===`. */
+export type InteractDocument = number | string;
+
+/**
+ * Which documents may take input, and how the refusals read. A composition
+ * build accepts only documents its turn loaded.
+ */
+export interface InteractDocumentPolicy {
+  /** True when `doc` may take input. */
+  accepts(doc: InteractDocument | null): boolean;
+  /** The answer when the page's document is refused before any action. */
+  refused: { error: string; detail: string };
+  /** A step's error when the document stops being accepted mid-batch. */
+  lost: string;
+  /** A step's error when the batch is aborted. */
+  stopped: string;
+  /** `interaction-unavailable`'s detail. */
+  unavailable: string;
+}
+
 export interface InteractDeps {
-  // A page-away (or missing tab) error, or null when the preview is on the composition.
+  /** A page-away (or missing page) error, or null when the page may be used. */
   guard(): { error: string; detail?: string } | null;
-  currentLoad(): number | null;
-  // True when `loadId` is an open turn-bound load of this turn.
-  isTurnDocument(loadId: number | null): boolean;
+  currentDocument(): InteractDocument | null;
+  policy: InteractDocumentPolicy;
   aborted(): boolean;
   locate(selector: string): Promise<LocateResult>;
-  // Sets a <select>'s value and fires input + change (a native popup can't
-  // be driven by synthetic mouse input).
+  /**
+   * Sets a <select>'s value and fires input + change (a native popup can't
+   * be driven by synthetic mouse input).
+   */
   selectValue(selector: string, value: string): Promise<{ ok: true } | { error: string }>;
-  // Sends trusted input, calling `stillPinned` before EACH command and
-  // stopping (false) the moment it answers false — a mousedown or focus
-  // handler can navigate mid-action. Throws when the input channel is
-  // unavailable.
+  /**
+   * Sends trusted input, calling `stillPinned` before EACH command and
+   * stopping (false) the moment it answers false — a mousedown or focus
+   * handler can navigate mid-action. Throws when the input channel is
+   * unavailable.
+   */
   dispatch(commands: CdpCommand[], stillPinned: () => boolean): Promise<boolean>;
   wait(ms: number): Promise<void>;
-  // DOM change counting in the current document, from the batch's start.
+  /** DOM change counting in the current document, from the batch's start. */
   startObserving(): Promise<void>;
   readObserved(): Promise<number | null>;
   consoleErrorsSince(ts: number): string[];
-  // The call trace's length now (a cursor), and the calls recorded after one.
+  /** The call trace's length now (a cursor), and the calls recorded after one. */
   callCursor(): number;
   callsSince(cursor: number): string[];
   linkCursor(): number;
   linksSince(cursor: number): string[];
-  // Request-burst / rate-limit warnings that hold right now
-  // (compositions/burst-watch.ts). Absent: none are reported.
+  /** Request-burst / rate-limit warnings that hold right now. Absent: none are reported. */
   requestWarnings?(): string[];
   now(): number;
-  // Select-all is Meta+A on macOS, Ctrl+A elsewhere.
+  /** Select-all is Meta+A on macOS, Ctrl+A elsewhere. */
   mac: boolean;
 }
 
@@ -91,7 +119,7 @@ export interface InteractStepReport {
   ok: boolean;
   error?: string;
   navigated?: true;
-  // A <select> is set through the DOM, not by trusted input.
+  /** A <select> is set through the DOM, not by trusted input. */
   trusted?: false;
 }
 
@@ -102,22 +130,9 @@ export interface InteractReport {
   consoleErrors: string[];
   calls: string[];
   linksNotOpened: string[];
-  // Too many requests to one site, or answers that look like a rate limit.
+  /** Too many requests to one site, or answers that look like a rate limit. */
   requestWarnings?: string[];
   note?: string;
-}
-
-// The calls a batch reports: trace entries after `cursor` made by one of the
-// turn's own documents (the trace is composition-wide; another tab of the
-// composition may be calling meanwhile).
-export function turnCallsSince(
-  entries: ReadonlyArray<{ loadId?: number; method: string; host: string; pathTemplate: string; operationName: string | null; status: number; ok: boolean }>,
-  cursor: number,
-  isTurnLoad: (loadId: number) => boolean,
-): string[] {
-  return entries.slice(cursor)
-    .filter((e) => e.loadId !== undefined && isTurnLoad(e.loadId))
-    .map((e) => `${e.method} ${e.host}${e.pathTemplate}${e.operationName ? ` (${e.operationName})` : ''} → ${e.status}${e.ok ? '' : ' (failed)'}`);
 }
 
 export function parseInteractInput(input: unknown): { actions: InteractAction[]; settleMs: number } | { error: string } {
@@ -161,7 +176,7 @@ export function describeAction(a: InteractAction): string {
   return `press ${a.press}`;
 }
 
-// The activity line for a batch ("clicked .note-icon, typed into textarea").
+/** The activity line for a batch ("clicked .note-icon, typed into textarea"). */
 export function interactActivity(input: unknown): string | null {
   const parsed = parseInteractInput(input);
   if ('error' in parsed) return null;
@@ -222,11 +237,10 @@ function targetProblem(loc: LocateResult, selector: string, typing = false): str
 export async function runInteract(input: unknown, deps: InteractDeps): Promise<InteractReport | { error: string; detail?: string }> {
   const parsed = parseInteractInput(input);
   if ('error' in parsed) return parsed;
+  const { policy } = deps;
   const away = deps.guard();
   if (away) return away;
-  if (!deps.isTurnDocument(deps.currentLoad())) {
-    return { error: 'not-a-turn-document', detail: 'the preview is not showing a document loaded during this build — reload_page first' };
-  }
+  if (!policy.accepts(deps.currentDocument())) return { ...policy.refused };
   const startedAt = deps.now();
   const linkCursor = deps.linkCursor();
   const callCursor = deps.callCursor();
@@ -238,14 +252,14 @@ export async function runInteract(input: unknown, deps: InteractDeps): Promise<I
     if (stopped) break;
     const label = describeAction(action);
     const fail = (error: string): void => { steps.push({ action: label, ok: false, error }); stopped = true; };
-    if (deps.aborted()) { fail('the turn was stopped'); break; }
+    if (deps.aborted()) { fail(policy.stopped); break; }
     const away2 = deps.guard();
     if (away2) { fail(away2.detail ?? away2.error); break; }
-    const pinned = deps.currentLoad();
-    if (!deps.isTurnDocument(pinned)) { fail('the preview is no longer showing this build\'s document'); break; }
+    const pinned = deps.currentDocument();
+    if (!policy.accepts(pinned)) { fail(policy.lost); break; }
 
-    // Checked immediately before input goes out: same document, still ours.
-    const stillPinned = (): boolean => !deps.aborted() && deps.currentLoad() === pinned && deps.isTurnDocument(pinned);
+    // Checked immediately before input goes out: same document, still accepted.
+    const stillPinned = (): boolean => !deps.aborted() && deps.currentDocument() === pinned && policy.accepts(pinned);
     try {
       if ('select' in action) {
         const loc = await deps.locate(action.select);
@@ -274,10 +288,10 @@ export async function runInteract(input: unknown, deps: InteractDeps): Promise<I
         steps.push({ action: label, ok: true });
       }
     } catch {
-      return { error: 'interaction-unavailable', detail: 'input could not be sent to the preview' };
+      return { error: 'interaction-unavailable', detail: policy.unavailable };
     }
     await deps.wait(parsed.settleMs);
-    if (deps.currentLoad() !== pinned) {
+    if (deps.currentDocument() !== pinned) {
       const last = steps[steps.length - 1];
       if (last) last.navigated = true;
       stopped = true;
@@ -297,3 +311,75 @@ export async function runInteract(input: unknown, deps: InteractDeps): Promise<I
   if (report.steps.some((s) => s.navigated)) report.note = 'the page navigated; later actions did not run — the DOM change count restarted with the new document';
   return report;
 }
+
+// --- page-side scripts --------------------------------------------------------
+//
+// What a host runs in its isolated world (the DOM shared, the page's own
+// globals unreachable) to serve `locate`, `selectValue` and DOM change
+// counting. Each is a self-contained expression.
+
+/**
+ * Finds `selector`'s one element, scrolls it to the centre and measures its
+ * centre in CSS pixels (what Input.dispatchMouseEvent takes), and whether
+ * the hit test there lands on anything but the element or one of its own
+ * descendants — an ancestor counts as covering it (the element doesn't take
+ * pointer events, so a click there would go to that ancestor).
+ */
+export function locateScript(selector: string): string {
+  return `(() => {
+    let els;
+    try { els = document.querySelectorAll(${JSON.stringify(selector)}); } catch (e) { return { error: 'invalid selector: ' + ${JSON.stringify(selector)} }; }
+    if (els.length !== 1) return { count: els.length };
+    const el = els[0];
+    // 'instant': a smooth-scrolling page would still be mid-scroll when the
+    // box and hit test below are measured.
+    el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
+    const r = el.getBoundingClientRect();
+    const cs = getComputedStyle(el);
+    const visible = r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none';
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    const top = visible ? document.elementFromPoint(x, y) : null;
+    const covered = visible && (!top || !(top === el || el.contains(top)))
+      ? (top ? top.tagName.toLowerCase() + (top.id ? '#' + top.id : '') : 'nothing hit-testable') : null;
+    // :disabled is the effective state — it covers a <fieldset disabled>
+    // ancestor, which leaves the control's own .disabled false.
+    const disabled = el.matches(':disabled');
+    const TEXT_TYPES = ['', 'text', 'search', 'email', 'url', 'tel', 'password', 'number'];
+    const editable = el.isContentEditable === true
+      || (el.tagName === 'TEXTAREA' && !el.readOnly && !disabled)
+      || (el.tagName === 'INPUT' && !el.readOnly && !disabled && TEXT_TYPES.includes((el.getAttribute('type') || '').toLowerCase()));
+    return { count: 1, x, y, visible, covered, disabled, tag: el.tagName.toLowerCase(), editable };
+  })()`;
+}
+
+/** Sets a <select>'s value to the option matching `value` (by value or text) and fires input + change. */
+export function selectScript(selector: string, value: string): string {
+  return `(() => {
+    let els;
+    try { els = document.querySelectorAll(${JSON.stringify(selector)}); } catch (e) { return { error: 'invalid selector' }; }
+    if (els.length !== 1) return { error: els.length + ' elements match ' + ${JSON.stringify(selector)} };
+    const el = els[0];
+    if (el.tagName !== 'SELECT') return { error: ${JSON.stringify(selector)} + ' is not a <select> — use click' };
+    const want = ${JSON.stringify(value)};
+    const opt = Array.from(el.options).find((o) => o.value === want || o.text.trim() === want);
+    if (!opt) return { error: 'no option ' + JSON.stringify(want) + ' in ' + ${JSON.stringify(selector)} };
+    if (el.matches(':disabled') || opt.matches(':disabled')) {
+      return { error: 'option ' + JSON.stringify(want) + ' is disabled — a user could not pick it' };
+    }
+    el.value = opt.value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return { ok: true };
+  })()`;
+}
+
+/** Starts (or restarts) counting DOM mutation records in the current document. */
+export const OBSERVE_START_SCRIPT = `(() => {
+  if (window.__shimInteract) window.__shimInteract.obs.disconnect();
+  const state = { n: 0, obs: new MutationObserver((records) => { state.n += records.length; }) };
+  state.obs.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  window.__shimInteract = state;
+  return true;
+})()`;
+/** The mutation record count since OBSERVE_START_SCRIPT, or null when it never ran in this document. */
+export const OBSERVE_READ_SCRIPT = '(() => (window.__shimInteract ? window.__shimInteract.n : null))()';
