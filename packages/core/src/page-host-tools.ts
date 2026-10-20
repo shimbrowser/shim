@@ -14,6 +14,8 @@ import { computeCropRect, CROP_PAD } from './view-crop';
 import type { CropMeasurement, CropRect } from './view-crop';
 import type { PageHost, PageWorld, QueryPageResult, InspectElementResult, PageToolError, ScreenshotOptions, ScreenshotResult } from './page-host';
 import { errMessage } from './error';
+import { syntaxProbe } from './syntax-probe';
+import type { CompileProbe } from './rewrite-response';
 
 export const QUERY_TIMEOUT_MS = 8000;
 export const INSPECT_TIMEOUT_MS = 5000;
@@ -448,11 +450,15 @@ export function expressionProblem(expression: unknown): string | null {
 
 // evaluate_in_page takes either a single expression (`document.title`) or a
 // statement body that returns its value (`const n = 1; return n`). Which one
-// is decided by compiling, never by running: the probe puts the input as an
-// expression inside a function that is never called, so it resolves exactly
-// when that form compiles and nothing of the input runs. Every valid
-// expression is also a valid statement body (one whose value is dropped), so
-// the expression form is tried first; anything else runs as a body.
+// is decided by compiling, never by running, and HOST-SIDE: the host's own
+// parser (syntaxProbe) reads the input as each form without running any of
+// it. Compiling in the page instead left every statement body's failed
+// expression probe in the page console as `Uncaught SyntaxError`, which the
+// session then reported as the site's error. Every valid expression is also a
+// valid statement body (one whose value is dropped), so the expression form is
+// tried first; input that compiles as neither is answered here, never sent.
+// Only a host that can't parse (no eval) falls back to the in-page probe: the
+// input as an expression inside a function that is never called.
 const PROBE_OK = 'shim-evaluate-expression';
 
 /** The script that resolves when `expression` compiles as an expression; it never runs it. */
@@ -494,12 +500,26 @@ ${expression}
  * serializes the value (or the throw) in the page, so every host returns the
  * same JSON. The result is capped at MAX_RESULT characters.
  */
-export async function evaluateOnHost(host: PageHost, expression: string, timeoutMs: number, world: PageWorld): Promise<EvaluateResult> {
+/** Which form `expression` compiles as, read by the host's parser; null when that parser is unavailable. */
+export function evaluateForm(expression: string, probe: CompileProbe = syntaxProbe): { form: 'expression' | 'body' } | { error: string } | null {
+  const asExpression = probe(`(async () => (${expression}\n));`);
+  if (asExpression.ok) return { form: 'expression' };
+  if (/^syntax check unavailable/.test(asExpression.error ?? '')) return null;
+  const asBody = probe(`(async () => {\n${expression}\n});`);
+  if (asBody.ok) return { form: 'body' };
+  return { error: `SyntaxError: ${asBody.error ?? 'the input compiles as neither an expression nor a statement body'}` };
+}
+
+export async function evaluateOnHost(host: PageHost, expression: string, timeoutMs: number, world: PageWorld, probe: CompileProbe = syntaxProbe): Promise<EvaluateResult> {
+  const decided = evaluateForm(expression, probe);
+  if (decided && 'error' in decided) return { error: decided.error };
   let settled = false;
   const run = async (): Promise<string> => {
-    // A probe that fails to compile rejects; then the input runs as a body,
-    // and if it compiles as neither, the body's compile error is the answer.
-    const isExpression = await host.evaluate(expressionProbeSource(expression), world).then(() => true, () => false);
+    // Decided host-side when the host can parse; otherwise the in-page probe
+    // (a failure to compile rejects, and the input then runs as a body).
+    const isExpression = decided
+      ? decided.form === 'expression'
+      : await host.evaluate(expressionProbeSource(expression), world).then(() => true, () => false);
     // A probe that outlived the timeout must not start the run after the
     // caller was told it timed out.
     if (settled) throw new Error('evaluateInPage timeout');

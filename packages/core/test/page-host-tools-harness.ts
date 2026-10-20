@@ -185,9 +185,9 @@ async function testEvaluate(): Promise<void> {
   });
   const ok = await evaluateOnHost(host, '1 + 1', 100, 'engine');
   check('the result is the page-serialized JSON', 'result' in ok && ok.result === '{"n":2}', JSON.stringify(ok));
-  check('the expression is probed, then runs awaited inside the wrapper, both in the given world',
-    host.evals.length === 2 && host.evals.every((e) => e.world === 'engine')
-    && (host.evals[0]?.code ?? '').includes('__shimNeverCalled') && (host.evals[1]?.code ?? '').includes('await (1 + 1'),
+  check('the form is decided host-side: one evaluate, the wrapper, in the given world (no in-page probe)',
+    host.evals.length === 1 && host.evals[0]?.world === 'engine'
+    && !(host.evals[0]?.code ?? '').includes('__shimNeverCalled') && (host.evals[0]?.code ?? '').includes('await (1 + 1'),
     JSON.stringify(host.evals));
   const big = await evaluateOnHost(host, 'BIG', 100, 'main');
   check('a long result is truncated', 'result' in big && big.result.length === MAX_RESULT + '\n... (truncated)'.length);
@@ -220,6 +220,23 @@ async function testEvaluate(): Promise<void> {
   check('a body\'s throw is an error value', 'error' in bodyThrow && bodyThrow.error === 'conf', JSON.stringify(bodyThrow));
   const broken = await evaluateOnHost(real, 'const = ;', 500, 'main');
   check('input that compiles as neither is an error, not a throw', 'error' in broken && /SyntaxError|Unexpected/.test(broken.error), JSON.stringify(broken));
+
+  // Nothing that fails to compile ever reaches the page: an in-page compile
+  // failure lands in the page console as `Uncaught SyntaxError`, which the
+  // session reports as the site's error (the in-page expression probe did exactly that).
+  const compiles = (code: string): boolean => { try { new Function(code); return true; } catch { return false; } };
+  const watched = scriptedHost((code) => (0, eval)(code) as unknown);
+  for (const input of ['const x = 1; return x + 1', 'return 5', 'document.title', 'const = ;', 'let a = await Promise.resolve(1);\nreturn a']) {
+    watched.evals.length = 0;
+    await evaluateOnHost(watched, input, 500, 'main');
+    check(`${JSON.stringify(input)} sends the page only code that compiles`, watched.evals.every((e) => compiles(`return async () => { return ${e.code}\n}`)),
+      JSON.stringify(watched.evals.map((e) => e.code.slice(0, 80))));
+  }
+  check('input that compiles as neither never reaches the page', await (async () => {
+    watched.evals.length = 0;
+    await evaluateOnHost(watched, 'const = ;', 500, 'main');
+    return watched.evals.length === 0;
+  })());
   ran = 0;
   await evaluateOnHost(real, '__evalRan()', 500, 'main');
   check('the probe never runs the input: an expression runs once', ran === 1, String(ran));
@@ -235,7 +252,9 @@ async function testEvaluate(): Promise<void> {
     late++;
     return JSON.stringify({ result: 1 });
   });
-  const slow = await evaluateOnHost(slowProbe, '1', 10, 'main');
+  // (Only a host whose parser is unavailable probes in the page.)
+  const noParser = (): { ok: false; error: string } => ({ ok: false, error: 'syntax check unavailable in this host (no eval)' });
+  const slow = await evaluateOnHost(slowProbe, '1', 10, 'main', noParser);
   await new Promise((r) => setTimeout(r, 80));
   check('a run never starts after its timeout', 'error' in slow && slow.error === 'evaluateInPage timeout' && late === 0, `${JSON.stringify(slow)} late=${late}`);
 }
