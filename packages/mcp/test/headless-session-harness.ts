@@ -1175,6 +1175,23 @@ async function main(): Promise<void> {
     await req(r, 'DELETE', `/sessions/${rid}`);
   }
 
+  console.log('an on-site reload keeps the current URL, hash and all');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'reload-in-place.shim');
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile, create: { name: 'InPlace' } });
+    const pid = String(opened.sessionId);
+    const host = r.hosts[0] as FakeHost;
+    // An in-page state change (a SERP's `#sv=…`) moves the URL without leaving the site.
+    const moved = `${url}#sv=CAESJA`;
+    host.setUrl(moved);
+    const res = await req(r, 'POST', `/sessions/${pid}/call`, { name: 'reload_page', input: {} });
+    const out = typeof res.result === 'string' ? JSON.parse(res.result) as Record<string, unknown> : {};
+    check('reload_page on the site reloads in place (no destination), as its description says', out.ok === true
+      && host.reloads.length === 1 && host.reloads[0] === undefined && host.url() === moved, { out, reloads: host.reloads });
+    await req(r, 'DELETE', `/sessions/${pid}`);
+  }
+
   console.log('a reload that lands off the site re-applies nothing');
   {
     const r = rig();

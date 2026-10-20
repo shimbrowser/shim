@@ -608,11 +608,14 @@ const SESSION_RELOAD_PAGE: ToolDefinition = {
     're-establish the previewed work on the fresh page. Two uses: (1) ' +
     'RECOVERY after a destructive mistake (a handler moved or removed live ' +
     'site DOM and teardown broke the page; a runaway script in a ' +
-    'composition). (2) RETURN after a `page-away` error — the tab was ' +
-    'navigated off the session\'s site; this brings it back to the page the ' +
-    'session started on. It never navigates anywhere else. Re-verify with ' +
-    'the usual tools afterwards. Limited to a few uses per session — it is ' +
-    'a recovery tool, not part of the normal preview loop.',
+    'composition): while the tab is still on the session\'s site it reloads ' +
+    'the CURRENT URL in place — query, hash and all, so the page you were ' +
+    'checking comes back, not the one the session opened on. (2) RETURN ' +
+    'after a `page-away` error — the tab was navigated off the session\'s ' +
+    'site; only then does it load the page the session started on. It ' +
+    'never navigates anywhere else. Re-verify with the usual tools ' +
+    'afterwards. Limited to a few uses per session — it is a recovery tool, ' +
+    'not part of the normal preview loop.',
   input_schema: {
     type: 'object',
     properties: {},

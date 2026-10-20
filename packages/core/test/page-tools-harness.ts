@@ -86,6 +86,15 @@ check('the session view_page makes visual verification a duty',
 check('the session interact_page says it is composition-only', /^Composition sessions only/.test(SESSION_PAGE_TOOLS.interact_page.description));
 check('the session interact_page never promises api.ai runs', !/api\.ai runs/.test(SESSION_PAGE_TOOLS.interact_page.description));
 check('the session evaluate warns that site actions are real', /not undone/.test(SESSION_PAGE_TOOLS.evaluate_in_page.description));
+// Both hosts reload an on-site page in place (its current URL, hash and all)
+// and go back to the start URL only after a page-away; the description must
+// say so, or an agent reads "returns to where the session started" into a
+// plain recovery reload.
+check('the session reload_page says an on-site reload keeps the current URL',
+  /CURRENT URL in place/.test(SESSION_PAGE_TOOLS.reload_page.description)
+  && /hash/.test(SESSION_PAGE_TOOLS.reload_page.description)
+  && /only then does it load the page the session started on/.test(SESSION_PAGE_TOOLS.reload_page.description),
+  SESSION_PAGE_TOOLS.reload_page.description);
 
 if (failures) {
   console.error(`\n${failures} failure(s)`);
