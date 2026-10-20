@@ -242,7 +242,8 @@ All of them act on the session's tab.
   change the page — that is what the folder is for — and remember it runs as the user.
   Capped at 5000 characters in, 8000 out, 3 seconds.
 - **`view_page { selector? }`** — a screenshot, as an image. With `selector`, a crop of that
-  element plus margin at native resolution (the verification shot); without, the visible
+  element plus margin at native resolution (the verification shot; an element below the
+  fold is scrolled into view for the shot and the scroll put back); without, the visible
   viewport downscaled to 1280px wide (a last-resort visual lookup — for icon-only buttons,
   branded wordmarks, "the one that looks like X"). After a lookup, write the anchor from a
   structural tool, never from pixel positions.

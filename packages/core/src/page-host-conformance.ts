@@ -57,6 +57,11 @@ body { font: 16px/1.4 sans-serif; margin: 16px; }
 #list, .rows { display: flex; gap: 8px; list-style: none; padding: 0; }
 #lead { color: rgb(0, 0, 0); }
 .box { padding: 8px; border: 1px solid #999; margin: 4px 0; min-height: 20px; }
+#fold-pane { height: 120px; overflow: auto; }
+#fold-pane-spacer { height: 400px; }
+#fold-spacer { height: calc(100vh - 200px); }
+#fold-target { height: 200px; box-sizing: border-box; background: rgb(200, 30, 160); }
+#fold-tail { height: 1500px; }
 `;
 
 // The page's own app: a client-rendered #app (re-render and SPA routing are
@@ -135,6 +140,19 @@ ${deploy === 1
 `;
 }
 
+// The crop page: #fold-target starts a few px above the bottom of the
+// viewport (the pane above it is 120px plus margins, the spacer fills the
+// rest), so the viewport cuts most of it off; #fold-far starts a viewport
+// and a half below; #fold-pane-target is below the fold of its own
+// scrolling pane.
+const FOLD_BODY = `
+<div id="fold-pane"><div id="fold-pane-spacer"></div><div id="fold-pane-target" class="box">in the pane</div></div>
+<div id="fold-spacer"></div>
+<div id="fold-target" class="box">below the fold</div>
+<div id="fold-tail"></div>
+<div id="fold-far" class="box">far below</div>
+`;
+
 const STRICT_BODY = `
 <style>#strict-ad { color: rgb(1, 2, 3); }</style>
 <div id="strict-ad" class="box">strict ad</div>
@@ -157,6 +175,7 @@ export function conformanceFixture(pathname: string, state: FixtureState): Fixtu
     case '/app':
     case '/app/other': return html(page('app', '<div id="app"></div>', state.deploy));
     case '/deploy': return html(page('deploy', deployBody(state.deploy), state.deploy));
+    case '/fold': return html(page('fold', FOLD_BODY, state.deploy));
     case '/strict': return html(page('strict', STRICT_BODY, state.deploy), STRICT_CSP);
     case '/assets/site.css': return asset('text/css; charset=utf-8', SITE_CSS);
     case '/assets/app.v1.js':
@@ -876,6 +895,119 @@ const pageToolsCase: ConformanceCase = {
   },
 };
 
+const cropScrollCase: ConformanceCase = {
+  id: 'view-crop-scroll',
+  title: 'a view_page crop of an element the viewport cuts off captures all of it and leaves the scroll where it was',
+  covers: ['page-tools'],
+  async run(kit) {
+    if (!(await kit.load('/fold'))) return;
+    const dpr = await kit.read('window.devicePixelRatio');
+    const ratio = typeof dpr === 'number' && dpr > 0 ? dpr : 1;
+    const geometry = await kit.read(`(() => {
+      const r = document.querySelector('#fold-target').getBoundingClientRect();
+      return { top: r.top, bottom: r.bottom, vh: window.innerHeight };
+    })()`);
+    kit.check('the fixture: the viewport cuts #fold-target off', isRecord(geometry) && typeof geometry.top === 'number'
+      && typeof geometry.vh === 'number' && typeof geometry.bottom === 'number' && geometry.top < geometry.vh && geometry.bottom > geometry.vh, geometry);
+    const scrollState = (): Promise<unknown> => kit.read(`[window.scrollX, window.scrollY, document.querySelector('#fold-pane').scrollTop].join(',')`);
+    await kit.read(`(window.scrollTo({ left: 0, top: 7, behavior: 'instant' }), document.querySelector('#fold-pane').scrollTop = 5, 0)`);
+    const before = await scrollState();
+
+    // A host that, at every capture, asks the page which of the fold
+    // targets the clip shows: its center inside the clip, and the topmost
+    // element there (so not hidden under its pane's fold).
+    const targets = ['#fold-target', '#fold-far', '#fold-pane-target'];
+    const exposed: string[][] = [];
+    let captures = 0;
+    const watched: PageHost = Object.assign(Object.create(kit.host) as PageHost, {
+      async screenshot(opts?: Parameters<PageHost['screenshot']>[0]) {
+        captures++;
+        const clip = opts?.clip;
+        if (clip) {
+          const seen = await kit.read(`${JSON.stringify(targets)}.filter((sel) => {
+            const el = document.querySelector(sel);
+            const r = el.getBoundingClientRect();
+            const cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+            const c = ${JSON.stringify(clip)};
+            if (cx < c.x || cx > c.x + c.width || cy < c.y || cy > c.y + c.height) return false;
+            const hit = document.elementFromPoint(cx, cy);
+            return !!hit && el.contains(hit);
+          })`);
+          exposed.push(Array.isArray(seen) ? seen.filter((x): x is string => typeof x === 'string') : []);
+        }
+        return kit.host.screenshot(opts);
+      },
+    });
+    const shown = (sel: string): boolean => exposed.some((list) => list.includes(sel));
+
+    // The crop holds the whole element: its height in CSS px is at least the
+    // element's (the margin is the rest).
+    const fullyCaptured = (shot: { error?: string; height?: number; elementBox?: { w: number; h: number } }): boolean =>
+      shot.error === undefined && typeof shot.height === 'number' && isRecord(shot.elementBox)
+      && shot.elementBox.h > 0 && shot.height / ratio >= shot.elementBox.h;
+    const strip = (shot: { dataBase64?: string }): unknown => ({ ...shot, dataBase64: shot.dataBase64?.length });
+
+    const partly = await viewPageOnHost(watched, { selector: '#fold-target' }, 'main');
+    kit.check('view_page crop of an element partly below the fold: all of it, in view', fullyCaptured(partly) && shown('#fold-target'), { shot: strip(partly), exposed });
+    kit.check('…and the page\'s scroll is put back', (await scrollState()) === before, { before, after: await scrollState() });
+
+    exposed.length = 0;
+    const far = await viewPageOnHost(watched, { selector: '#fold-far' }, 'engine');
+    kit.check('view_page crop of an element scrolled out entirely: a capture of it, not an error', fullyCaptured(far) && shown('#fold-far'), { shot: strip(far), exposed });
+    kit.check('…and the page\'s scroll is put back', (await scrollState()) === before, { before, after: await scrollState() });
+
+    exposed.length = 0;
+    const pane = await viewPageOnHost(watched, { selector: '#fold-pane-target' }, 'main');
+    kit.check('view_page crop of an element below its pane\'s fold: the pane is scrolled to show it', fullyCaptured(pane) && shown('#fold-pane-target'), { shot: strip(pane), exposed });
+    kit.check('…and the pane\'s scroll is put back too', (await scrollState()) === before, { before, after: await scrollState() });
+
+    const visible = await viewPageOnHost(kit.host, { selector: '#fold-pane' }, 'main');
+    kit.check('view_page crop of a fully visible element still works', visible.error === undefined && visible.croppedTo === '#fold-pane', strip(visible));
+    kit.check('…and never scrolls', (await scrollState()) === before, { before, after: await scrollState() });
+
+    // A holder that died mid-crop left an expired lease with the scroll it
+    // saved: the next view_page puts that scroll back before taking over.
+    await kit.read(`(() => {
+      const s = document.scrollingElement;
+      const saved = [[s, s.scrollLeft, s.scrollTop]];
+      s.scrollTo({ left: 0, top: 600, behavior: 'instant' });
+      globalThis[Symbol.for('shim.viewPage.lease')] = { token: 'dead', expires: Date.now() - 1, saved };
+      return true;
+    })()`);
+    const afterDead = await viewPageOnHost(kit.host, { selector: '#fold-target' }, 'main');
+    kit.check('an expired lease\'s scroll is put back by the next view_page', afterDead.error === undefined && (await scrollState()) === before, { before, after: await scrollState() });
+
+    // A view_page that can't get the lease inside its wait answers busy: no
+    // capture without the lease, and its page-side wait never takes the
+    // lease after it gave up.
+    await kit.read(`(globalThis[Symbol.for('shim.viewPage.lease')] = { token: 'held', expires: Date.now() + 5000, saved: [] }, true)`);
+    const capturesBefore = captures;
+    const busyFull = await viewPageOnHost(watched, undefined, 'main', { leaseWaitMs: 200 });
+    const busyCrop = await viewPageOnHost(watched, { selector: '#fold-far' }, 'main', { leaseWaitMs: 200 });
+    await kit.sleep(400);
+    const holder = await kit.read(`(globalThis[Symbol.for('shim.viewPage.lease')] || {}).token`);
+    await kit.read(`(delete globalThis[Symbol.for('shim.viewPage.lease')], true)`);
+    kit.check('a view_page that can\'t get the lease answers busy, with no capture', typeof busyFull.error === 'string' && typeof busyCrop.error === 'string'
+      && /too long/.test(busyFull.error) && /too long/.test(busyCrop.error) && captures === capturesBefore, { busyFull: busyFull.error, busyCrop: busyCrop.error, captures: captures - capturesBefore });
+    kit.check('…and never takes the lease after it gave up', holder === 'held', holder);
+    kit.check('…and leaves the scroll alone', (await scrollState()) === before, { before, after: await scrollState() });
+
+    // Overlapping calls (parallel tool calls, parallel workers): each crop
+    // still captures its own target, and the page ends where it started.
+    exposed.length = 0;
+    const [c1, c2, c3, whole] = await Promise.all([
+      viewPageOnHost(watched, { selector: '#fold-target' }, 'main'),
+      viewPageOnHost(watched, { selector: '#fold-far' }, 'main'),
+      viewPageOnHost(watched, { selector: '#fold-pane-target' }, 'main'),
+      viewPageOnHost(watched, undefined, 'main'),
+    ]);
+    kit.check('overlapping crops each capture their own target', [c1, c2, c3].every(fullyCaptured)
+      && exposed.length === 3 && exposed.every((list) => list.length === 1) && targets.every(shown), { exposed });
+    kit.check('…beside an overlapping full-viewport shot', whole.error === undefined && whole.croppedTo === undefined, strip(whole));
+    kit.check('…and the page and pane scroll end where they started', (await scrollState()) === before, { before, after: await scrollState() });
+  },
+};
+
 const strictCspCase: ConformanceCase = {
   id: 'strict-csp',
   title: 'handlers compile and run on a page whose CSP forbids eval and inline style',
@@ -1005,7 +1137,7 @@ const noMatchCase: ConformanceCase = {
 };
 
 export const CONFORMANCE_CASES: readonly ConformanceCase[] = [
-  applyCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, strictCspCase, sharedModuleCase, noMatchCase,
+  applyCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, cropScrollCase, strictCspCase, sharedModuleCase, noMatchCase,
 ];
 
 /** Every capability some case vouches for. */

@@ -10,9 +10,9 @@
 // preview tools). Every result is a value, never a
 // throw: an error is `{ error, detail? }`.
 
-import { computeCropRect } from './view-crop';
+import { computeCropRect, CROP_PAD } from './view-crop';
 import type { CropMeasurement, CropRect } from './view-crop';
-import type { PageHost, PageWorld, QueryPageResult, InspectElementResult, PageToolError } from './page-host';
+import type { PageHost, PageWorld, QueryPageResult, InspectElementResult, PageToolError, ScreenshotOptions, ScreenshotResult } from './page-host';
 import { errMessage } from './error';
 
 export const QUERY_TIMEOUT_MS = 8000;
@@ -63,7 +63,8 @@ export function withTimeout<T>(p: Promise<T>, ms: number, message: string): Prom
 export async function queryPageByScript(host: PageHost, description: string, timeoutMs: number, world: PageWorld): Promise<QueryPageResult> {
   try {
     const hits = await withTimeout(host.evaluate(
-      `(() => {
+      `(async () => {
+        ${WAIT_FOR_LEASE}
         const words = ${JSON.stringify(description)}.toLowerCase().split(/\\s+/).filter(Boolean);
         function cssPath(el) {
           const parts = [];
@@ -119,7 +120,8 @@ export async function inspectElementByScript(host: PageHost, selector: string, t
   if (!selector) return { element: { found: false } };
   try {
     const element = await withTimeout(host.evaluate(
-      `(() => {
+      `(async () => {
+        ${WAIT_FOR_LEASE}
         const sel = ${JSON.stringify(selector)};
         const matches = document.querySelectorAll(sel);
         const el = matches[0];
@@ -163,45 +165,266 @@ export async function inspectElementByScript(host: PageHost, selector: string, t
 // visual judgment; the element plus context margin is legible and ~10x fewer
 // image tokens. getBoundingClientRect's viewport CSS px is the space a
 // screenshot clip takes; the geometry itself is view-crop.ts (pure).
-async function measureCropRect(host: PageHost, selector: string, world: PageWorld): Promise<
-  { rect: CropRect; elementBox: { w: number; h: number } } | { error: string }
-> {
-  let m: CropMeasurement | null;
-  try {
-    m = await host.evaluate(
-      `(() => {
-        const el = document.querySelector(${JSON.stringify(selector)});
-        if (!el) return null;
+//
+// A screenshot sees only the viewport, so a target cut off by the viewport
+// or by a scrolling ancestor (partly below the fold, or scrolled out
+// entirely) is scrolled into view for the shot — centered when it fits with
+// its margin, top-aligned when it doesn't — and every scroll position that
+// moved is put back right after the capture. Restoring, rather than leaving
+// the page where the crop put it, keeps the page what the agent (and, on an
+// attached tab, the user) last saw: a later full-viewport shot or a rect from
+// query_page / inspect_element stays in the same frame. Scrolling only when
+// the target is cut off leaves a crop of an already-visible element exactly
+// as before. The cost: the page sees the scroll (scroll listeners, lazy
+// loading) — the price of a whole element, since the Shim browser's capture
+// sees only the viewport (no capture beyond it, as a CDP clip could).
+//
+// Concurrent callers (parallel tool calls, parallel workers on one tab) must
+// not interleave a crop's scroll, capture and restore with each other or
+// with a full-viewport shot, so every view_page holds a lease in the page
+// from its first script to its last: one per document and tool world, kept
+// on that world's global, so it spans every caller whatever PageHost object
+// they hold. A lease names its token, so only its holder restores and
+// releases it, and it expires (VIEW_LEASE_MS) so a caller that died never
+// wedges the page: whoever takes an expired lease first puts back the scroll
+// it saved. A live holder never loses its lease mid-capture: it renews it
+// every VIEW_LEASE_RENEW_MS while the capture runs (a capture can take
+// seconds — a hidden window's first frames), so only a holder that stopped
+// renewing ever expires. The
+// self-contained query_page / inspect_element reads,
+// which report viewport rects, wait for it too.
+
+// The lease's slot on the tool world's global.
+const VIEW_LEASE_SLOT = 'shim.viewPage.lease';
+/** How long a view_page lease holds before another caller may take it. */
+export const VIEW_LEASE_MS = 10_000;
+/** How often a view_page holding the lease renews it while its capture runs. */
+export const VIEW_LEASE_RENEW_MS = 2_000;
+// Bound on the release script (it only restores scroll positions).
+const RELEASE_TIMEOUT_MS = 5_000;
+/**
+ * How long a view_page waits in the page for the lease (room for a couple of
+ * queued holders). The deadline is the page's own, so a waiter that gives up
+ * never takes the lease afterwards; it answers busy instead.
+ */
+export const VIEW_WAIT_MS = 20_000;
+const BUSY_ERROR = 'view_page: another view_page held the page for too long — try again';
+// Bound on the wait for a frame after scrolling (a hidden view never paints;
+// its capture produces the frame).
+const SCROLL_PAINT_WAIT_MS = 300;
+
+// Page-side (inside an async function): waits until no live lease is held; defines `__leaseKey`.
+const WAIT_FOR_LEASE = `const __leaseKey = Symbol.for(${JSON.stringify(VIEW_LEASE_SLOT)});
+    const __leaseFree = () => { const l = globalThis[__leaseKey]; return !l || l.expires <= Date.now(); };
+    while (!__leaseFree()) await new Promise((r) => setTimeout(r, 16));`;
+
+// Page-side (inside an async function): waits, until VIEW_WAIT_MS, for the
+// lease — answering { busy: true } without taking it at the deadline — then
+// takes it, first putting back what an expired holder scrolled, and leaves
+// its token in `__token`.
+const acquireLease = (waitMs: number): string => `const __leaseKey = Symbol.for(${JSON.stringify(VIEW_LEASE_SLOT)});
+    const __leaseFree = () => { const l = globalThis[__leaseKey]; return !l || l.expires <= Date.now(); };
+    const __deadline = Date.now() + ${waitMs};
+    while (!__leaseFree()) {
+      if (Date.now() >= __deadline) return { busy: true };
+      await new Promise((r) => setTimeout(r, 16));
+    }
+    const __expired = globalThis[__leaseKey];
+    if (__expired && Array.isArray(__expired.saved)) {
+      for (const [n, left, top] of __expired.saved) n.scrollTo({ left, top, behavior: 'instant' });
+    }
+    const __token = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    globalThis[__leaseKey] = { token: __token, expires: Date.now() + ${VIEW_LEASE_MS}, saved: [] };`;
+
+/** The script that takes the view lease for a full-viewport shot; resolves to its token, or { busy: true }. */
+export function viewLeaseAcquireSource(waitMs: number = VIEW_WAIT_MS): string {
+  return `(async () => {
+    ${acquireLease(waitMs)}
+    return __token;
+  })()`;
+}
+
+/**
+ * The script that takes the view lease and measures `selector` for a crop,
+ * scrolling it into view first when the viewport or a scrolling ancestor cuts
+ * it off. Resolves to null (nothing matched; no lease held) or the
+ * measurement plus the lease token.
+ */
+export function cropMeasureSource(selector: string, waitMs: number = VIEW_WAIT_MS): string {
+  return `(async () => {
+    if (!document.querySelector(${JSON.stringify(selector)})) return null;
+    ${acquireLease(waitMs)}
+    try {
+      const el = document.querySelector(${JSON.stringify(selector)});
+      if (!el) { delete globalThis[__leaseKey]; return null; }
+      const measure = () => {
         const r = el.getBoundingClientRect();
         return { x: r.x, y: r.y, w: r.width, h: r.height, vw: window.innerWidth, vh: window.innerHeight };
-      })()`,
-      world,
-    ) as CropMeasurement | null;
+      };
+      // What of the page the element can show through: the viewport, cut
+      // down by every ancestor that clips its overflow.
+      const visibleBox = () => {
+        let x0 = 0, y0 = 0, x1 = window.innerWidth, y1 = window.innerHeight;
+        for (let n = el.parentElement; n && n !== document.documentElement && n !== document.body; n = n.parentElement) {
+          const cs = getComputedStyle(n);
+          if (cs.overflowX === 'visible' && cs.overflowY === 'visible') continue;
+          const b = n.getBoundingClientRect();
+          const left = b.left + n.clientLeft, top = b.top + n.clientTop;
+          x0 = Math.max(x0, left); y0 = Math.max(y0, top);
+          x1 = Math.min(x1, left + n.clientWidth); y1 = Math.min(y1, top + n.clientHeight);
+        }
+        return { x0, y0, x1, y1 };
+      };
+      const m = measure();
+      const v = visibleBox();
+      const cutOff = m.x < v.x0 || m.y < v.y0 || m.x + m.w > v.x1 || m.y + m.h > v.y1;
+      if (!cutOff || (m.w === 0 && m.h === 0)) return Object.assign(m, { token: __token });
+      const scroller = document.scrollingElement || document.documentElement;
+      const before = [];
+      for (let n = el.parentElement; n; n = n.parentElement) before.push([n, n.scrollLeft, n.scrollTop]);
+      if (scroller && !before.some((s) => s[0] === scroller)) before.push([scroller, scroller.scrollLeft, scroller.scrollTop]);
+      const pad = ${CROP_PAD};
+      el.scrollIntoView({
+        behavior: 'instant',
+        block: m.h + 2 * pad <= m.vh ? 'center' : 'start',
+        inline: m.w + 2 * pad <= m.vw ? 'center' : 'start',
+      });
+      globalThis[__leaseKey].saved = before.filter((s) => s[0].scrollLeft !== s[1] || s[0].scrollTop !== s[2]);
+      if (globalThis[__leaseKey].saved.length === 0) return Object.assign(m, { token: __token });
+      await Promise.race([
+        new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
+        new Promise((r) => setTimeout(r, ${SCROLL_PAINT_WAIT_MS})),
+      ]);
+      return Object.assign(measure(), { token: __token, scrolled: true });
+    } catch (err) {
+      const l = globalThis[__leaseKey];
+      if (l && l.token === __token) {
+        for (const [n, left, top] of l.saved) n.scrollTo({ left, top, behavior: 'instant' });
+        delete globalThis[__leaseKey];
+      }
+      throw err;
+    }
+  })()`;
+}
+
+/** The script that puts back what the lease `token` scrolled and releases it; another holder's lease is left alone. */
+export function viewLeaseReleaseSource(token: string): string {
+  return `(() => {
+    const key = Symbol.for(${JSON.stringify(VIEW_LEASE_SLOT)});
+    const l = globalThis[key];
+    if (!l || l.token !== ${JSON.stringify(token)}) return false;
+    for (const [n, left, top] of l.saved) n.scrollTo({ left, top, behavior: 'instant' });
+    delete globalThis[key];
+    return true;
+  })()`;
+}
+
+type Measured = CropMeasurement & { token?: unknown; scrolled?: boolean; busy?: boolean };
+type CropMeasured = { rect: CropRect; elementBox: { w: number; h: number }; token: string | null };
+
+async function measureCropRect(host: PageHost, selector: string, world: PageWorld, waitMs: number): Promise<CropMeasured | { error: string; token: string | null }> {
+  let m: Measured | null;
+  try {
+    m = await host.evaluate(cropMeasureSource(selector, waitMs), world) as Measured | null;
   } catch (err) {
-    return { error: 'crop measurement failed: ' + errMessage(err) };
+    // The script restores and releases on its own throw.
+    return { error: 'crop measurement failed: ' + errMessage(err), token: null };
   }
   if (!m) {
-    return { error: `crop selector matched nothing: ${selector} — check the selector, or call view_page without a selector for the full viewport` };
+    return { error: `crop selector matched nothing: ${selector} — check the selector, or call view_page without a selector for the full viewport`, token: null };
   }
+  if (m.busy === true) return { error: BUSY_ERROR, token: null };
+  const token = typeof m.token === 'string' ? m.token : null;
   const rect = computeCropRect(m);
   if (!rect) {
-    return { error: 'crop target is outside the visible viewport — ask the user to scroll it into view, or call view_page without a selector' };
+    return { error: 'crop target is outside the viewport and scrolling did not bring it in (it may be positioned off-screen or have no size) — call view_page without a selector', token };
   }
-  return { rect, elementBox: { w: Math.round(m.w), h: Math.round(m.h) } };
+  return { rect, elementBox: { w: Math.round(m.w), h: Math.round(m.h) }, token };
+}
+
+// A full shot's lease: its token; 'busy' when the page answered busy (or never
+// answered — a token that arrives after that is released at once, never
+// used); 'unleased' when the page can't run the script (or answered nothing
+// usable), which still gets its shot.
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
+
+async function acquireViewLease(host: PageHost, world: PageWorld, waitMs: number): Promise<string | 'busy' | 'unleased'> {
+  const pending = host.evaluate(viewLeaseAcquireSource(waitMs), world);
+  let gaveUp = false;
+  const outcome = await withTimeout(
+    pending.then(
+      (v): string => (typeof v === 'string' ? v : isRecord(v) && v.busy === true ? 'busy' : 'unleased'),
+      (): 'unleased' => 'unleased',
+    ),
+    waitMs + 2000,
+    'view lease timeout',
+  ).catch((): 'busy' => { gaveUp = true; return 'busy'; });
+  if (gaveUp) {
+    void pending.then((late) => (typeof late === 'string' ? releaseViewLease(host, late, world) : undefined), () => undefined);
+  }
+  return outcome;
+}
+
+async function releaseViewLease(host: PageHost, token: string | null, world: PageWorld): Promise<void> {
+  if (token === null) return;
+  await withTimeout(host.evaluate(viewLeaseReleaseSource(token), world), RELEASE_TIMEOUT_MS, 'release timeout').catch(() => undefined);
+}
+
+/** The script that extends the lease `token` holds; another holder's lease is left alone. */
+export function viewLeaseRenewSource(token: string): string {
+  return `(() => {
+    const l = globalThis[Symbol.for(${JSON.stringify(VIEW_LEASE_SLOT)})];
+    if (!l || l.token !== ${JSON.stringify(token)}) return false;
+    l.expires = Date.now() + ${VIEW_LEASE_MS};
+    return true;
+  })()`;
+}
+
+// Runs `work` while renewing the lease `token` every `everyMs`.
+async function whileRenewing<T>(host: PageHost, token: string | null, world: PageWorld, everyMs: number, work: () => Promise<T>): Promise<T> {
+  if (token === null) return work();
+  const timer = setInterval(() => { host.evaluate(viewLeaseRenewSource(token), world).catch(() => undefined); }, everyMs);
+  try {
+    return await work();
+  } finally {
+    clearInterval(timer);
+  }
 }
 
 /** view_page: the viewport (downscaled to MAX_SHOT_WIDTH), or a crop around `input.selector` at native resolution. */
-export async function viewPageOnHost(host: PageHost, input: { selector?: string } | undefined, world: PageWorld): Promise<ViewPageResult> {
+export async function viewPageOnHost(
+  host: PageHost,
+  input: { selector?: string } | undefined,
+  world: PageWorld,
+  options: { leaseWaitMs?: number; leaseRenewMs?: number } = {},
+): Promise<ViewPageResult> {
+  const waitMs = options.leaseWaitMs ?? VIEW_WAIT_MS;
+  const renewMs = options.leaseRenewMs ?? VIEW_LEASE_RENEW_MS;
+  const capture = (token: string | null, opts: ScreenshotOptions): Promise<ScreenshotResult> =>
+    whileRenewing(host, token, world, renewMs, () => host.screenshot(opts));
   const selector = typeof input?.selector === 'string' ? input.selector.trim() : '';
-  let clip: CropRect | undefined;
-  let elementBox: { w: number; h: number } | undefined;
-  if (selector) {
-    const measured = await measureCropRect(host, selector, world);
-    if ('error' in measured) return { error: measured.error };
-    clip = measured.rect;
-    elementBox = measured.elementBox;
+  if (!selector) {
+    const lease = await acquireViewLease(host, world, waitMs);
+    if (lease === 'busy') return { error: BUSY_ERROR };
+    const token = lease === 'unleased' ? null : lease;
+    try {
+      return shotResult(host, await capture(token, { maxWidth: MAX_SHOT_WIDTH }), '');
+    } finally {
+      await releaseViewLease(host, token, world);
+    }
   }
-  const shot = await host.screenshot(clip ? { clip } : { maxWidth: MAX_SHOT_WIDTH });
+  const measured = await measureCropRect(host, selector, world, waitMs);
+  try {
+    if ('error' in measured) return { error: measured.error };
+    return shotResult(host, await capture(measured.token, { clip: measured.rect }), selector, measured.elementBox);
+  } finally {
+    await releaseViewLease(host, measured.token, world);
+  }
+}
+
+function shotResult(host: PageHost, shot: ScreenshotResult, selector: string, elementBox?: { w: number; h: number }): ViewPageResult {
   if ('error' in shot) return { error: shot.error };
   return {
     dataBase64: shot.dataBase64,

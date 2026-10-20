@@ -222,6 +222,7 @@ const SHIM_VIEW_PAGE: ToolDefinition = {
         type: 'string',
         description:
           'Optional CSS selector to crop the screenshot to (element + context margin, native resolution). ' +
+          'An element the viewport cuts off is scrolled into view for the shot and the scroll is put back after. ' +
           'Use for verifying a specific element you just changed. Omit for the full viewport.',
       },
     },
@@ -515,6 +516,7 @@ const SESSION_VIEW_PAGE: ToolDefinition = {
         type: 'string',
         description:
           'Optional CSS selector to crop the screenshot to (element + context margin, native resolution). ' +
+          'An element the viewport cuts off is scrolled into view for the shot and the scroll is put back after. ' +
           'Use for verifying a specific element you just changed. Omit for the full viewport.',
       },
     },

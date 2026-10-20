@@ -69,7 +69,8 @@ async function testViewPage(): Promise<void> {
   check('a full shot asks the host for the viewport, capped at MAX_SHOT_WIDTH, without a clip',
     host.shots.length === 1 && host.shots[0]?.maxWidth === MAX_SHOT_WIDTH && host.shots[0]?.clip === undefined,
     JSON.stringify(host.shots));
-  check('a full shot measures nothing', host.evals.length === 0);
+  check('a full shot measures nothing, only takes the view lease',
+    host.evals.length === 1 && (host.evals[0]?.code ?? '').includes('return __token') && !isMeasure(host.evals[0]?.code ?? ''));
   check('the result carries the host url and the shot',
     full.url === 'https://example.com/a' && full.dataBase64 === 'cG5n' && full.mediaType === 'image/png'
     && full.sizeBytes === 3 && full.width === 1280 && full.height === 800 && !('croppedTo' in full),
@@ -78,7 +79,7 @@ async function testViewPage(): Promise<void> {
 
   const crop = await viewPageOnHost(host, { selector: ' .card  ' }, 'engine');
   const clip = host.shots[1]?.clip;
-  check('a crop measures in the given world', host.evals[0]?.world === 'engine' && isMeasure(host.evals[0]?.code ?? ''));
+  check('a crop measures in the given world', host.evals[1]?.world === 'engine' && isMeasure(host.evals[1]?.code ?? ''));
   check('a crop clips to the padded element rect with no width cap',
     clip !== undefined && clip.x === 0 && clip.y === 0 && clip.width === 191 && clip.height === 140 && host.shots[1]?.maxWidth === undefined,
     JSON.stringify(host.shots[1]));
@@ -88,7 +89,82 @@ async function testViewPage(): Promise<void> {
   const miss = await viewPageOnHost(scriptedHost(() => null), { selector: '.nope' }, 'main');
   check('a crop selector matching nothing is an actionable error', /^crop selector matched nothing: \.nope/.test(miss.error ?? ''), miss.error);
   const offscreen = await viewPageOnHost(scriptedHost(() => ({ x: 5000, y: 5000, w: 10, h: 10, vw: 1440, vh: 900 })), { selector: '.far' }, 'main');
-  check('a crop outside the viewport is an error, never a capture', /outside the visible viewport/.test(offscreen.error ?? ''), offscreen.error);
+  check('a crop that scrolling could not bring into the viewport is an error, never a capture', /outside the viewport and scrolling did not bring it in/.test(offscreen.error ?? ''), offscreen.error);
+
+  // The measure script took the lease (and scrolled the target in): the crop
+  // is of the scrolled-in rect, and the lease is released — its scroll put
+  // back — after the capture, by its own token.
+  const isRelease = (code: string): boolean => code.includes('l.token !== ') && !code.includes('l.expires = Date.now()');
+  const order: string[] = [];
+  const scrolledHost = scriptedHost(
+    (code) => {
+      if (isRelease(code)) { order.push(code.includes('"t1"') ? 'release:t1' : 'release:?'); return true; }
+      order.push('measure');
+      return { x: 10, y: 300, w: 100, h: 400, vw: 1440, vh: 900, token: 't1', scrolled: true };
+    },
+    (opts) => { order.push('shot'); return { mediaType: 'image/png', dataBase64: 'cG5n', sizeBytes: 3, width: (opts?.clip?.width ?? 0) * 2, height: (opts?.clip?.height ?? 0) * 2 }; },
+  );
+  const scrolled = await viewPageOnHost(scrolledHost, { selector: '.tall' }, 'engine');
+  const sclip = scrolledHost.shots[0]?.clip;
+  check('a scrolled-in target is cropped whole', scrolled.error === undefined && sclip?.y === 240 && sclip?.height === 520, JSON.stringify(sclip));
+  check('the lease is released by its token after the capture, in the same world',
+    order.join(',') === 'measure,shot,release:t1' && scrolledHost.evals.every((e) => e.world === 'engine'), order.join(','));
+  order.length = 0;
+  const failingShot = scriptedHost(
+    (code) => (isRelease(code) ? (order.push('release'), true) : { x: 10, y: 300, w: 100, h: 100, vw: 1440, vh: 900, token: 't2', scrolled: true }),
+    () => ({ error: 'capture broke' }),
+  );
+  const failed = await viewPageOnHost(failingShot, { selector: '.tall' }, 'main');
+  check('a failed capture still releases the lease', failed.error === 'capture broke' && order.join(',') === 'release', order.join(','));
+  order.length = 0;
+  const unplaced = scriptedHost((code) => (isRelease(code) ? (order.push('release'), true) : { x: 5000, y: 5000, w: 10, h: 10, vw: 1440, vh: 900, token: 't3' }));
+  const unplacedShot = await viewPageOnHost(unplaced, { selector: '.far' }, 'main');
+  check('a crop that cannot be placed releases the lease without a capture', typeof unplacedShot.error === 'string' && unplaced.shots.length === 0 && order.join(',') === 'release', order.join(','));
+  order.length = 0;
+  const fullLeased = scriptedHost((code) => (isRelease(code) ? (order.push(code.includes('"t4"') ? 'release:t4' : 'release:?'), true) : 't4'));
+  await viewPageOnHost(fullLeased, undefined, 'main');
+  check('a full shot releases its lease after the capture', order.join(',') === 'release:t4', order.join(','));
+  order.length = 0;
+  let renewals = 0;
+  const slowShot = scriptedHost(
+    (code) => {
+      if (isRelease(code)) { order.push('release'); return true; }
+      if (code.includes('l.expires = Date.now()')) { if (code.includes('"t5"')) renewals++; return true; }
+      return { x: 10, y: 300, w: 100, h: 100, vw: 1440, vh: 900, token: 't5', scrolled: true };
+    },
+    () => { order.push('shot'); return { mediaType: 'image/png', dataBase64: 'cG5n', sizeBytes: 3, width: 1, height: 1 }; },
+  );
+  const realShot = slowShot.screenshot.bind(slowShot);
+  slowShot.screenshot = (opts) => new Promise((r) => setTimeout(() => { void realShot(opts).then(r); }, 80));
+  const slow = await viewPageOnHost(slowShot, { selector: '.slow' }, 'main', { leaseRenewMs: 15 });
+  check('a slow capture still returns its picture, renewing its lease meanwhile, then releases',
+    slow.error === undefined && renewals >= 2 && order.join(',') === 'shot,release', `${JSON.stringify(slow)} renewals=${renewals} ${order.join(',')}`);
+  const before = renewals;
+  await new Promise((r) => setTimeout(r, 50));
+  check('…and stops renewing once the capture is done', renewals === before, `${before} -> ${renewals}`);
+  // The page answers busy (another view_page held the lease past the wait):
+  // an error, never a capture without the lease.
+  const busyFull = scriptedHost(() => ({ busy: true }));
+  const busyFullShot = await viewPageOnHost(busyFull, undefined, 'main');
+  check('a full shot the page answers busy is an error, with no capture', /held the page for too long/.test(busyFullShot.error ?? '') && busyFull.shots.length === 0, JSON.stringify(busyFullShot));
+  const busyCrop = scriptedHost(() => ({ busy: true }));
+  const busyCropShot = await viewPageOnHost(busyCrop, { selector: '.x' }, 'main');
+  check('a crop the page answers busy is an error, with no capture', /held the page for too long/.test(busyCropShot.error ?? '') && busyCrop.shots.length === 0, JSON.stringify(busyCropShot));
+  check('the wait is the page\'s own deadline', (busyFull.evals[0]?.code ?? '').includes('__deadline') && (busyCrop.evals[0]?.code ?? '').includes('__deadline'));
+  // The page never answers inside the wait: busy, no capture, and a token
+  // that lands afterwards is released at once.
+  order.length = 0;
+  const lateLease = scriptedHost((code) => {
+    if (isRelease(code)) { order.push(code.includes('"t6"') ? 'release:t6' : 'release:?'); return true; }
+    return new Promise((r) => setTimeout(() => r('t6'), 2100));
+  });
+  const lateShot = await viewPageOnHost(lateLease, undefined, 'main', { leaseWaitMs: 10 });
+  check('a lease that never comes inside the wait is busy, with no capture', /held the page for too long/.test(lateShot.error ?? '') && lateLease.shots.length === 0, JSON.stringify(lateShot));
+  await new Promise((r) => setTimeout(r, 150));
+  check('…and a token that lands after the caller gave up is released at once', order.join(',') === 'release:t6', order.join(','));
+  const noScripts = scriptedHost(() => { throw new Error('no scripts here'); });
+  const unleased = await viewPageOnHost(noScripts, undefined, 'main');
+  check('a full shot of a page whose scripts fail still captures', unleased.error === undefined && noScripts.shots.length === 1, JSON.stringify(unleased));
   const throws = await viewPageOnHost(scriptedHost(() => { throw new Error('nope'); }), { selector: '.x' }, 'main');
   check('a failed measurement is an error', throws.error === 'crop measurement failed: nope', throws.error);
   const failedShot = await viewPageOnHost(scriptedHost(() => null, () => ({ error: 'capture broke' })), undefined, 'main');

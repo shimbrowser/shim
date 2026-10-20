@@ -7,9 +7,9 @@
 //
 // Invariants under test: the crop always contains the element plus context
 // margin, sliver elements widen to a judgeable floor, the rect never
-// escapes the viewport, and an off-screen element yields null (the broker
-// turns that into a "scroll it into view" error) rather than a degenerate
-// capturePage call.
+// escapes the viewport, and an off-screen element yields null (view_page
+// scrolls a cut-off target in before measuring, so null is left for one
+// scrolling can't reach) rather than a degenerate capturePage call.
 
 import { computeCropRect, CROP_PAD, CROP_MIN } from '../src/view-crop';
 import type { CropMeasurement } from '../src/view-crop';
