@@ -29,7 +29,7 @@ import {
 } from '@shimbrowser/core/page-host-conformance';
 import type { FixtureDeploy } from '@shimbrowser/core/page-host-conformance';
 import { viewPageOnHost, MAX_SHOT_WIDTH } from '@shimbrowser/core/page-host-tools';
-import type { PageRuntimeEvent } from '@shimbrowser/core/page-host';
+import type { PageRuntimeEvent, PageConsoleMessage } from '@shimbrowser/core/page-host';
 import { attachPlaywrightPageHost, HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER } from '../src/playwright-page-host';
 import { openHeadlessPage } from '../src/playwright-launch';
 
@@ -99,6 +99,30 @@ async function main(): Promise<void> {
     const covered = coveredCapabilities();
     const uncovered = HEADLESS_CAPABILITIES.mutationKinds.filter((k) => !(covered as Set<string>).has(k));
     check('every mutation kind the headless host advertises has a conformance case', uncovered.length === 0, uncovered);
+
+    // ── console provenance: the engine world's lines are proven by CDP's
+    // execution context, so a handler's own line carries engineWorld and a
+    // page line under the same (forged) handler sourceURL never does ──
+    {
+      const lines: PageConsoleMessage[] = [];
+      const offConsole = host.onConsole((m) => { lines.push(m); });
+      const loaded = host.waitForLoad({ timeoutMs: 10000 });
+      host.reload(`${origin}/apply`);
+      check('reload to /apply finished (console provenance)', (await loaded).kind === 'finished');
+      const ruleKey = 'preview:conformance:provenance';
+      const url = `shim://patches/${ruleKey}/handlers/say.js`;
+      host.applyPreview({
+        patchId: 'conformance', ruleKey,
+        rule: { id: 'provenance', anchor: { primary: { kind: 'css', value: '#note-target' } }, mutations: [{ kind: 'script', handler: 'say' }], handlers: { say: "function say() { console.warn('conf-engine-line'); }" } },
+      });
+      const mine = await until(() => lines.find((m) => m.message.includes('conf-engine-line')) ?? null);
+      check('a handler\'s own line carries engineWorld', mine?.engineWorld === true && mine.source === url, mine);
+      await host.evaluate(`console.warn('conf-page-line')\n//# sourceURL=${url}`, 'main');
+      const forged = await until(() => lines.find((m) => m.message.includes('conf-page-line')) ?? null);
+      check('a page line under the same handler sourceURL never does', forged !== null && forged.source === url && forged.engineWorld !== true, forged);
+      host.removePreview(ruleKey);
+      offConsole();
+    }
 
     // ── D15: unsupported members fail in their own shape ──
     const events: PageRuntimeEvent[] = [];

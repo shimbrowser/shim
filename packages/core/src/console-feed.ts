@@ -16,13 +16,13 @@ export interface ConsoleEntry {
   level: ConsoleLevel;
   message: string;         // pre-capped to MSG_CAP
   source: string;          // sourceId (URL or handler sourceURL), may be ''
-  tag: string;             // '[site]' | '[shim?]' | '[shim]' | '[shim <handlerName>]', plus ' · frame <host>' from a sub-frame
+  tag: string;             // '[site]' | '[shim?]' | '[shim? <handlerName>]' | '[shim]' | '[shim <handlerName>]', plus ' · frame <host>' from a sub-frame
   ts: number;
   frame?: string;          // the logging sub-frame's host; absent for the top frame
 }
 
 export interface ConsoleFeed {
-  push(e: { level: string; message: string; source: string; ts: number; frame?: string; hostLike?: boolean }): void;
+  push(e: { level: string; message: string; source: string; ts: number; frame?: string; hostLike?: boolean; engineWorld?: boolean }): void;
   drainSinceEmit(): ConsoleEntry[];   // errors+warnings since last drain; clears the list
   ring(): ConsoleEntry[];             // last RING_CAP entries, all levels, oldest→newest
   clear(): void;                      // drops every entry (ring and since-emit)
@@ -33,29 +33,51 @@ export interface ConsoleFeed {
 // //# sourceURL pragma; the headless driver compiles under the same one).
 // Duplicated here because this module is host-agnostic and page-preload is a
 // preload; if the sourceURL shape ever changes, change BOTH (cross-ref
-// comment lives on both regexes).
-const HANDLER_URL_RE = /shim:\/\/patches\/(?:[^/\s]+)\/handlers\/([^/.\s]+)/;
+// comment lives on both regexes). Matched against a line's SOURCE only, never
+// its text: any page can log the URL.
+const HANDLER_URL_RE = /^shim:\/\/patches\/(?:[^/\s]+)\/handlers\/([^/.\s]+)/;
 
 // The engine's own diagnostics (anchors, rebase, dispatch) open with this
 // prefix and carry no handler URL. The page can log the same text, so a line
 // that only LOOKS like Shim's own tags `[shim?]`: told apart from the site's
-// ordinary output, never vouched for. (A console line carries no world or
-// execution context to prove where it came from.)
+// ordinary output, never vouched for.
 const ENGINE_PREFIX = '[shim] ';
 
 // A frame label is a host or a scheme; bound it anyway, it lands in every line.
 const FRAME_CAP = 64;
 
-// `frame` is the logging sub-frame's host (absent for the top frame): a
-// sub-frame's lines are another document's — an embed on the page, often
-// running the user's shims for ITS site — so the tag says where they came from.
-// `hostLike` is the host's reading that the line's source LOOKS like its own
-// code (its preload, engine files, runtime internals). A page can forge a
-// source with a `//# sourceURL=` pragma, so it earns `[shim?]`, never `[shim]`.
-export function tagFor(source: string, message: string, frame?: string, hostLike = false): string {
-  const m = HANDLER_URL_RE.exec(source) ?? HANDLER_URL_RE.exec(message);
-  const who = m ? (m[1] ? `shim ${m[1]}` : 'shim')
-    : hostLike || message.startsWith(ENGINE_PREFIX) ? 'shim?' : 'site';
+export interface TagSignals {
+  /**
+   * The logging sub-frame's host (absent for the top frame): a sub-frame's
+   * lines are another document's — an embed on the page, often running the
+   * user's shims for ITS site — so the tag says where they came from.
+   */
+  frame?: string;
+  /**
+   * The host's reading that the line's source LOOKS like its own code (its
+   * preload, engine files, runtime internals). A page can forge a source with
+   * a `//# sourceURL=` pragma, so it earns `[shim?]`, never `[shim]`.
+   */
+  hostLike?: boolean;
+  /**
+   * The host PROVED the line was logged in the engine's isolated world (an
+   * execution context it created, which page script can't run in). The only
+   * signal that earns an authoritative `[shim]` / `[shim <handler>]`.
+   */
+  engineWorld?: boolean;
+}
+
+// Only `engineWorld` vouches for a line. A handler URL as the source without
+// it is just as forgeable as the engine prefix (`eval(code +
+// '\n//# sourceURL=shim://patches/…/handlers/x.js')`), so it tags
+// `[shim? x]`: told apart from the site's output, never vouched for.
+export function tagFor(source: string, message: string, signals: TagSignals = {}): string {
+  const m = HANDLER_URL_RE.exec(source);
+  const handler = m?.[1] ? ` ${m[1]}` : '';
+  const who = signals.engineWorld ? `shim${handler}`
+    : m ? `shim?${handler}`
+    : signals.hostLike || message.startsWith(ENGINE_PREFIX) ? 'shim?' : 'site';
+  const frame = signals.frame;
   return frame ? `[${who} · frame ${frame.slice(0, FRAME_CAP)}]` : `[${who}]`;
 }
 
@@ -76,7 +98,11 @@ export function createConsoleFeed(): ConsoleFeed {
         level,
         message,
         source: e.source,
-        tag: tagFor(e.source, message, e.frame, e.hostLike === true),
+        tag: tagFor(e.source, message, {
+          ...(e.frame ? { frame: e.frame } : {}),
+          hostLike: e.hostLike === true,
+          engineWorld: e.engineWorld === true,
+        }),
         ts: e.ts,
         ...(e.frame ? { frame: e.frame.slice(0, FRAME_CAP) } : {}),
       };

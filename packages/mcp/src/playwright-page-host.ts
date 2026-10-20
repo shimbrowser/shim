@@ -304,12 +304,18 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
       void answerCall(executionContextId, msg.id, msg.method, msg.patchId, msg.origin, msg.args);
     }
   });
-  cdp.on('Runtime.consoleAPICalled', ({ type, args, stackTrace }) => {
+  // A line vouches for the engine only when CDP says it ran in the engine's
+  // world: the context this host created, which page script can't run in.
+  // The text and the source (a `//# sourceURL=` pragma) are the page's to forge.
+  const inEngineWorld = (contextId: number | undefined): boolean =>
+    contextId !== undefined && worldContextId !== null && contextId === worldContextId;
+  cdp.on('Runtime.consoleAPICalled', ({ type, args, stackTrace, executionContextId }) => {
     const frame = stackTrace?.callFrames[0];
     emitConsole({
       level: consoleLevel(type),
       message: args.map((a) => formatConsoleArg(a)).join(' '),
       source: frame?.url ?? '',
+      ...(inEngineWorld(executionContextId) ? { engineWorld: true } : {}),
     });
   });
   cdp.on('Runtime.exceptionThrown', ({ exceptionDetails }) => {
@@ -319,6 +325,7 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
       level: 'error',
       message: firstLine.startsWith('Uncaught') ? firstLine : `Uncaught ${firstLine}`,
       source: exceptionDetails.url ?? '',
+      ...(inEngineWorld(exceptionDetails.executionContextId) ? { engineWorld: true } : {}),
     });
   });
 

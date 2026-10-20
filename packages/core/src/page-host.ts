@@ -128,6 +128,15 @@ export interface PageConsoleMessage {
    * (`//# sourceURL=`), so this is a hint for labelling, never proof.
    */
   hostLike?: boolean;
+  /**
+   * True only when the host itself proves the line was logged in the
+   * engine's isolated world — the execution context the host created for
+   * the engine, which page script can't run in (e.g. CDP's
+   * `executionContextId`). Never derived from the message, its source or
+   * anything else the page can write. The only signal that makes a line
+   * read as Shim's own; a host that can't prove it leaves it out.
+   */
+  engineWorld?: boolean;
 }
 
 /** Stops a subscription. Calling it again does nothing. */

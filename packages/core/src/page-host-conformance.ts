@@ -727,6 +727,22 @@ const throwingCase: ConformanceCase = {
     const warned = await kit.until(() => kit.console.find((m) => m.level === 'warning' && m.message.includes('conf-warn-message')) ?? null, 3000);
     kit.check('a handler\'s console.warn reaches the console feed as a warning', warned !== null, kit.console.slice(0, 20));
 
+    // Provenance: page script can log a handler URL, or run under a forged
+    // `//# sourceURL=` naming one. Neither is the engine world, so neither
+    // line may carry engineWorld (the only signal that tags a line [shim …]).
+    const forgedUrl = `shim://patches/${syncKey}/handlers/boom.js`;
+    // (Main-world script under the page's CSP can't run an inline <script>,
+    // so the forged pragma rides a main-world evaluate: same world, same
+    // reach as any page script with eval.)
+    await kit.read(`console.warn('conf-forged-text ' + ${JSON.stringify(forgedUrl)})`);
+    await kit.read(`console.warn('conf-forged-pragma')\n//# sourceURL=${forgedUrl}`);
+    const forgedText = await kit.until(() => kit.console.find((m) => m.message.includes('conf-forged-text')) ?? null, 3000);
+    const forgedPragma = await kit.until(() => kit.console.find((m) => m.message.includes('conf-forged-pragma')) ?? null, 3000);
+    kit.check('a page line naming a handler URL in its text arrives, never as the engine world\'s',
+      forgedText !== null && forgedText.engineWorld !== true, forgedText);
+    kit.check('a page line under a forged handler sourceURL arrives with that source, never as the engine world\'s',
+      forgedPragma !== null && forgedPragma.source === forgedUrl && forgedPragma.engineWorld !== true, forgedPragma);
+
     const healthy = await kit.until(async () => (await kit.read(`!!document.querySelector('#shadow-target > .conf-note')`)) === true ? true : null);
     kit.check('a healthy rule on the same page still mounted', healthy === true);
     kit.check('the page still runs its own code', (await kit.read('typeof window.__fixture.rerender')) === 'function');
