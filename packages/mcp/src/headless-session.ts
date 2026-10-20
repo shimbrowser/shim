@@ -913,7 +913,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
           members.add(event.member);
         }
       }));
-      handle.off.push(host.onConsole((m) => handle.console.push({ level: m.level, message: m.message, source: m.source, ts: now() })));
+      handle.off.push(host.onConsole((m) => handle.console.push({ level: m.level, message: m.message, source: m.source, ts: now(), ...(m.frame ? { frame: m.frame } : {}), ...(m.hostLike ? { hostLike: true } : {}) })));
       // Headless has no installed shims: the committed rules run as previews.
       for (const rule of handle.working.rules || []) apply(handle, previewFor(handle, rule));
       await markDocument(handle);

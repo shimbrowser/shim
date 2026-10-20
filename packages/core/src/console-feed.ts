@@ -16,12 +16,13 @@ export interface ConsoleEntry {
   level: ConsoleLevel;
   message: string;         // pre-capped to MSG_CAP
   source: string;          // sourceId (URL or handler sourceURL), may be ''
-  tag: string;             // '[site]' | '[shim]' | '[shim <handlerName>]'
+  tag: string;             // '[site]' | '[shim?]' | '[shim]' | '[shim <handlerName>]', plus ' · frame <host>' from a sub-frame
   ts: number;
+  frame?: string;          // the logging sub-frame's host; absent for the top frame
 }
 
 export interface ConsoleFeed {
-  push(e: { level: string; message: string; source: string; ts: number }): void;
+  push(e: { level: string; message: string; source: string; ts: number; frame?: string; hostLike?: boolean }): void;
   drainSinceEmit(): ConsoleEntry[];   // errors+warnings since last drain; clears the list
   ring(): ConsoleEntry[];             // last RING_CAP entries, all levels, oldest→newest
   clear(): void;                      // drops every entry (ring and since-emit)
@@ -35,10 +36,27 @@ export interface ConsoleFeed {
 // comment lives on both regexes).
 const HANDLER_URL_RE = /shim:\/\/patches\/(?:[^/\s]+)\/handlers\/([^/.\s]+)/;
 
-export function tagFor(source: string, message: string): string {
+// The engine's own diagnostics (anchors, rebase, dispatch) open with this
+// prefix and carry no handler URL. The page can log the same text, so a line
+// that only LOOKS like Shim's own tags `[shim?]`: told apart from the site's
+// ordinary output, never vouched for. (A console line carries no world or
+// execution context to prove where it came from.)
+const ENGINE_PREFIX = '[shim] ';
+
+// A frame label is a host or a scheme; bound it anyway, it lands in every line.
+const FRAME_CAP = 64;
+
+// `frame` is the logging sub-frame's host (absent for the top frame): a
+// sub-frame's lines are another document's — an embed on the page, often
+// running the user's shims for ITS site — so the tag says where they came from.
+// `hostLike` is the host's reading that the line's source LOOKS like its own
+// code (its preload, engine files, runtime internals). A page can forge a
+// source with a `//# sourceURL=` pragma, so it earns `[shim?]`, never `[shim]`.
+export function tagFor(source: string, message: string, frame?: string, hostLike = false): string {
   const m = HANDLER_URL_RE.exec(source) ?? HANDLER_URL_RE.exec(message);
-  if (!m) return '[site]';
-  return m[1] ? `[shim ${m[1]}]` : '[shim]';
+  const who = m ? (m[1] ? `shim ${m[1]}` : 'shim')
+    : hostLike || message.startsWith(ENGINE_PREFIX) ? 'shim?' : 'site';
+  return frame ? `[${who} · frame ${frame.slice(0, FRAME_CAP)}]` : `[${who}]`;
 }
 
 function normalizeLevel(level: string): ConsoleLevel {
@@ -58,8 +76,9 @@ export function createConsoleFeed(): ConsoleFeed {
         level,
         message,
         source: e.source,
-        tag: tagFor(e.source, message),
+        tag: tagFor(e.source, message, e.frame, e.hostLike === true),
         ts: e.ts,
+        ...(e.frame ? { frame: e.frame.slice(0, FRAME_CAP) } : {}),
       };
       ringBuf.push(entry);
       if (ringBuf.length > RING_CAP) ringBuf.shift();
@@ -92,7 +111,7 @@ export function formatAutoBlock(entries: ConsoleEntry[]): string | null {
   const buckets = new Map<string, Bucket>();
   let order = 0;
   for (const e of entries) {
-    const key = `${e.level}|${e.source}|${e.message.slice(0, 120)}`;
+    const key = `${e.level}|${e.tag}|${e.source}|${e.message.slice(0, 120)}`;
     const existing = buckets.get(key);
     if (existing) {
       existing.count += 1;

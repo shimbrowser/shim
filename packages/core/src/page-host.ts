@@ -116,6 +116,18 @@ export interface PageConsoleMessage {
   message: string;
   /** The script URL (or a handler's sourceURL) that logged it; may be ''. */
   source: string;
+  /**
+   * The host of the sub-frame that logged it (an embedded iframe), or its URL
+   * when it has no host; absent for the page's top frame. A host that can't
+   * tell frames apart leaves it out.
+   */
+  frame?: string;
+  /**
+   * True when its source looks like the host's own in-page code (its
+   * preload, engine files or runtime internals). A page can forge a source
+   * (`//# sourceURL=`), so this is a hint for labelling, never proof.
+   */
+  hostLike?: boolean;
 }
 
 /** Stops a subscription. Calling it again does nothing. */
