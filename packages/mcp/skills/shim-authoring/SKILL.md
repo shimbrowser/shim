@@ -254,8 +254,9 @@ All of them act on the session's tab.
   visited routes, never a crawl. Use it after a clean preview when the target recurs across
   views ("on every post"). Report honestly: matched → verified there; your rule no-match
   → it does not apply there (likely different markup); unvisited page-types → unverified.
-- `interact_page` is for composition sessions (section 9); a shim session answers that it
-  isn't offered. So are `probe_request`, `read_calls` and `verify_mint`.
+- `interact_page` is for composition sessions (section 9); a shim session refuses it with
+  `composition-only` (headless: `requires-shim-browser`). So are `probe_request`,
+  `read_calls` and `verify_mint`.
 
 ### The site's own API: the API map tools
 
