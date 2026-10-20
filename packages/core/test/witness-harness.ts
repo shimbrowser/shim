@@ -18,7 +18,11 @@
 
 import { buildWitness, matchWitness, WITNESS_VERSION } from '../src/witness';
 import * as anchors from '../src/anchors';
-import type { Anchor, Witness } from '../src/types';
+import type { Anchor, Witness, Rule } from '../src/types';
+import { makeReconciler } from '../src/rule-reconcile';
+import { makeRuleState } from '../src/rule-state';
+import type { RuntimeSpec, RuleMountEntry } from '../src/engine-internal';
+import type { CoreApi } from '../src/api';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail: unknown): void {
@@ -319,6 +323,96 @@ function tLadderVolatileText() {
   check('text-kind rung stays strict on text drift', r3.nodes.length === 0 && r3.witnessRejected === true, JSON.stringify({ n: r3.nodes.length, rejected: r3.witnessRejected }));
 }
 
+// Document singletons (<html>, <head>, <body>). Live-caught on Google
+// (2026-10-20): a page-level `script` rule anchored `css body`, committed on
+// /search, captured the search page's body — `id="gsr"`, a stem of inline CSS,
+// the first children — and then matched 0 on the homepage, whose body has none
+// of those. Every document has exactly one body, so a body-tag candidate can't
+// be "a different element"; those soft signals describe the PAGE, and they
+// silently scoped the rule to one page type. The tag gate alone verifies a
+// singleton; the selector keeps any deliberate scoping (`body.home`). Recovery
+// refuses a singleton witness: the scan would always "find" the body and
+// re-point a page-scoped selector onto a page it was never meant for.
+function tDocumentSingletons() {
+  console.log('document singletons (html/head/body):');
+  // The witness the loop actually committed on google.com/search.
+  const searchBody: Witness = {
+    v: WITNESS_VERSION, tag: 'body', attrs: { id: 'gsr' },
+    textStem: ':root{--coemy:#fff;--xhugwc:#fff}:root{-',
+    childTags: ['style', 'style', 'style', 'script', 'noscript', 'div', 'div', 'span'],
+    parentTag: 'html',
+  };
+  const homeBody = el('body', { jsmodel: 'hspDDf' }, { text: '(function(){window.google={kEI:', children: [el('div'), el('script')], parent: el('html') });
+  const v = matchWitness(searchBody, homeBody);
+  check('a body witness from one page verifies another page\'s body', v.pass, JSON.stringify(v));
+
+  const anchor: Anchor = { primary: { kind: 'css', value: 'body' }, witness: searchBody };
+  const r = anchors.resolveAllWithSource(anchor, makeRoot({ body: [homeBody] }));
+  check('`css body` resolves on the homepage under a /search witness', r.nodes.length === 1 && r.nodes[0] === homeBody && !r.witnessRejected,
+    JSON.stringify({ n: r.nodes.length, rejected: r.witnessRejected }));
+
+  const htmlW: Witness = { v: WITNESS_VERSION, tag: 'html', attrs: { 'data-theme': 'dark' }, childTags: ['head', 'body'] };
+  check('an html witness verifies by tag alone', matchWitness(htmlW, el('html', { lang: 'en' })).pass, '');
+
+  // The tag gate still holds: a body witness never verifies a non-body.
+  check('tag gate still applies to a singleton witness', !matchWitness(searchBody, el('div', { id: 'gsr' })).pass, '');
+  // Non-singletons keep their soft scoring.
+  const divW: Witness = { v: WITNESS_VERSION, tag: 'div', attrs: { id: 'search' }, textStem: 'results', parentTag: 'body' };
+  check('a div witness still rejects an impostor div', !matchWitness(divW, el('div', { id: 'other' }, { text: 'about', parent: el('main') })).pass, '');
+
+  // Capture keeps only the tag (and parent) for singletons — nothing page-specific
+  // travels on the spec, and an older engine reading it verifies by tag too.
+  const captured = buildWitness(homeBody);
+  check('buildWitness on body keeps no page-specific signals',
+    !!captured && captured.tag === 'body' && !captured.attrs && !captured.textStem && !captured.childTags,
+    JSON.stringify(captured));
+
+  // Recovery must not re-point onto the body (it would always "succeed").
+  const root = { getElementsByTagName(tag: string): Element[] { return tag === 'body' ? [homeBody] : []; } };
+  const rec = anchors.witnessRecoverDetail(searchBody, root);
+  check('witness recovery refuses a singleton witness', rec.el === null && /singleton/.test(rec.reason || ''), JSON.stringify(rec.reason));
+}
+
+// The component-identity arms honour singletons too: a body witness carrying a
+// `component` (captured before singletons skipped enrichment) must neither veto
+// the body on another page type nor drive a component recovery onto it.
+async function tSingletonComponentArms() {
+  console.log('document singletons vs component identity (reconciler):');
+  const body = el('body', {}, { parent: el('html') });
+  (globalThis as unknown as { document: unknown }).document = { getElementsByTagName: (): Element[] => [body] };
+  const bodyWitness: Witness = { v: WITNESS_VERSION, tag: 'body', parentTag: 'html', component: { path: ['SearchLayout', 'App'], propKeys: [] } };
+  const run = (rule: Rule, rs: ReturnType<typeof makeRuleState>, specExtra: Partial<RuntimeSpec>) => new Promise<Array<{ kind: string; payload: unknown }>>((resolve) => {
+    const events: Array<{ kind: string; payload: unknown }> = [];
+    const api = {
+      reportEvent: (kind: string, payload: unknown) => { events.push({ kind, payload }); },
+      componentId: {
+        verify: async () => ({ path: ['HomeLayout', 'App'] }),
+        find: async () => [body],
+        symbols: async () => null,
+      },
+    } as unknown as CoreApi;
+    const spec = { id: 's', rules: [rule], __bundleHashFn: () => 'new', ...specExtra } as RuntimeSpec;
+    const r = makeReconciler(rule, spec, api, rs, new Set());
+    r.start();
+    setTimeout(() => { r.stop(); resolve(events); }, 4500);
+  });
+
+  // Primary resolves the homepage body; the stored component names the search layout.
+  const rsA = makeRuleState();
+  rsA.state.set(body, {} as RuleMountEntry);
+  rsA.matchedSource = 'primary';
+  rsA.resolvedEl = body;
+  const ruleA: Rule = { id: 'page', anchor: { primary: { kind: 'css', value: 'body' }, witness: bodyWitness }, mutations: [{ kind: 'script', handler: 'h' }] };
+  const evA = await run(ruleA, rsA, { bundleHash: 'new' });
+  check('a stored body component never vetoes the body', !evA.some((e) => e.kind === 'rule-quarantined'), JSON.stringify(evA));
+
+  // Deploy + a page-scoped `body.home` that resolves nothing: component identity
+  // would find the body, but re-pointing onto it would drop the scoping.
+  const ruleB: Rule = { id: 'home-only', anchor: { primary: { kind: 'css', value: 'body.home' }, witness: bodyWitness }, mutations: [{ kind: 'script', handler: 'h' }] };
+  const evB = await run(ruleB, makeRuleState(), { bundleHash: 'old' });
+  check('no component recovery onto a singleton', !evB.some((e) => e.kind === 'rule-rebase'), JSON.stringify(evB));
+}
+
 tBuild();
 tMatchTolerance();
 tMatchRejection();
@@ -327,9 +421,12 @@ tRecoverChain();
 tLadder();
 tVolatileTextLenient();
 tLadderVolatileText();
+tDocumentSingletons();
 
-if (failures) {
-  console.error(`\n${failures} check(s) FAILED`);
-  process.exit(1);
-}
-console.log('\nall checks passed');
+void tSingletonComponentArms().then(() => {
+  if (failures) {
+    console.error(`\n${failures} check(s) FAILED`);
+    process.exit(1);
+  }
+  console.log('\nall checks passed');
+});

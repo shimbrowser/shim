@@ -671,6 +671,13 @@ interface StrongMatch {
 // failure escalated to an LLM turn and nothing recorded which veto fired).
 function witnessRecoverDetail(w: Witness | null | undefined, root: ScanRoot | Document = document) {
   if (!w || !w.tag) return { el: null as Element | null, reason: 'no witness to scan with' as string | null };
+  // A document singleton (<html>/<head>/<body>) witness verifies by tag alone,
+  // so the scan would always "find" the one body — and re-pointing a selector
+  // that deliberately scoped it (`body.home`) onto a page it never matched is a
+  // mis-attach. Recovery has no evidence to offer here; decline.
+  if (witness.isDocumentSingletonTag(w.tag)) {
+    return { el: null as Element | null, reason: `document singleton <${w.tag}> witness carries no identity to recover with` as string | null };
+  }
   // Feature-detect inline (rather than via an intermediate `scope` variable)
   // — TS's narrowing of an optional-vs-required method across a
   // `ScanRoot | Document` union doesn't survive being stashed in a variable

@@ -130,6 +130,7 @@ export function makeReconciler(
     // still runs either way: it only tracks the bundle hash, never changes an
     // anchor, and keeps the gate honest if they re-enable.
     const canRebase = deploy && spec.autoRepair !== false;
+    const singletonWitness = witnessMod.isDocumentSingletonTag(rule.anchor?.witness?.tag);
 
     // Resolving cleanly via primary — keep the stored baseline current. Fires
     // when the baseline is MISSING (freshly-committed shim → initialize the
@@ -151,7 +152,10 @@ export function makeReconciler(
       // dotted property path like `rule.anchor?.witness?.component` doesn't
       // survive an intervening async call, so `expectedComponent` is what
       // carries the non-null fact across them.
-      const expectedComponent = rule.anchor?.witness?.component;
+      // A document-singleton witness (<html>/<head>/<body>) verifies by tag
+      // alone — a component stored on one (captured before singletons skipped
+      // enrichment) describes the page type, not the element, so it never vetoes.
+      const expectedComponent = singletonWitness ? undefined : rule.anchor?.witness?.component;
       if (rs.resolvedEl && expectedComponent &&
           api.componentId && typeof api.componentId.verify === 'function') {
         const actual = await api.componentId.verify(rs.resolvedEl);
@@ -241,7 +245,9 @@ export function makeReconciler(
       // catches the exact deploy class css anchors can't survive — markup/class
       // rewrite with the React tree intact. Falls through to witnessRecover
       // (tag/attr/text scan) when there's no component witness or no unique hit.
-      const storedComponent = rule.anchor?.witness?.component;
+      // Never for a document singleton: recovery would re-point a deliberately
+      // scoped selector (`body.home`) onto whatever page renders the component.
+      const storedComponent = singletonWitness ? undefined : rule.anchor?.witness?.component;
       if (canRebase && storedComponent &&
           api.componentId && typeof api.componentId.find === 'function') {
         // The stored identity is (for post-map witnesses) in ORIGINAL-name

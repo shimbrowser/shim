@@ -293,7 +293,11 @@ export function applyRule(
           witness: w,
         });
         const verifyFn = api.componentId && api.componentId.verify;
-        if (typeof verifyFn === 'function') {
+        // Document singletons (<html>/<head>/<body>) verify by tag alone
+        // (witness.ts): a component identity on one would re-scope a
+        // page-level rule to the page type it was captured on — the very
+        // thing the tag-only witness exists to prevent.
+        if (typeof verifyFn === 'function' && !witnessMod.isDocumentSingletonTag(w.tag)) {
           // Store the identity in ORIGINAL-name space when the deploy's symbol
           // map is available (sourcemap Stage B): `Wc` → `TrackRow`. That's what makes
           // the witness deploy-durable — the next build renames Wc to Xd, but

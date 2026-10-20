@@ -50,6 +50,22 @@ const WEIGHTS = {
 
 const PASS_THRESHOLD = 0.5;
 
+// Document singletons: every document has exactly one <html>, <head> and
+// <body>, so a candidate with one of these tags can never be "a different
+// element" — the tag gate is the whole identity test. Their soft signals
+// (body text, which textContent fills with inline CSS/JS, first children, a
+// page-type id) describe the PAGE, not the element, and differ between page
+// types of one host. Scoring them silently scoped page-level rules to the page
+// they were captured on (live-caught on Google: a `css body` rule captured on
+// /search, `id="gsr"`, matched 0 on the homepage). Any deliberate scoping
+// (`body.home`, `body[data-page=…]`) lives in the selector, which still has to
+// resolve. Capture keeps only tag + parent for them; verification passes on
+// the tag; witness recovery refuses them (anchors.witnessRecoverDetail).
+const DOCUMENT_SINGLETON_TAGS = new Set(['html', 'head', 'body']);
+function isDocumentSingletonTag(tag: string | null | undefined): boolean {
+  return typeof tag === 'string' && DOCUMENT_SINGLETON_TAGS.has(tag.toLowerCase());
+}
+
 // Attributes worth remembering — same set the picker treats as stable
 // (page-preload's extractElementInfo), minus our own: the engine stamps
 // `data-shim-css` / `data-shim-replace-root` / etc. tokens onto anchors
@@ -104,6 +120,12 @@ function textStemOf(el: Element) {
 // here at capture time. Omitted on non-React pages (bridge resolves null).
 function buildWitness(el: Element, opts: { component?: ComponentDescriptor } = {}) {
   if (!el || !el.tagName) return null;
+  if (isDocumentSingletonTag(el.tagName)) {
+    const single: Witness = { v: WITNESS_VERSION, tag: el.tagName.toLowerCase() };
+    const parent = el.parentElement?.tagName;
+    if (parent) single.parentTag = parent.toLowerCase();
+    return single;
+  }
   const attrs: Record<string, string> = {};
   for (const attr of el.attributes || []) {
     if (isStableAttr(attr.name)) attrs[attr.name] = attr.value;
@@ -164,6 +186,12 @@ function matchWitness(witness: Witness | null | undefined, el: Element | null | 
   // against a <section> no matter how the soft signals shake out.
   if (el.tagName.toLowerCase() !== witness.tag) {
     return { pass: false, score: 0, detail: [`tag mismatch: expected <${witness.tag}>, saw <${el.tagName.toLowerCase()}>`] };
+  }
+  // A document singleton is verified by the tag alone (see
+  // DOCUMENT_SINGLETON_TAGS) — including witnesses captured before capture
+  // stopped recording their page-specific signals.
+  if (isDocumentSingletonTag(witness.tag)) {
+    return { pass: true, score: 1, detail: [`document singleton <${witness.tag}> — verified by tag`] };
   }
 
   let total = 0;
@@ -267,4 +295,4 @@ function matchWitness(witness: Witness | null | undefined, el: Element | null | 
   return { pass: false, score, detail };
 }
 
-export { buildWitness, matchWitness, WITNESS_VERSION };
+export { buildWitness, matchWitness, isDocumentSingletonTag, WITNESS_VERSION };
