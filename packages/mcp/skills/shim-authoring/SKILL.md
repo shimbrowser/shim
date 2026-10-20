@@ -54,6 +54,11 @@ browser.
      holds something else). Never a temp or scratch folder: the user opens, packs
      (`shim pack`) and previews (`shim preview`) the folder there after you're done. Tell
      the user the folder in your first reply after the checkout.
+   - **Not inside a code project.** If your working directory is in a git repository or
+     a code project (a `.git`, a `package.json`), don't check out there. The folder would
+     show up in the repository's changes, and the project's lint and tests would pick up
+     its handlers. Use a folder of its own outside it instead, like
+     `~/shim-sessions/<name>`: still a lasting folder, not a temp one.
 4. **Edit the folder** (section 2): `shim.json` and `handlers/<name>.js`.
 5. **Preview.** `shim_preview` sends the whole folder; Shim lints it, applies the
    difference to the live page, waits for it to settle and answers with a **revision** and
@@ -446,6 +451,86 @@ Rules that keep handlers safe — every one learned from real breakage:
   (`getComputedStyle(document.documentElement).getPropertyValue('--color-primary')`). A
   default-styled button next to the site's own is a first-preview failure, not polish.
 
+#### A page-level script, and in-site navigation
+
+**Anchor a page-level script on `html` or `body`.** Use this for a script that runs once
+per page and has no element to decorate: a keyboard shortcut, a controller over the whole
+list, a floating panel. Write `{ "kind": "css", "value": "body" }` (or `"html"`). Each
+matches exactly one element, the lint accepts it, and sites almost never replace it. As a
+result, **the handler runs once per document load, not once per in-site page.**
+
+**In-site (SPA) navigation reuses the anchor, so the handler does not run again.** On a
+single-page site, clicking a link changes the URL and swaps the content, but `body`, a
+header or a sidebar the handler anchored stays in place. The handler's work goes stale
+and nothing calls it again. `api.onRouteChange` doesn't help: only a `mount-route`
+handler's `api` has it. A `script` handler has to notice the change itself and refresh:
+
+```js
+module.exports = function trackPage({ anchor, api }) {
+  let lastUrl = location.href;
+  let retry = null;
+  // Re-read the page and update what you built. The new page may not be rendered
+  // yet: if what you need is missing, try again shortly (bounded).
+  const update = (tries = 0) => {
+    clearTimeout(retry);
+    const ready = true; // e.g. document.querySelector('<something the page renders>')
+    if (!ready && tries < 20) { retry = setTimeout(() => update(tries + 1), 250); return; }
+    // … update from the current page …
+  };
+  // A URL change is a hint; the content may still be the old page or a placeholder.
+  const checkUrl = () => {
+    if (location.href === lastUrl) return;
+    lastUrl = location.href;
+    update();
+  };
+  // The site's own "navigation finished" event, if it has one (look for it in the
+  // site's code or with evaluate_in_page), means the new page is in place: always
+  // update. YouTube, for one, fires yt-navigate-finish on document. Re-read the
+  // page; don't rely on event.detail.
+  const onNavigated = () => { lastUrl = location.href; update(); };
+  document.addEventListener('yt-navigate-finish', onNavigated);
+  window.addEventListener('popstate', checkUrl); // back / forward
+  const poll = setInterval(checkUrl, 500);       // any site: a cheap location check
+  api.cleanup(() => {
+    document.removeEventListener('yt-navigate-finish', onNavigated);
+    window.removeEventListener('popstate', checkUrl);
+    clearInterval(poll);
+    clearTimeout(retry);
+  });
+  update();
+};
+```
+
+Don't wrap `history.pushState` to catch navigations. Handlers run in an isolated world, so
+the site's own calls never go through your wrapper. After the change, verify a second
+in-site page: navigate in the tab, then `query_page` or `view_page` again.
+
+#### Recipe: a page-wide sort or filter
+
+To sort or filter the site's list (cards in a grid, rows in a feed), anchor one
+controller on the list's container (or `body`), not one rule per item. Then follow these
+rules so the framework that owns the list keeps working:
+
+- **Sort with CSS `order`, never by moving nodes.** Set `item.style.order` on each item.
+  Re-appending the site's nodes fights the framework's own bookkeeping and breaks when it
+  re-renders. `order` works only among the children of one flex or grid container. When
+  the items sit in per-row wrappers, give the wrappers `display: contents` (a `restyle`
+  rule, or a style you set) so every item becomes a child of the same container. **Filter**
+  with `display: none` the same way.
+- **Write only the values that changed.** Frameworks reset `style` when they re-render an
+  item, so your controller must re-apply. But writing every value on every pass churns
+  layout and can loop. Compare first, as in
+  `if (el.style.order !== want) el.style.order = want`.
+- **Guard the observer against its own writes.** New items arrive as the user scrolls,
+  and a re-render can reset an item's `style` without adding a node. So the controller
+  does need a `MutationObserver` on the container, watching `childList` and the `style`
+  attribute across the subtree (`{ childList: true, subtree: true, attributes: true,
+  attributeFilter: ['style'] }`). Batch the work into one `requestAnimationFrame`,
+  `disconnect()` before you write and re-`observe()` after, so your own writes are never
+  observed, and add `api.cleanup(() => observer.disconnect())`.
+- Put the control (the sort menu, the filter box) in the same handler's returned DOM, and
+  refresh on in-site navigation as above.
+
 ### DOM removal: `remove`
 
 `{ "kind": "remove" }` deletes the anchor; irreversible until reload. **Prefer `hide`**,
@@ -705,7 +790,8 @@ Don't repeat it.
   answer `{ ok: false }`. It spends the user's money: batch, cache in `api.storage`, never
   call it from a mutation-driven loop, and don't trigger AI features over and over while
   previewing. Tell the user in your summary that the feature needs their approval.
-- **`api.onRouteChange(fn)`** — for `mount-route` pages (section 5).
+- **`api.onRouteChange(fn)`** — for `mount-route` pages (section 5) only. A `script`
+  handler's `api` has no `onRouteChange`: to follow in-site navigation, see section 5.
 - **`api.modules.invoke(id, fnPath, args)`** — for modules an `intercept` declared.
 
 **Never hammer the site.** One request per row (a 100-call burst on mount) gets the user
@@ -756,8 +842,8 @@ this section is what differs.
    without a commit and it is deleted, its address freed.
 3. **Check out** (with `dir`, or `shim_checkout { dir }`): `manifest.json` plus every file of
    the composition, flat. Use an empty folder, placed like a shim's (section 1): your
-   working directory plus the composition's name, never a temp or scratch folder, and
-   tell the user where it is.
+   working directory plus the composition's name, never a temp or scratch folder and never
+   inside a code project, and tell the user where it is.
 4. **Edit, then `shim_preview`.** Shim validates the folder, saves the changed files onto the
    composition and reloads its page. If the manifest adds a host (or changes a host's
    `mint`), the user is asked in Shim first and the preview waits; allowed, the page can
@@ -988,3 +1074,10 @@ The loop is the same, with three differences:
   `api.db` reads as absent), the preview lists it under `unsupportedApi`, and its rule is
   **`verification: partial`** — tell the user that rule is unverified until they try it in
   Shim. Only a `full` rule behaves the same in Shim.
+- **Requests from a handler, headless.** Since `api.fetch` is refused, a handler's plain
+  `fetch` is the only way out, and it runs under the page's CORS. It reaches the page's
+  own site, and a third-party API only if that API sends CORS headers for the page's
+  origin. The fresh profile has no logins, so the site answers as it would a logged-out
+  visitor. In the Shim browser, keep `api.fetch` for third-party APIs (no CORS, no
+  cookies) and the page's `fetch` for the site's own endpoints. A handler written around
+  headless's limits should still use `api.fetch` once it runs in Shim.
