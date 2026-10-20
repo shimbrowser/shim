@@ -201,7 +201,7 @@ export interface CaseKit {
   /** Load a fixture path and wait until the engine answers. False when it never did. */
   load(path: string): Promise<boolean>;
   /** Apply `rule` as a preview of the suite's shim; returns its ruleKey. */
-  apply(rule: Rule, options?: { bundleHash?: string }): string;
+  apply(rule: Rule, options?: { bundleHash?: string; autoRepair?: boolean }): string;
   remove(ruleKey: string): void;
   /** Evaluate in the page's main world; a throw reads as undefined. */
   read(code: string): Promise<unknown>;
@@ -266,10 +266,16 @@ function makeKit(ctx: ConformanceContext, checks: ConformanceCheck[], applied: S
       await sleep(50);
     }
   };
-  const apply = (rule: Rule, options?: { bundleHash?: string }): string => {
+  const apply = (rule: Rule, options?: { bundleHash?: string; autoRepair?: boolean }): string => {
     const ruleKey = conformanceRuleKey(rule.id);
     applied.add(ruleKey);
-    ctx.host.applyPreview({ patchId: PATCH_ID, rule, ruleKey, ...(options?.bundleHash !== undefined ? { bundleHash: options.bundleHash } : {}) });
+    ctx.host.applyPreview({
+      patchId: PATCH_ID,
+      rule,
+      ruleKey,
+      ...(options?.bundleHash !== undefined ? { bundleHash: options.bundleHash } : {}),
+      ...(options?.autoRepair !== undefined ? { autoRepair: options.autoRepair } : {}),
+    });
     return ruleKey;
   };
   const remove = (ruleKey: string): void => {
@@ -751,6 +757,17 @@ const deployCase: ConformanceCase = {
       // Same dead anchor, but the baseline IS the current build: no deploy,
       // so no rebase — a transient no-match.
       const steady = kit.apply({ id: 'steady', anchor: { primary: { kind: 'css', value: 'button.buy-v1' }, witness: wBuy }, mutations: [{ kind: 'hide' }] }, { bundleHash: b2 });
+      // The same deploy for a shim that opted out of auto-repair: the
+      // baseline still refreshes, but no anchor is re-pointed. A dead primary
+      // with a working fallback keeps applying through the fallback; a dead
+      // witnessed primary quarantines instead of recovering.
+      const offRefresh = kit.apply({ id: 'off-refresh', anchor: css('#stable'), mutations: [{ kind: 'restyle', properties: { scrollMarginRight: '2.5px' } }] }, { bundleHash: b1, autoRepair: false });
+      const offPromote = kit.apply({
+        id: 'off-promote',
+        anchor: { primary: { kind: 'css', value: 'button.buy-v1' }, fallbacks: [{ kind: 'css', value: 'button[data-sku="42"]' }] },
+        mutations: [{ kind: 'restyle', properties: { scrollMarginLeft: '3.5px' } }],
+      }, { bundleHash: b1, autoRepair: false });
+      const offRecover = kit.apply({ id: 'off-recover', anchor: { primary: { kind: 'css', value: 'button.buy-v1' }, witness: wBuy }, mutations: [{ kind: 'hide' }] }, { bundleHash: b1, autoRepair: false });
 
       const refreshed = await kit.event((e) => e.kind === 'spec-bundle-update' && e.specId === refresh, 8000);
       kit.check('rebase 1 (refresh): a rule still resolving reports the new baseline', refreshed?.bundleHash === b2, { refreshed, b2 });
@@ -804,6 +821,16 @@ const deployCase: ConformanceCase = {
       const steadyMiss = await kit.event((e) => e.kind === 'rule-no-match' && e.specId === steady, 8000);
       kit.check('without a deploy, a dead anchor is a transient no-match', steadyMiss !== null);
       kit.check('…and is never rebased', !kit.events.some((e) => (e.kind === 'rule-rebase' || e.kind === 'rule-quarantined') && e.specId === steady));
+
+      const offRefreshed = await kit.event((e) => e.kind === 'spec-bundle-update' && e.specId === offRefresh, 8000);
+      kit.check('auto-repair off: a rule still resolving still reports the new baseline', offRefreshed?.bundleHash === b2, offRefreshed);
+      const offQuarantined = await kit.event((e) => e.kind === 'rule-quarantined' && e.specId === offRecover, 10000);
+      kit.check('auto-repair off: a dead witnessed primary quarantines', offQuarantined !== null, offQuarantined);
+      const offStatus = await kit.event((e) => e.kind === 'rule-status' && e.specId === offPromote && typeof e.matched === 'number' && e.matched > 0, 8000);
+      const offMargin = await kit.read(`(() => { const b = document.querySelector('button[data-sku="42"]'); return b ? getComputedStyle(b).scrollMarginLeft : null; })()`);
+      kit.check('auto-repair off: a dead primary still applies through its working fallback', offStatus !== null && offMargin === '3.5px', { offStatus, offMargin });
+      const offRebases = kit.events.filter((e) => e.kind === 'rule-rebase' && (e.specId === offPromote || e.specId === offRecover || e.specId === offRefresh));
+      kit.check('auto-repair off: nothing is promoted or recovered (no rule-rebase)', offRebases.length === 0, offRebases);
     } finally {
       kit.setDeploy(1);
     }

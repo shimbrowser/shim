@@ -149,6 +149,12 @@ export interface HeadlessHandle {
   /** As committed: version, bundleHash, the file's envelope. */
   version: number;
   bundleHash: string | undefined;
+  /**
+   * The committed anchor of each rule, by rule id (anchorDigest, witness
+   * aside): the rules that run behind `bundleHash`. Seeded witnesses count
+   * as committed, since .shim-state.json pins them to the committed anchor.
+   */
+  committedAnchors: Map<string, string>;
   envelope: Record<string, unknown>;
   /** Live previews by ruleKey: what reload_page re-applies. */
   live: Map<string, PreviewRule>;
@@ -413,9 +419,26 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     handle.host.removePreview(ruleKey);
   }
 
-  // A rule applies behind the committed deploy baseline only while it keeps
-  // the witness it was committed with (an unchanged anchor): a new or
-  // re-anchored rule has nothing to rebase from.
+  // The committed anchors, by rule id: every committed rule's, then (for a
+  // rule the committed spec doesn't have) a seeded witness's — until this
+  // session commits, which rewrites what is committed.
+  function committedAnchorsOf(rules: Rule[] | undefined, seeds: Record<string, RuleState> | undefined): Map<string, string> {
+    const out = new Map<string, string>();
+    for (const rule of rules || []) {
+      if (typeof rule?.id === 'string' && rule.anchor) out.set(rule.id, anchorDigest(rule.anchor));
+    }
+    for (const [id, entry] of Object.entries(seeds ?? {})) {
+      if (!out.has(id)) out.set(id, entry.anchorDigest);
+    }
+    return out;
+  }
+
+  // A rule applies behind the committed deploy baseline only while its anchor
+  // is the one it was committed with, witness or not (a multi-match rule never
+  // captures one, and refresh and promote don't need it): a new or re-anchored
+  // rule has nothing to rebase from. The spec's autoRepair rides with the
+  // baseline, so an opted-out shim's preview never promotes or recovers an
+  // anchor the committed shim would leave alone.
   function previewFor(handle: HeadlessHandle, rule: Rule): PreviewRule {
     handle.applies += 1;
     const preview: PreviewRule = {
@@ -424,7 +447,11 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       ruleKey: previewKey(handle.source.spec.id, rule.id),
       applyId: `${handle.sessionId}:${handle.applies}`,
     };
-    if (handle.bundleHash && rule.anchor?.witness) preview.bundleHash = handle.bundleHash;
+    const committed = handle.committedAnchors.get(rule.id);
+    if (handle.bundleHash && rule.anchor && committed !== undefined && committed === anchorDigest(rule.anchor)) {
+      preview.bundleHash = handle.bundleHash;
+      if (handle.working.autoRepair === false) preview.autoRepair = false;
+    }
     return preview;
   }
 
@@ -807,6 +834,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     }
     handle.version = version;
     handle.bundleHash = bundleHash;
+    handle.committedAnchors = committedAnchorsOf(spec.rules, undefined);
     handle.envelope = { ...handle.envelope, authoringHistory: history };
     handle.storedHandlers = { ...file.handlers };
     handle.source = { ...handle.source, created: false };
@@ -835,6 +863,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         storedHandlers: { ...source.handlers },
         version: typeof source.spec.version === 'number' ? source.spec.version : 1,
         bundleHash: typeof source.spec.bundleHash === 'string' ? source.spec.bundleHash : undefined,
+        committedAnchors: committedAnchorsOf(source.spec.rules, seedWitnesses),
         envelope: { ...source.envelope },
         live: new Map(),
         applies: 0,

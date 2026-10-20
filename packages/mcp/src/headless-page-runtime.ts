@@ -41,7 +41,8 @@ export interface PageRuntimeControl {
   shareHandler(key: string, fn: unknown): void;
   /** Defines a rule's handler from the instance kept under `key`; false when there is none yet. */
   defineShared(ruleKey: string, name: string, key: string): boolean;
-  apply(patchId: string, rule: Rule, ruleKey: string, bundleHash: string | null, applyId?: string | null): boolean;
+  /** `autoRepair` rides only with `bundleHash` (PreviewRule.autoRepair): false keeps the anchor-changing rebases off. */
+  apply(patchId: string, rule: Rule, ruleKey: string, bundleHash: string | null, applyId?: string | null, autoRepair?: boolean | null): boolean;
   remove(ruleKey: string): boolean;
   resolve(id: number, value: unknown): boolean;
   /** Rejects a pending api call: the driver's store failed. */
@@ -230,7 +231,7 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
       control.defineHandler(ruleKey, name, sharedHandlers.get(key));
       return true;
     },
-    apply(patchId, rule, ruleKey, bundleHash, applyId) {
+    apply(patchId, rule, ruleKey, bundleHash, applyId, autoRepair) {
       remove(ruleKey);
       const handlers = compiled.get(ruleKey);
       compiled.delete(ruleKey);
@@ -240,7 +241,9 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
         // shim and an unsupported-api event names the preview.
         const previewControl = ShimCore.run({ spec: { id: ruleKey, rules: [] } }, makeApi(patchId, ruleKey, typeof applyId === 'string' && applyId ? applyId : null));
         previews.set(ruleKey, previewControl);
-        const deploy = typeof bundleHash === 'string' ? { bundleHash, current: deployId } : undefined;
+        const deploy = typeof bundleHash === 'string'
+          ? { bundleHash, current: deployId, ...(autoRepair === false ? { autoRepair: false } : {}) }
+          : undefined;
         previewControl.applyExtraRule(rule, ruleKey, ruleKey, handlers, deploy);
         return true;
       } catch (err) {

@@ -80,6 +80,15 @@ export interface PreviewRule {
    */
   bundleHash?: string;
   /**
+   * The spec's `autoRepair`, read only with `bundleHash`. `false` keeps the
+   * preview's rebase ladder to what an opted-out committed shim does on a
+   * deploy: the baseline refresh still runs, but nothing promotes a fallback
+   * or witness-recovers a dead primary (no `rule-rebase` that changes the
+   * anchor); the rule reports no-match or quarantine instead. Absent or
+   * `true`, auto-repair is on, as for a spec that never set it.
+   */
+  autoRepair?: boolean;
+  /**
    * An opaque tag for this version of the preview. A host that supports it
    * stamps it as `applyId` on every runtime event the preview reports, so a
    * consumer can tell a late event from a replaced version of the same

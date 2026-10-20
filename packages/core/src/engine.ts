@@ -37,9 +37,12 @@ interface PatchBundle {
 
 // An extra rule's deploy gate: the baseline it was committed under and the
 // page's current deploy identity (computed lazily, at reconcile time).
+// `autoRepair` is the committed spec's: false keeps the anchor-changing
+// rebases (promote, witness recovery) off, as they are for the committed rule.
 interface ExtraRuleDeploy {
   bundleHash: string;
   current: () => string | null;
+  autoRepair?: boolean;
 }
 
 // The control object run() returns to page-preload — lets the sidebar /
@@ -178,7 +181,10 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
   return {
     applyExtraRule(rule: Rule, specIdOverride?: string, ruleKey?: string, extraRuleHandlers?: HandlerMap, deploy?: ExtraRuleDeploy) {
       let effectiveSpec: RuntimeSpec = specIdOverride ? { ...spec, id: specIdOverride } : spec;
-      if (deploy) effectiveSpec = { ...effectiveSpec, bundleHash: deploy.bundleHash, __bundleHashFn: deploy.current };
+      if (deploy) {
+        effectiveSpec = { ...effectiveSpec, bundleHash: deploy.bundleHash, __bundleHashFn: deploy.current };
+        if (deploy.autoRepair === false) effectiveSpec.autoRepair = false;
+      }
       api.onReady(() => {
         // Setup waits for the document. A control torn down meanwhile (a host
         // letting go of the page, a patch removed mid-load) must not mount it:

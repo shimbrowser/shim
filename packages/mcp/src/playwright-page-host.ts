@@ -460,13 +460,13 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
   async function applyPreviewNow(preview: PreviewRule): Promise<void> {
     const contextId = await waitForWorld(worldWaitMs);
     if (contextId === null || detached) return;
-    const { patchId, rule, ruleKey, bundleHash, applyId } = preview;
+    const { patchId, rule, ruleKey, bundleHash, applyId, autoRepair } = preview;
     for (const [name, source] of Object.entries(rule.handlers ?? {})) {
       if (typeof source !== 'string') continue;
       await compileHandler(contextId, patchId, ruleKey, name, source);
     }
     await cdp.send('Runtime.evaluate', {
-      expression: `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].apply(${JSON.stringify(patchId)}, ${JSON.stringify(rule)}, ${JSON.stringify(ruleKey)}, ${JSON.stringify(bundleHash ?? null)}, ${JSON.stringify(applyId ?? null)})`,
+      expression: `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].apply(${JSON.stringify(patchId)}, ${JSON.stringify(rule)}, ${JSON.stringify(ruleKey)}, ${JSON.stringify(bundleHash ?? null)}, ${JSON.stringify(applyId ?? null)}, ${JSON.stringify(autoRepair ?? null)})`,
       contextId,
     });
   }

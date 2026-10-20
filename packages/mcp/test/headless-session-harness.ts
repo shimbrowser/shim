@@ -356,8 +356,9 @@ async function main(): Promise<void> {
     const id = String(opened.sessionId);
     const host = r.hosts[0] as FakeHost;
     check('every committed rule runs as a preview', host.applied.map((p) => p.ruleKey).join() === 'preview:shim-tracks:hide-promo,preview:shim-tracks:row,preview:shim-tracks:mark');
-    check('a rule with a witness runs behind the deploy baseline; one without does not',
-      host.applied[0]?.bundleHash === 'deploy-1' && host.applied[2]?.bundleHash === undefined);
+    check('every committed rule runs behind the deploy baseline, witness or not',
+      host.applied.every((p) => p.bundleHash === 'deploy-1'), host.applied.map((p) => p.bundleHash));
+    check('a spec that never set autoRepair sends none', host.applied.every((p) => p.autoRepair === undefined));
     check('opening settles after applying the committed rules, so the first view sees them', r.appliedAtSettle[0] === 3, r.appliedAtSettle);
     check('stored handler modules are inlined for the page', typeof host.applied[2]?.rule.handlers?.mark === 'string' && !host.applied[2].rule.handlers.mark.startsWith('module.exports'));
     const busy = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'x', intent: 'x', shimFile });
@@ -415,6 +416,7 @@ async function main(): Promise<void> {
     check('a rule that used an unsupported member is partial', byId.get('fetcher')?.verification === 'partial');
     check('a rule that matched nothing is none, not full', byId.get('gone')?.verification === 'none');
     check('the re-applied rule kept its committed deploy baseline', host.applied.find((p) => p.ruleKey.endsWith(':row') && host.applied.indexOf(p) >= before)?.bundleHash === 'deploy-1');
+    check('a new rule runs behind none', host.applied.filter((p) => (p.rule.id === 'gone' || p.rule.id === 'fetcher')).every((p) => p.bundleHash === undefined));
     check('handler errors carry rule, handler, message, stack', JSON.stringify(ev.errors).includes('"handler":"fetcher"') && JSON.stringify(ev.errors).includes('boom'));
     check('no-match is reported from the status, with no engine event', JSON.stringify(ev.noMatch) === JSON.stringify([{ ruleId: 'gone', selector: '.gone' }]), ev.noMatch);
     check('unsupported uses are listed with a note', JSON.stringify(ev.unsupportedApi) === JSON.stringify([{ ruleId: 'fetcher', member: 'fetch' }])
@@ -886,6 +888,53 @@ async function main(): Promise<void> {
     check('…and the one captured during begin', isRecord(savedRule('old')?.anchor?.witness), saved.spec.rules);
     check('…and no stale one', savedRule('swap')?.anchor?.witness === undefined && !saved.spec.rules.some((x) => x.id === 'ghost'), saved.spec.rules);
     await req(r, 'DELETE', `/sessions/${lid}`);
+  }
+
+  console.log('the deploy baseline follows the committed anchor, and autoRepair rides with it');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'rows.shim');
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'Rows', handlers: {},
+      spec: {
+        id: 'shim-rows', version: 2, bundleHash: 'deploy-1', autoRepair: false, match: { hosts: ['site.test'] },
+        rules: [
+          // Multi-match: the engine never captures a witness for it.
+          { id: 'rows', anchor: { primary: { kind: 'css', value: '.row' }, fallbacks: [{ kind: 'css', value: '[data-row]' }] }, mutations: [{ kind: 'restyle', css: { color: 'red' } }] },
+          { id: 'buy', anchor: { ...css('.buy'), witness: { v: 1, tag: 'button' } }, mutations: [{ kind: 'hide' }] },
+        ],
+      },
+    }));
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    const sid = String(opened.sessionId);
+    const host = r.hosts[0] as FakeHost;
+    const last = (ruleId: string): PreviewRule | undefined => [...host.applied].reverse().find((p) => p.rule.id === ruleId);
+    check('a witness-less committed rule runs behind the baseline', last('rows')?.bundleHash === 'deploy-1', last('rows'));
+    check('an opted-out shim\'s committed rules carry autoRepair: false', last('rows')?.autoRepair === false && last('buy')?.autoRepair === false,
+      [last('rows'), last('buy')]);
+
+    const folder = decodeWorkingCopy((await req(r, 'GET', `/sessions/${sid}/checkout`)).files);
+    const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown> & { rules: Array<Record<string, unknown>> };
+    const reanchored = spec.rules.map((rule) => (rule.id === 'rows' ? { ...rule, anchor: css('.track-row') } : rule));
+    const pv = await preview(r, sid, { ...folder, 'shim.json': json({ ...spec, rules: [...reanchored, { id: 'fresh', anchor: css('.fresh'), mutations: [{ kind: 'hide' }] }] }) } as Record<string, string>);
+    check('the re-anchored and new rules preview', pv.applied === true, pv);
+    check('a re-anchored rule runs behind no baseline, and so no autoRepair', last('rows')?.bundleHash === undefined && last('rows')?.autoRepair === undefined, last('rows'));
+    check('a new rule runs behind no baseline', last('fresh')?.bundleHash === undefined && last('fresh')?.autoRepair === undefined, last('fresh'));
+
+    const back = spec.rules.map((rule) => (rule.id === 'rows' ? { ...rule, mutations: [{ kind: 'restyle', css: { color: 'blue' } }] } : rule));
+    const pv2 = await preview(r, sid, { ...folder, 'shim.json': json({ ...spec, rules: back }) } as Record<string, string>);
+    check('back on the committed anchor, the rule runs behind the baseline again', pv2.applied === true && last('rows')?.bundleHash === 'deploy-1' && last('rows')?.autoRepair === false, last('rows'));
+
+    const pv3 = await preview(r, sid, { ...folder, 'shim.json': json({ ...spec, rules: reanchored }) } as Record<string, string>);
+    check('re-anchored again', pv3.applied === true && last('rows')?.bundleHash === undefined, last('rows'));
+    const c = await req(r, 'POST', `/sessions/${sid}/commit`, { revision: 3, commitId: 'rows-1', summary: 're-anchored rows' });
+    const saved = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { bundleHash?: string; autoRepair?: boolean } };
+    check('the re-anchor commits', c.ok === true && typeof saved.spec.bundleHash === 'string', { c, spec: saved.spec });
+    check('…keeping autoRepair off', saved.spec.autoRepair === false, saved.spec);
+    const edited = reanchored.map((rule) => (rule.id === 'rows' ? { ...rule, mutations: [{ kind: 'restyle', css: { color: 'green' } }] } : rule));
+    const pv4 = await preview(r, sid, { ...folder, 'shim.json': json({ ...spec, rules: edited }) } as Record<string, string>);
+    check('once committed, the new anchor runs behind the committed baseline', pv4.applied === true && last('rows')?.bundleHash === saved.spec.bundleHash, last('rows'));
+    await req(r, 'DELETE', `/sessions/${sid}`);
   }
 
   console.log('an unapplied deploy recovery keeps the committed baseline');

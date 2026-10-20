@@ -324,7 +324,11 @@ async function main(): Promise<void> {
     host.applyPreview({ patchId: 'p', ruleKey: 'preview:p:r', applyId: 'sess:3', rule: { id: 'r', anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] } });
     await tick();
     const applyExpr = cdp.sends.map((x) => String(x.params.expression ?? '')).find((e) => e.includes('.apply("p"')) ?? '';
-    check('the driver hands the preview\'s applyId to the page runtime', applyExpr.endsWith(', null, "sess:3")'), applyExpr);
+    check('the driver hands the preview\'s applyId to the page runtime', applyExpr.endsWith(', null, "sess:3", null)'), applyExpr);
+    host.applyPreview({ patchId: 'q', ruleKey: 'preview:q:r', bundleHash: 'deploy-1', autoRepair: false, rule: { id: 'r', anchor: { primary: { kind: 'css', value: 'x' } }, mutations: [{ kind: 'hide' }] } });
+    await tick();
+    const offExpr = cdp.sends.map((x) => String(x.params.expression ?? '')).find((e) => e.includes('.apply("q"')) ?? '';
+    check('…and the deploy baseline with autoRepair: false', offExpr.endsWith(', "deploy-1", null, false)'), offExpr);
     await host.detach();
   }
   {
