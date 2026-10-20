@@ -11,7 +11,7 @@ import * as anchors from './anchors';
 import * as witnessMod from './witness';
 import * as componentId from './component-id';
 import { isShimOwnedElement } from './own-dom';
-import { getSymbols } from './engine-internal';
+import { readSymbols, symbolsOf, withinBudget, ENRICH_BUDGET_MS } from './engine-internal';
 import type { RuntimeSpec } from './engine-internal';
 import type { RuleRuntimeState } from './rule-state';
 import type { Rule, Anchor, AnchorSpec } from './types';
@@ -158,14 +158,25 @@ export function makeReconciler(
       const expectedComponent = singletonWitness ? undefined : rule.anchor?.witness?.component;
       if (rs.resolvedEl && expectedComponent &&
           api.componentId && typeof api.componentId.verify === 'function') {
-        const actual = await api.componentId.verify(rs.resolvedEl);
+        // Both reads are bounded (ENRICH_BUDGET_MS, engine-internal.ts): the
+        // symbol map can wait on a cold Bundle Discovery run. A bridge or map
+        // that hasn't answered in time makes the veto not applicable: it
+        // never judges on evidence it doesn't have.
+        const verifyFn = api.componentId.verify;
+        const el = rs.resolvedEl;
+        const [actualRead, symsRead] = await Promise.all([
+          withinBudget(Promise.resolve().then(() => verifyFn(el)), ENRICH_BUDGET_MS),
+          readSymbols(api),
+        ]);
+        const actual = actualRead.done ? actualRead.value : null;
         // Dual raw/translated scoring (sourcemap Stage B): the stored identity may be
         // in original-name space (new witnesses) or minified space (pre-map
         // witnesses); matchComponent takes the max of comparing the live fiber
         // names raw and translated through the deploy's symbol map, so neither
         // generation false-quarantines.
-        const syms = await getSymbols(api);
-        const verdict = componentId.matchComponent(expectedComponent, actual, syms);
+        const verdict = symsRead.state === 'timed-out'
+          ? { applicable: false, pass: true, score: 1 }
+          : componentId.matchComponent(expectedComponent, actual, symbolsOf(symsRead));
         if (verdict.applicable && !verdict.pass) {
           noMatchReported = true;
           if (typeof api.reportEvent === 'function') {
@@ -248,7 +259,14 @@ export function makeReconciler(
       // Never for a document singleton: recovery would re-point a deliberately
       // scoped selector (`body.home`) onto whatever page renders the component.
       const storedComponent = singletonWitness ? undefined : rule.anchor?.witness?.component;
-      if (canRebase && storedComponent &&
+      // The symbol map, bounded (ENRICH_BUDGET_MS). A map that hasn't arrived
+      // in time skips the component arm for a MAPPED witness: its names are
+      // original-space and only reach live fibers through the map, so a raw
+      // scan would compare names that can't appear. DOM recovery still runs.
+      const symsRead = canRebase && storedComponent ? await readSymbols(api) : null;
+      const skipComponent = !!storedComponent?.mapped && symsRead?.state === 'timed-out';
+      if (skipComponent) recoveryNotes.push('component-id: skipped (symbol map not ready in time)');
+      if (canRebase && storedComponent && symsRead && !skipComponent &&
           api.componentId && typeof api.componentId.find === 'function') {
         // The stored identity is (for post-map witnesses) in ORIGINAL-name
         // space; live fibers carry the CURRENT deploy's minified names. Invert
@@ -258,7 +276,7 @@ export function makeReconciler(
         // TrackRow witness finds the node now named Xd. No map → raw only, the
         // pre-Stage-B behavior.
         const stored = storedComponent;
-        const syms = await getSymbols(api);
+        const syms = symbolsOf(symsRead);
         const toMin = componentId.translateComponent(stored, componentId.invertSymbols(syms));
         // `toMin` is only ever null/undefined per translateComponent's general
         // signature — with a defined, non-empty `stored` input (guaranteed by

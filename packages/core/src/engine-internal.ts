@@ -71,16 +71,87 @@ export interface RejectedSample {
   source?: string | null;
 }
 
-// Current deploy's {minified: original} component-name map (sourcemap Stage B), via
-// the api bridge. Null-safe on every degraded surface — stub apis, forwarded
-// frames, harnesses — and never throws; null means "compare raw names".
-export function getSymbols(api: CoreApi): Promise<Record<string, string> | null> {
+// --- Bounded enrichment ------------------------------------------------------
+//
+// The component-identity signal reaches the engine through two async calls:
+// `api.componentId.verify` (the main-world bridge, which bounds itself at
+// 400 ms in the browser) and `api.componentId.symbols()` (the deploy's symbol
+// map). In the Shim browser the second one awaits an in-flight Bundle
+// Discovery run for the current chunk set, which has no time limit: a cold
+// Discovery fetches and parses every bundle on the page. Every engine consumer
+// therefore waits at most ENRICH_BUDGET_MS and then goes on without the map.
+//
+// The budget is sized against the host's read of a preview. The Shim browser
+// reads preview events once, APPLY_SETTLE_MS (2000 ms) after the apply, and
+// the headless host uses the same window (HEADLESS_SETTLE_MS). Witness
+// capture runs on the first scan that resolves its element, normally the
+// apply's own synchronous scan, so a 1000 ms wait still lands the witness
+// with half the window to spare. A Discovery run that answers inside the
+// budget (the warm case: a cached deploy answers in milliseconds) still
+// enriches; one that doesn't leaves the witness without `component`.
+export const ENRICH_BUDGET_MS = 1000;
+
+// What a bounded symbols read found:
+//   - ready     the deploy's {minified: original} map
+//   - no-map    the host answered, and there is no map (unmapped site, stub
+//               api, forwarded frame, a host without the bridge)
+//   - timed-out the host had not answered inside the budget. Not the same as
+//               no-map: a mapped witness can't be judged or translated
+//               without the map, so consumers skip the component signal
+//               instead of comparing original names against raw fibers.
+export type SymbolsRead =
+  | { state: 'ready'; symbols: Record<string, string> }
+  | { state: 'no-map' }
+  | { state: 'timed-out' };
+
+// Settle `p` within `ms`: `{ done: true, value }` when it resolved in time,
+// `{ done: false }` when it timed out or rejected. The timer is cleared either
+// way, so a pending engine never holds the event loop open.
+export function withinBudget<T>(p: Promise<T>, ms: number): Promise<{ done: true; value: T } | { done: false }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({ done: false });
+    }, ms);
+    p.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ done: true, value });
+      },
+      () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ done: false });
+      },
+    );
+  });
+}
+
+// The current deploy's component-name map (sourcemap Stage B) via the api
+// bridge, bounded by `budgetMs`. Null-safe on every degraded surface (stub
+// apis, forwarded frames, harnesses) and never throws. A host whose call throws
+// reads as no-map, as before; only a call still pending at the deadline reads
+// as timed-out.
+export async function readSymbols(api: CoreApi, budgetMs: number = ENRICH_BUDGET_MS): Promise<SymbolsRead> {
   if (!api || !api.componentId || typeof api.componentId.symbols !== 'function') {
-    return Promise.resolve(null);
+    return { state: 'no-map' };
   }
-  return Promise.resolve()
+  const call = Promise.resolve()
     .then(() => api.componentId.symbols())
     .catch(() => null);
+  const r = await withinBudget(call, budgetMs);
+  if (!r.done) return { state: 'timed-out' };
+  return r.value ? { state: 'ready', symbols: r.value } : { state: 'no-map' };
+}
+
+// The map a ready read carries, else null ("compare raw names").
+export function symbolsOf(read: SymbolsRead): Record<string, string> | null {
+  return read.state === 'ready' ? read.symbols : null;
 }
 
 // The one genuinely dynamic boundary in the engine: a handler is arbitrary

@@ -9,7 +9,6 @@
 
 import * as anchors from './anchors';
 import * as witnessMod from './witness';
-import * as componentId from './component-id';
 import { applyStrategy } from './strategies';
 import { isShimOwnedElement } from './own-dom';
 import {
@@ -18,7 +17,7 @@ import {
 } from './css-sheets';
 import { desiredSequence, REORDER_SIBLING_CAP } from './layout-kinds';
 import { dispatchMutation, injectStripNotes } from './dispatch-mutation';
-import { getSymbols } from './engine-internal';
+import { enrichWitness } from './witness-enrich';
 import type { HandlerMap, MutationRegistry, RuntimeSpec } from './engine-internal';
 import { makeRuleState } from './rule-state';
 import { makeStatusReporter } from './rule-status';
@@ -283,55 +282,28 @@ export function applyRule(
       const w = witnessMod.buildWitness(el);
       if (w && typeof api.reportEvent === 'function') {
         // Enrich with framework-component-identity via the main-world bridge
-        // before emitting — the isolated world can't read fibers itself. Resolves
-        // null on non-React pages / no bridge, in which case the witness simply
-        // omits `component`. The slight defer is harmless: this event is
-        // groundwork the authoring loop / rebase pass consume async.
+        // before emitting — the isolated world can't read fibers itself. The
+        // wait is bounded (witness-enrich.ts): the witness is emitted once,
+        // inside the host's preview window, with `component` only when both
+        // the bridge and the symbol map answered in time. Document singletons
+        // (<html>/<head>/<body>) verify by tag alone (witness.ts): a component
+        // identity on one would re-scope a page-level rule to the page type it
+        // was captured on, so they are never enriched.
         // `legacyTextStem` rides the EVENT only (never the stored witness):
         // the element's textContent stem, the extraction unmarked pre-visible-
         // text witnesses were built with, so a consumer judging this capture
         // against one of those (auto re-anchor's content check) compares like
         // with like. Sent only when it differs from the visible stem.
         const legacyTextStem = witnessMod.legacyTextStemOf(el);
-        const emit = () => api.reportEvent('rule-witness', {
-          specId: spec.id,
-          ruleId: rule.id,
-          witness: w,
-          ...(legacyTextStem && legacyTextStem !== (w.textStem || '') ? { legacyTextStem } : {}),
+        const enrichment = witnessMod.isDocumentSingletonTag(w.tag) ? Promise.resolve(w) : enrichWitness(el, w, api);
+        void enrichment.then((enriched) => {
+          api.reportEvent('rule-witness', {
+            specId: spec.id,
+            ruleId: rule.id,
+            witness: enriched,
+            ...(legacyTextStem && legacyTextStem !== (enriched.textStem || '') ? { legacyTextStem } : {}),
+          });
         });
-        const verifyFn = api.componentId && api.componentId.verify;
-        // Document singletons (<html>/<head>/<body>) verify by tag alone
-        // (witness.ts): a component identity on one would re-scope a
-        // page-level rule to the page type it was captured on — the very
-        // thing the tag-only witness exists to prevent.
-        if (typeof verifyFn === 'function' && !witnessMod.isDocumentSingletonTag(w.tag)) {
-          // Store the identity in ORIGINAL-name space when the deploy's symbol
-          // map is available (sourcemap Stage B): `Wc` → `TrackRow`. That's what makes
-          // the witness deploy-durable — the next build renames Wc to Xd, but
-          // both translate back to TrackRow. No map (or Discovery not finished
-          // yet) → raw names, exactly the pre-Stage-B behavior.
-          Promise.resolve()
-            .then(() => Promise.all([verifyFn(el), getSymbols(api)]))
-            .then(([cid, syms]) => {
-              if (cid && Array.isArray(cid.path) && cid.path.length) {
-                const t = componentId.translateComponent(cid, syms);
-                // `mapped: true` marks a witness whose names only exist through a
-                // symbol map (translation actually renamed them) — the verify
-                // veto then refuses to score it raw against minified fibers when
-                // no map is available (see matchComponent). Untranslated captures
-                // (no map, or names already original) stay unmarked.
-                // (translateComponent's signature allows null/undefined for
-                // callers with a possibly-absent descriptor; `cid` is already
-                // verified non-empty above, so `t` is always populated here —
-                // this guard just satisfies the type, not a behavior change.)
-                if (t) w.component = t !== cid ? { ...t, mapped: true } : t;
-              }
-            })
-            .catch(() => {})
-            .finally(emit);
-        } else {
-          emit();
-        }
       }
     }
     for (const el of nodes) {
