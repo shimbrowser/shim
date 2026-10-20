@@ -25,8 +25,9 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
   // rule-status `note` so the authoring loop sees them mid-turn and
   // self-corrects. Diagnostics only — never behavior changes.
   const hasLayoutKind = (rule.mutations || []).some((m) => m.kind === 'reorder' || m.kind === 'reshape');
-  // A hide/remove rule whose matched element IS or CONTAINS the main media
-  // element (<video>/<audio>), or blankets most of the viewport, silently
+  // A hide/remove rule whose matched element IS the main media element
+  // (<video>/<audio>) or is the single wrapper of one, or blankets most of
+  // the viewport, silently
   // blanks the player — audio keeps playing, picture goes white. Live-caught: a
   // ".video-stream" hide meant for Shorts nuked YouTube's own player, and
   // nothing warned. Rides the rule-status `note` into authoring feedback
@@ -66,6 +67,10 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
   //    across EVERY matched element on each report. A selector resolving
   //    [harmless, <video>] still warns (not just the first match), and it
   //    self-clears the instant the media element leaves the matched set.
+  //    CONTAINING media only counts for a single match — the player's own
+  //    container. Among many matches (18 sponsored tiles, one with an
+  //    autoplay preview) a media descendant is just one tile's content, not
+  //    the page's player; live-caught on Amazon as a false warning.
   //  - COVER can only be read BEFORE `hide` stamps display:none — post-apply
   //    getBoundingClientRect() is 0x0 and `remove` has detached the node, so a
   //    large-container hide is invisible to a post-apply measurement. It's
@@ -75,15 +80,16 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
   //    a container removed from the DOM without a re-commit keeps the cover
   //    warning until the next reload — a hidden thing doesn't un-hide itself.
   const MEDIA_COVER_FRACTION = 0.55;
-  const isMediaEl = (el: Element): boolean => {
-    try {
-      return (typeof el.matches === 'function' && el.matches('video, audio'))
-        || (typeof el.querySelector === 'function' && el.querySelector('video, audio') !== null);
-    } catch { return false; }
+  const isMedia = (el: Element): boolean => {
+    try { return typeof el.matches === 'function' && el.matches('video, audio'); } catch { return false; }
   };
+  const containsMedia = (el: Element): boolean => {
+    try { return typeof el.querySelector === 'function' && el.querySelector('video, audio') !== null; } catch { return false; }
+  };
+  const isMediaEl = (el: Element): boolean => isMedia(el) || containsMedia(el);
   let sawLargeCover = false;
   const noteLargeCoverAtMount = (el: Element): void => {
-    if (!hasHideOrRemoveKind || sawLargeCover || isMediaEl(el)) return;
+    if (!hasHideOrRemoveKind || sawLargeCover || isMedia(el)) return;
     try {
       const win = el.ownerDocument?.defaultView;
       const r = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null;
@@ -95,7 +101,8 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
   };
   const mediaHideKind = (): 'media' | 'cover' | null => {
     if (!hasHideOrRemoveKind) return null;
-    for (const el of rs.state.keys()) { if (isMediaEl(el)) return 'media'; }
+    const single = rs.state.size === 1;
+    for (const el of rs.state.keys()) { if (single ? isMediaEl(el) : isMedia(el)) return 'media'; }
     return sawLargeCover ? 'cover' : null;
   };
   const mediaHideNote = (kind: 'media' | 'cover' | null): string | null => {
