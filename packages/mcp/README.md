@@ -77,7 +77,7 @@ The tools and the loop are the same in both modes. Only the page changes.
 | What a commit saves | a new version of the shim in Shim's library | the `.shim` file the session names |
 | Consent | Shim asks you to allow each session, and asks again at commit if the work grants something sensitive | none: the agent drives its own browser, with no logins, on a page it named |
 | Features | everything Shim supports | a stated subset (next section) |
-| When | a session opened on a Shim tab (`tabId`) | a session opened on a `url` while no Shim browser is reachable, or with `mode: "headless"` |
+| When | a session opened on a Shim tab (`tabId`), or on a `url` while Shim is reachable (a new tab you allow) | a session opened on a `url` while no Shim browser is reachable, or with `mode: "headless"` |
 | Only this mode | `shim-mcp --attach`, or `SHIM_MCP_MODE=attach` | `shim-mcp --headless`, or `SHIM_MCP_MODE=headless` |
 
 **Attach** talks to Shim over its **control endpoint**: a Unix socket (a named pipe on
@@ -92,7 +92,10 @@ this before you allow the session.
 attaches. A session on a `url` runs headless when no Shim browser is reachable, meaning
 there is no `control.json` or the process it names is gone. The mode never switches
 silently. Every `shim_open_session` answer names its mode and why. With Shim running, a bare
-`url` is refused (`shim-running`) unless the call asks for `mode: "headless"`. A session
+`url` attaches: Shim's card always asks you to let it open a new tab at that exact URL (a
+site you allowed until quit included), the tab opens only once you allow it, and a page that
+lands on another origin opens no session and its tab is closed. Pass `mode: "headless"` to
+open the url headless instead. A session
 keeps its mode until it ends, even if Shim starts in the meantime.
 
 **Headless** never reads the Shim browser's profile. Every session starts a new,
@@ -143,10 +146,11 @@ the data tools. A headless-only server (`--headless`) also refuses `shim_launch`
 
 1. **Find a page.**
    - Attach: `shim_launch` (or `shim_status`), then `shim_list_tabs` for a site tab's
-     `tabId`.
+     `tabId`, or name a `url` no tab shows.
    - Headless: name a `url`.
 2. **Open a session.**
-   - Attach: `shim_open_session { tabId, intent, shimId | newShimName, dir }`.
+   - Attach: `shim_open_session { tabId | url, intent, shimId | newShimName, dir }`. A `url`
+     answers the new tab's `tabId`.
    - Headless: `shim_open_session { url, intent, shimFile | newShimName, dir }`. The file
      defaults to `<dir>.shim`.
 

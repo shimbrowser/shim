@@ -171,14 +171,15 @@ const HINTS: Record<string, string> = {
   'commit-denied': 'The user declined the commit in Shim. The session is still open.',
   'commit-timeout': 'Nobody approved the commit in Shim within two minutes. The session is still open.',
   'invalid-target': 'Use a tabId from shim_list_tabs for a tab with a site loaded.',
-  'target-changed': 'The tab went to another site while the user was deciding; check shim_list_tabs and open the session again.',
+  'target-changed': 'The tab went to another site (or, for a url, the page landed on another origin and Shim closed the tab); check shim_list_tabs, or open the url the page actually lives at, and open the session again.',
   'unknown-artifact': 'Use a shim id or a compositionId from shim_list_tabs, or newShimName / newCompositionName to start a new one.',
   'mount-taken': 'Another composition has that address; propose a different mount (shim_list_tabs lists the ones in use), or omit it and Shim suggests a free one.',
   'invalid-mount': 'A mount is lowercase letters, digits and hyphens, not starting with a hyphen.',
   'requires-shim-browser': 'This needs the Shim browser: it is not available in headless mode. Run shim-mcp without --headless, with Shim running.',
   unsupported: 'Headless mode supports a subset of shim features: remove what is listed, or author this shim in the Shim browser.',
   'page-open-failed': 'Check the url (http or https, reachable from this machine) and try again.',
-  'shim-running': 'Work in a Shim tab instead (shim_list_tabs, then shim_open_session with tabId: the user\'s logins, commits go to Shim\'s library), or pass mode: "headless" to use a fresh Chromium and a .shim file.',
+  'page-load-failed': 'The page did not load in the new tab, and Shim closed it. Check the url and try again.',
+  'no-window': 'Shim has no open window. Ask the user to open one, then try again.',
   'headless-unavailable': 'Restart the server without --attach (or with SHIM_MCP_MODE unset) to open headless sessions.',
   'playwright-missing': 'Run the install command above (once, in a terminal), then open the session again. Shim does not bundle Chromium.',
   'chromium-missing': 'Run the install command above (once, in a terminal), then open the session again. Shim does not bundle Chromium.',
@@ -419,12 +420,13 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         : { available: false, reason: ready.reason, install: ready.install };
     const headlessOk = headlessOut.available === true;
     const next = attach.available === true
-      ? 'Shim is running: shim_list_tabs, then shim_open_session with tabId (the user\'s logins; commits go to Shim\'s library). ' +
+      ? 'Shim is running: shim_list_tabs, then shim_open_session with tabId (the user\'s logins; commits go to Shim\'s library), ' +
+        'or with url for a page no tab shows (the user allows Shim to open it in a new tab). ' +
         'To work on a fresh Chromium and a .shim file instead, pass url with mode: "headless".'
       : unresponsivePid !== null
         ? `Shim (process ${unresponsivePid}) is running but its control endpoint did not answer: ask the user to check Shim, or call shim_launch to reconnect. ` +
           (headlessOk
-            ? 'For a headless session meanwhile, pass url with mode: "headless" (a url alone is refused while Shim runs).'
+            ? 'For a headless session meanwhile, pass url with mode: "headless" (a url alone goes to Shim, which is not answering).'
             : `Headless needs Playwright, installed once: \`${String(headlessOut.install)}\`.`)
       : headlessOk
         ? 'No Shim browser: shim_open_session with url opens a headless session (a fresh Chromium, no logins; commits write a .shim file). ' +
@@ -456,10 +458,10 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       return { mode: 'attach', why: 'a tab in the Shim browser, with the user\'s logins; commits go to Shim\'s library' };
     }
     if (requested === 'headless') return { mode: 'headless', why: 'headless as asked: a fresh Chromium with no logins; commits write the .shim file' };
-    if (!hasUrl) throw new ToolFailure('invalid-request', 'pass tabId (a tab in the Shim browser, from shim_list_tabs) or url (a page to open headless)');
+    if (!hasUrl) throw new ToolFailure('invalid-request', 'pass tabId (a tab in the Shim browser, from shim_list_tabs) or url (a page to open)');
     const probe = attachProbe();
     if (probe.reachable) {
-      throw new ToolFailure('shim-running', `the Shim browser is running (process ${probe.info.pid}), so a url does not open a headless session on its own`);
+      return { mode: 'attach', why: `the Shim browser is running (process ${probe.info.pid}): a new Shim tab at the url, once the user allows it, with their logins; commits go to Shim's library` };
     }
     return { mode: 'headless', why: `${probe.reason}, so this session runs headless: a fresh Chromium with no logins; commits write the .shim file` };
   }
@@ -510,6 +512,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         // A composition runs only in the Shim browser and needs no tab: it
         // picks attach as a tabId does (a headless pin still refuses it below).
         const wantsComposition = compositionId !== undefined || newCompositionName !== undefined;
+        if (url !== undefined && input.tabId !== undefined) throw new ToolFailure('invalid-request', 'pass tabId or url, not both');
         const pickedMode = pickMode(requested, input.tabId !== undefined || wantsComposition, url !== undefined);
         const picked = wantsComposition && pickedMode.mode === 'attach'
           ? { mode: pickedMode.mode, why: 'the Shim browser, where compositions run (its preview opens in a Shim tab); commits go to Shim\'s library' }
@@ -544,10 +547,11 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           }
           if (mount !== undefined && newCompositionName === undefined) throw new ToolFailure('invalid-request', 'mount goes with newCompositionName (a new composition\'s address)');
           kind = compositionId !== undefined || newCompositionName !== undefined ? 'composition' : 'shim';
-          if (kind === 'shim' && tabId === undefined) throw new ToolFailure('invalid-request', 'a shim session needs tabId: a site tab from shim_list_tabs');
+          if (kind === 'composition' && url !== undefined) throw new ToolFailure('invalid-request', 'a url is for a shim session; a composition takes tabId (optional) or nothing');
+          if (kind === 'shim' && tabId === undefined && url === undefined) throw new ToolFailure('invalid-request', 'a shim session needs tabId (a site tab from shim_list_tabs) or url (a page Shim opens in a new tab once the user allows)');
           body = {
             kind,
-            ...(tabId !== undefined ? { target: { webContentsId: tabId } } : {}),
+            ...(tabId !== undefined ? { target: { webContentsId: tabId } } : url !== undefined ? { target: { url } } : {}),
             agent,
             intent,
             ...(compositionId !== undefined ? { artifactId: compositionId }
@@ -569,6 +573,10 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
           modeReason: picked.why,
           ...(artifactId !== null ? (kind === 'composition' ? { compositionId: artifactId } : { shimId: artifactId }) : {}),
           ...(picked.mode === 'headless' ? { shimFile: opened.shimFile, url: opened.url } : {}),
+          // A session on a url in Shim: the new tab it opened, and where the
+          // page landed.
+          ...(picked.mode === 'attach' && typeof opened.tabId === 'number' ? { tabId: opened.tabId } : {}),
+          ...(picked.mode === 'attach' && typeof opened.url === 'string' ? { url: opened.url } : {}),
           ...(Array.isArray(opened.warnings) ? { warnings: opened.warnings } : {}),
           // A new composition's address, as the user allowed it.
           ...(typeof opened.mount === 'string' ? { mount: opened.mount } : {}),

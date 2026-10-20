@@ -152,6 +152,10 @@ export interface OpenRequest {
   // have moved since it was approved: a backend binding to something else
   // throws TargetChangedError.
   approvedScope?: string;
+  // The origin (scheme://host[:port]) the human approved when the session
+  // opened its own tab at a URL: begin holds the target to it, port and
+  // scheme included, once the lease is held.
+  approvedOrigin?: string;
   // Who is driving (shown on Shim's cards), and what they set out to do.
   agent: string;
   intent: string;
@@ -190,6 +194,8 @@ export interface BeginArgs<L extends SessionLease = SessionLease> {
   artifactId: string;
   target: unknown;
   approvedScope?: string;
+  // See OpenRequest.approvedOrigin.
+  approvedOrigin?: string;
   agent: string;
   intent: string;
   // See OpenRequest.created.
@@ -612,6 +618,7 @@ export function createSessionRegistry<L extends SessionLease = SessionLease>(opt
       handle = await backend.begin({
         sessionId, artifactId: req.artifactId, target: req.target, agent: req.agent, intent: req.intent,
         ...(req.approvedScope !== undefined ? { approvedScope: req.approvedScope } : {}),
+        ...(req.approvedOrigin !== undefined ? { approvedOrigin: req.approvedOrigin } : {}),
         created: req.created === true || req.mint !== undefined, mint: req.mint ?? null,
         lease, signal: controller.signal,
       });

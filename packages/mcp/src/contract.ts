@@ -79,10 +79,15 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
       'shim or composition name, lowercased and hyphenated), never a temp or scratch folder, and tell the user ' +
       'where it is. While the session is open the shim or composition is yours alone; Shim ' +
       'ends it after 10 idle minutes, or when the user stops it or starts their own turn on it. ' +
-      'Headless (no Shim browser needed): pass url instead of tabId. The session opens that page in its own ' +
+      'A page no Shim tab shows: pass url instead of tabId (with shimId or newShimName). With Shim running, ' +
+      'the user is always asked on the card to let Shim open a new tab at that exact url — even for a site they ' +
+      'allowed until quit — and the tab opens only once they allow it; if the page lands on another origin (a ' +
+      'sign-in redirect, another port or scheme) the session doesn\'t open, Shim closes the tab, and the answer ' +
+      'is target-changed. Opening a tab is on the user\'s answer, never yours to repeat: a denied url stays ' +
+      'denied. Headless (no Shim browser needed): the same url opens that page in its own ' +
       'Chromium, with no logins, and works on the .shim file shimFile (loaded when it exists; with newShimName, ' +
       'created by your first commit — default <dir>.shim). A url opens headless only while no Shim browser is ' +
-      'reachable; with Shim running, use its tab (tabId) or pass mode "headless" explicitly. The answer always ' +
+      'reachable, or with mode "headless". The answer always ' +
       'names the session\'s mode and why. Headless has no compositions.',
     input_schema: {
       type: 'object',
@@ -95,12 +100,12 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
         newCompositionName: { type: 'string', description: 'Instead of compositionId: create a new composition with this name (a manifest and an empty index.html to start from). It is kept only if you commit.' },
         mount: { type: 'string', description: 'With newCompositionName: the address to propose, compose://<mount> — lowercase letters, digits and hyphens, not starting with a hyphen, and not already taken. Omitted: Shim suggests one from the name. The user may change it.' },
         dir: { type: 'string', description: 'Optional absolute folder to check the working copy out into once the session opens. Default to <your working directory>/<name> unless the user named one; never a temp or scratch folder.' },
-        url: { type: 'string', description: 'Headless mode only, instead of tabId: the http(s) page to open.' },
+        url: { type: 'string', description: 'Instead of tabId, for a shim: the http(s) page to open (no credentials). With Shim running, a new Shim tab the user allows on the card; headless, a page in its own Chromium.' },
         shimFile: { type: 'string', description: 'Headless mode only, instead of shimId: the absolute path of the .shim file to work on. Commits write it.' },
         mode: {
           type: 'string',
           enum: ['attach', 'headless'],
-          description: 'Optional. The default is attach for a tabId, and headless for a url while no Shim browser is reachable. Pass "headless" to open a url headless even with Shim running.',
+          description: 'Optional. The default is attach for a tabId, and for a url while the Shim browser is reachable (a new tab the user allows); headless for a url while it is not. Pass "headless" to open a url headless even with Shim running.',
         },
       },
       required: ['intent'],
@@ -230,7 +235,8 @@ export const AUTO_SERVER_INSTRUCTIONS =
   'the same tools in both: ATTACH works on a tab in the running Shim browser (the user\'s logins; the user allows ' +
   'each session in Shim; commits go to Shim\'s library), HEADLESS needs no Shim and drives its own Chromium per ' +
   'session (no logins; commits write a .shim file). Call shim_status first: it says which modes are available, ' +
-  'why, and what to do next. Attach: shim_list_tabs, shim_open_session with tabId. Headless: shim_open_session with ' +
+  'why, and what to do next. Attach: shim_list_tabs, shim_open_session with tabId (or url, for a page no tab shows: ' +
+  'Shim opens it in a new tab once the user allows). Headless: shim_open_session with ' +
   'url, intent, newShimName (or shimFile) and dir. Then edit shim.json and handlers/*.js, shim_preview to apply ' +
   'the folder to the live page and read the evidence, the page tools (view_page, query_page, inspect_element, …) ' +
   'to look, shim_commit with a summary, and shim_end_session. For a visual change, verify with a screenshot ' +

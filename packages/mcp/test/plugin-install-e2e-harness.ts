@@ -13,7 +13,7 @@
 //
 // plus: nothing but Playwright resolves from the copy (the core page bundle
 // and the MCP SDK are inlined in the bundle, never looked up at runtime); with
-// a live Shim's discovery file present, a bare url is refused (shim-running)
+// a live Shim's discovery file present, a bare url goes to Shim, not headless
 // instead of silently going headless; and the CLI bundle in the same copy
 // previews a folder too.
 //
@@ -192,12 +192,13 @@ async function main(): Promise<void> {
     check('the session ends', ended.ended === true, ended);
 
     // --- no silent switch -----------------------------------------------------
-    // A live Shim's discovery file (this process's pid): a bare url is
-    // refused instead of quietly going headless.
+    // A live Shim's discovery file (this process's pid): a bare url goes to
+    // Shim (a new tab the user allows) instead of quietly going headless.
     fs.mkdirSync(path.dirname(controlFile), { recursive: true });
     fs.writeFileSync(controlFile, JSON.stringify({ format: 'shim-control/1', socketPath: path.join(tmp, 'no.sock'), token: 't', pid: process.pid, appVersion: 'x' }));
     const refused = await call('shim_open_session', { url, intent: 'x', newShimName: 'Other', dir: path.join(project, 'other') });
-    check('with Shim reachable, a bare url is shim-running', refused.isError === true && (refused.content[0]?.text ?? '').startsWith('shim-running'), refused.content[0]?.text);
+    check('with Shim reachable, a bare url goes to Shim (here unreachable: an error), never headless',
+      refused.isError === true && !fs.existsSync(path.join(project, 'other.shim')), refused.content[0]?.text);
     fs.rmSync(controlFile);
 
     await c.close();

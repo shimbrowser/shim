@@ -7,9 +7,9 @@
 // Covers: shim_status names both modes, whether each is available and why,
 // and what to do next (Shim reachable / not; Playwright found / not, with the
 // install command; a live pid whose endpoint doesn't answer); a url opens
-// headless only while no Shim is reachable, and with Shim running it is
-// refused (shim-running) unless the call asks for headless: never a silent
-// switch; every open answer names its mode and why; a tabId attaches, and so
+// headless only while no Shim is reachable, and with Shim running it goes to
+// Shim (a new tab the user allows, target { url }) unless the call asks for
+// headless: never a silent switch; every open answer names its mode and why; a tabId attaches, and so
 // does a composition (it needs no tab, and runs only in Shim); each
 // session keeps its mode for every later call even after Shim appears; two
 // sessions in different modes side by side; refusals carry auto-mode hints;
@@ -67,7 +67,13 @@ function endpoint(kind: 'attach' | 'headless', idPrefix: string): Script {
     if (req.path === '/tabs') return kind === 'attach' ? ok({ windows: [] }) : refuse(422, 'requires-shim-browser', 'no tabs');
     if (req.method === 'POST' && req.path === '/sessions') {
       n += 1;
-      return ok({ sessionId: `${idPrefix}${n}`, artifactId: 'shim-1', ...(kind === 'headless' ? { shimFile: '/tmp/x.shim', url: 'https://site.test/' } : {}) });
+      const urlTarget = kind === 'attach' && typeof (req.body as { target?: { url?: unknown } }).target?.url === 'string';
+      return ok({
+        sessionId: `${idPrefix}${n}`, artifactId: 'shim-1',
+        ...(kind === 'headless' ? { shimFile: '/tmp/x.shim', url: 'https://site.test/' } : {}),
+        // A url session in Shim answers the tab it opened and where it landed.
+        ...(urlTarget ? { tabId: 31, url: 'https://site.test/landed' } : {}),
+      });
     }
     if (req.path.endsWith('/call')) {
       const name = (req.body as { name?: string }).name;
@@ -171,8 +177,10 @@ async function main(): Promise<void> {
     s = json(await call(client, 'shim_status'));
     check('a live but silent Shim with headless ready: next asks for mode: "headless", never a bare url',
       /mode: "headless"/.test(String(s.next)) && !/with url opens a headless session/.test(String(s.next)), String(s.next));
+    const headlessBefore = r.headless.length;
     const bare = await call(client, 'shim_open_session', { url: 'https://site.test/', intent: 'x', newShimName: 'Site', shimFile: '/tmp/x.shim' });
-    check('…because a bare url is refused shim-running there (what next steers around)', bare.isError === true && /shim-running/.test(JSON.stringify(bare.content)), JSON.stringify(bare.content));
+    check('…because a bare url goes to that silent Shim and fails there, never headless (what next steers around)',
+      bare.isError === true && r.headless.length === headlessBefore, JSON.stringify(bare.content));
     await client.close();
   }
 
@@ -194,10 +202,21 @@ async function main(): Promise<void> {
     const preview = await call(client, 'view_page', { sessionId: hid });
     check('a later page tool goes to the session\'s own mode, even with Shim now running', textOf(preview) === 'headless:view_page' && r.attach.length === 0, textOf(preview));
 
-    const refused = await call(client, 'shim_open_session', { url: 'https://site.test/', intent: 'x', newShimName: 'Other', shimFile: '/tmp/y.shim' });
-    check('Shim running: a bare url is refused as shim-running', refused.isError === true && textOf(refused).startsWith('shim-running'), textOf(refused));
-    check('…naming both ways forward', /shim_list_tabs/.test(textOf(refused)) && /mode: "headless"/.test(textOf(refused)));
-    check('…and nothing opened anywhere', r.headless.filter((x) => x.path === '/sessions').length === 1 && !r.attach.some((x) => x.path === '/sessions'));
+    const viaUrl = await call(client, 'shim_open_session', { url: 'https://site.test/', intent: 'x', newShimName: 'Other' });
+    const vu = json(viaUrl);
+    check('…its answer names the new tab and where the page landed', vu.tabId === 31 && vu.url === 'https://site.test/landed', JSON.stringify(vu));
+    check('Shim running: a bare url attaches (a new Shim tab the user allows)', !viaUrl.isError && vu.mode === 'attach' && /new Shim tab at the url/.test(String(vu.modeReason)), textOf(viaUrl));
+    const urlOpen = r.attach.find((x) => x.path === '/sessions');
+    check('…Shim gets the url as the target, for a shim, nothing headless', JSON.stringify(rec(urlOpen?.body).target) === '{"url":"https://site.test/"}'
+      && rec(urlOpen?.body).kind === 'shim' && JSON.stringify(rec(urlOpen?.body).create) === '{"name":"Other"}'
+      && r.headless.filter((x) => x.path === '/sessions').length === 1, JSON.stringify(urlOpen?.body));
+    await call(client, 'shim_end_session', { sessionId: String(vu.sessionId) });
+    r.attach.length = 0;
+    const both = await call(client, 'shim_open_session', { url: 'https://site.test/', tabId: 7, intent: 'x', newShimName: 'Other' });
+    check('tabId and url together are refused', both.isError === true && /not both/.test(textOf(both)), textOf(both));
+    const compUrl = await call(client, 'shim_open_session', { url: 'https://site.test/', intent: 'x', newCompositionName: 'Dash' });
+    check('a url for a composition is refused', compUrl.isError === true && /url is for a shim session/.test(textOf(compUrl)), textOf(compUrl));
+    check('…and neither reached Shim', !r.attach.some((x) => x.path === '/sessions'));
 
     const forced = json(await call(client, 'shim_open_session', { url: 'https://site.test/', intent: 'x', newShimName: 'Other', shimFile: '/tmp/y.shim', mode: 'headless' }));
     check('mode "headless" opens headless with Shim running', forced.mode === 'headless' && /as asked/.test(String(forced.modeReason)), JSON.stringify(forced));

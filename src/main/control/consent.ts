@@ -21,6 +21,10 @@
 //     is never answered from memory and never remembered — each one is a
 //     choice of address only the human makes — so "allow this host" counts
 //     as allow once there.
+//   - A session that opens its own tab at a URL (session page-driving D9)
+//     carries `openUrl`: the card always asks, even when "allow this host"
+//     answered for its host earlier — a remembered answer covers attaching
+//     to a tab, never creating one — and its answer is never remembered.
 import type { Timers } from '../sessions/registry';
 
 export const CONSENT_TIMEOUT_MS = 2 * 60_000;
@@ -53,6 +57,16 @@ export interface ConsentSubject {
   // A new composition: the address proposed for it (compose://<mount>),
   // which the human can change on the card before allowing.
   proposedMount?: string;
+  // A session on a page no tab shows: the full URL Shim opens a new tab at
+  // once the human allows, and its origin (scheme://host[:port]).
+  openUrl?: string;
+  openOrigin?: string;
+}
+
+// Asked every time and never remembered: a new composition's address, and a
+// tab Shim would open.
+function askedEachTime(subject: ConsentSubject): boolean {
+  return subject.proposedMount !== undefined || subject.openUrl !== undefined;
 }
 
 // What the human chose on the card besides the answer.
@@ -121,7 +135,7 @@ export function createConsentGate(opts: ConsentGateOptions = {}): ConsentGate {
 
   return {
     request(subject, signal) {
-      if (subject.proposedMount === undefined && remembered.has(subject.scope)) return Promise.resolve({ allowed: true, via: 'remembered' });
+      if (!askedEachTime(subject) && remembered.has(subject.scope)) return Promise.resolve({ allowed: true, via: 'remembered' });
       if (signal?.aborted) return Promise.resolve({ allowed: false, reason: 'cancelled' });
       if (pending.size >= maxPending) return Promise.resolve({ allowed: false, reason: 'too-many-pending' });
       const id = newId();
@@ -157,12 +171,16 @@ export function createConsentGate(opts: ConsentGateOptions = {}): ConsentGate {
         entry.settle({ allowed: true, via: 'allow-once', mount: choice?.mount ?? proposed });
         return true;
       }
+      if (entry.info.openUrl !== undefined) {
+        entry.settle({ allowed: true, via: 'allow-once' });
+        return true;
+      }
       entry.settle({ allowed: true, via: answer });
       if (answer === 'allow-host') {
         remembered.add(entry.info.scope);
         // Other requests already waiting on the same scope are covered too.
         for (const other of [...pending.values()]) {
-          if (other.info.scope === entry.info.scope && other.info.proposedMount === undefined) other.settle({ allowed: true, via: 'remembered' });
+          if (other.info.scope === entry.info.scope && !askedEachTime(other.info)) other.settle({ allowed: true, via: 'remembered' });
         }
       }
       return true;

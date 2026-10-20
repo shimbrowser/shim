@@ -34,7 +34,8 @@ browser.
    site tab, the shims that already run on its host and `connect`: `"asks"` (opening a
    session shows the user a card) or `"allowed"` (they allowed this site until Shim quits,
    so no card comes). Compositions carry `connect` the same way. Work against the tab
-   showing the page the user means.
+   showing the page the user means. **No tab shows the site?** Open the session on its
+   `url` instead (step 3): never open tabs yourself (AppleScript, `open`, another browser).
 3. **Open a session.** `shim_open_session { tabId, intent, shimId | newShimName, dir }`.
    - `shimId` refines an existing shim; `newShimName` starts a new one on the tab's site
      (it is kept only if you commit).
@@ -48,6 +49,14 @@ browser.
      decline, do not retry unless they ask you to.
    - With `dir` (an absolute path to an empty folder, or an earlier checkout) the shim is
      checked out at once. Otherwise call `shim_checkout { dir }`.
+   - **A page no tab shows:** `shim_open_session { url, intent, shimId | newShimName, dir }`
+     in place of `tabId` (http or https, no credentials). The card always asks the user to
+     let Shim open a new tab at that exact URL, even for a site they allowed until quit,
+     so always tell them to look at Shim first. The tab opens only after they allow it. If
+     the page lands on another origin (a sign-in redirect, another port or scheme), the
+     session doesn't open, Shim closes the tab, and the answer is `target-changed` with
+     `landedHost`: tell the user (they may need to sign in first), never retry on your own.
+     The answer carries the new tab's `tabId`.
    - **Where the folder goes.** Unless the user names a folder, use your working directory
      plus the shim's name, lowercased and hyphenated: started in `~/shim-sessions`, a shim
      named "Test hide" goes in `~/shim-sessions/test-hide` (add `-2`, `-3` if that folder
@@ -1103,9 +1112,9 @@ A session runs headless when you open it on a `url` and no Shim browser is reach
 when you pass `mode: "headless"`, or when the server runs as `shim-mcp --headless`. The
 session opens its own Chromium page (a fresh profile, no logins, never Shim's). The
 `shim_open_session` answer always says `mode` and `modeReason`: tell the user which one you
-are in, because what a commit saves differs. With Shim running, a bare `url` answers
-`shim-running`: work in the user's Shim tab (`shim_list_tabs`, then `tabId`) unless they
-want a standalone `.shim` file, in which case pass `mode: "headless"`.
+are in, because what a commit saves differs. With Shim running, a bare `url` opens an
+attach session on a new Shim tab (section 1, step 3) unless you pass `mode: "headless"`:
+do that only when the user wants a standalone `.shim` file.
 
 Headless needs Playwright. If it is missing, opening answers `playwright-missing` (or
 `chromium-missing`, or `system-deps-missing` on Linux) with the exact command to run. Give the user that command; don't run
