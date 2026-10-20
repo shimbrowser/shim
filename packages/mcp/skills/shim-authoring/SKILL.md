@@ -248,6 +248,12 @@ All of them act on the session's tab.
   page — fix the rule first, then reload) or after a `page-away` error (the user navigated
   the tab off the site; every page tool refuses rather than touching the wrong page). It
   never navigates anywhere else, and it is limited to a few uses per session.
+- **An attach session's tab off screen.** Shim keeps the session's tab running at full
+  speed while Shim is behind your terminal. But when the tab is not the selected one in its
+  window, or the window is minimized or hidden, `view_page` answers `tab-not-visible`
+  instead of a screenshot that could show an older frame. The other page tools and the
+  preview's evidence still read the live page and carry a `tabWarning`. Ask the user to
+  select the tab before you judge anything visual.
 - **`verify_across_pages { routes? }`** — replays the working shim's rules against the
   *other* page-types the user has already visited on this site (feed, search, profile, …),
   offscreen, and reports per route and per rule whether each matched. A checklist over
