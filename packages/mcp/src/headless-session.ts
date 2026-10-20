@@ -47,10 +47,11 @@ import { applyDelta } from '@shimbrowser/core/spec-delta';
 import { lintSpec } from '@shimbrowser/core/spec-lint';
 import {
   checkoutShim, packShim, anchorDigest, referencedHandlerNames, nameMap, ShimFolderError,
-  SHIM_STATE_FILE, SHIM_STATE_FORMAT, type ShimFile, type ShimState, type RuleState, type FolderInput,
+  SHIM_STATE_FILE, SHIM_STATE_FORMAT, type ShimFile, type ShimState, type RuleState, type SetWitnessState, type FolderInput,
 } from '@shimbrowser/core/shim-folder';
 import { handlerWorlds, moduleToExpression } from '@shimbrowser/core/handler-source';
 import { diffWorkingCopy } from '@shimbrowser/core/working-copy-diff';
+import { hasManagedKeys, withManagedFingerprint } from '@shimbrowser/core/managed-anchor';
 import { decodeWorkingCopy, encodeWorkingCopy, WorkingCopyWireError } from '@shimbrowser/core/working-copy-wire';
 import {
   preflightSpec, scanRuleHandlers, verificationLevel, UNSUPPORTED_API_EVENT, type UnsupportedFeature,
@@ -128,6 +129,12 @@ export interface HeadlessBackendOptions {
    * behind the deploy baseline.
    */
   seedAnchors?: Record<string, string>;
+  /**
+   * Set witnesses kept outside the `.shim` (a folder's .shim-state.json
+   * setWitnesses, by rule id), seeded the way seedWitnesses are, each into its
+   * own anchor field.
+   */
+  seedSetWitnesses?: Record<string, SetWitnessState>;
 }
 
 /** A rule's broken reconciliation outcome: a recovery the engine reported but nothing applied, or a quarantine. */
@@ -337,18 +344,26 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
   const writeShimFile = options.writeShimFile ?? writeAtomic;
   const seedWitnesses = options.seedWitnesses;
   const seedAnchors = options.seedAnchors;
+  const seedSetWitnesses = options.seedSetWitnesses;
 
   // A rule new to the working state takes its seeded witness while its anchor
   // is the one the witness was captured for (HeadlessBackendOptions.seedWitnesses).
   function seedAddedRules(prev: Spec, next: Spec, ops: DeltaOp[]): void {
-    if (!seedWitnesses || !next.rules) return;
+    if ((!seedWitnesses && !seedSetWitnesses) || !next.rules) return;
     const had = new Set((prev.rules || []).map((r) => r.id));
     const added = new Set(ops.filter((op) => op.op === 'add-rule' && op.rule?.id && !had.has(op.rule.id)).map((op) => op.rule?.id));
     next.rules = next.rules.map((rule) => {
-      if (!added.has(rule.id) || !rule.anchor || rule.anchor.witness) return rule;
-      const entry = Object.hasOwn(seedWitnesses, rule.id) ? seedWitnesses[rule.id] : undefined;
-      if (!entry || entry.anchorDigest !== anchorDigest(rule.anchor)) return rule;
-      return { ...rule, anchor: { ...rule.anchor, witness: clone(entry.witness) } };
+      if (!added.has(rule.id) || !rule.anchor || hasManagedKeys(rule.anchor)) return rule;
+      const digest = anchorDigest(rule.anchor);
+      const entry = seedWitnesses && Object.hasOwn(seedWitnesses, rule.id) ? seedWitnesses[rule.id] : undefined;
+      const setEntry = seedSetWitnesses && Object.hasOwn(seedSetWitnesses, rule.id) ? seedSetWitnesses[rule.id] : undefined;
+      // Each fingerprint to its own field, only while the anchor is the one it was captured for.
+      const fingerprint = {
+        ...(entry && entry.anchorDigest === digest ? { witness: clone(entry.witness) } : {}),
+        ...(setEntry && setEntry.anchorDigest === digest ? { setWitness: clone(setEntry.setWitness) } : {}),
+      };
+      if (!hasManagedKeys(fingerprint)) return rule;
+      return { ...rule, anchor: withManagedFingerprint(rule.anchor, fingerprint) };
     });
   }
 
@@ -438,6 +453,9 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     }
     if (!seeded) return out;
     for (const [id, entry] of Object.entries(seedWitnesses ?? {})) {
+      if (!out.has(id)) out.set(id, entry.anchorDigest);
+    }
+    for (const [id, entry] of Object.entries(seedSetWitnesses ?? {})) {
       if (!out.has(id)) out.set(id, entry.anchorDigest);
     }
     for (const [id, digest] of Object.entries(seedAnchors ?? {})) {
@@ -632,7 +650,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         // The working rule carries any witness this preview captured.
         status: describeRuleStatus(rule, status, { witnessed: live?.anchor?.witness !== undefined }),
         verification: verificationLevel(
-          live?.anchor?.witness, handle.host.capabilities, (handle.unsupported.get(key)?.size ?? 0) > 0, noMatchIds.has(rule.id),
+          live?.anchor, handle.host.capabilities, (handle.unsupported.get(key)?.size ?? 0) > 0, noMatchIds.has(rule.id),
         ),
       };
     });
@@ -828,9 +846,12 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       rules: nameMap<RuleState>(),
       file: { ...handle.envelope, authoringHistory: history },
     };
+    const setWitnesses = nameMap<SetWitnessState>();
     for (const rule of spec.rules || []) {
       if (rule.anchor?.witness) state.rules[rule.id] = { anchorDigest: anchorDigest(rule.anchor), witness: rule.anchor.witness };
+      if (rule.anchor?.setWitness) setWitnesses[rule.id] = { anchorDigest: anchorDigest(rule.anchor), setWitness: rule.anchor.setWitness };
     }
+    if (Object.keys(setWitnesses).length) state.setWitnesses = setWitnesses;
     let file: ShimFile;
     try {
       file = packShim({ ...files, [SHIM_STATE_FILE]: JSON.stringify(state) });

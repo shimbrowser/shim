@@ -134,15 +134,20 @@ console.log('source scan');
 
 console.log('verification level');
 {
-  const plain = { v: 1, tag: 'div' };
-  const component = { v: 1, tag: 'div', component: { name: 'TrackRow' } };
+  const plain = { witness: { v: 1, tag: 'div' } };
+  const component = { witness: { v: 1, tag: 'div', component: { v: 1, path: ['TrackRow'], propKeys: [] } } };
+  const set = { setWitness: { v: 1, tag: 'li', count: 3, nested: false } };
   check('full: a plain witness, no unsupported use', verificationLevel(plain, HEADLESS, false) === 'full');
-  check('full: no witness at all', verificationLevel(undefined, HEADLESS, false) === 'full');
+  check('full: no witness at all', verificationLevel(undefined, HEADLESS, false) === 'full' && verificationLevel({}, HEADLESS, false) === 'full');
   check('partial: an unsupported-api event fired', verificationLevel(plain, HEADLESS, true) === 'partial');
-  check('partial: component identity the host cannot check', verificationLevel(component as never, HEADLESS, false) === 'partial');
-  check('full: component identity on a host that checks it', verificationLevel(component as never, BROWSER, false) === 'full');
+  check('partial: component identity the host cannot check', verificationLevel(component, HEADLESS, false) === 'partial');
+  check('full: component identity on a host that checks it', verificationLevel(component, BROWSER, false) === 'full');
   check('none: the rule matched nothing, whatever else holds', verificationLevel(plain, HEADLESS, true, true) === 'none'
-    && verificationLevel(component as never, BROWSER, false, true) === 'none');
+    && verificationLevel(component, BROWSER, false, true) === 'none');
+  check('partial: an element witness of an unknown version', verificationLevel({ witness: { v: 9, tag: 'div' } }, BROWSER, false) === 'partial');
+  check('partial: a set witness (not verified by this engine)', verificationLevel(set, BROWSER, false) === 'partial');
+  check('partial: a set witness of an unknown version', verificationLevel({ setWitness: { v: 9, tag: 'li', count: 3, nested: false } }, BROWSER, false) === 'partial');
+  check('partial: conflicted (both kinds)', verificationLevel({ ...plain, ...set }, BROWSER, false) === 'partial');
 }
 
 console.log('noMatch evidence');

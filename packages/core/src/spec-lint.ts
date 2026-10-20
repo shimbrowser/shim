@@ -37,6 +37,7 @@ import { validateRewriteMutation, detectTransformForm } from './rewrite-response
 import { validateInterceptMutation } from './intercept';
 import { syntaxProbe } from './syntax-probe';
 import { expressionToModule, handlerModuleProblem } from './handler-source';
+import { ENGINE_MANAGED_ANCHOR_KEYS } from './managed-anchor';
 
 // A transform / wrap is kept by transformLiteral only if it evaluates to a
 // function; anything else parses fine and then leaves the rule silently
@@ -83,7 +84,7 @@ const RULE_KEYS = new Set(['id', 'anchor', 'mutations', 'handlers']);
 // is deliberately cheap, same-turn feedback so the model sees the rejection
 // before the commit round-trip.
 const CONNECTION_ENGINES = new Set(['postgres', 'mysql', 'mariadb', 'mssql', 'sqlite-remote', 'supabase']);
-const ANCHOR_KEYS = new Set(['primary', 'fallbacks', 'iframe', 'witness']);
+const ANCHOR_KEYS = new Set<string>(['primary', 'fallbacks', 'iframe', ...ENGINE_MANAGED_ANCHOR_KEYS]);
 // Union across kinds: properties (restyle), handler/mount (script,
 // replace-root, mount-route), pattern/title (mount-route), from/to/exceptPaths
 // (redirect), position/before/after (reorder), layout/direction/columns/rows/

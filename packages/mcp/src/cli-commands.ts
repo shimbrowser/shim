@@ -24,7 +24,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   packShim, unpackShim, readShimFolder, matchHostsProblem, scriptModuleProblems, ShimFolderError, SHIM_STATE_FILE, SHIM_FILE_FORMAT,
-  type FolderInput, type ShimFile, type RuleState,
+  type FolderInput, type ShimFile, type RuleState, type SetWitnessState,
 } from '@shimbrowser/core/shim-folder';
 import { lintSpec } from '@shimbrowser/core/spec-lint';
 import { preflightSpec, scanRuleHandlers } from '@shimbrowser/core/capability-preflight';
@@ -409,11 +409,13 @@ export async function previewFolder(opts: PreviewOptions, deps: PreviewDeps): Pr
   let packed: ShimFile;
   let seedWitnesses: Record<string, RuleState> | undefined;
   let seedAnchors: Record<string, string> | undefined;
+  let seedSetWitnesses: Record<string, SetWitnessState> | undefined;
   try {
     packed = packShim(withState);
     const state = readShimFolder(withState).state;
     seedWitnesses = state?.rules;
     seedAnchors = state?.anchors;
+    seedSetWitnesses = state?.setWitnesses;
   } catch (e) {
     asCliError(e);
   }
@@ -478,6 +480,7 @@ export async function previewFolder(opts: PreviewOptions, deps: PreviewDeps): Pr
       ...(deps.settleMs !== undefined ? { settleMs: deps.settleMs } : {}),
       ...(seedWitnesses ? { seedWitnesses } : {}),
       ...(seedAnchors ? { seedAnchors } : {}),
+      ...(seedSetWitnesses ? { seedSetWitnesses } : {}),
     },
   });
 

@@ -47,11 +47,31 @@ export interface Witness {
   component?: ComponentDescriptor;
 }
 
+// Set witness (set-witness.ts): what every observed member of a multi-match
+// rule's set shares. A separate field from `witness` so an older engine, which
+// treats any `anchor.witness` as single-element, ignores it. `v` is the hard
+// version gate. Engine-managed like `witness` (ENGINE_MANAGED_ANCHOR_KEYS).
+export interface SetWitness {
+  v: number;
+  tag: string;
+  attrs?: Record<string, string>;
+  attrNames?: string[];
+  childTags?: string[];
+  parentTag?: string;
+  textStem?: string;
+  count: number;
+  nested: boolean;
+  // A CSS selector (tag + constant site data-* values) whose complete result
+  // equalled the anchor's complete result at capture — the recovery query.
+  identity?: string;
+}
+
 export interface Anchor {
   primary: AnchorSpec;
   fallbacks?: AnchorSpec[];
   iframe?: { kind: string; value: string };
   witness?: Witness;
+  setWitness?: SetWitness;
 }
 
 export interface MountSpec {

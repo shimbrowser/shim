@@ -17,7 +17,10 @@
 //
 // Pure: no Node, no DOM.
 
-import type { Spec, Rule, Witness } from './types';
+import type { Spec, Rule } from './types';
+import { fingerprintKind } from './managed-anchor';
+import type { ManagedFingerprint } from './managed-anchor';
+import { WITNESS_VERSION } from './witness';
 import type { PageHostCapabilities, PageHostApiMember } from './page-host';
 import { PAGE_HOST_API_MEMBERS } from './page-host';
 import { referencedHandlerNames } from './shim-folder';
@@ -203,7 +206,7 @@ export function scanRuleHandlers(
 
 /**
  * A rule's verification level on a host (D15): `full` only when every signal in
- * its witness was checked there, `partial` when something couldn't be, and
+ * its fingerprint was checked there, `partial` when something couldn't be, and
  * `none` when the rule matched nothing (it is in the preview's `noMatch[]`), so
  * there was nothing to verify. It never says the rule looks right.
  */
@@ -211,18 +214,27 @@ export type VerificationLevel = 'full' | 'partial' | 'none';
 
 /**
  * `none` when the rule matched nothing; otherwise `partial` when the host could
- * not check something: the witness carries component identity and the host has
- * none, or a handler used an api member the host lacks (an `unsupported-api`
- * event fired for the rule).
+ * not check something: a handler used an api member the host lacks (an
+ * `unsupported-api` event fired for the rule); the anchor carries a
+ * fingerprint this engine can't read (an unknown version), or both kinds at
+ * once (conflicted: it needs a recapture); the element witness carries
+ * component identity and the host has none; or a set witness, which this
+ * engine does not verify yet. `fingerprint` is the rule's anchor (only its
+ * engine-managed fields are read).
  */
 export function verificationLevel(
-  witness: Witness | undefined,
+  fingerprint: ManagedFingerprint | undefined,
   capabilities: PageHostCapabilities,
   unsupportedApiFired: boolean,
   matchedNothing = false,
 ): VerificationLevel {
   if (matchedNothing) return 'none';
   if (unsupportedApiFired) return 'partial';
+  const kind = fingerprintKind(fingerprint);
+  if (kind === 'conflicted') return 'partial';
+  const witness = fingerprint?.witness;
+  if (witness && witness.v !== WITNESS_VERSION) return 'partial';
   if (!capabilities.componentIdentity && witness?.component !== undefined) return 'partial';
+  if (fingerprint?.setWitness) return 'partial';
   return 'full';
 }

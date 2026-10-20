@@ -39,6 +39,7 @@ import type { DeltaOp } from './spec-delta';
 import { handlerWorlds, moduleForExpression, moduleToExpression } from './handler-source';
 import { canonicalModule } from './spec-lint';
 import { normalizeIntent } from './intent';
+import { hasManagedKeys, withoutManagedKeys, withManagedFingerprint, managedFingerprintOf } from './managed-anchor';
 import {
   readShimFolder, ShimFolderError, anchorDigest, referencedHandlerNames, stableStringify, handlerPath,
 } from './shim-folder';
@@ -79,12 +80,11 @@ function previousModules(rule: Rule, stored: Record<string, string>): Record<str
   return out;
 }
 
-// Rule identity for "did it change": everything authored, witness dropped,
-// handlers compared as canonical module source.
+// Rule identity for "did it change": everything authored, engine-managed
+// fingerprints dropped, handlers compared as canonical module source.
 function ruleFingerprint(rule: Rule, modules: Record<string, string>): string {
   const { handlers: _handlers, ...rest } = rule;
-  const anchor = rest.anchor ? { ...rest.anchor } : undefined;
-  if (anchor) delete anchor.witness;
+  const anchor = rest.anchor ? withoutManagedKeys(rest.anchor) : undefined;
   const canonical: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const [name, source] of Object.entries(modules)) canonical[name] = canonicalModule(source);
   return stableStringify({ ...rest, anchor, handlers: canonical });
@@ -111,8 +111,7 @@ function comparableField(key: string, value: unknown): unknown {
       if (!isRecord(rule)) return rule;
       const { handlers: _handlers, ...rest } = rule;
       if (!isRecord(rest.anchor)) return rest;
-      const { witness: _witness, ...anchor } = rest.anchor;
-      return { ...rest, anchor };
+      return { ...rest, anchor: withoutManagedKeys(rest.anchor) };
     }),
   };
 }
@@ -264,8 +263,10 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
     const held = before?.handlers;
     const changed = !before || ruleFingerprint(authored, modules) !== ruleFingerprint(before, previousModules(before, stored))
       || Object.entries(rule.handlers || {}).some(([name, expression]) => !!held && Object.hasOwn(held, name) && held[name] !== expression);
-    if (before?.anchor?.witness && rule.anchor && anchorDigest(before.anchor) === anchorDigest(rule.anchor)) {
-      rule.anchor = { ...rule.anchor, witness: before.anchor.witness };
+    // Carry back every fingerprint the host holds for an unchanged anchor,
+    // each to its own field (a set witness never lands in `witness`).
+    if (before?.anchor && rule.anchor && hasManagedKeys(before.anchor) && anchorDigest(before.anchor) === anchorDigest(rule.anchor)) {
+      rule.anchor = withManagedFingerprint(rule.anchor, managedFingerprintOf(before.anchor));
     }
     return { rule, before, changed };
   });

@@ -6,8 +6,10 @@
 //   handlers/<name>.js   one handler per file, in module form
 //                        (`module.exports = <expr>;`, handler-source.ts).
 //   .shim-state.json     tool-managed, written by `unpack` only: per rule the
-//                        witness plus a digest of the anchor it was captured
-//                        for, a digest of each witness-less rule's anchor
+//                        element witness plus a digest of the anchor it was
+//                        captured for (`rules`), set witnesses the same way in
+//                        their own map (`setWitnesses`), a digest of each
+//                        rule's anchor that has no element witness
 //                        (`anchors`), the spec's `bundleHash` and `version`,
 //                        and the rest of the `.shim` envelope (name, opt-in
 //                        data, …).
@@ -28,7 +30,9 @@
 // Pure and Node-free: a folder is a map of relative path → contents (UTF-8
 // text or bytes). Reading and writing disk is the caller's job.
 
-import type { Spec, Rule, Anchor, Witness } from './types';
+import type { Spec, Rule, Anchor, Witness, SetWitness } from './types';
+import { ENGINE_MANAGED_ANCHOR_KEYS, withoutManagedKeys, deleteManagedKeys } from './managed-anchor';
+import { SET_WITNESS_VERSION } from './set-witness';
 import { sha256Hex } from './sha256';
 import { moduleForExpression, handlerModuleProblem } from './handler-source';
 import { lintSpec, canonicalModule, HANDLER_REF_FIELDS } from './spec-lint';
@@ -69,16 +73,31 @@ export interface RuleState {
   witness: Witness;
 }
 
+/** A rule's set witness (multi-match), kept apart from element witnesses. */
+export interface SetWitnessState {
+  /** anchorDigest() of the anchor the set witness was captured for. */
+  anchorDigest: string;
+  setWitness: SetWitness;
+}
+
 export interface ShimState {
   format: typeof SHIM_STATE_FORMAT;
   name?: string;
   version?: number;
   bundleHash?: string;
-  /** Keyed by rule id. */
+  /** Element witnesses only, keyed by rule id. */
   rules: Record<string, RuleState>;
   /**
-   * The committed anchor of each rule that has no witness (a multi-match
-   * rule never captures one), as anchorDigest() by rule id. A rule whose
+   * Set witnesses, keyed by rule id. A separate map so a reader that predates
+   * set witnesses ignores it (a set fingerprint is never written into a
+   * `rules[id].witness` slot, where an older reader would treat it as an
+   * element witness). Optional: absent reads as none.
+   */
+  setWitnesses?: Record<string, SetWitnessState>;
+  /**
+   * The committed anchor of each rule that has no element witness (a
+   * multi-match rule never captures one; it may carry a set witness, in
+   * `setWitnesses`), as anchorDigest() by rule id. A rule whose
    * anchor still matches its digest is unchanged since the commit, so a
    * preview runs it behind `bundleHash`. Optional: a file without it reads as
    * one with no such rules, and a reader that predates it ignores it.
@@ -159,11 +178,10 @@ export function stableStringify(value: unknown): string {
   return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(',')}}`;
 }
 
-/** sha256 of the anchor without its witness — what a stored witness is pinned to. */
+/** sha256 of the anchor without its engine-managed fields — what a stored witness is pinned to. */
 export function anchorDigest(anchor: Anchor | undefined): string {
   if (!anchor) return sha256Hex('null');
-  const { witness: _witness, ...rest } = anchor;
-  return sha256Hex(stableStringify(rest));
+  return sha256Hex(stableStringify(withoutManagedKeys(anchor)));
 }
 
 /** The handler names a rule's mutations reference (handler / transform / wrap). */
@@ -191,7 +209,8 @@ function json(value: unknown): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
-// shim.json's spec: a deep copy without handler source and witnesses. A
+// shim.json's spec: a deep copy without handler source and witnesses (every
+// engine-managed anchor field, ENGINE_MANAGED_ANCHOR_KEYS). A
 // global shim's promoted default carries rules of its own, and their
 // witnesses never leave either (the model never sees one).
 function authoredSpec(spec: Spec, dropFields: readonly string[]): Spec {
@@ -205,7 +224,7 @@ function authoredSpec(spec: Spec, dropFields: readonly string[]): Spec {
     for (const rule of list) {
       if (!isRecord(rule)) continue;
       delete rule.handlers;
-      if (isRecord(rule.anchor)) delete rule.anchor.witness;
+      if (isRecord(rule.anchor)) deleteManagedKeys(rule.anchor);
     }
   }
   return out;
@@ -308,6 +327,7 @@ export function unpackShim(fileContent: string | unknown): FolderFiles {
     }
   }
   const state: ShimState = { format: SHIM_STATE_FORMAT, rules: nameMap<RuleState>() };
+  const setWitnesses = nameMap<SetWitnessState>();
   const anchors = nameMap<string>();
   const seen = new Set<string>();
   rules.forEach((ruleValue, index) => {
@@ -323,10 +343,14 @@ export function unpackShim(fileContent: string | unknown): FolderFiles {
       }
     }
     const anchor = ruleValue.anchor;
-    if (isRecord(anchor) && anchor.witness !== undefined) {
-      state.rules[id] = { anchorDigest: anchorDigest(anchor as unknown as Anchor), witness: anchor.witness as Witness };
-    } else if (isRecord(anchor)) {
-      anchors[id] = anchorDigest(anchor as unknown as Anchor);
+    if (isRecord(anchor)) {
+      // Each managed field to its own map. A rule without an element witness
+      // also records its anchor digest: a reader that predates set witnesses
+      // then still runs an unchanged set-witnessed rule behind bundleHash.
+      const digest = anchorDigest(anchor as unknown as Anchor);
+      if (anchor.witness !== undefined) state.rules[id] = { anchorDigest: digest, witness: anchor.witness as Witness };
+      else anchors[id] = digest;
+      if (anchor.setWitness !== undefined) setWitnesses[id] = { anchorDigest: digest, setWitness: anchor.setWitness as SetWitness };
     }
   });
   checkHandlerNames(Object.keys(modules), problems);
@@ -336,6 +360,7 @@ export function unpackShim(fileContent: string | unknown): FolderFiles {
   if (typeof spec.version === 'number') state.version = spec.version;
   if (typeof spec.bundleHash === 'string') state.bundleHash = spec.bundleHash;
   if (Object.keys(anchors).length) state.anchors = anchors;
+  if (Object.keys(setWitnesses).length) state.setWitnesses = setWitnesses;
   const envelope = nameMap<unknown>();
   for (const [key, value] of Object.entries(parsed)) {
     if (key === 'format' || key === 'name' || key === 'spec' || key === 'handlers') continue;
@@ -461,8 +486,10 @@ function checkAuthoredSpec(raw: Record<string, unknown>, handlers: Record<string
     if ('handlers' in ruleValue) {
       problems.push(`rule "${id}": inline "handlers" are not allowed in ${SHIM_JSON} — put each handler in ${HANDLERS_DIR}/<name>.js and name it from the mutation`);
     }
-    if (isRecord(ruleValue.anchor) && 'witness' in ruleValue.anchor) {
-      problems.push(`rule "${id}": anchor "witness" is managed by Shim — remove it`);
+    if (isRecord(ruleValue.anchor)) {
+      for (const key of ENGINE_MANAGED_ANCHOR_KEYS) {
+        if (key in ruleValue.anchor) problems.push(`rule "${id}": anchor "${key}" is managed by Shim — remove it`);
+      }
     }
     if (ruleValue.mutations !== undefined && !Array.isArray(ruleValue.mutations)) {
       problems.push(`rule "${id}": "mutations" must be an array`);
@@ -509,6 +536,25 @@ function checkScriptModules(spec: Spec, handlers: Record<string, string>): void 
   if (problems.length) throw new ShimFolderError('malformed-shim-folder', problems);
 }
 
+// A known-version set witness must have the shape the engine reads; one of an
+// unknown version is kept as it is (a newer engine wrote it, and this one
+// reports such a rule as only partially verified).
+function setWitnessShapeProblem(value: Record<string, unknown>): string | null {
+  if (value.v !== SET_WITNESS_VERSION) return null;
+  if (typeof value.tag !== 'string' || !value.tag) return 'needs a "tag" string';
+  if (typeof value.count !== 'number' || !Number.isFinite(value.count)) return 'needs a numeric "count"';
+  if (typeof value.nested !== 'boolean') return 'needs a boolean "nested"';
+  if (value.attrs !== undefined && (!isRecord(value.attrs) || !Object.values(value.attrs).every((v) => typeof v === 'string'))) return '"attrs" must map names to strings';
+  for (const field of ['attrNames', 'childTags'] as const) {
+    const list = value[field];
+    if (list !== undefined && (!Array.isArray(list) || !list.every((v) => typeof v === 'string'))) return `"${field}" must be a list of strings`;
+  }
+  for (const field of ['parentTag', 'textStem', 'identity'] as const) {
+    if (value[field] !== undefined && typeof value[field] !== 'string') return `"${field}" must be a string`;
+  }
+  return null;
+}
+
 function parseState(text: string): ShimState {
   let parsed: unknown;
   try {
@@ -529,6 +575,19 @@ function parseState(text: string): ShimState {
     for (const [id, entry] of Object.entries(parsed.rules)) {
       if (!isRecord(entry) || typeof entry.anchorDigest !== 'string' || !isRecord(entry.witness)) {
         problems.push(`rules["${id}"] needs an "anchorDigest" string and a "witness" object`);
+      }
+    }
+  }
+  if (parsed.setWitnesses !== undefined) {
+    if (!isRecord(parsed.setWitnesses)) problems.push('"setWitnesses" must be an object');
+    else {
+      for (const [id, entry] of Object.entries(parsed.setWitnesses)) {
+        if (!isRecord(entry) || typeof entry.anchorDigest !== 'string' || !isRecord(entry.setWitness)) {
+          problems.push(`setWitnesses["${id}"] needs an "anchorDigest" string and a "setWitness" object`);
+        } else {
+          const shape = setWitnessShapeProblem(entry.setWitness);
+          if (shape) problems.push(`setWitnesses["${id}"].setWitness ${shape}`);
+        }
       }
     }
   }
@@ -571,9 +630,14 @@ export function packShim(input: FolderInput): ShimFile {
   if (state?.version !== undefined) spec.version = state.version;
   if (state?.bundleHash !== undefined) spec.bundleHash = state.bundleHash;
   for (const rule of spec.rules || []) {
+    if (!rule.anchor) continue;
+    const digest = anchorDigest(rule.anchor);
+    // Each fingerprint back to its own field.
     const entry = state && Object.hasOwn(state.rules, rule.id) ? state.rules[rule.id] : undefined;
-    if (!entry || !rule.anchor || anchorDigest(rule.anchor) !== entry.anchorDigest) continue;
-    rule.anchor = { ...rule.anchor, witness: clone(entry.witness) };
+    if (entry && digest === entry.anchorDigest) rule.anchor = { ...rule.anchor, witness: clone(entry.witness) };
+    const sets = state?.setWitnesses;
+    const setEntry = sets && Object.hasOwn(sets, rule.id) ? sets[rule.id] : undefined;
+    if (setEntry && digest === setEntry.anchorDigest) rule.anchor = { ...rule.anchor, setWitness: clone(setEntry.setWitness) };
   }
 
   const hostsProblem = matchHostsProblem(spec);
