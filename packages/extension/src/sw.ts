@@ -219,11 +219,20 @@ async function injectRuntime(tabId: number, mode: ExtensionMode): Promise<void> 
 // runtime are injected in the mode's world; the user-script runtime waits
 // for the retired one's mark to go before it boots. Every tab is best
 // effort: one the extension cannot reach is skipped.
-async function refreshOpenTabs(patterns: readonly string[]): Promise<void> {
+// Refreshes queue behind registration syncs and each other: two at once
+// would both find a tab without a runtime and inject the engine twice.
+function refreshOpenTabs(patterns: readonly string[]): Promise<void> {
+  return serialized(() => refreshOpenTabsNow(patterns));
+}
+
+async function refreshOpenTabsNow(patterns: readonly string[]): Promise<void> {
   const mode = modeNow;
   const answered = new Set<number>();
-  // What an isolated-world runtime is told: in full mode it leaves.
-  const toIsolated: ToRuntime = mode === 'full' ? { type: 'retire' } : { type: 'sync' };
+  // What an isolated-world runtime is told: in full mode it leaves, when a
+  // user-script runtime can be injected in its place (Chrome 135+);
+  // before that it stays and keeps the declarative rules running.
+  const canInjectUserScript = mode === 'full' && typeof (chrome.userScripts as { execute?: unknown }).execute === 'function';
+  const toIsolated: ToRuntime = canInjectUserScript ? { type: 'retire' } : { type: 'sync' };
   for (const [port, { tabId, world }] of runtimePorts) {
     const nudge: ToRuntime = world === 'isolated' ? toIsolated : { type: 'sync' };
     try {

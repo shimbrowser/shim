@@ -58,13 +58,18 @@ interface Runtime {
 
   const mark = Math.random().toString(36).slice(2);
   const markHeld = (): string | null => document.documentElement.getAttribute(RUNTIME_MARK);
-  // The previous instance's runtime, if it is still tearing down here.
-  const takeover: Promise<void> = markHeld() === null
-    ? Promise.resolve()
+  // The previous runtime, if it is still tearing down here: a retiring one
+  // drops its mark at once, so a mark that outlasts the wait is a holder
+  // that is alive (in the other world, say, with its port down for the
+  // moment) and keeps the document; this runtime then stands down rather
+  // than run beside it.
+  const takeover: Promise<boolean> = markHeld() === null
+    ? Promise.resolve(true)
     : new Promise((resolve) => {
       const deadline = Date.now() + TAKEOVER_WAIT_MS;
       const tick = (): void => {
-        if (markHeld() === null || Date.now() >= deadline) { resolve(); return; }
+        if (markHeld() === null) { resolve(true); return; }
+        if (Date.now() >= deadline) { resolve(false); return; }
         setTimeout(tick, TAKEOVER_POLL_MS);
       };
       tick();
@@ -181,8 +186,9 @@ interface Runtime {
   // runtime must boot nothing: the successor owns the document now.
   const resync = async (): Promise<void> => {
     if (retired) return;
-    await takeover;
+    const free = await takeover;
     if (retired || !host[BOOT_FLAG]) return; // retired or invalidated while waiting
+    if (!free) { invalidated(); return; } // a live holder keeps the document
     document.documentElement.setAttribute(RUNTIME_MARK, mark);
     let answer: WorkerAnswer;
     try {
@@ -210,12 +216,10 @@ interface Runtime {
   // The isolated world (declarative mode) listens for it; the user-script
   // world (full mode) has no onMessage and is nudged over the port below.
   const onMessage = (chrome.runtime as { onMessage?: typeof chrome.runtime.onMessage }).onMessage;
-  let port: chrome.runtime.Port | null = null;
   const onNudge = (msg: ToRuntime): void => {
     if (retired) return;
     if (msg.type === 'retire') {
       invalidated();
-      try { port?.disconnect(); } catch { /* already gone */ }
       return;
     }
     sync();
@@ -223,6 +227,9 @@ interface Runtime {
   if (onMessage) {
     onMessage.addListener((msg: unknown, sender, sendResponse: (answer: { ok: true }) => void) => {
       if (sender.id !== chrome.runtime.id || !isToRuntime(msg)) return false;
+      // A retired runtime is not a runtime: unanswered, the worker treats
+      // the tab as one with none and injects anew.
+      if (retired) return false;
       onNudge(msg);
       sendResponse({ ok: true });
       return false;
@@ -240,11 +247,17 @@ interface Runtime {
   // or this extension instance is gone. Either way everything is torn
   // down, the mark dropped for the successor, the flag dropped so a
   // fresh injection boots anew, and no port is held again.
+  let port: chrome.runtime.Port | null = null;
   const invalidated = (): void => {
     retired = true;
     for (const id of [...controls.keys()]) stop(id);
     delete host[BOOT_FLAG];
     if (markHeld() === mark) document.documentElement.removeAttribute(RUNTIME_MARK);
+    // No port either: to the worker a tab with a port has a runtime, and
+    // this one is none; without it the tab is injected anew when needed.
+    const held = port;
+    port = null;
+    try { held?.disconnect(); } catch { /* already gone */ }
   };
   const contextGone = (): boolean => {
     try {
