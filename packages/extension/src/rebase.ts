@@ -10,9 +10,14 @@
 // escalates to a quarantine; a quarantine that does escalate holds the rule
 // for review. No LLM re-anchor: review is the ceiling here.
 
-import type { Spec, Anchor, Rule } from '@shimbrowser/core/types';
+import type { Spec, Anchor, AnchorSpec, Rule } from '@shimbrowser/core/types';
 import { pagePathKey } from '@shimbrowser/core/deploy-id';
 import type { QuarantineState, RuleStateRecord } from './store';
+
+/** The anchor kinds the engine resolves; a reported anchor of any other kind is not an anchor. */
+export const ANCHOR_KINDS: ReadonlySet<string> = new Set<AnchorSpec['kind']>(['css', 'data-attr', 'aria', 'text']);
+const ANCHOR_SPEC_FIELDS = ['value', 'name', 'role', 'label', 'match'] as const;
+const MAX_ANCHOR_TEXT = 4096;
 
 /** A rule with this many page kinds remembered is global: every page kind counts as known. */
 export const PAGE_MEMORY_CAP = 50;
@@ -40,8 +45,50 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-function isAnchor(v: unknown): v is Anchor {
-  return isRecord(v) && isRecord(v.primary) && typeof v.primary.kind === 'string' && typeof v.primary.value === 'string';
+/**
+ * A reported anchor spec, kept to the core's shape: one of the engine's
+ * kinds, its string fields and nothing else. A reported event is the
+ * page's word (a handler can report what it likes about its own shim),
+ * so what is stored is what the schema allows, no more.
+ */
+function anchorSpec(v: unknown): AnchorSpec | null {
+  if (!isRecord(v) || typeof v.kind !== 'string' || !ANCHOR_KINDS.has(v.kind)) return null;
+  const out: AnchorSpec = { kind: v.kind as AnchorSpec['kind'] };
+  for (const field of ANCHOR_SPEC_FIELDS) {
+    const value = v[field];
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || value.length > MAX_ANCHOR_TEXT) return null;
+    if (field === 'match' && value !== 'exact' && value !== 'contains') return null;
+    out[field] = value as never;
+  }
+  return out;
+}
+
+/** A reported anchor in the core's shape, or null: the primary of a known kind, fallbacks likewise, a fingerprint as an object. */
+export function reportedAnchor(v: unknown): Anchor | null {
+  if (!isRecord(v)) return null;
+  const primary = anchorSpec(v.primary);
+  if (!primary) return null;
+  const anchor: Anchor = { primary };
+  if (v.fallbacks !== undefined) {
+    if (!Array.isArray(v.fallbacks)) return null;
+    const fallbacks: AnchorSpec[] = [];
+    for (const f of v.fallbacks) {
+      const spec = anchorSpec(f);
+      if (!spec) return null;
+      fallbacks.push(spec);
+    }
+    anchor.fallbacks = fallbacks;
+  }
+  if (v.witness !== undefined) {
+    if (!isRecord(v.witness) || typeof v.witness.tag !== 'string') return null;
+    anchor.witness = v.witness as unknown as Anchor['witness'];
+  }
+  if (v.setWitness !== undefined) {
+    if (!isRecord(v.setWitness)) return null;
+    anchor.setWitness = v.setWitness as unknown as Anchor['setWitness'];
+  }
+  return anchor;
 }
 
 export interface RebaseOutcome {
@@ -59,8 +106,9 @@ export interface RebaseOutcome {
  * version bump and a snapshot for nothing). A new bundle hash with the same
  * primary still proceeds, so the gate stays honest.
  */
-export function rebasedSpec(spec: Spec, ruleId: string, anchor: unknown, bundleHash: unknown): RebaseOutcome | null {
-  if (!isAnchor(anchor)) return null;
+export function rebasedSpec(spec: Spec, ruleId: string, reported: unknown, bundleHash: unknown): RebaseOutcome | null {
+  const anchor = reportedAnchor(reported);
+  if (!anchor) return null;
   const rules = [...(spec.rules ?? [])];
   const index = rules.findIndex((r) => r.id === ruleId);
   const before = rules[index];
@@ -96,7 +144,7 @@ export function witnessedSpec(spec: Spec, ruleId: string, witness: unknown, setW
   if (index < 0 || !rule || !rule.anchor) return null;
   if (rule.anchor.witness || rule.anchor.setWitness) return null;
   const anchor: Anchor = { ...rule.anchor };
-  if (isRecord(witness)) anchor.witness = witness as unknown as Anchor['witness'];
+  if (isRecord(witness) && typeof witness.tag === 'string') anchor.witness = witness as unknown as Anchor['witness'];
   else if (isRecord(setWitness)) anchor.setWitness = setWitness as unknown as Anchor['setWitness'];
   else return null;
   rules[index] = { ...rule, anchor };

@@ -4,7 +4,7 @@
 // when it moved; a captured witness lands only on a rule without one; page
 // memory and the escalation gate; the quarantine reason in main's words.
 
-import { rebasedSpec, refreshedSpec, witnessedSpec, rememberPath, escalationAllowed, quarantineFrom, PAGE_MEMORY_CAP } from '../src/rebase';
+import { rebasedSpec, refreshedSpec, witnessedSpec, reportedAnchor, rememberPath, escalationAllowed, quarantineFrom, PAGE_MEMORY_CAP } from '../src/rebase';
 import type { Spec } from '@shimbrowser/core/types';
 
 let failures = 0;
@@ -43,6 +43,21 @@ console.log('a rebase:');
   check('the same primary at a new bundle hash still proceeds, so the gate stays honest', sameNewBuild !== null && sameNewBuild.spec.bundleHash === 'b2' && sameNewBuild.version === 4);
   const unversioned = rebasedSpec({ ...spec, version: undefined }, 'buy', promoted, 'b2');
   check('a spec without a version counts as version 1', unversioned?.version === 2);
+}
+
+console.log('a reported anchor is kept to the core\'s shape:');
+{
+  const ok = reportedAnchor({ primary: { kind: 'aria', role: 'button', label: 'Buy', match: 'contains' }, fallbacks: [{ kind: 'text', value: 'Buy the record' }], witness: { v: 1, tag: 'button' }, extra: 1 });
+  check('a known kind with its fields, fallbacks and fingerprint', ok !== null && ok.primary.kind === 'aria' && ok.primary.label === 'Buy' && ok.fallbacks?.[0]?.kind === 'text' && ok.witness?.tag === 'button');
+  check('and nothing else', ok !== null && !('extra' in ok) && Object.keys(ok).sort().join() === 'fallbacks,primary,witness');
+  check('an unknown kind is no anchor', reportedAnchor({ primary: { kind: 'xpath', value: '//a' } }) === null);
+  check('a non-string field is no anchor', reportedAnchor({ primary: { kind: 'css', value: 42 } }) === null);
+  check('an unknown match is no anchor', reportedAnchor({ primary: { kind: 'text', value: 'x', match: 'regex' } }) === null);
+  check('a fallback of an unknown kind is no anchor', reportedAnchor({ primary: { kind: 'css', value: 'a' }, fallbacks: [{ kind: 'js', value: '1' }] }) === null);
+  check('a fingerprint without a tag is no anchor', reportedAnchor({ primary: { kind: 'css', value: 'a' }, witness: { v: 1 } }) === null);
+  check('an oversized value is no anchor', reportedAnchor({ primary: { kind: 'css', value: 'x'.repeat(5000) } }) === null);
+  check('so a rebase to such an anchor is nothing', rebasedSpec(spec, 'buy', { primary: { kind: 'xpath', value: '//a' } }, 'b2') === null);
+  check('a primary field of a prototype\'s name is a field', reportedAnchor({ primary: { kind: 'css', value: 'a', __proto__: { polluted: true } } })?.primary.value === 'a');
 }
 
 console.log('a baseline refresh:');
