@@ -11,8 +11,8 @@
 // survival, SPA navigation, anchor recovery after a simulated deploy,
 // teardown, a throwing handler, plus api.storage, the page tools, a page
 // with a strict CSP (the real-browser spike's compile path (D12), through the
-// real driver), shared handler modules, a dead anchor's preview evidence, and
-// trusted input with its document token.
+// real driver), shared handler modules, a dead anchor's preview evidence,
+// trusted input with its document token, and a superseded load.
 //
 // The suite owns its site: `conformanceFixture(path, state)` answers every
 // request, and the runner serves it (any HTTP server; the case only needs the
@@ -270,7 +270,7 @@ export const CONFORMANCE_CAPABILITIES = [
   'mount:inline', 'mount:portal', 'mount:overlay', 'mount:shadow', 'self-healing',
   'witness:capture', 'witness:verify', 'witness:set', 'rebase:refresh', 'rebase:promote', 'rebase:recover', 'rebase:quarantine',
   'api.storage', 'api.cleanup', 'handler-errors', 'console', 'spa-navigation', 'teardown', 'page-tools', 'strict-csp',
-  'no-match', 'trusted-input',
+  'no-match', 'trusted-input', 'superseded-load',
 ] as const;
 export type ConformanceCapability = (typeof CONFORMANCE_CAPABILITIES)[number];
 
@@ -1225,6 +1225,32 @@ const noMatchCase: ConformanceCase = {
   },
 };
 
+// A load another navigation supersedes before it finishes (Chromium aborts
+// it, ERR_ABORTED) is not a failed load: the wait follows the navigation that
+// took over, as a redirect is followed — what an installed shim's
+// `location.replace` during the load looks like to a navigate. A load that
+// genuinely fails still ends the wait as failed.
+const supersededLoadCase: ConformanceCase = {
+  id: 'superseded-load',
+  title: 'a superseded load is followed to where the page lands; a real failure still fails',
+  covers: ['superseded-load'],
+  async run(kit) {
+    if (!(await kit.load('/apply'))) return;
+    const wait = kit.host.waitForLoad({ timeoutMs: 15000 });
+    kit.host.reload(`${kit.origin}/apply?first=1`);
+    kit.host.reload(`${kit.origin}/apply?second=1`);
+    const outcome = await wait;
+    kit.check('the wait reports the superseding load as finished', outcome.kind === 'finished', outcome);
+    kit.check('…and the page is where that load went', kit.host.url().endsWith('/apply?second=1'), kit.host.url());
+
+    // Nothing listens on port 1: the connection is refused.
+    const failing = kit.host.waitForLoad({ timeoutMs: 15000 });
+    kit.host.reload('http://127.0.0.1:1/');
+    const failed = await failing;
+    kit.check('a load that cannot connect still ends the wait as failed', failed.kind === 'failed' && failed.code !== -3, failed);
+  },
+};
+
 // Set witnesses: a multi-match rule's preview captures what every row shares
 // (re-emitted as rows are added, withdrawn for mixed tags), and a rule
 // carrying it applies only to members, never to a same-selector impostor.
@@ -1530,7 +1556,7 @@ const inputCase: ConformanceCase = {
 
 export const CONFORMANCE_CASES: readonly ConformanceCase[] = [
   applyCase, setWitnessCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, cropScrollCase, strictCspCase, sharedModuleCase, noMatchCase,
-  inputCase,
+  inputCase, supersededLoadCase,
 ];
 
 /** Every capability some case vouches for. */

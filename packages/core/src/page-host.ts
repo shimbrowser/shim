@@ -161,6 +161,22 @@ export interface LoadWaitOptions {
   failures?: 'main-frame' | 'any-frame';
 }
 
+/**
+ * Chromium's net error for a navigation cancelled before it finished. A main
+ * frame load that ends this way was usually superseded by another navigation
+ * (a page script or an installed shim calling `location.replace` while the
+ * page loads, the way a redirect does): `waitForLoad` then follows the
+ * superseding load and reports how that one ends. Only an abort no other
+ * navigation took over (a stopped load) ends the wait as `failed`.
+ */
+export const NET_ERR_ABORTED = -3;
+
+/**
+ * How long a wait gives an aborted main-frame load to show the navigation
+ * that superseded it before it reports the abort as a failure.
+ */
+export const SUPERSEDED_LOAD_GRACE_MS = 500;
+
 /** query_page / inspect_element answers. Errors are values, never throws. */
 export interface PageToolError { error: string; detail?: string }
 export type QueryPageResult = { candidates: unknown[] } | PageToolError;
@@ -259,7 +275,12 @@ export interface PageHost {
    * Call `waitForLoad` in the same tick to observe the load it starts.
    */
   reload(url?: string): void;
-  /** Resolves on the first of: the load finishing or failing, the page closing, `signal` aborting, the timeout. */
+  /**
+   * Resolves on the first of: the load finishing or failing, the page
+   * closing, `signal` aborting, the timeout. A main-frame load another
+   * navigation superseded (`NET_ERR_ABORTED`) is not a failure: the wait
+   * follows the navigation that replaced it.
+   */
   waitForLoad(options: LoadWaitOptions): Promise<PageLoadOutcome>;
 
   /** Engine-served page inspection; present exactly when `capabilities.engineInspection`. */

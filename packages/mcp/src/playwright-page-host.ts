@@ -27,7 +27,7 @@ import type {
   PageRuntimeEvent, PageConsoleMessage, PageLoadOutcome, LoadWaitOptions, Unsubscribe,
   PageInputCommand, PageInputResult,
 } from '@shimbrowser/core/page-host';
-import { DOCUMENT_TOKEN_SCRIPT, sendInputCommands } from '@shimbrowser/core/page-host';
+import { DOCUMENT_TOKEN_SCRIPT, NET_ERR_ABORTED, SUPERSEDED_LOAD_GRACE_MS, sendInputCommands } from '@shimbrowser/core/page-host';
 import { handlerExpressionSource } from '@shimbrowser/core/handler-source';
 import { pageRuntimeSource } from './headless-page-runtime';
 import { imageSize } from './results';
@@ -547,15 +547,23 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
     }
   }
 
+  // A main-frame ERR_ABORTED is a load another navigation superseded (a
+  // page script's `location.replace` during the load), not a failure: the
+  // wait follows the navigation request that took over, already sent or sent
+  // within the grace window. Only an abort nothing took over ends it as failed.
   function waitForLoad({ signal, timeoutMs, failures = 'main-frame' }: LoadWaitOptions): Promise<PageLoadOutcome> {
     return new Promise((resolve) => {
       let settled = false;
+      let abortGrace: ReturnType<typeof setTimeout> | null = null;
+      let lastNavigation: Request | null = null;
       const settle = (outcome: PageLoadOutcome): void => {
         if (settled) return;
         settled = true;
         loadWaits.delete(settle);
         clearTimeout(timer);
+        if (abortGrace) clearTimeout(abortGrace);
         page.off('load', onLoad);
+        page.off('request', onRequest);
         page.off('requestfailed', onFailed);
         page.off('close', onClose);
         if (signal) {
@@ -563,18 +571,35 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
         }
         resolve(outcome);
       };
-      const onLoad = (): void => settle({ kind: 'finished' });
-      const onFailed = (req: Request): void => {
-        let mainFrame: boolean;
+      const isMainNavigation = (req: Request): boolean | null => {
         try {
-          if (!req.isNavigationRequest()) return;
-          mainFrame = req.frame() === page.mainFrame();
+          if (!req.isNavigationRequest()) return null;
+          return req.frame() === page.mainFrame();
         } catch {
-          return;
+          return null;
         }
+      };
+      const onLoad = (): void => settle({ kind: 'finished' });
+      const onRequest = (req: Request): void => {
+        if (isMainNavigation(req) === true) lastNavigation = req;
+      };
+      const onFailed = (req: Request): void => {
+        const mainFrame = isMainNavigation(req);
+        if (mainFrame === null) return;
         if (!mainFrame && failures !== 'any-frame') return;
         const text = req.failure()?.errorText ?? 'net::ERR_FAILED';
-        settle({ kind: 'failed', code: netErrorCode(text), description: text.replace(/^net::/, '') });
+        const failed: PageLoadOutcome = { kind: 'failed', code: netErrorCode(text), description: text.replace(/^net::/, '') };
+        if (mainFrame && failed.code === NET_ERR_ABORTED) {
+          // Superseded: a newer main-frame navigation is already on its way.
+          if (lastNavigation !== null && lastNavigation !== req) return;
+          if (abortGrace) clearTimeout(abortGrace);
+          abortGrace = setTimeout(() => {
+            abortGrace = null;
+            if (lastNavigation === null || lastNavigation === req) settle(failed);
+          }, SUPERSEDED_LOAD_GRACE_MS);
+          return;
+        }
+        settle(failed);
       };
       const onClose = (): void => settle({ kind: 'destroyed' });
       const onAbort = (): void => settle({ kind: 'aborted' });
@@ -582,6 +607,7 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
       if (detached || page.isClosed()) { settle({ kind: 'destroyed' }); return; }
       loadWaits.add(settle);
       page.on('load', onLoad);
+      page.on('request', onRequest);
       page.on('requestfailed', onFailed);
       page.on('close', onClose);
       if (signal) {
