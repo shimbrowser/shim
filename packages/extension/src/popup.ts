@@ -2,9 +2,25 @@
 // the way to the install page. Everything it shows is data from the worker,
 // rendered as text, never as markup.
 
-import type { ToWorker, WorkerAnswer, ShimSummary } from './messages';
+import type { ToWorker, WorkerAnswer, ShimSummary, VersionSummary } from './messages';
 
 const ask = (msg: ToWorker): Promise<WorkerAnswer> => chrome.runtime.sendMessage(msg);
+
+/** Hands the user a file from this page: a Blob link, clicked. */
+function download(fileName: string, text: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+function when(ms: number): string {
+  return new Date(ms).toLocaleString();
+}
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -43,11 +59,35 @@ function renderShim(shim: ShimSummary, refresh: () => void): HTMLElement {
   }
   card.append(top);
 
+  // Rules the ladder could not re-find after a site change: held for review,
+  // never silently mis-attached. The way to repair here is to export the
+  // file and repair it in Shim or with Claude Code.
+  if (shim.review.length) {
+    const review = el('div', 'review');
+    review.append(el('span', 'pill warn', 'needs review'));
+    const list = el('ul', 'problems');
+    for (const item of shim.review) list.append(el('li', undefined, `${item.ruleId}: ${item.reason}`));
+    review.append(list);
+    card.append(review);
+  }
+
   const bottom = el('div', 'row');
-  const rules = el('span', 'muted', `${shim.ruleCount} rule${shim.ruleCount === 1 ? '' : 's'}`);
+  const rules = el('span', 'muted', `${shim.ruleCount} rule${shim.ruleCount === 1 ? '' : 's'} · v${shim.version}`);
   bottom.append(rules);
   const spacer = el('span', 'grow');
   bottom.append(spacer);
+  const exportButton = el('button', undefined, 'export');
+  exportButton.title = 'save this shim as a .shim file, as it is now, with its saved data';
+  exportButton.addEventListener('click', async () => {
+    exportButton.disabled = true;
+    const answer = await ask({ type: 'shims.export', id: shim.id });
+    if (answer.ok && 'file' in answer) download(answer.fileName, answer.file);
+    exportButton.disabled = false;
+  });
+  bottom.append(exportButton);
+  const history = el('button', undefined, 'history');
+  history.title = 'earlier versions of this shim, each one restorable';
+  bottom.append(history);
   const remove = el('button', 'danger', 'remove');
   let armed = false;
   remove.addEventListener('click', async () => {
@@ -62,6 +102,36 @@ function renderShim(shim: ShimSummary, refresh: () => void): HTMLElement {
   });
   bottom.append(remove);
   card.append(bottom);
+
+  const versions = el('div', 'versions');
+  versions.hidden = true;
+  history.addEventListener('click', async () => {
+    if (!versions.hidden) { versions.hidden = true; return; }
+    versions.replaceChildren();
+    const answer = await ask({ type: 'shims.versions', id: shim.id });
+    if (!answer.ok || !('versions' in answer)) return;
+    const list = answer.versions as VersionSummary[];
+    if (!list.length) versions.append(el('div', 'muted', 'no earlier versions'));
+    for (const v of [...list].reverse()) {
+      const row = el('div', 'row');
+      const current = v.version === shim.version;
+      row.append(el('span', 'muted', `v${v.version} · ${v.reason} · ${when(v.at)}${current ? ' · current' : ''}`));
+      row.append(el('span', 'grow'));
+      // The current version is what runs; there is nothing to restore it to.
+      if (!current) {
+        const restore = el('button', undefined, 'restore');
+        restore.addEventListener('click', async () => {
+          restore.disabled = true;
+          await ask({ type: 'shims.restore', id: shim.id, version: v.version });
+          refresh();
+        });
+        row.append(restore);
+      }
+      versions.append(row);
+    }
+    versions.hidden = false;
+  });
+  card.append(versions);
   return card;
 }
 

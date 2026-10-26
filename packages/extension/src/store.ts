@@ -3,9 +3,10 @@
 // beside it the stores the later phases fill:
 //
 //   shims       id → the installed shim
-//   versions    [shimId, version] → a restorable snapshot (every commit and rebase)
+//   versions    [shimId, version] → every version the shim has been (install, rebase, restore), each restorable
 //   user_data   [shimId, origin, key] → a handler's `api.storage` row
 //   rule_state  [shimId, ruleId] → quarantine and page memory
+//   baselines   [shimId, host, pathKey] → the deploy id a page kind was last seen at
 //   prefs       key → an extension setting
 //
 // `user_data` has the semantics every Shim host gives `api.storage`: JSON
@@ -23,7 +24,10 @@ import type { InstallProvenance, UserDataRow } from './install';
 import type { ExtensionMode } from './capabilities';
 
 export const STORE_DB_NAME = 'shim-for-chrome';
-export const STORE_SCHEMA_VERSION = 1;
+export const STORE_SCHEMA_VERSION = 2;
+
+/** Distinct page kinds kept per (shim, host); past this the least recently refreshed go. */
+export const BASELINE_CAP = 100;
 
 export interface InstalledShim {
   id: string;
@@ -62,6 +66,59 @@ interface PrefRecord {
   value: unknown;
 }
 
+/** A restorable snapshot of a shim as it was before a change (or as installed). */
+export interface VersionRecord {
+  shimId: string;
+  version: number;
+  spec: Spec;
+  handlers: Record<string, string>;
+  at: number;
+  reason: 'install' | 'rebase' | 'restore';
+}
+
+/** Why a rule is held for review, from the engine's quarantine event. */
+export interface QuarantineState {
+  reason: string;
+  expected: unknown;
+  seen: unknown[];
+  occurredAt: number;
+}
+
+/**
+ * One rule's learned state: the page kinds it has applied on (page memory,
+ * the escalation gate's evidence) and its quarantine, if any.
+ */
+/**
+ * The capture a rule's fingerprint came from, when the extension captured
+ * it (a rule that arrived without one): the document and rev of the event
+ * it kept, and the anchor it was captured for. Absent when the rule's
+ * fingerprint came committed (the file's, a rebase's), which a capture
+ * never replaces.
+ */
+export interface CaptureRecord {
+  documentId: string | null;
+  rev: number;
+  anchorDigest: string;
+}
+
+export interface RuleStateRecord {
+  shimId: string;
+  ruleId: string;
+  /** pathKey → last seen, ms. */
+  paths: Record<string, number>;
+  quarantine?: QuarantineState;
+  capture?: CaptureRecord;
+}
+
+export interface BaselineRecord {
+  shimId: string;
+  host: string;
+  pathKey: string;
+  bundleHash: string;
+  updatedAt: number;
+}
+
+
 export interface ShimStore {
   /** Every installed shim in cascade order (lowest rank first; the top wins). */
   listShims(): Promise<InstalledShim[]>;
@@ -74,14 +131,48 @@ export interface ShimStore {
   addShim(shim: Omit<InstalledShim, 'rank'>): Promise<number>;
   /** Writes a shim as given (an update of an existing one; a new one goes through addShim). */
   putShim(shim: InstalledShim): Promise<void>;
-  /** Removes the shim and, in the same transaction, its versions, user data and rule state. */
+  /** Removes the shim and, in the same transaction, its versions, user data, rule state and baselines. */
   deleteShim(id: string): Promise<boolean>;
   setEnabled(id: string, enabled: boolean): Promise<boolean>;
+  /**
+   * Replaces the shim's spec with `next` (already bumped) and snapshots it
+   * under its version with the reason that produced it, in one
+   * transaction: a rebase, or a restore. The spec as it stood is
+   * snapshotted again under its own version first (keeping that version's
+   * reason and time), so what was amended since (captured fingerprints,
+   * the advanced baseline) is what a restore of it brings back. Every
+   * version the shim has been, the current one included, is then a
+   * snapshot, each restorable. Refused (false) when the shim is gone or
+   * its spec is no longer at `expectedVersion`: the caller read a version
+   * another write has moved since.
+   */
+  reviseSpec(id: string, next: Spec, reason: VersionRecord['reason'], expectedVersion: number): Promise<boolean>;
+  /** Replaces the spec without a snapshot (a baseline refresh, a captured fingerprint); refused when its version moved. */
+  amendSpec(id: string, spec: Spec, expectedVersion: number): Promise<boolean>;
+  versions: {
+    /** Snapshots the shim as it is now under its version (an install's first record). */
+    snapshot(shim: InstalledShim, reason: VersionRecord['reason']): Promise<void>;
+    listForShim(shimId: string): Promise<VersionRecord[]>;
+    get(shimId: string, version: number): Promise<VersionRecord | null>;
+  };
+  ruleState: {
+    get(shimId: string, ruleId: string): Promise<RuleStateRecord | null>;
+    put(record: RuleStateRecord): Promise<void>;
+    listForShim(shimId: string): Promise<RuleStateRecord[]>;
+  };
+  baselines: {
+    /** Records the deploy id `pathKey` on `host` was last seen at, and keeps at most BASELINE_CAP page kinds per (shim, host). */
+    record(shimId: string, host: string, pathKey: string, bundleHash: string): Promise<void>;
+    /** pathKey → bundleHash for one shim on one host; empty when nothing is recorded. */
+    forHost(shimId: string, host: string): Promise<Record<string, string>>;
+  };
   userData: {
     get(scope: UserDataScope, key: string): Promise<unknown>;
     set(scope: UserDataScope, key: string, value: unknown): Promise<unknown>;
     delete(scope: UserDataScope, key: string): Promise<boolean>;
     list(scope: UserDataScope): Promise<Record<string, unknown>>;
+    /** Every row of one shim, across origins: what an export carries. */
+    listForShim(shimId: string): Promise<UserDataRow[]>;
     /** Writes the rows a `.shim` file carried for `shimId` (an install's opt-in user data). */
     restore(shimId: string, rows: readonly UserDataRow[]): Promise<number>;
   };
@@ -96,10 +187,12 @@ const SHIMS = 'shims';
 const VERSIONS = 'versions';
 const USER_DATA = 'user_data';
 const RULE_STATE = 'rule_state';
+const BASELINES = 'baselines';
 const PREFS = 'prefs';
 const BY_SHIM = 'byShim';
 const BY_SCOPE = 'byScope';
 const BY_RANK = 'byRank';
+const BY_HOST = 'byHost';
 
 function upgrade(db: IDBDatabase, from: number): void {
   if (from < 1) {
@@ -110,6 +203,11 @@ function upgrade(db: IDBDatabase, from: number): void {
     userData.createIndex(BY_SCOPE, ['shimId', 'origin']);
     db.createObjectStore(RULE_STATE, { keyPath: ['shimId', 'ruleId'] }).createIndex(BY_SHIM, 'shimId');
     db.createObjectStore(PREFS, { keyPath: 'key' });
+  }
+  if (from < 2) {
+    const baselines = db.createObjectStore(BASELINES, { keyPath: ['shimId', 'host', 'pathKey'] });
+    baselines.createIndex(BY_SHIM, 'shimId');
+    baselines.createIndex(BY_HOST, ['shimId', 'host']);
   }
 }
 
@@ -156,6 +254,11 @@ export function openShimStore(factory: IDBFactory = indexedDB, name: string = ST
   }).then((db) => bind(db));
 }
 
+/** A spec's version; one without one is version 1. */
+export function versionOf(spec: { version?: unknown }): number {
+  return typeof spec.version === 'number' && Number.isFinite(spec.version) ? spec.version : 1;
+}
+
 function bind(db: IDBDatabase): ShimStore {
   const read = (stores: string | string[]) => db.transaction(stores, 'readonly');
   const write = (stores: string | string[]) => db.transaction(stores, 'readwrite');
@@ -193,7 +296,7 @@ function bind(db: IDBDatabase): ShimStore {
       await completion(tx);
     },
     async deleteShim(id) {
-      const tx = write([SHIMS, VERSIONS, USER_DATA, RULE_STATE]);
+      const tx = write([SHIMS, VERSIONS, USER_DATA, RULE_STATE, BASELINES]);
       const shims = tx.objectStore(SHIMS);
       const existing = await request(shims.getKey(id));
       if (existing === undefined) {
@@ -204,8 +307,93 @@ function bind(db: IDBDatabase): ShimStore {
       await deleteByIndex(tx.objectStore(VERSIONS), BY_SHIM, id);
       await deleteByIndex(tx.objectStore(USER_DATA), BY_SHIM, id);
       await deleteByIndex(tx.objectStore(RULE_STATE), BY_SHIM, id);
+      await deleteByIndex(tx.objectStore(BASELINES), BY_SHIM, id);
       await completion(tx);
       return true;
+    },
+    async reviseSpec(id, next, reason, expectedVersion) {
+      const tx = write([SHIMS, VERSIONS]);
+      const shims = tx.objectStore(SHIMS);
+      const versions = tx.objectStore(VERSIONS);
+      const shim = await request(shims.get(id) as IDBRequest<InstalledShim | undefined>);
+      if (!shim || versionOf(shim.spec) !== expectedVersion) {
+        tx.abort();
+        return false;
+      }
+      const now = Date.now();
+      const current = versionOf(shim.spec);
+      const held = await request(versions.get([id, current]) as IDBRequest<VersionRecord | undefined>);
+      versions.put({ shimId: id, version: current, spec: shim.spec, handlers: shim.handlers, at: held?.at ?? now, reason: held?.reason ?? 'install' } satisfies VersionRecord);
+      versions.put({ shimId: id, version: versionOf(next), spec: next, handlers: shim.handlers, at: now, reason } satisfies VersionRecord);
+      shims.put({ ...shim, spec: next });
+      await completion(tx);
+      return true;
+    },
+    async amendSpec(id, spec, expectedVersion) {
+      const tx = write(SHIMS);
+      const shims = tx.objectStore(SHIMS);
+      const shim = await request(shims.get(id) as IDBRequest<InstalledShim | undefined>);
+      if (!shim || versionOf(shim.spec) !== expectedVersion) {
+        tx.abort();
+        return false;
+      }
+      shims.put({ ...shim, spec });
+      await completion(tx);
+      return true;
+    },
+    versions: {
+      async snapshot(shim, reason) {
+        const version = versionOf(shim.spec);
+        const tx = write(VERSIONS);
+        tx.objectStore(VERSIONS).put({ shimId: shim.id, version, spec: shim.spec, handlers: shim.handlers, at: Date.now(), reason } satisfies VersionRecord);
+        await completion(tx);
+      },
+      async listForShim(shimId) {
+        const rows = await request(read(VERSIONS).objectStore(VERSIONS).index(BY_SHIM).getAll(shimId) as IDBRequest<VersionRecord[]>);
+        return rows.sort((a, b) => a.version - b.version);
+      },
+      async get(shimId, version) {
+        const row = await request(read(VERSIONS).objectStore(VERSIONS).get([shimId, version]) as IDBRequest<VersionRecord | undefined>);
+        return row ?? null;
+      },
+    },
+    ruleState: {
+      async get(shimId, ruleId) {
+        const row = await request(read(RULE_STATE).objectStore(RULE_STATE).get([shimId, ruleId]) as IDBRequest<RuleStateRecord | undefined>);
+        return row ?? null;
+      },
+      async put(record) {
+        const tx = write(RULE_STATE);
+        tx.objectStore(RULE_STATE).put(record);
+        await completion(tx);
+      },
+      async listForShim(shimId) {
+        return request(read(RULE_STATE).objectStore(RULE_STATE).index(BY_SHIM).getAll(shimId) as IDBRequest<RuleStateRecord[]>);
+      },
+    },
+    baselines: {
+      async record(shimId, host, pathKey, bundleHash) {
+        const tx = write(BASELINES);
+        const store = tx.objectStore(BASELINES);
+        const rows = await request(store.index(BY_HOST).getAll([shimId, host]) as IDBRequest<BaselineRecord[]>);
+        // Recency is strictly ordered: two records in one millisecond would
+        // tie, and the eviction below would then pick by name.
+        const latest = rows.reduce((max, row) => Math.max(max, row.updatedAt), 0);
+        const updatedAt = Math.max(Date.now(), latest + 1);
+        store.put({ shimId, host, pathKey, bundleHash, updatedAt } satisfies BaselineRecord);
+        const kept = rows.filter((row) => row.pathKey !== pathKey);
+        if (kept.length + 1 > BASELINE_CAP) {
+          kept.sort((a, b) => b.updatedAt - a.updatedAt);
+          for (const row of kept.slice(BASELINE_CAP - 1)) store.delete([row.shimId, row.host, row.pathKey]);
+        }
+        await completion(tx);
+      },
+      async forHost(shimId, host) {
+        const rows = await request(read(BASELINES).objectStore(BASELINES).index(BY_HOST).getAll([shimId, host]) as IDBRequest<BaselineRecord[]>);
+        const out: Record<string, string> = {};
+        for (const row of rows) put(out, row.pathKey, row.bundleHash);
+        return out;
+      },
     },
     async setEnabled(id, enabled) {
       const tx = write(SHIMS);
@@ -250,6 +438,10 @@ function bind(db: IDBDatabase): ShimStore {
         const out: Record<string, unknown> = {};
         for (const row of rows) put(out, row.key, row.value);
         return out;
+      },
+      async listForShim(shimId) {
+        const rows = await request(read(USER_DATA).objectStore(USER_DATA).index(BY_SHIM).getAll(shimId) as IDBRequest<UserDataRecord[]>);
+        return rows.map((row) => ({ origin: row.origin, key: row.key, value: row.value }));
       },
       async restore(shimId, rows) {
         if (rows.length === 0) return 0;

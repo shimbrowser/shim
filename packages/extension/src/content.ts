@@ -22,9 +22,10 @@
 // tears every shim down.
 
 import type * as Core from '@shimbrowser/core';
+import type { Rule } from '@shimbrowser/core/types';
 import { isToRuntime, RUNTIME_PORT, type ToWorker, type ToRuntime, type FromRuntime, type WorkerAnswer, type BundleAnswer, type BundledShim } from './messages';
 import { reconcileShims } from './reconcile';
-import { compileHandlers } from './compile';
+import { compileHandlers, type HandlerMap } from './compile';
 
 const BOOT_FLAG = '__shimForChrome';
 const UNSUPPORTED_ERROR = 'not-available-in-shim-for-chrome';
@@ -160,9 +161,22 @@ interface Runtime {
 
   let retired = false;
   const deployId = (): string | null => ShimCore.deployIdForDocument(document);
-  // Each running shim's control and the priority it booted with: a shim
-  // whose priority moved boots again (reconcile.ts).
-  const controls = new Map<string, { control: PatchControl; priority: number }>();
+  // Each running shim's control with the priority and spec version it
+  // booted with, its compiled handlers, and each rule as it was last
+  // applied (its JSON, by id), with the ids now running as extra rules. A
+  // shim whose priority moved boots again; one whose spec moved (a rebase,
+  // a restore) has its changed rules swapped under the running control
+  // (reconcile.ts).
+  interface Running {
+    control: PatchControl;
+    priority: number;
+    version: number;
+    handlers: HandlerMap;
+    rules: Map<string, string>;
+    extras: Set<string>;
+  }
+  const controls = new Map<string, Running>();
+  const ruleJson = (rules: readonly Rule[] | undefined): Map<string, string> => new Map((rules ?? []).map((r) => [r.id, JSON.stringify(r)]));
 
   const boot = (shim: BundledShim): void => {
     try {
@@ -175,7 +189,7 @@ interface Runtime {
         emit(shim.id, 'handler-compile-failed', { specId: shim.id, handler: problem.name, error: problem.error, path: location.pathname });
       }
       const control = ShimCore.run({ spec: shim.spec, handlers, priority: shim.priority, bundleHash: deployId }, makeApi(shim.id));
-      controls.set(shim.id, { control, priority: shim.priority });
+      controls.set(shim.id, { control, priority: shim.priority, version: shim.version, handlers, rules: ruleJson(shim.spec.rules), extras: new Set() });
     } catch (err) {
       console.error('[shim] boot failed', shim.id, err);
     }
@@ -189,6 +203,47 @@ interface Runtime {
     } catch (err) {
       console.error('[shim] teardown failed', id, err);
     }
+  };
+  // The spec moved (a rebase healed an anchor, a restore brought another
+  // version back): only the rules that changed are touched. Each is taken
+  // down (the committed rule suppressed, or the earlier swap removed) and
+  // run again as an extra rule under the same control, with the baseline
+  // the page is served now, so it sees no deploy; the rules that did not
+  // change keep their lifecycle, deploy gate and all. Booting the whole
+  // shim again instead would re-serve the advanced baseline to every rule
+  // and silence a sibling's quarantine for the very deploy that healed
+  // this one (the engine reports a recovery and leaves the apply to the
+  // host), and would re-run every handler for one rule's sake.
+  const update = (shim: BundledShim): void => {
+    const running = controls.get(shim.id);
+    if (!running) return;
+    const next = ruleJson(shim.spec.rules);
+    const key = (ruleId: string): string => `${shim.id}:rebased:${ruleId}`;
+    const takeDown = (ruleId: string): void => {
+      if (running.extras.has(ruleId)) {
+        running.control.removeExtraRule(key(ruleId));
+        running.extras.delete(ruleId);
+      } else {
+        running.control.suppressRule(ruleId);
+      }
+    };
+    const deploy = typeof shim.spec.bundleHash === 'string'
+      ? { bundleHash: shim.spec.bundleHash, current: deployId, ...(shim.spec.autoRepair === false ? { autoRepair: false } : {}) }
+      : undefined;
+    try {
+      for (const ruleId of running.rules.keys()) if (!next.has(ruleId)) takeDown(ruleId);
+      for (const rule of shim.spec.rules ?? []) {
+        const before = running.rules.get(rule.id);
+        if (before === JSON.stringify(rule)) continue;
+        if (before !== undefined) takeDown(rule.id);
+        running.control.applyExtraRule(rule, shim.id, key(rule.id), running.handlers, deploy);
+        running.extras.add(rule.id);
+      }
+    } catch (err) {
+      console.error('[shim] update failed', shim.id, err);
+    }
+    running.rules = next;
+    running.version = shim.version;
   };
 
   // Syncs run one after another: two re-injections in a row must not boot
@@ -210,9 +265,10 @@ interface Runtime {
     if (retired) return;
     if (!answer.ok || !('shims' in answer)) return;
     const bundle = answer as BundleAnswer;
-    const priorities = new Map([...controls].map(([id, r]) => [id, r.priority]));
-    const { stop: gone, start } = reconcileShims(priorities, bundle.shims);
+    const stamps = new Map([...controls].map(([id, r]) => [id, { priority: r.priority, version: r.version }]));
+    const { stop: gone, start, update: moved } = reconcileShims(stamps, bundle.shims);
     for (const id of gone) stop(id);
+    for (const shim of moved) update(shim);
     for (const shim of start) boot(shim);
   };
   let chain: Promise<void> = Promise.resolve();

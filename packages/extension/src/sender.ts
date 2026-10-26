@@ -9,7 +9,7 @@ export type SenderContext =
   /** One of the extension's own pages. */
   | { kind: 'page' }
   /** The page runtime, on a site the content script was registered for. */
-  | { kind: 'content'; hostname: string; port: string; origin: string }
+  | { kind: 'content'; hostname: string; port: string; origin: string; pathname: string }
   | { kind: 'unknown' };
 
 export interface SenderLike {
@@ -32,11 +32,11 @@ export function senderContext(sender: SenderLike | undefined, extensionId: strin
     return { kind: 'unknown' };
   }
   if ((url.protocol !== 'http:' && url.protocol !== 'https:') || !sender.tab) return { kind: 'unknown' };
-  return { kind: 'content', hostname: url.hostname, port: url.port, origin: url.origin };
+  return { kind: 'content', hostname: url.hostname, port: url.port, origin: url.origin, pathname: url.pathname };
 }
 
 /** Message types the extension's own pages may send. */
-export const PAGE_MESSAGES: ReadonlySet<string> = new Set(['mode', 'shims.list', 'shims.setEnabled', 'shims.uninstall', 'install.commit']);
+export const PAGE_MESSAGES: ReadonlySet<string> = new Set(['mode', 'shims.list', 'shims.setEnabled', 'shims.uninstall', 'shims.export', 'shims.versions', 'shims.restore', 'install.commit']);
 /** Message types the page runtime may send. */
 export const CONTENT_MESSAGES: ReadonlySet<string> = new Set(['bundle', 'storage', 'event']);
 

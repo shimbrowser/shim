@@ -101,9 +101,98 @@ async function main(): Promise<void> {
   // Live records are b (1) and c (3): the next rank is one past the highest live one.
   check('a new install takes one past the highest live rank', (await store.addShim(f)) === 4);
 
+  console.log('versions, rule state and baselines:');
+  {
+    const b = await store.getShim('b');
+    check('a shim to revise', b !== null);
+    if (b) {
+      await store.versions.snapshot(b, 'install');
+      const v1 = await store.versions.listForShim('b');
+      check('an install snapshot under its version', v1.length === 1 && v1[0]?.version === (b.spec.version ?? 1) && v1[0]?.reason === 'install');
+      const v = b.spec.version ?? 1;
+      // An amendment since the install's snapshot (a captured fingerprint, say) rides the current spec.
+      check('amendSpec replaces without a snapshot', (await store.amendSpec('b', { ...b.spec, bundleHash: 'amended' }, v)) === true
+        && (await store.getShim('b'))?.spec.bundleHash === 'amended' && (await store.versions.listForShim('b')).length === 1);
+      check('amendSpec against a moved version is refused', (await store.amendSpec('b', { ...b.spec, bundleHash: 'stale' }, v + 7)) === false && (await store.getShim('b'))?.spec.bundleHash === 'amended');
+      const next = { ...b.spec, version: v + 1, bundleHash: 'b2' };
+      check('reviseSpec against a moved version is refused', (await store.reviseSpec('b', next, 'rebase', v + 1)) === false && ((await store.getShim('b'))?.spec.version ?? 1) === v);
+      check('reviseSpec stores the next spec and snapshots it under its version, in one go', (await store.reviseSpec('b', next, 'rebase', v)) === true);
+      const after = await store.getShim('b');
+      check('the shim carries the next spec', after?.spec.version === next.version && after.spec.bundleHash === 'b2');
+      const versions = await store.versions.listForShim('b');
+      check('every version the shim has been, in order, with what produced it', versions.map((x) => `${x.version}:${x.reason}`).join(',') === `${v}:install,${v + 1}:rebase`, versions.map((x) => `${x.version}:${x.reason}`).join(','));
+      const got = await store.versions.get('b', v + 1);
+      check('a snapshot reads back with the spec it held', got !== null && got.spec.bundleHash === 'b2' && got.reason === 'rebase');
+      const first = await store.versions.get('b', v);
+      check('the version revised away was snapshotted again as it stood, amendments included, keeping its reason', first?.spec.bundleHash === 'amended' && first.reason === 'install');
+      check('revising a missing shim is false', (await store.reviseSpec('zzz', next, 'rebase', v)) === false && (await store.amendSpec('zzz', next, v)) === false);
+    }
+    check('no rule state to start', (await store.ruleState.get('b', 'r1')) === null && (await store.ruleState.listForShim('b')).length === 0);
+    await store.ruleState.put({ shimId: 'b', ruleId: 'r1', paths: { '/projects/*': 5 } });
+    await store.ruleState.put({ shimId: 'b', ruleId: 'r2', paths: {}, quarantine: { reason: 'gone', expected: null, seen: [], occurredAt: 9 } });
+    const r1 = await store.ruleState.get('b', 'r1');
+    check('rule state reads back', r1?.paths['/projects/*'] === 5 && r1.quarantine === undefined);
+    check('and lists per shim', (await store.ruleState.listForShim('b')).map((r) => r.ruleId).sort().join() === 'r1,r2');
+    await store.ruleState.put({ shimId: 'b', ruleId: 'r1', paths: { '/projects/*': 6 }, quarantine: { reason: 'x', expected: null, seen: [], occurredAt: 1 } });
+    check('put replaces', (await store.ruleState.get('b', 'r1'))?.quarantine?.reason === 'x');
+
+    check('no baselines to start', Object.keys(await store.baselines.forHost('b', 'example.com')).length === 0);
+    await store.baselines.record('b', 'example.com', '/', 'h1');
+    await store.baselines.record('b', 'example.com', '/projects/*', 'h2');
+    await store.baselines.record('b', 'other.test', '/', 'h9');
+    const forHost = await store.baselines.forHost('b', 'example.com');
+    check('baselines read back per host and page kind', forHost['/'] === 'h1' && forHost['/projects/*'] === 'h2' && Object.keys(forHost).length === 2);
+    await store.baselines.record('b', 'example.com', '/', 'h1b');
+    check('recording a page kind again replaces its hash', (await store.baselines.forHost('b', 'example.com'))['/'] === 'h1b');
+    for (let i = 0; i < 105; i++) await store.baselines.record('c', 'cap.test', `/kind${i}`, `h${i}`);
+    const capped = await store.baselines.forHost('c', 'cap.test');
+    check('at most the cap of page kinds per host, the least recently refreshed gone', Object.keys(capped).length === 100 && capped['/kind104'] === 'h104' && capped['/kind0'] === undefined, String(Object.keys(capped).length));
+  }
+
+  console.log('delete cascades the new stores:');
+  {
+    check('deleteShim', (await store.deleteShim('b')) === true);
+    check('its versions, rule state and baselines went with it',
+      (await store.versions.listForShim('b')).length === 0 && (await store.ruleState.listForShim('b')).length === 0 && Object.keys(await store.baselines.forHost('b', 'example.com')).length === 0);
+    check('another shim\'s baselines stay', Object.keys(await store.baselines.forHost('c', 'cap.test')).length === 100);
+  }
+
   console.log('schema:');
-  check('version 1', STORE_SCHEMA_VERSION === 1);
+  check('version 2', STORE_SCHEMA_VERSION === 2);
   store.close();
+
+  console.log('upgrade from version 1:');
+  {
+    // A store as the previous version left it: the shims store with a shim in it, and no baselines store.
+    const name = `store-upgrade-${Date.now()}`;
+    const old = await new Promise<IDBDatabase>((resolve, reject) => {
+      const open = fakeIndexedDB.open(name, 1);
+      open.onupgradeneeded = () => {
+        const db = open.result;
+        db.createObjectStore('shims', { keyPath: 'id' }).createIndex('byRank', 'rank', { unique: true });
+        db.createObjectStore('versions', { keyPath: ['shimId', 'version'] }).createIndex('byShim', 'shimId');
+        const ud = db.createObjectStore('user_data', { keyPath: ['shimId', 'origin', 'key'] });
+        ud.createIndex('byShim', 'shimId');
+        ud.createIndex('byScope', ['shimId', 'origin']);
+        db.createObjectStore('rule_state', { keyPath: ['shimId', 'ruleId'] }).createIndex('byShim', 'shimId');
+        db.createObjectStore('prefs', { keyPath: 'key' });
+      };
+      open.onsuccess = () => resolve(open.result);
+      open.onerror = () => reject(open.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = old.transaction('shims', 'readwrite');
+      tx.objectStore('shims').put(shim('kept', 1));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    old.close();
+    const upgraded = await openShimStore(fakeIndexedDB, name);
+    check('the shim from version 1 is still there', (await upgraded.getShim('kept')) !== null);
+    await upgraded.baselines.record('kept', 'example.com', '/', 'h');
+    check('and the new store works', (await upgraded.baselines.forHost('kept', 'example.com'))['/'] === 'h');
+    upgraded.close();
+  }
 
   console.log('');
   if (failures) { console.error(`${failures} check(s) failed`); process.exit(1); }

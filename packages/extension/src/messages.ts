@@ -12,6 +12,7 @@
 import type { Spec } from '@shimbrowser/core/types';
 import type { PreparedInstall, InstallProvenance } from './install';
 import type { ExtensionMode } from './capabilities';
+import type { VersionRecord } from './store';
 
 export type StorageMethod = 'get' | 'set' | 'delete' | 'list';
 
@@ -27,6 +28,12 @@ export type ToWorker =
   | { type: 'shims.list' }
   | { type: 'shims.setEnabled'; id: string; enabled: boolean }
   | { type: 'shims.uninstall'; id: string }
+  /** The shim as a `.shim` file (its spec as rebased, its handlers, its saved data): repair in Shim, or keep. */
+  | { type: 'shims.export'; id: string }
+  /** The shim's restorable snapshots. */
+  | { type: 'shims.versions'; id: string }
+  /** A restore is a forward change: the current spec is snapshotted, the chosen one becomes the next version. */
+  | { type: 'shims.restore'; id: string; version: number }
   /** The install page, after the user granted the hosts: write and register. */
   | { type: 'install.commit'; prepared: PreparedInstall; provenance: InstallProvenance };
 
@@ -39,8 +46,11 @@ export type ToWorker =
  */
 export interface BundledShim {
   id: string;
+  /** The spec, with the deploy baseline of the page's own kind in `bundleHash`. */
   spec: Spec;
   priority: number;
+  /** The stored spec's version: a shim whose version moved (a rebase, a restore) boots again. */
+  version: number;
   handlers: Record<string, string>;
 }
 
@@ -60,7 +70,20 @@ export interface ShimSummary {
   ruleCount: number;
   /** Installed under a mode this browser no longer runs: it stays, disabled, until that mode is back. */
   needsFullMode: boolean;
+  /** The stored spec's version, bumped by every rebase and restore. */
+  version: number;
+  /** Rules held for review: the ladder could not re-find their target after a site change. */
+  review: ReviewItem[];
 }
+
+export interface ReviewItem {
+  ruleId: string;
+  reason: string;
+  occurredAt: number;
+}
+
+/** One snapshot as the popup lists it. */
+export type VersionSummary = Pick<VersionRecord, 'version' | 'at' | 'reason'>;
 
 export type WorkerAnswer =
   | BundleAnswer
@@ -68,6 +91,8 @@ export type WorkerAnswer =
   | { ok: true; mode: ExtensionMode; shims: ShimSummary[] }
   | { ok: true; mode: ExtensionMode }
   | { ok: true; id: string }
+  | { ok: true; file: string; fileName: string }
+  | { ok: true; versions: VersionSummary[] }
   | { ok: true }
   | { ok: false; error: string };
 

@@ -36,8 +36,8 @@ export function extensionCopy(work: string, hostPermissions: string[]): string {
   return ext;
 }
 
-/** The conformance fixture site: /apply (style-src allows inline) and /strict (style-src 'self'). */
-export async function fixtureServer(): Promise<{ origin: string; close(): void }> {
+/** The conformance fixture site: /apply (style-src allows inline), /strict (style-src 'self'), /deploy (its markup moves with `setDeploy`). */
+export async function fixtureServer(): Promise<{ origin: string; setDeploy(deploy: FixtureDeploy): void; close(): void }> {
   const state = { deploy: 1 as FixtureDeploy };
   const server = http.createServer((req, res) => {
     const r = conformanceFixture(new URL(req.url ?? '/', 'http://x').pathname, state);
@@ -45,7 +45,11 @@ export async function fixtureServer(): Promise<{ origin: string; close(): void }
     res.end(r.body);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-  return { origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, close: () => server.close() };
+  return {
+    origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    setDeploy: (deploy) => { state.deploy = deploy; },
+    close: () => server.close(),
+  };
 }
 
 export type ShimFileWriter = (id: string, name: string, rules: unknown[], extra?: Record<string, unknown>, handlers?: Record<string, string>) => string;
