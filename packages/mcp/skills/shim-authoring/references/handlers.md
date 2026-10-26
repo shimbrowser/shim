@@ -38,6 +38,16 @@ Rules that keep handlers safe — every one learned from real breakage:
 - **Register teardown for every side effect** beyond the returned DOM: `document`/`window`
   listeners, intervals, observers, third-party widgets — `api.cleanup(() => …)`. Without it
   they leak across route changes and toggles.
+- **Don't cache on `globalThis` (or `window`) across runs.** Handlers run in the page's
+  isolated world, and that world lives until the page reloads: a preview compiles your
+  new code into the same world, so whatever an earlier version put on a global is still
+  there, through every re-mount and every later preview (and every other shim on the page
+  sees it too). A cache keyed by a global (`globalThis.__myCache ??= {}`) keeps serving
+  the old code's results after you change the logic, and a preview then shows stale
+  output that isn't what your current code does. Keep an in-memory cache in a variable at
+  the top of the handler's module (outside the exported function: it starts fresh whenever
+  the code changes), persist with `api.storage`, key a cache on something that changes
+  with the logic (a version string), or delete the global in `api.cleanup`.
 - **Never move or reparent the site's own DOM into containers you create.** When the rule
   tears down, your container goes and the site's nodes go with it, permanently. Clone
   (`node.cloneNode(true)`) and `hide` the original instead.
