@@ -10,7 +10,9 @@
 //                            options, so it is the bundle the other hosts run
 //   dist/popup.html|js       the popup
 //   dist/install.html|js     the install page
+//   dist/prepare.html|js     the install check, a sandboxed page (its CSP permits the syntax probe)
 //   dist/ui.css              their stylesheet
+//   dist/icons/              the toolbar icon, the browser's, in the manifest's sizes
 //
 // Every script is one self-contained IIFE for the browser platform (an
 // extension page's <script> and a content script resolve no imports).
@@ -33,6 +35,7 @@ const ENTRIES = {
   content: 'content.ts',
   popup: 'popup.ts',
   install: 'install-page.ts',
+  prepare: 'prepare.ts',
 };
 
 function coreBuild() {
@@ -69,17 +72,12 @@ async function buildExtension() {
   const core = coreBuild();
   await esbuild.build(core.pageBundleOptions({ outfile: path.join(DIST, core.PAGE_BUNDLE_FILE) }));
 
-  for (const name of fs.readdirSync(STATIC)) {
-    const from = path.join(STATIC, name);
-    const to = path.join(DIST, name);
-    if (name === 'manifest.json') {
-      const manifest = JSON.parse(fs.readFileSync(from, 'utf8'));
-      manifest.version = manifestVersion(pkg.version);
-      fs.writeFileSync(to, JSON.stringify(manifest, null, 2) + '\n');
-    } else {
-      fs.copyFileSync(from, to);
-    }
-  }
+  // Everything static as it is (icons/ included), then the manifest with
+  // the package version stamped in.
+  fs.cpSync(STATIC, DIST, { recursive: true });
+  const manifest = JSON.parse(fs.readFileSync(path.join(STATIC, 'manifest.json'), 'utf8'));
+  manifest.version = manifestVersion(pkg.version);
+  fs.writeFileSync(path.join(DIST, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
   return DIST;
 }
 
