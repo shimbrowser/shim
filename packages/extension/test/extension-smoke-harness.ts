@@ -102,6 +102,20 @@ async function main(): Promise<void> {
         && JSON.stringify(regs[0]?.js) === '["shim-core.page.js","content.js"]' && regs[0]?.runAt === 'document_start', regs);
   }
 
+  console.log('the install page with its own script delayed past the sandbox:');
+  {
+    // The sandboxed check frame can finish before install.js runs and its
+    // one unsolicited readiness message be lost; the page then asks.
+    const page = await ctx.newPage();
+    await page.route('**/install.js', async (route) => { await sleep(1500); await route.continue(); });
+    await page.goto(`chrome-extension://${extId}/install.html`);
+    await page.setInputFiles('#file', second);
+    await page.waitForSelector('#review:not([hidden]) h2', { timeout: 15000 });
+    const heading = (await page.textContent('#review h2')) ?? '';
+    check('the review still arrives (readiness asked for, not waited on)', heading.startsWith('ready to install'), heading);
+    await page.close();
+  }
+
   console.log('the declarative kinds and the spec stylesheet on /apply:');
   {
     await fixture.goto(`${origin}/apply`);

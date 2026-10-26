@@ -120,6 +120,15 @@ if (onUserScriptConnect) {
     }
     runtimePorts.set(port, tabId);
     port.onDisconnect.addListener(() => { runtimePorts.delete(port); });
+    // A connection is a runtime that may have missed a change: the worker
+    // it held a port to went away (idled out) and the change happened
+    // before this one reconnected, when no port was there to nudge. So
+    // every connection starts with a look at what runs there.
+    try {
+      port.postMessage({ type: 'sync' } satisfies ToRuntime);
+    } catch {
+      runtimePorts.delete(port);
+    }
   });
 }
 

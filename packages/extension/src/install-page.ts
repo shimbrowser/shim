@@ -9,11 +9,12 @@
 
 import type { PreparedInstall, InstallRefusal } from './install';
 import { currentMode } from './capabilities';
-import { isPrepareAnswer, PREPARE_READY, type PrepareRequest } from './prepare';
+import { isPrepareAnswer, PREPARE_READY, PREPARE_PING, type PrepareRequest } from './prepare';
 import type { ToWorker, WorkerAnswer } from './messages';
 
 const ask = (msg: ToWorker): Promise<WorkerAnswer> => chrome.runtime.sendMessage(msg);
 const PREPARE_TIMEOUT_MS = 15000;
+const PING_EVERY_MS = 100;
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -36,23 +37,39 @@ const sandbox = must<HTMLIFrameElement>('prepare');
 
 // --- the sandboxed check ---------------------------------------------------------
 
-const sandboxReady = new Promise<void>((resolve) => {
-  const onReady = (event: MessageEvent<unknown>): void => {
-    if (event.source !== sandbox.contentWindow) return;
-    const data = event.data as { type?: unknown } | null;
-    if (data?.type !== PREPARE_READY) return;
-    window.removeEventListener('message', onReady);
-    resolve();
-  };
-  window.addEventListener('message', onReady);
+// The frame may have run before this script loaded and its one unsolicited
+// readiness message be lost, so readiness is the parent's to ask for: a ping
+// every so often until the frame answers, inside the same deadline as the
+// check itself.
+let sandboxReady = false;
+window.addEventListener('message', (event: MessageEvent<unknown>) => {
+  if (event.source !== sandbox.contentWindow) return;
+  const data = event.data as { type?: unknown } | null;
+  if (data?.type === PREPARE_READY) sandboxReady = true;
 });
+
+function waitForSandbox(deadline: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tick = (): void => {
+      if (sandboxReady) { resolve(); return; }
+      if (Date.now() >= deadline) { reject(new Error('the install check did not start')); return; }
+      // The sandbox has an opaque origin, so the target origin is the
+      // wildcard; the frame is ours and answers only its parent.
+      sandbox.contentWindow?.postMessage({ type: PREPARE_PING }, '*');
+      setTimeout(tick, PING_EVERY_MS);
+    };
+    tick();
+  });
+}
 
 let lastToken = 0;
 
 /** Prepare `text` in the sandbox. Answers are matched by token, so a slower earlier file never answers a later one. */
-function prepare(text: string): Promise<PreparedInstall | InstallRefusal> {
+async function prepare(text: string): Promise<PreparedInstall | InstallRefusal> {
   const token = ++lastToken;
-  return sandboxReady.then(() => new Promise((resolve, reject) => {
+  const deadline = Date.now() + PREPARE_TIMEOUT_MS;
+  await waitForSandbox(deadline);
+  return new Promise((resolve, reject) => {
     const done = (): void => {
       clearTimeout(timer);
       window.removeEventListener('message', onAnswer);
@@ -65,13 +82,11 @@ function prepare(text: string): Promise<PreparedInstall | InstallRefusal> {
     const timer = setTimeout(() => {
       done();
       reject(new Error('the install check did not answer'));
-    }, PREPARE_TIMEOUT_MS);
+    }, Math.max(0, deadline - Date.now()));
     window.addEventListener('message', onAnswer);
     const request: PrepareRequest = { type: 'prepare', token, text, mode: currentMode() };
-    // The sandbox has an opaque origin, so the target origin is the wildcard;
-    // the frame is ours and answers only its parent.
     sandbox.contentWindow?.postMessage(request, '*');
-  }));
+  });
 }
 
 // --- the review -------------------------------------------------------------------

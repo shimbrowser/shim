@@ -223,6 +223,36 @@ async function main(): Promise<void> {
     check('access back: both registered again', (await userScripts()).length === 2);
   }
 
+  console.log('a port connection is answered with a sync:');
+  {
+    // The port a runtime holds dies with the worker and reconnects a second
+    // later. A change in that gap (access revoked, say, which boots a fresh
+    // worker with no port to nudge) must still reach the page, so every
+    // connection starts with a sync: a new port from the user-script world
+    // hears one before it says anything. (The worker cannot be made to die
+    // on cue under Playwright, whose session keeps it alive, so the
+    // mechanism is pinned here rather than the gap itself.)
+    const tabs = await worker.evaluate(() => chrome.tabs.query({ url: '*://127.0.0.1/*' }).then((t) => t.map((x) => x.id)));
+    const tabId = tabs[0];
+    check('a fixture tab is open', typeof tabId === 'number');
+    if (typeof tabId === 'number') {
+      const heard = await worker.evaluate(async (id) => {
+        const res = await chrome.userScripts.execute({
+          target: { tabId: id },
+          js: [{
+            code: `new Promise((resolve) => {
+              const port = chrome.runtime.connect({ name: 'shim-runtime' });
+              const timer = setTimeout(() => { resolve('nothing'); port.disconnect(); }, 3000);
+              port.onMessage.addListener((m) => { clearTimeout(timer); resolve(JSON.stringify(m)); port.disconnect(); });
+            })`,
+          }],
+        });
+        return res.map((x) => x.result);
+      }, tabId);
+      check('a new port from the user-script world is greeted with a sync', heard[0] === '{"type":"sync"}', heard);
+    }
+  }
+
   console.log('a handler that does not parse:');
   {
     const { page, heading } = await install(broken);

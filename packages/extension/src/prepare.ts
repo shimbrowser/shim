@@ -25,6 +25,8 @@ export interface PrepareAnswer {
 }
 
 export const PREPARE_READY = 'prepare-ready';
+/** The parent's own readiness probe: answered with PREPARE_READY, so a readiness lost before the parent listened is asked for again. */
+export const PREPARE_PING = 'prepare-ping';
 
 export function isPrepareRequest(msg: unknown): msg is PrepareRequest {
   if (typeof msg !== 'object' || msg === null) return false;
@@ -40,11 +42,19 @@ export function isPrepareAnswer(msg: unknown): msg is PrepareAnswer {
 
 if (typeof window !== 'undefined' && window.parent !== window) {
   window.addEventListener('message', (event: MessageEvent<unknown>) => {
-    if (event.source !== window.parent || !isPrepareRequest(event.data)) return;
+    if (event.source !== window.parent) return;
+    const data = event.data as { type?: unknown } | null;
+    if (data?.type === PREPARE_PING) {
+      window.parent.postMessage({ type: PREPARE_READY }, event.origin);
+      return;
+    }
+    if (!isPrepareRequest(event.data)) return;
     const { token, text, mode } = event.data;
     const result = prepareInstall(text, capabilitiesFor(mode), mode);
     const answer: PrepareAnswer = { type: 'prepared', token, result };
     window.parent.postMessage(answer, event.origin);
   });
+  // Unsolicited once, in case the parent already listens; the parent pings
+  // otherwise (its script may load after this frame ran).
   window.parent.postMessage({ type: PREPARE_READY }, '*');
 }
