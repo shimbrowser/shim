@@ -23,7 +23,9 @@
 import fs from 'fs';
 import path from 'path';
 import type { BrowserContext } from 'playwright';
-import { workDir, extensionCopy, fixtureServer, shimWriter, css, launch, workerOf, installer, configureExtension, sleep } from './smoke-helpers';
+import {
+  workDir, extensionCopy, fixtureServer, shimWriter, css, launch, workerOf, installer, configureExtension, setExtensionEnabled, sleep,
+} from './smoke-helpers';
 
 let failures = 0;
 let passes = 0;
@@ -298,6 +300,32 @@ async function main(): Promise<void> {
     check('removing while access is withheld works', (await registered()).length === 0);
     await hostAccess('ON_ALL_SITES');
     await popup.close();
+  }
+
+  console.log('the extension disabled and enabled again under an open page:');
+  {
+    await fixture.goto(`${origin}/apply`);
+    await installAll(tidy);
+    const s0 = await settled((s) => s.ad === 'none' && s.injected === 1);
+    check('the shim applies', s0.ad === 'none' && s0.injected === 1, s0);
+    const fresh = ctx.waitForEvent('serviceworker', { timeout: 15000 });
+    check('disabling answers ok', (await setExtensionEnabled(ctx, extId, false)) === 'ok');
+    const s1 = await settled((s) => s.ad !== 'none' && s.injected === 0);
+    check('the orphaned runtime tears the shim down: hide, injected node and stylesheet gone', s1.ad !== 'none' && s1.injected === 0 && s1.grid !== 'rgb(0, 128, 0)', s1);
+    check('enabling answers ok', (await setExtensionEnabled(ctx, extId, true)) === 'ok');
+    const next = await fresh;
+    const s2 = await settled((s) => s.ad === 'none' && s.injected === 1);
+    check('the new instance takes the open page over without a reload', s2.ad === 'none' && s2.injected === 1 && s2.grid === 'rgb(0, 128, 0)', s2);
+    const regs = await next.evaluate(() => chrome.scripting.getRegisteredContentScripts());
+    check('one registration in the new instance', regs.length === 1);
+    const popup = await ctx.newPage();
+    await popup.goto(`chrome-extension://${extId}/popup.html`);
+    await popup.waitForSelector('#list .card button.danger');
+    await popup.click('#list .card button.danger');
+    await popup.click('#list .card button.danger');
+    await popup.waitForSelector('#empty:not([hidden])');
+    await popup.close();
+    await settled((s) => s.ad !== 'none');
   }
 
   console.log('a refusal:');

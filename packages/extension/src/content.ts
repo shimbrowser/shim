@@ -16,8 +16,10 @@
 // and the worker sends only shims that fit the mode, so no rule needs one.
 // Full mode registers this same runtime in the user-script world, where the
 // handlers compile (compile.ts) before the engine runs the shim. That world
-// has no onMessage, so the runtime there holds a port to the worker and is
-// nudged over it; a dropped port (the worker idled out) is reconnected.
+// has no onMessage, so the runtime is nudged over the port it holds to the
+// worker in both worlds; a dropped port (the worker idled out) is
+// reconnected, and one that cannot be (the extension instance is gone)
+// tears every shim down.
 
 import type * as Core from '@shimbrowser/core';
 import { isToRuntime, RUNTIME_PORT, type ToWorker, type WorkerAnswer, type BundleAnswer, type BundledShim } from './messages';
@@ -173,7 +175,7 @@ interface Runtime {
   // this document even once the extension lost access to its site (site
   // access revoked), so the shims that no longer run here are torn down.
   // The isolated world (declarative mode) listens for it; the user-script
-  // world (full mode) has no onMessage and holds a port instead.
+  // world (full mode) has no onMessage and is nudged over the port below.
   const onMessage = (chrome.runtime as { onMessage?: typeof chrome.runtime.onMessage }).onMessage;
   if (onMessage) {
     onMessage.addListener((msg: unknown, sender, sendResponse: (answer: { ok: true }) => void) => {
@@ -182,20 +184,37 @@ interface Runtime {
       sendResponse({ ok: true });
       return false;
     });
-  } else {
-    const RECONNECT_MS = 1000;
-    const connect = (): void => {
-      let port: chrome.runtime.Port;
-      try {
-        port = chrome.runtime.connect({ name: RUNTIME_PORT });
-      } catch {
-        return; // the extension is gone (unloaded or updated): this document is on its own until it reloads
-      }
-      port.onMessage.addListener((msg: unknown) => { if (isToRuntime(msg)) sync(); });
-      // The worker idles out and restarts; its next nudge needs a port.
-      port.onDisconnect.addListener(() => { setTimeout(connect, RECONNECT_MS); });
-    };
-    connect();
   }
+
+  // This runtime belongs to one extension instance. When that instance goes
+  // (the extension reloaded: the user-scripts toggle flipped, an update, a
+  // removal), the document keeps running with an invalidated chrome.runtime:
+  // no message and no nudge reaches it again, and whatever it applied would
+  // stay until the page reloads. So every shim is torn down then, and the
+  // boot flag dropped, so an injection from the next instance boots fresh.
+  const invalidated = (): void => {
+    for (const id of [...controls.keys()]) stop(id);
+    delete host[BOOT_FLAG];
+  };
+
+  // A port to the worker, in both worlds: the worker nudges it (the one
+  // way to reach the user-script world), greets every connection with a
+  // sync, and its loss tells the two cases apart. The worker idling out
+  // drops the port and the reconnect succeeds, waking the worker; the
+  // extension instance going makes the reconnect throw.
+  const RECONNECT_MS = 1000;
+  const connect = (): void => {
+    let port: chrome.runtime.Port;
+    try {
+      if (!chrome.runtime.id) throw new Error('extension context invalidated');
+      port = chrome.runtime.connect({ name: RUNTIME_PORT });
+    } catch {
+      invalidated();
+      return;
+    }
+    port.onMessage.addListener((msg: unknown) => { if (isToRuntime(msg)) sync(); });
+    port.onDisconnect.addListener(() => { setTimeout(connect, RECONNECT_MS); });
+  };
+  connect();
   sync();
 })();

@@ -123,6 +123,26 @@ export async function configureExtension(ctx: BrowserContext, extId: string, con
   }
 }
 
+/**
+ * Disable or enable the extension the way the chrome://extensions toggle
+ * does (chrome.management from that page). Disabling orphans every open
+ * document's runtime (its chrome.runtime is invalidated, as after a reload
+ * or an update); enabling boots a fresh instance.
+ */
+export async function setExtensionEnabled(ctx: BrowserContext, extId: string, enabled: boolean): Promise<string> {
+  const settings = await ctx.newPage();
+  try {
+    await settings.goto('chrome://extensions/');
+    return await settings.evaluate(([id, on]) => new Promise<string>((resolve) => {
+      const api = (globalThis as { chrome?: { management?: { setEnabled(id: string, on: boolean, cb: () => void): void }; runtime?: { lastError?: { message: string } } } }).chrome;
+      if (!api?.management) { resolve('no management'); return; }
+      api.management.setEnabled(id, on, () => resolve(api.runtime?.lastError ? `err: ${api.runtime.lastError.message}` : 'ok'));
+    }), [extId, enabled] as const);
+  } finally {
+    await settings.close();
+  }
+}
+
 export async function popupOf(ctx: BrowserContext, extId: string): Promise<Page> {
   const popup = await ctx.newPage();
   await popup.goto(`chrome-extension://${extId}/popup.html`);

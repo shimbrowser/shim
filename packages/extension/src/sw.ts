@@ -106,31 +106,34 @@ async function syncRegistrations(): Promise<void> {
 
 // --- the runtimes on open pages ---------------------------------------------------
 
-// A full-mode runtime cannot receive a message (the user-script world has
-// no onMessage), so it holds a port, and the worker nudges it there. Each
-// port is one document's runtime; the map says which tab it is in.
+// Every runtime holds a port to the worker: a full-mode runtime cannot
+// receive a message (the user-script world has no onMessage), so the port
+// is how the worker nudges it, and in both worlds its loss tells the
+// runtime whether this extension instance is still there. Each port is
+// one document's runtime; the map says which tab it is in. Content
+// scripts connect on onConnect, user scripts on onUserScriptConnect.
 const runtimePorts = new Map<chrome.runtime.Port, number>();
-const onUserScriptConnect = (chrome.runtime as { onUserScriptConnect?: chrome.events.Event<(port: chrome.runtime.Port) => void> }).onUserScriptConnect;
-if (onUserScriptConnect) {
-  onUserScriptConnect.addListener((port) => {
-    const tabId = port.sender?.tab?.id;
-    if (port.name !== RUNTIME_PORT || tabId === undefined) {
-      port.disconnect();
-      return;
-    }
-    runtimePorts.set(port, tabId);
-    port.onDisconnect.addListener(() => { runtimePorts.delete(port); });
-    // A connection is a runtime that may have missed a change: the worker
-    // it held a port to went away (idled out) and the change happened
-    // before this one reconnected, when no port was there to nudge. So
-    // every connection starts with a look at what runs there.
-    try {
-      port.postMessage({ type: 'sync' } satisfies ToRuntime);
-    } catch {
-      runtimePorts.delete(port);
-    }
-  });
+function acceptRuntimePort(port: chrome.runtime.Port): void {
+  const tabId = port.sender?.tab?.id;
+  if (port.name !== RUNTIME_PORT || tabId === undefined) {
+    port.disconnect();
+    return;
+  }
+  runtimePorts.set(port, tabId);
+  port.onDisconnect.addListener(() => { runtimePorts.delete(port); });
+  // A connection is a runtime that may have missed a change: the worker
+  // it held a port to went away (idled out) and the change happened
+  // before this one reconnected, when no port was there to nudge. So
+  // every connection starts with a look at what runs there.
+  try {
+    port.postMessage({ type: 'sync' } satisfies ToRuntime);
+  } catch {
+    runtimePorts.delete(port);
+  }
 }
+chrome.runtime.onConnect.addListener(acceptRuntimePort);
+const onUserScriptConnect = (chrome.runtime as { onUserScriptConnect?: chrome.events.Event<(port: chrome.runtime.Port) => void> }).onUserScriptConnect;
+if (onUserScriptConnect) onUserScriptConnect.addListener(acceptRuntimePort);
 
 /** The engine and the runtime into `tabId`, or the runtime alone where the engine already runs, in the mode's world. */
 async function injectRuntime(tabId: number, mode: ExtensionMode): Promise<void> {
@@ -211,6 +214,30 @@ async function refreshOpenTabs(patterns: readonly string[]): Promise<void> {
   }));
 }
 
+/** The patterns of every shim that runs in this mode and whose hosts are held: where an open page may need the runtime. */
+async function activePatterns(): Promise<string[]> {
+  const shims = (await (await store()).listShims()).filter((shim) => shim.enabled && fitsMode(shim));
+  const out = new Set<string>();
+  for (const shim of shims) {
+    if (await hostsGranted(shim)) for (const pattern of patternsFor(shim)) out.add(pattern);
+  }
+  return [...out];
+}
+
+// The first boot of this extension instance (installed, updated, reloaded,
+// enabled again): the documents already open ran the previous instance's
+// runtime, which tore its shims down when that instance went, so they get
+// this one's. A worker that merely idled out and restarted is the same
+// instance, and its runtimes reconnect their ports on their own.
+// chrome.storage.session lives exactly as long as an instance.
+async function bootRefresh(): Promise<void> {
+  const { booted } = await chrome.storage.session.get('booted');
+  await syncRegistrations();
+  if (booted === true) return;
+  await chrome.storage.session.set({ booted: true });
+  await refreshOpenTabs(await activePatterns());
+}
+
 chrome.runtime.onInstalled.addListener(() => { void syncRegistrations(); });
 chrome.runtime.onStartup.addListener(() => { void syncRegistrations(); });
 // Site access revoked (chrome://extensions) stops the scripts that needed it
@@ -222,7 +249,7 @@ chrome.permissions.onRemoved.addListener(() => {
 chrome.permissions.onAdded.addListener((added) => {
   void syncRegistrations().then(() => refreshOpenTabs(added.origins ?? []));
 });
-void syncRegistrations();
+void bootRefresh();
 
 // --- answers ---------------------------------------------------------------------
 

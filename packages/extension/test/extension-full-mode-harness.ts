@@ -24,7 +24,8 @@ import fs from 'fs';
 import path from 'path';
 import type { BrowserContext, Page, Worker } from 'playwright';
 import {
-  workDir, extensionCopy, fixtureServer, shimWriter, css, launch, workerOf, installer, configureExtension, popupOf, settle, sleep,
+  workDir, extensionCopy, fixtureServer, shimWriter, css, launch, workerOf, installer, configureExtension, setExtensionEnabled, popupOf,
+  settle, sleep,
 } from './smoke-helpers';
 
 let failures = 0;
@@ -251,6 +252,30 @@ async function main(): Promise<void> {
       }, tabId);
       check('a new port from the user-script world is greeted with a sync', heard[0] === '{"type":"sync"}', heard);
     }
+  }
+
+  console.log('the extension disabled and enabled again under open pages:');
+  {
+    // Disabling (as a reload or an update does) invalidates every open
+    // document's runtime: no nudge reaches it again, so it tears its shims
+    // down on its own. The next instance's first boot gives those pages
+    // its runtime.
+    const v0 = await applyView(apply);
+    const s0 = await strictView(strict);
+    check('both pages carry the shims', v0.ad === 'none' && v0.root === 1 && s0.badge !== null, { v0, s0 });
+    const fresh = ctx.waitForEvent('serviceworker', { timeout: 15000 });
+    check('disabling answers ok', (await setExtensionEnabled(ctx, extId, false)) === 'ok');
+    const gone = await applySettled((v) => v.ad !== 'none' && v.root === 0);
+    check('the orphaned runtime tears everything down: hide gone, root gone', gone.ad !== 'none' && gone.root === 0, gone);
+    const sGone = await strictSettled((v) => v.badge === null && v.ad !== 'none');
+    check('on the other page too, and the handler\'s api.cleanup ran', sGone.badge === null && sGone.cleanups === s0.cleanups + 1, { sGone, before: s0.cleanups });
+    check('enabling answers ok', (await setExtensionEnabled(ctx, extId, true)) === 'ok');
+    worker = await fresh;
+    const back = await applySettled((v) => v.ad === 'none' && v.root === 1);
+    check('the new instance takes the open page over without a reload', back.ad === 'none' && back.root === 1, back);
+    const sBack = await strictSettled((v) => v.badge !== null && v.ad === 'none');
+    check('and the other page, the handler compiled again', sBack.badge !== null && sBack.ad === 'none', sBack);
+    check('both registered as user scripts in the new instance', (await userScripts()).length === 2 && (await contentScripts()).length === 0);
   }
 
   console.log('a handler that does not parse:');
