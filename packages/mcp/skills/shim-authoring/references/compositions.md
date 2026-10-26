@@ -110,7 +110,10 @@ style.css
 ## `window.api`
 
 Page code reaches everything outside its own files through `window.api` (`api` below).
-Nothing throws: every call resolves `{ ok: false, error }` on a refusal — render it.
+`api.fetch`, `api.ai` and `api.db` never throw: a refusal resolves `{ ok: false, error }` —
+render it. `api.storage` and `api.settings` resolve the bare value and **reject** on a
+refusal (an `Error` whose message is the code, such as `authoring-read-only`), so wrap them
+in `try` / `catch`.
 
 - **`api.fetch(host, path, opts?)`** — `opts`: `method`, `headers`, `body`. Resolves
   `{ ok, status, text, error? }` (`JSON.parse(res.text)`). It is the page's only network:
@@ -122,7 +125,10 @@ Nothing throws: every call resolves `{ ok: false, error }` on a refusal — rend
   composition's own origin: `<img src="/_media/<host>/<path>">`
   (`<audio src="/_media/media.example.com/preview/1.mp3">`). A direct https URL is blocked.
 - **`api.storage.get / set / delete / list`** — a key/value store private to the
-  composition (JSON values; `get` is `null` when unset). Use it instead of `localStorage`.
+  composition (JSON values). `get(key)` resolves the stored value itself, or `null` when
+  unset — never an `{ ok, value }` wrapper; `set` resolves the value, `delete` a boolean,
+  `list` a `{ key: value }` object. A shim handler's `api.storage` resolves the same shapes
+  (`references/api.md`). Use it instead of `localStorage`.
 - **`api.settings.get(key)` / `getAll()`** — the user's values for the declared fields;
   handle an unset one with a "configure me" state. Never copy a setting into
   `localStorage` or cookies.
@@ -145,10 +151,21 @@ Shim holds the composition for your session exactly as for its own build:
   data — not even when you commit; they're dropped when the session ends. So a cache works
   while you build (a page that stores what it fetched won't fetch it again on every
   preview), but don't take a stored value as proof the real save works.
-- **Other writes are refused**: `api.db.run` and any write through `api.fetch` answer
-  `authoring-read-only`. Tables you declare are created only when you commit. Verify
-  everything up to a database save; say plainly that the save itself could not be
-  exercised.
+- **Other writes are refused**: every `api.db` write (`run`, on the local database or a
+  connection) and any write through `api.fetch` resolves
+  `{ ok: false, error: "authoring-read-only" }` for the whole session — after
+  `shim_commit` too, since the session still holds the composition. Verify everything up
+  to a database save, and say plainly that the save itself could not be exercised. To
+  check the write path, commit, end the session, have the user use the feature in Shim
+  (or rely on what the page writes on its own once it runs unheld), then open a fresh
+  session and read the rows with `query_db`.
+- **Declared tables appear at commit.** A table you add to `storage` doesn't exist until
+  `shim_commit` creates it (right then, even mid-session; additive changes only). Until
+  then every read of it answers `sqlite: no such table: <name>` — the page's `api.db.query`
+  as `{ ok: false, error }`, `query_db` as `{ error }` — and so does a new composition's
+  before its first commit. Make
+  the page treat that answer as an empty table (a "nothing saved yet" state), not a
+  failure to fix. After the commit the table exists, empty, and reads `{ ok: true, rows: [] }`.
 - **Secret settings read `null`**, so the preview shows your unset-value path.
 - **`api.ai` is refused**: every call resolves
   `{ ok: false, error: "ai-unavailable-in-external-session" }` — Shim never spends the

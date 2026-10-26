@@ -35,9 +35,12 @@ Don't repeat it.
 
 - **`api.cleanup(fn)`** — teardown for side effects (`references/handlers.md`).
 - **`api.origin`, `api.host`** — the page's origin and host, as strings.
-- **`api.storage`** — per-shim, per-origin key/value: `get(key)` (null when unset),
-  `set(key, value)` (any JSON value), `delete(key)`, `list()`. Use it for small state:
-  toggles, "played" flags, a cache of per-item data so each item is fetched at most once.
+- **`api.storage`** — per-shim, per-origin key/value: `get(key)` resolves the stored value
+  itself (null when unset; never an `{ ok, value }` wrapper), `set(key, value)` (any JSON
+  value) resolves the value, `delete(key)` a boolean, `list()` a `{ key: value }` object.
+  Unlike the `{ ok }` calls, a failure rejects (as `api.settings` does): catch it. Use it
+  for small state: toggles, "played" flags, a cache of per-item data so each item is
+  fetched at most once.
   - **`api.storage.pack`** — the same four methods over a bucket every shim in the
     shim's pack shares. Present only while the shim is in a pack: guard
     `api.storage.pack &&` and treat an empty bucket as normal.
