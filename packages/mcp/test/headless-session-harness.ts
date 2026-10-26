@@ -851,6 +851,41 @@ async function main(): Promise<void> {
     await req(r, 'DELETE', `/sessions/${sid}`);
   }
 
+  console.log('a cardinality-many rule that first matches after a navigation commits its set witness');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'after-nav.shim');
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile, create: { name: 'AfterNav' } });
+    const sid = String(opened.sessionId);
+    const host = r.hosts[0] as FakeHost;
+    // Nothing on the first document; eleven members on the next one.
+    let rows = 0;
+    host.onApply = (p, h) => {
+      h.emit({ kind: 'rule-status', specId: p.ruleKey, ruleId: p.rule.id, matched: rows, matchedVia: 'primary', applyId: p.applyId });
+      if (rows > 1) {
+        h.emit({ kind: 'rule-witness', specId: p.ruleKey, ruleId: p.rule.id, witness: null, documentId: `d${rows}`, rev: rows, applyId: p.applyId,
+          setWitness: { v: 1, tag: 'div', count: rows, nested: false } });
+      }
+    };
+    const folder = decodeWorkingCopy((await req(r, 'GET', `/sessions/${sid}/checkout`)).files);
+    const spec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown>;
+    spec.rules = [{ id: 'cards', anchor: { ...css('div.card'), cardinality: 'many' }, mutations: [{ kind: 'hide' }] }];
+    const files = { ...folder, 'shim.json': json(spec) } as Record<string, string>;
+    const p1 = await preview(r, sid, files);
+    check('matching nothing, the rule previews', p1.applied === true, p1);
+    rows = 11;
+    host.navigate(url);
+    await req(r, 'POST', `/sessions/${sid}/call`, { name: 'view_page', input: {} });
+    const p2 = await preview(r, sid, files);
+    const ev2 = isRecord(p2.evidence) ? p2.evidence : {};
+    check('the repeat preview of the unchanged folder reports applied consistently (top level and evidence)', p2.applied === ev2.applied, p2);
+    const cm = await req(r, 'POST', `/sessions/${sid}/commit`, { revision: p2.revision, commitId: 'n1', summary: 's' });
+    const saved = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as { spec: { rules: Array<{ id: string; anchor?: { setWitness?: { count?: number }; witness?: unknown } }> } };
+    const rule = saved.spec.rules.find((x) => x.id === 'cards');
+    check('…and the commit carries the set witness of the eleven', cm.ok === true && rule?.anchor?.setWitness?.count === 11 && rule.anchor.witness === undefined, { cm, rule });
+    await req(r, 'DELETE', `/sessions/${sid}`);
+  }
+
   console.log('a witness the engine reports after the preview answered is still taken');
   {
     const r = rig();
