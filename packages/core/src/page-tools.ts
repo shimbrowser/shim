@@ -691,7 +691,9 @@ const SESSION_INTERACT_PAGE: ToolDefinition = {
     'site (in a site form, inside a site link or button, a label for a site ' +
     'control) are refused with a typed error (not-shim-dom, other-shim-dom, ' +
     'site-activation, frame-unsupported, shadow-unsupported); a key or text ' +
-    "goes only to your shim's focused field (focus-not-shim). Scroll steps may " +
+    "goes only to your shim's focused field (focus-not-shim). While the tab is " +
+    "not the selected one in its Shim window, or the window is minimized or " +
+    'hidden, nothing is sent (tab-not-visible). Scroll steps may ' +
     'happen anywhere and can make the site load or mark things. The user\'s ' +
     'own keyboard or mouse input on the tab stops the batch (`interrupted: ' +
     '"user"`). What a click does is real: your handler acts as the signed-in ' +

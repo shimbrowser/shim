@@ -18,7 +18,11 @@ from outside (AppleScript, another browser).
   a label for a site control), `frame-unsupported`, `shadow-unsupported`, and
   `focus-not-shim` (a key or text while your shim's field doesn't have focus). The target
   and focus are re-checked right before every press and keystroke; an overlay or a focus
-  change stops the batch. Scroll steps may happen anywhere, and can make the site load or
+  change stops the batch. While the tab is not the selected one in its Shim window, or the
+  window is minimized or hidden, nothing is sent: the call answers `tab-not-visible`, or
+  a step stops with it when the user switches away mid-batch (input to an off-screen tab
+  can be reported as sent without reaching the page). Ask the user to select the tab.
+  Scroll steps may happen anywhere, and can make the site load or
   mark things. When the user touches the tab (keyboard or mouse) the batch stops
   (`interrupted: "user"`); so does any navigation. What your control does when clicked is
   real: your handler acts as the user. The result lists each step (a scroll: `requested`,

@@ -279,7 +279,8 @@ All of them act on the session's tab.
 - **An attach session's tab off screen.** Shim keeps the session's tab running at full
   speed while Shim is behind your terminal. But when the tab is not the selected one in its
   window, or the window is minimized or hidden, `view_page` answers `tab-not-visible`
-  instead of a screenshot that could show an older frame. The other page tools and the
+  instead of a screenshot that could show an older frame, and `interact_page` answers it
+  instead of sending input. The other page tools and the
   preview's evidence still read the live page and carry a `tabWarning`. Ask the user to
   select the tab before you judge anything visual.
 - **A new page under you.** When the tab loads a new document on the site (a handler's
