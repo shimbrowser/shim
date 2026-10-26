@@ -36,7 +36,7 @@ function check(label: string, cond: boolean, detail?: unknown): void {
   console.error(`  ✗ ${label}${detail !== undefined ? ' — ' + JSON.stringify(detail) : ''}`);
 }
 
-interface StrictView { ad: string; badge: string | null; cleanups: number }
+interface StrictView { ad: string; badge: string | null; cleanups: number; outline: string }
 interface ApplyView { ad: string; root: number; original: string | null }
 
 const BADGE = `module.exports = async function badge({ anchor, api }) {
@@ -72,7 +72,7 @@ async function main(): Promise<void> {
     { id: 'hide-strict-ad', anchor: css('#strict-ad'), mutations: [{ kind: 'hide' }] },
     { id: 'badge', anchor: css('#strict-target'), mutations: [{ kind: 'script', handler: 'badge' }] },
     { id: 'root', anchor: css('#root-target'), mutations: [{ kind: 'replace-root', handler: 'root' }] },
-  ], {}, { badge: BADGE, root: ROOT });
+  ], { css: '#strict-target { outline: 2px solid rgb(0, 128, 0) }' }, { badge: BADGE, root: ROOT });
   const tidy = shimFile('tidy', 'Tidy fixture', [
     { id: 'hide-ad', anchor: css('#ad'), mutations: [{ kind: 'hide' }] },
   ]);
@@ -96,6 +96,7 @@ async function main(): Promise<void> {
     ad: getComputedStyle(document.getElementById('strict-ad') as Element).display,
     badge: document.querySelector('.fm-badge')?.textContent ?? null,
     cleanups: Number(document.documentElement.getAttribute('data-fm-cleanups') || 0),
+    outline: getComputedStyle(document.getElementById('strict-target') as Element).outlineColor,
   }));
   const applyView = (page: Page): Promise<ApplyView> => page.evaluate(() => ({
     ad: getComputedStyle(document.getElementById('ad') as Element).display,
@@ -276,6 +277,19 @@ async function main(): Promise<void> {
     const sBack = await strictSettled((v) => v.badge !== null && v.ad === 'none');
     check('and the other page, the handler compiled again', sBack.badge !== null && sBack.ad === 'none', sBack);
     check('both registered as user scripts in the new instance', (await userScripts()).length === 2 && (await contentScripts()).length === 0);
+
+    // Back to back, so the old teardown and the new injection overlap.
+    const fresh2 = ctx.waitForEvent('serviceworker', { timeout: 15000 });
+    await setExtensionEnabled(ctx, extId, false);
+    check('enabling again at once answers ok', (await setExtensionEnabled(ctx, extId, true)) === 'ok');
+    worker = await fresh2;
+    const again = await strictSettled((v) => v.badge !== null && v.ad === 'none');
+    await sleep(1500);
+    const kept = await strictView(strict);
+    check('after a prompt re-enable the handler ran, the hide holds and the spec stylesheet survived the old teardown',
+      again.badge !== null && kept.badge !== null && kept.ad === 'none' && kept.outline === 'rgb(0, 128, 0)', { again, kept });
+    const sheets = await strict.evaluate(() => document.querySelectorAll('style[data-shim^="patch-"]').length);
+    check('one spec stylesheet in the document', sheets === 1, sheets);
   }
 
   console.log('a handler that does not parse:');

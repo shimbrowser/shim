@@ -28,6 +28,14 @@ import { compileHandlers } from './compile';
 
 const BOOT_FLAG = '__shimForChrome';
 const UNSUPPORTED_ERROR = 'not-available-in-shim-for-chrome';
+// The document carries the mark of the runtime instance that holds it. A
+// runtime from the next extension instance lands in a fresh world and
+// cannot see the old one's globals, but it can see the document: it waits
+// for the old mark to go (the old runtime removes it as it tears down)
+// before it boots, so the two never share the document's stylesheets.
+const RUNTIME_MARK = 'data-shim-runtime';
+const TAKEOVER_WAIT_MS = 2000;
+const TAKEOVER_POLL_MS = 50;
 
 type PatchControl = ReturnType<typeof Core.run>;
 
@@ -47,6 +55,20 @@ interface Runtime {
   }
   const ShimCore = host.ShimCore as typeof Core | undefined;
   if (!ShimCore || typeof ShimCore.run !== 'function') return;
+
+  const mark = Math.random().toString(36).slice(2);
+  const markHeld = (): string | null => document.documentElement.getAttribute(RUNTIME_MARK);
+  // The previous instance's runtime, if it is still tearing down here.
+  const takeover: Promise<void> = markHeld() === null
+    ? Promise.resolve()
+    : new Promise((resolve) => {
+      const deadline = Date.now() + TAKEOVER_WAIT_MS;
+      const tick = (): void => {
+        if (markHeld() === null || Date.now() >= deadline) { resolve(); return; }
+        setTimeout(tick, TAKEOVER_POLL_MS);
+      };
+      tick();
+    });
 
   const ask = (msg: ToWorker): Promise<WorkerAnswer> => chrome.runtime.sendMessage(msg);
   const tell = (msg: ToWorker): void => {
@@ -150,8 +172,11 @@ interface Runtime {
   };
 
   // Syncs run one after another: two re-injections in a row must not boot
-  // one shim twice.
+  // one shim twice. The first waits for a predecessor to leave.
   const resync = async (): Promise<void> => {
+    await takeover;
+    if (!host[BOOT_FLAG]) return; // invalidated while waiting
+    document.documentElement.setAttribute(RUNTIME_MARK, mark);
     let answer: WorkerAnswer;
     try {
       answer = await ask({ type: 'bundle' });
@@ -195,6 +220,14 @@ interface Runtime {
   const invalidated = (): void => {
     for (const id of [...controls.keys()]) stop(id);
     delete host[BOOT_FLAG];
+    if (markHeld() === mark) document.documentElement.removeAttribute(RUNTIME_MARK);
+  };
+  const contextGone = (): boolean => {
+    try {
+      return !chrome.runtime.id;
+    } catch {
+      return true;
+    }
   };
 
   // A port to the worker, in both worlds: the worker nudges it (the one
@@ -206,14 +239,19 @@ interface Runtime {
   const connect = (): void => {
     let port: chrome.runtime.Port;
     try {
-      if (!chrome.runtime.id) throw new Error('extension context invalidated');
+      if (contextGone()) throw new Error('extension context invalidated');
       port = chrome.runtime.connect({ name: RUNTIME_PORT });
     } catch {
       invalidated();
       return;
     }
     port.onMessage.addListener((msg: unknown) => { if (isToRuntime(msg)) sync(); });
-    port.onDisconnect.addListener(() => { setTimeout(connect, RECONNECT_MS); });
+    port.onDisconnect.addListener(() => {
+      // The context is gone the moment the instance is: tear down now, not
+      // after the reconnect delay, so a successor finds the document free.
+      if (contextGone()) { invalidated(); return; }
+      setTimeout(connect, RECONNECT_MS);
+    });
   };
   connect();
   sync();

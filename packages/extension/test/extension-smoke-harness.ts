@@ -66,7 +66,9 @@ async function main(): Promise<void> {
   const ctx: BrowserContext = await launch(ext, profile);
   const errors: string[] = [];
   ctx.on('weberror', (e) => errors.push(String(e.error())));
-  const { worker, extId } = await workerOf(ctx);
+  // `worker` is reassigned when the extension is disabled and enabled again (a fresh instance, a fresh handle).
+  let { worker } = await workerOf(ctx);
+  const { extId } = await workerOf(ctx);
   const registered = () => worker.evaluate(() => chrome.scripting.getRegisteredContentScripts());
   const { install, installAll } = installer(ctx, extId);
 
@@ -313,11 +315,50 @@ async function main(): Promise<void> {
     const s1 = await settled((s) => s.ad !== 'none' && s.injected === 0);
     check('the orphaned runtime tears the shim down: hide, injected node and stylesheet gone', s1.ad !== 'none' && s1.injected === 0 && s1.grid !== 'rgb(0, 128, 0)', s1);
     check('enabling answers ok', (await setExtensionEnabled(ctx, extId, true)) === 'ok');
-    const next = await fresh;
+    worker = await fresh;
     const s2 = await settled((s) => s.ad === 'none' && s.injected === 1);
     check('the new instance takes the open page over without a reload', s2.ad === 'none' && s2.injected === 1 && s2.grid === 'rgb(0, 128, 0)', s2);
-    const regs = await next.evaluate(() => chrome.scripting.getRegisteredContentScripts());
-    check('one registration in the new instance', regs.length === 1);
+    check('one registration in the new instance', (await registered()).length === 1);
+
+    // Disabled and enabled back to back: the old runtime's teardown and the
+    // new instance's injection overlap in time, and the new engine must end
+    // up with its own stylesheet, not one the old teardown removes.
+    const fresh2 = ctx.waitForEvent('serviceworker', { timeout: 15000 });
+    await setExtensionEnabled(ctx, extId, false);
+    check('enabling again at once answers ok', (await setExtensionEnabled(ctx, extId, true)) === 'ok');
+    worker = await fresh2;
+    const s3 = await settled((s) => s.ad === 'none' && s.injected === 1 && s.grid === 'rgb(0, 128, 0)');
+    await sleep(1500);
+    const s4 = await styles();
+    check('after a prompt re-enable the page carries the shim and its stylesheet, and keeps them', s3.grid === 'rgb(0, 128, 0)' && s4.ad === 'none' && s4.injected === 1 && s4.grid === 'rgb(0, 128, 0)', { s3, s4 });
+    const sheets = await fixture.evaluate(() => document.querySelectorAll('style[data-shim^="patch-"]').length);
+    check('one spec stylesheet in the document', sheets === 1, sheets);
+    const marks = await fixture.evaluate(() => document.documentElement.getAttribute('data-shim-runtime'));
+    check('the document carries the live runtime\'s mark', typeof marks === 'string' && marks.length > 0, marks);
+
+    // A predecessor still tearing down holds the document: a runtime that
+    // is new to the document waits for its mark to go before it boots. The
+    // page is loaded with nothing registered, so enabling the shim injects
+    // a fresh runtime into it (an existing one would only sync again).
+    const popup0 = await ctx.newPage();
+    await popup0.goto(`chrome-extension://${extId}/popup.html`);
+    await popup0.waitForSelector('#list .card input[type=checkbox]:checked');
+    await popup0.click('#list .card input[type=checkbox]');
+    await popup0.waitForSelector('#list .card input[type=checkbox]:not(:checked)');
+    const dOff = Date.now() + 5000;
+    while (Date.now() < dOff && (await registered()).length !== 0) await sleep(100);
+    await fixture.goto(`${origin}/apply`);
+    await sleep(300);
+    check('a page loaded with nothing registered has no runtime', (await styles()).ad !== 'none' && (await fixture.evaluate(() => document.documentElement.getAttribute('data-shim-runtime'))) === null);
+    await fixture.evaluate(() => document.documentElement.setAttribute('data-shim-runtime', 'lingering-predecessor'));
+    await popup0.click('#list .card input[type=checkbox]');
+    await sleep(700);
+    const held = await styles();
+    check('while a predecessor\'s mark is on the document, the runtime waits', held.ad !== 'none', held);
+    await fixture.evaluate(() => document.documentElement.removeAttribute('data-shim-runtime'));
+    const released = await settled((s) => s.ad === 'none' && s.injected === 1);
+    check('and boots once the mark is gone', released.ad === 'none' && released.injected === 1, released);
+    await popup0.close();
     const popup = await ctx.newPage();
     await popup.goto(`chrome-extension://${extId}/popup.html`);
     await popup.waitForSelector('#list .card button.danger');
