@@ -31,7 +31,7 @@ import { capabilitiesFor, detectMode, type ExtensionMode } from './capabilities'
 import { arbitrate, type RuntimeWorld as ArbitratedWorld } from './arbitrate';
 import { baselineForPath, pagePathKey } from '@shimbrowser/core/deploy-id';
 import {
-  rebasedSpec, refreshedSpec, witnessedSpec, rememberPath, escalationAllowed, quarantineFrom, emptyRuleState, type RuntimeEventPayload,
+  rebasedSpec, refreshedSpec, capturedSpec, rememberPath, escalationAllowed, quarantineFrom, emptyRuleState, type RuntimeEventPayload,
 } from './rebase';
 import { mintShimId } from './install';
 import { matchPatternsForHosts } from './match-patterns';
@@ -425,8 +425,17 @@ async function ruleStateFor(db: ShimStore, shimId: string, ruleId: string) {
   return (await db.ruleState.get(shimId, ruleId)) ?? emptyRuleState(shimId, ruleId);
 }
 
-/** Per shim, the event being kept now; the next one waits for it. */
+/**
+ * Per shim, the spec write in flight; the next waits for it. Every write
+ * that reads the spec, computes and writes (an event kept, a restore) runs
+ * in here, so two never read one version and both write the next.
+ */
 const ingesting = new Map<string, Promise<void>>();
+function chained<T>(shimId: string, work: () => Promise<T>): Promise<T> {
+  const run = (ingesting.get(shimId) ?? Promise.resolve()).then(work);
+  ingesting.set(shimId, run.then(() => undefined, () => undefined));
+  return run;
+}
 
 /** One engine event from the runtime of `shim` on `page`; answers whether the open pages should look again. */
 async function ingestEvent(db: ShimStore, shim: InstalledShim, page: { hostname: string }, kind: string, payload: RuntimeEventPayload): Promise<boolean> {
@@ -439,23 +448,26 @@ async function ingestEvent(db: ShimStore, shim: InstalledShim, page: { hostname:
       await recordBaseline(db, shim.id, page.hostname, payload);
       const out = rebasedSpec(shim.spec, ruleId, payload.anchor, payload.bundleHash);
       if (!out) return false;
-      await db.reviseSpec(shim.id, out.spec, 'rebase');
-      // Healed: whatever review it was held for no longer applies.
+      if (!(await db.reviseSpec(shim.id, out.spec, 'rebase', specVersion(shim.spec)))) return false;
+      // Healed: whatever review it was held for no longer applies, and its
+      // fingerprint is the rebase's now, committed, never captured over.
       const state = await ruleStateFor(db, shim.id, ruleId);
-      if (state.quarantine) await db.ruleState.put({ ...state, quarantine: undefined });
+      if (state.quarantine || state.capture) await db.ruleState.put({ ...state, quarantine: undefined, capture: undefined });
       console.log(`[shim] auto-rebase (${String(payload.strategy)}${payload.via ? ` via ${String(payload.via)}` : ''}) ${shim.id}/${ruleId}: spec v${out.version}`);
       return true;
     }
     case 'spec-bundle-update': {
       await recordBaseline(db, shim.id, page.hostname, payload);
       const next = refreshedSpec(shim.spec, payload.bundleHash);
-      if (next) await db.amendSpec(shim.id, next);
+      if (next) await db.amendSpec(shim.id, next, specVersion(shim.spec));
       return false;
     }
     case 'rule-witness': {
       if (!ruleId) return false;
-      const next = witnessedSpec(shim.spec, ruleId, payload.witness, payload.setWitness);
-      if (next) await db.amendSpec(shim.id, next);
+      const state = await ruleStateFor(db, shim.id, ruleId);
+      const out = capturedSpec(shim.spec, ruleId, state.capture, payload);
+      if (!out) return false;
+      if (await db.amendSpec(shim.id, out.spec, specVersion(shim.spec))) await db.ruleState.put({ ...state, capture: out.capture });
       return false;
     }
     case 'rule-status': {
@@ -562,7 +574,7 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
       // One shim's events are kept one after another: two rebases reported
       // by one document (two rules healed in one pass) each read the spec
       // the other wrote, so neither overwrites the other's anchor.
-      const kept = (ingesting.get(shimId) ?? Promise.resolve()).then(async (): Promise<WorkerAnswer> => {
+      return chained(shimId, async (): Promise<WorkerAnswer> => {
         const shim = await db.getShim(shimId);
         if (!shim || !(await runsOn(shim, page, capabilities))) return { ok: false, error: 'not a shim of this page' };
         let changed = false;
@@ -576,8 +588,6 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
         if (changed) void refreshOpenTabs(patternsFor(shim));
         return { ok: true };
       });
-      ingesting.set(shimId, kept.then(() => undefined, () => undefined));
-      return kept;
     }
     case 'mode':
       return { ok: true, mode: modeNow };
@@ -598,23 +608,24 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
       const versions = (await db.versions.listForShim(shim.id)).map((v) => ({ version: v.version, at: v.at, reason: v.reason }));
       return { ok: true, versions };
     }
-    case 'shims.restore': {
-      const shim = await db.getShim(msg.id);
-      if (!shim) return { ok: false, error: 'no such shim' };
-      const snapshot = await db.versions.get(shim.id, msg.version);
-      if (!snapshot) return { ok: false, error: 'no such version' };
-      // A restore is a forward change: the chosen spec comes back as the
-      // next version (never the old number, so history stays a line). Its
-      // rules' reviews are cleared: whatever broke, this is a different
-      // spec now.
-      const next = { ...snapshot.spec, id: shim.id, version: specVersion(shim.spec) + 1 };
-      await db.reviseSpec(shim.id, next, 'restore');
-      for (const state of await db.ruleState.listForShim(shim.id)) {
-        if (state.quarantine) await db.ruleState.put({ ...state, quarantine: undefined });
-      }
-      await refreshOpenTabs(patternsFor(shim));
-      return { ok: true };
-    }
+    case 'shims.restore':
+      return chained(msg.id, async (): Promise<WorkerAnswer> => {
+        const shim = await db.getShim(msg.id);
+        if (!shim) return { ok: false, error: 'no such shim' };
+        const snapshot = await db.versions.get(shim.id, msg.version);
+        if (!snapshot) return { ok: false, error: 'no such version' };
+        // A restore is a forward change: the chosen spec comes back as the
+        // next version (never the old number, so history stays a line). Its
+        // rules' reviews and captures are cleared: whatever broke, this is
+        // a different spec now, and its fingerprints are the snapshot's.
+        const next = { ...snapshot.spec, id: shim.id, version: specVersion(shim.spec) + 1 };
+        if (!(await db.reviseSpec(shim.id, next, 'restore', specVersion(shim.spec)))) return { ok: false, error: 'the shim changed meanwhile; try again' };
+        for (const state of await db.ruleState.listForShim(shim.id)) {
+          if (state.quarantine || state.capture) await db.ruleState.put({ ...state, quarantine: undefined, capture: undefined });
+        }
+        await refreshOpenTabs(patternsFor(shim));
+        return { ok: true };
+      });
     case 'shims.setEnabled': {
       const shim = await db.getShim(msg.id);
       if (!shim) return { ok: false, error: 'no such shim' };

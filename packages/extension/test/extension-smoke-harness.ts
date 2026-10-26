@@ -480,6 +480,7 @@ async function main(): Promise<void> {
     if (restoreV1) await restoreV1.click();
     const restored = await settle(exported, (f) => (f.spec.version ?? 1) === 4, 10000);
     check('restoring v1 is a forward change: version 4 with v1\'s anchors', (restored.spec.version ?? 1) === 4 && restored.spec.rules.find((r) => r.id === 'promote')?.anchor.primary.value === 'button.buy-v1', { version: restored.spec.version });
+    check('and with the fingerprints captured on v1 (its snapshot was refreshed as it stood)', restored.spec.rules.filter((r) => r.anchor.witness).length >= 4, restored.spec.rules.map((r) => `${r.id}:${r.anchor.witness ? 'w' : '-'}`));
     const afterRestore = await summaryOf();
     check('and clears the review', afterRestore.review.length === 0 && afterRestore.version === 4, afterRestore);
     await popup.close();

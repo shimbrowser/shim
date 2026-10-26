@@ -4,7 +4,8 @@
 // when it moved; a captured witness lands only on a rule without one; page
 // memory and the escalation gate; the quarantine reason in main's words.
 
-import { rebasedSpec, refreshedSpec, witnessedSpec, reportedAnchor, rememberPath, escalationAllowed, quarantineFrom, PAGE_MEMORY_CAP } from '../src/rebase';
+import { rebasedSpec, refreshedSpec, capturedSpec, reportedAnchor, rememberPath, escalationAllowed, quarantineFrom, PAGE_MEMORY_CAP } from '../src/rebase';
+import { anchorDigest } from '@shimbrowser/core/managed-anchor';
 import type { Spec } from '@shimbrowser/core/types';
 
 let failures = 0;
@@ -67,14 +68,41 @@ console.log('a baseline refresh:');
   check('nothing for no hash', refreshedSpec(spec, undefined) === null && refreshedSpec(spec, '') === null);
 }
 
-console.log('a captured witness:');
+console.log('a rebase keeps the authored anchor fields:');
 {
-  const w = { v: 1, tag: 'button', attrs: { 'data-sku': '42' } };
-  const out = witnessedSpec(spec, 'buy', w, undefined);
-  check('lands on a rule without one', out?.rules?.[0]?.anchor?.witness?.tag === 'button');
-  check('a set witness lands as a set witness', witnessedSpec(spec, 'buy', undefined, { v: 1, members: 3 })?.rules?.[0]?.anchor?.setWitness !== undefined);
-  check('a rule that has one keeps it', out !== null && witnessedSpec(out, 'buy', { v: 1, tag: 'em' }, undefined) === null);
-  check('an unknown rule, or no witness: nothing', witnessedSpec(spec, 'nope', w, undefined) === null && witnessedSpec(spec, 'buy', undefined, undefined) === null);
+  const many: Spec = { ...spec, rules: [{ id: 'rows', anchor: { primary: { kind: 'css', value: 'li.row-v1' }, fallbacks: [{ kind: 'css', value: 'li[data-row]' }], cardinality: 'many', iframe: { kind: 'css', value: 'iframe#list' } }, mutations: [{ kind: 'hide' }] }] };
+  // The engine's promotion of a `many` rule: the ladder rotated, no element witness, cardinality retained.
+  const out = rebasedSpec(many, 'rows', { primary: { kind: 'css', value: 'li[data-row]' }, fallbacks: [{ kind: 'css', value: 'li.row-v1' }], cardinality: 'many' }, 'b2');
+  const a = out?.spec.rules?.[0]?.anchor;
+  check('the promoted ladder', a?.primary.value === 'li[data-row]' && a.fallbacks?.[0]?.value === 'li.row-v1');
+  check('cardinality stays many, with no element witness', a?.cardinality === 'many' && a.witness === undefined);
+  check('the iframe target stays the rule\'s own', a?.iframe?.value === 'iframe#list');
+  check('a reported anchor validates cardinality', reportedAnchor({ primary: { kind: 'css', value: 'a' }, cardinality: 'many' })?.cardinality === 'many' && reportedAnchor({ primary: { kind: 'css', value: 'a' }, cardinality: 'few' }) === null);
+  const withOld = rebasedSpec({ ...spec, rules: [{ id: 'buy', anchor: { primary: { kind: 'css', value: 'a' }, witness: { v: 1, tag: 'a' } }, mutations: [{ kind: 'hide' }] }] }, 'buy', { primary: { kind: 'css', value: 'b' } }, 'b2');
+  check('a report without a fingerprint replaces the old one with none (the managed state is replaced as a whole)', withOld !== null && withOld.spec.rules?.[0]?.anchor?.witness === undefined);
+}
+
+console.log('a captured fingerprint follows the engine\'s contract:');
+{
+  const bare: Spec = { ...spec, rules: [{ id: 'buy', anchor: { primary: { kind: 'css', value: 'button' } }, mutations: [{ kind: 'hide' }] }] };
+  const digest = anchorDigest({ primary: { kind: 'css', value: 'button' } });
+  const w = { v: 1, tag: 'button' };
+  const sw = { v: 1, members: 3, tag: 'li' };
+  const first = capturedSpec(bare, 'buy', undefined, { witness: w, setWitness: null, documentId: 'doc-a', anchorDigest: digest, rev: 1 });
+  check('a rule without a fingerprint takes a capture', first?.spec.rules?.[0]?.anchor?.witness?.tag === 'button' && first.capture.rev === 1 && first.capture.documentId === 'doc-a');
+  const grown = first && capturedSpec(first.spec, 'buy', first.capture, { witness: null, setWitness: sw, documentId: 'doc-a', anchorDigest: digest, rev: 2 });
+  check('a later rev in the same document replaces it: element to set', grown?.spec.rules?.[0]?.anchor?.setWitness !== undefined && grown.spec.rules?.[0]?.anchor?.witness === undefined && grown.capture.rev === 2);
+  check('a lower rev in the same document is ignored', grown !== null && grown !== undefined && capturedSpec(grown.spec, 'buy', grown.capture, { witness: w, setWitness: null, documentId: 'doc-a', anchorDigest: digest, rev: 1 }) === null);
+  const withdrawn = grown && capturedSpec(grown.spec, 'buy', grown.capture, { witness: null, setWitness: null, documentId: 'doc-a', anchorDigest: digest, rev: 3, captureNote: 'mixed-tags' });
+  check('an explicit none withdraws the fingerprint', withdrawn?.spec.rules?.[0]?.anchor?.witness === undefined && withdrawn?.spec.rules?.[0]?.anchor?.setWitness === undefined && withdrawn?.capture.rev === 3);
+  const later = withdrawn && capturedSpec(withdrawn.spec, 'buy', withdrawn.capture, { witness: w, setWitness: null, documentId: 'doc-b', anchorDigest: digest, rev: 1 });
+  check('a later document replaces, whatever its rev', later?.spec.rules?.[0]?.anchor?.witness?.tag === 'button' && later.capture.documentId === 'doc-b');
+  check('a capture for another anchor (digest) is ignored', first !== null && capturedSpec(first.spec, 'buy', first.capture, { witness: w, setWitness: null, documentId: 'doc-c', anchorDigest: 'other', rev: 1 }) === null);
+  check('a committed fingerprint (no capture record) is never captured over', capturedSpec(spec, 'buy', undefined, { witness: w, setWitness: null, documentId: 'doc-a', anchorDigest: anchorDigest(spec.rules?.[0]?.anchor), rev: 1 }) === null || !spec.rules?.[0]?.anchor?.witness);
+  const committed: Spec = { ...spec, rules: [{ id: 'buy', anchor: { primary: { kind: 'css', value: 'button' }, witness: { v: 1, tag: 'em' } }, mutations: [{ kind: 'hide' }] }] };
+  check('…truly: a rule with a fingerprint and no capture record keeps it', capturedSpec(committed, 'buy', undefined, { witness: w, setWitness: null, documentId: 'doc-a', anchorDigest: digest, rev: 9 }) === null);
+  check('an event from an engine without a rev reads as rev -1, and is taken when nothing is held', capturedSpec(bare, 'buy', undefined, { witness: w })?.capture.rev === -1);
+  check('an unknown rule is nothing', capturedSpec(bare, 'nope', undefined, { witness: w, documentId: 'doc-a', anchorDigest: digest, rev: 1 }) === null);
 }
 
 console.log('page memory and the gate:');

@@ -12,7 +12,9 @@
 
 import type { Spec, Anchor, AnchorSpec, Rule } from '@shimbrowser/core/types';
 import { pagePathKey } from '@shimbrowser/core/deploy-id';
-import type { QuarantineState, RuleStateRecord } from './store';
+import { readCaptureEvent, inCaptureBinding, supersedes, fingerprintOfCapture, type CaptureEvent } from '@shimbrowser/core/capture-event';
+import { anchorDigest, withManagedFingerprint, withoutManagedKeys, managedFingerprintOf, hasManagedKeys } from '@shimbrowser/core/managed-anchor';
+import type { QuarantineState, RuleStateRecord, CaptureRecord } from './store';
 
 /** The anchor kinds the engine resolves; a reported anchor of any other kind is not an anchor. */
 export const ANCHOR_KINDS: ReadonlySet<string> = new Set<AnchorSpec['kind']>(['css', 'data-attr', 'aria', 'text']);
@@ -39,6 +41,10 @@ export interface RuntimeEventPayload {
   witness?: unknown;
   setWitness?: unknown;
   anchorDigest?: unknown;
+  documentId?: unknown;
+  rev?: unknown;
+  applyId?: unknown;
+  captureNote?: unknown;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -88,7 +94,27 @@ export function reportedAnchor(v: unknown): Anchor | null {
     if (!isRecord(v.setWitness)) return null;
     anchor.setWitness = v.setWitness as unknown as Anchor['setWitness'];
   }
+  if (v.cardinality !== undefined) {
+    if (v.cardinality !== 'many') return null;
+    anchor.cardinality = 'many';
+  }
   return anchor;
+}
+
+/**
+ * The rule's anchor after a rebase: the authored fields the engine does not
+ * rewrite (`cardinality`, `iframe`) stay the rule's own, the ladder comes
+ * from the report, and the managed fingerprint is replaced as a whole by
+ * what the report carries (a promotion of a `many` rule carries none, and
+ * gets none).
+ */
+function rebasedAnchor(existing: Anchor | undefined, reported: Anchor): Anchor {
+  const authored = existing ? withoutManagedKeys(existing) : undefined;
+  const base: Anchor = { primary: reported.primary };
+  if (reported.fallbacks) base.fallbacks = reported.fallbacks;
+  if (authored?.iframe) base.iframe = authored.iframe;
+  if (authored?.cardinality === 'many' || reported.cardinality === 'many') base.cardinality = 'many';
+  return withManagedFingerprint(base, managedFingerprintOf(reported));
 }
 
 export interface RebaseOutcome {
@@ -115,12 +141,13 @@ export function rebasedSpec(spec: Spec, ruleId: string, reported: unknown, bundl
   if (index < 0 || !before) return null;
   const hash = typeof bundleHash === 'string' && bundleHash ? bundleHash : null;
   if (JSON.stringify(before.anchor?.primary) === JSON.stringify(anchor.primary) && (hash === null || spec.bundleHash === hash)) return null;
-  const after: Rule = { ...before, anchor };
+  const merged = rebasedAnchor(before.anchor, anchor);
+  const after: Rule = { ...before, anchor: merged };
   rules[index] = after;
   const current = typeof spec.version === 'number' && Number.isFinite(spec.version) ? spec.version : 1;
   const version = current + 1;
   const next: Spec = { ...spec, rules, version, ...(hash ? { bundleHash: hash } : {}) };
-  return { spec: next, version, before: before.anchor, after: anchor };
+  return { spec: next, version, before: before.anchor, after: merged };
 }
 
 /** The spec with its bundle hash advanced, or null when it already is (or the hash is no string). */
@@ -129,26 +156,41 @@ export function refreshedSpec(spec: Spec, bundleHash: unknown): Spec | null {
   return { ...spec, bundleHash };
 }
 
+export interface CaptureOutcome {
+  spec: Spec;
+  capture: CaptureRecord;
+}
+
 /**
- * The spec with a captured fingerprint kept on a rule that has none: a
- * shim that arrived without witnesses (authored where none were captured)
- * gains them from its first clean resolves, so the ladder's recovery and
- * verification have something to work with on the next deploy. A rule that
- * has a fingerprint keeps it (the commit's, or the last rebase's). Null
- * when nothing changes.
+ * A `rule-witness` event kept, by the engine's capture contract: each event
+ * replaces the rule's whole managed fingerprint, is bound to the anchor it
+ * was captured for, and is ordered by document then rev (a later document
+ * replaces, within a document only a higher rev does), withdrawal (an
+ * explicit "none") included. A fingerprint that came committed (the
+ * file's, a rebase's) is never captured over: only a rule that has none,
+ * or one whose fingerprint this host captured (`capture`), takes a
+ * capture. Null when nothing changes.
  */
-export function witnessedSpec(spec: Spec, ruleId: string, witness: unknown, setWitness: unknown): Spec | null {
+export function capturedSpec(spec: Spec, ruleId: string, capture: CaptureRecord | undefined, payload: RuntimeEventPayload): CaptureOutcome | null {
+  const read = readCaptureEvent({ kind: 'rule-witness', ...payload });
+  if (!read) return null;
   const rules = [...(spec.rules ?? [])];
   const index = rules.findIndex((r) => r.id === ruleId);
   const rule = rules[index];
   if (index < 0 || !rule || !rule.anchor) return null;
-  if (rule.anchor.witness || rule.anchor.setWitness) return null;
-  const anchor: Anchor = { ...rule.anchor };
-  if (isRecord(witness) && typeof witness.tag === 'string') anchor.witness = witness as unknown as Anchor['witness'];
-  else if (isRecord(setWitness)) anchor.setWitness = setWitness as unknown as Anchor['setWitness'];
-  else return null;
+  if (hasManagedKeys(rule.anchor) && !capture) return null;
+  const binding = { applyId: null, anchorDigest: anchorDigest(rule.anchor) };
+  if (!inCaptureBinding(read, binding)) return null;
+  const current: CaptureEvent | null = capture
+    ? { witness: null, setWitness: null, documentId: capture.documentId, anchorDigest: capture.anchorDigest, rev: capture.rev, applyId: null, note: null }
+    : null;
+  if (!supersedes(read, current)) return null;
+  const anchor = withManagedFingerprint(withoutManagedKeys(rule.anchor), fingerprintOfCapture(read));
   rules[index] = { ...rule, anchor };
-  return { ...spec, rules };
+  return {
+    spec: { ...spec, rules },
+    capture: { documentId: read.documentId, rev: read.rev, anchorDigest: read.anchorDigest ?? binding.anchorDigest },
+  };
 }
 
 /** The page memory with `path`'s kind remembered as of `now`. */

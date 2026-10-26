@@ -110,18 +110,22 @@ async function main(): Promise<void> {
       const v1 = await store.versions.listForShim('b');
       check('an install snapshot under its version', v1.length === 1 && v1[0]?.version === (b.spec.version ?? 1) && v1[0]?.reason === 'install');
       const v = b.spec.version ?? 1;
+      // An amendment since the install's snapshot (a captured fingerprint, say) rides the current spec.
+      check('amendSpec replaces without a snapshot', (await store.amendSpec('b', { ...b.spec, bundleHash: 'amended' }, v)) === true
+        && (await store.getShim('b'))?.spec.bundleHash === 'amended' && (await store.versions.listForShim('b')).length === 1);
+      check('amendSpec against a moved version is refused', (await store.amendSpec('b', { ...b.spec, bundleHash: 'stale' }, v + 7)) === false && (await store.getShim('b'))?.spec.bundleHash === 'amended');
       const next = { ...b.spec, version: v + 1, bundleHash: 'b2' };
-      check('reviseSpec stores the next spec and snapshots it under its version, in one go', (await store.reviseSpec('b', next, 'rebase')) === true);
+      check('reviseSpec against a moved version is refused', (await store.reviseSpec('b', next, 'rebase', v + 1)) === false && ((await store.getShim('b'))?.spec.version ?? 1) === v);
+      check('reviseSpec stores the next spec and snapshots it under its version, in one go', (await store.reviseSpec('b', next, 'rebase', v)) === true);
       const after = await store.getShim('b');
       check('the shim carries the next spec', after?.spec.version === next.version && after.spec.bundleHash === 'b2');
       const versions = await store.versions.listForShim('b');
       check('every version the shim has been, in order, with what produced it', versions.map((x) => `${x.version}:${x.reason}`).join(',') === `${v}:install,${v + 1}:rebase`, versions.map((x) => `${x.version}:${x.reason}`).join(','));
       const got = await store.versions.get('b', v + 1);
       check('a snapshot reads back with the spec it held', got !== null && got.spec.bundleHash === 'b2' && got.reason === 'rebase');
-      check('and the first still holds the installed spec', (await store.versions.get('b', v))?.spec.bundleHash === b.spec.bundleHash);
-      check('amendSpec replaces without a snapshot', (await store.amendSpec('b', { ...next, bundleHash: 'b3' })) === true
-        && (await store.getShim('b'))?.spec.bundleHash === 'b3' && (await store.versions.listForShim('b')).length === versions.length);
-      check('revising a missing shim is false', (await store.reviseSpec('zzz', next, 'rebase')) === false && (await store.amendSpec('zzz', next)) === false);
+      const first = await store.versions.get('b', v);
+      check('the version revised away was snapshotted again as it stood, amendments included, keeping its reason', first?.spec.bundleHash === 'amended' && first.reason === 'install');
+      check('revising a missing shim is false', (await store.reviseSpec('zzz', next, 'rebase', v)) === false && (await store.amendSpec('zzz', next, v)) === false);
     }
     check('no rule state to start', (await store.ruleState.get('b', 'r1')) === null && (await store.ruleState.listForShim('b')).length === 0);
     await store.ruleState.put({ shimId: 'b', ruleId: 'r1', paths: { '/projects/*': 5 } });

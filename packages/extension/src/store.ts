@@ -88,12 +88,26 @@ export interface QuarantineState {
  * One rule's learned state: the page kinds it has applied on (page memory,
  * the escalation gate's evidence) and its quarantine, if any.
  */
+/**
+ * The capture a rule's fingerprint came from, when the extension captured
+ * it (a rule that arrived without one): the document and rev of the event
+ * it kept, and the anchor it was captured for. Absent when the rule's
+ * fingerprint came committed (the file's, a rebase's), which a capture
+ * never replaces.
+ */
+export interface CaptureRecord {
+  documentId: string | null;
+  rev: number;
+  anchorDigest: string;
+}
+
 export interface RuleStateRecord {
   shimId: string;
   ruleId: string;
   /** pathKey → last seen, ms. */
   paths: Record<string, number>;
   quarantine?: QuarantineState;
+  capture?: CaptureRecord;
 }
 
 export interface BaselineRecord {
@@ -123,13 +137,18 @@ export interface ShimStore {
   /**
    * Replaces the shim's spec with `next` (already bumped) and snapshots it
    * under its version with the reason that produced it, in one
-   * transaction: a rebase, or a restore. Every version the shim has been,
-   * the current one included, is then a snapshot, each restorable. Answers
-   * false when the shim is gone.
+   * transaction: a rebase, or a restore. The spec as it stood is
+   * snapshotted again under its own version first (keeping that version's
+   * reason and time), so what was amended since (captured fingerprints,
+   * the advanced baseline) is what a restore of it brings back. Every
+   * version the shim has been, the current one included, is then a
+   * snapshot, each restorable. Refused (false) when the shim is gone or
+   * its spec is no longer at `expectedVersion`: the caller read a version
+   * another write has moved since.
    */
-  reviseSpec(id: string, next: Spec, reason: VersionRecord['reason']): Promise<boolean>;
-  /** Replaces the spec without a snapshot: a baseline refresh, a captured witness. */
-  amendSpec(id: string, spec: Spec): Promise<boolean>;
+  reviseSpec(id: string, next: Spec, reason: VersionRecord['reason'], expectedVersion: number): Promise<boolean>;
+  /** Replaces the spec without a snapshot (a baseline refresh, a captured fingerprint); refused when its version moved. */
+  amendSpec(id: string, spec: Spec, expectedVersion: number): Promise<boolean>;
   versions: {
     /** Snapshots the shim as it is now under its version (an install's first record). */
     snapshot(shim: InstalledShim, reason: VersionRecord['reason']): Promise<void>;
@@ -235,6 +254,11 @@ export function openShimStore(factory: IDBFactory = indexedDB, name: string = ST
   }).then((db) => bind(db));
 }
 
+/** A spec's version; one without one is version 1. */
+export function versionOf(spec: { version?: unknown }): number {
+  return typeof spec.version === 'number' && Number.isFinite(spec.version) ? spec.version : 1;
+}
+
 function bind(db: IDBDatabase): ShimStore {
   const read = (stores: string | string[]) => db.transaction(stores, 'readonly');
   const write = (stores: string | string[]) => db.transaction(stores, 'readwrite');
@@ -287,25 +311,29 @@ function bind(db: IDBDatabase): ShimStore {
       await completion(tx);
       return true;
     },
-    async reviseSpec(id, next, reason) {
+    async reviseSpec(id, next, reason, expectedVersion) {
       const tx = write([SHIMS, VERSIONS]);
       const shims = tx.objectStore(SHIMS);
+      const versions = tx.objectStore(VERSIONS);
       const shim = await request(shims.get(id) as IDBRequest<InstalledShim | undefined>);
-      if (!shim) {
+      if (!shim || versionOf(shim.spec) !== expectedVersion) {
         tx.abort();
         return false;
       }
-      const version = typeof next.version === 'number' && Number.isFinite(next.version) ? next.version : 1;
-      tx.objectStore(VERSIONS).put({ shimId: id, version, spec: next, handlers: shim.handlers, at: Date.now(), reason } satisfies VersionRecord);
+      const now = Date.now();
+      const current = versionOf(shim.spec);
+      const held = await request(versions.get([id, current]) as IDBRequest<VersionRecord | undefined>);
+      versions.put({ shimId: id, version: current, spec: shim.spec, handlers: shim.handlers, at: held?.at ?? now, reason: held?.reason ?? 'install' } satisfies VersionRecord);
+      versions.put({ shimId: id, version: versionOf(next), spec: next, handlers: shim.handlers, at: now, reason } satisfies VersionRecord);
       shims.put({ ...shim, spec: next });
       await completion(tx);
       return true;
     },
-    async amendSpec(id, spec) {
+    async amendSpec(id, spec, expectedVersion) {
       const tx = write(SHIMS);
       const shims = tx.objectStore(SHIMS);
       const shim = await request(shims.get(id) as IDBRequest<InstalledShim | undefined>);
-      if (!shim) {
+      if (!shim || versionOf(shim.spec) !== expectedVersion) {
         tx.abort();
         return false;
       }
@@ -315,7 +343,7 @@ function bind(db: IDBDatabase): ShimStore {
     },
     versions: {
       async snapshot(shim, reason) {
-        const version = typeof shim.spec.version === 'number' && Number.isFinite(shim.spec.version) ? shim.spec.version : 1;
+        const version = versionOf(shim.spec);
         const tx = write(VERSIONS);
         tx.objectStore(VERSIONS).put({ shimId: shim.id, version, spec: shim.spec, handlers: shim.handlers, at: Date.now(), reason } satisfies VersionRecord);
         await completion(tx);
