@@ -114,15 +114,19 @@ function renderShim(shim: ShimSummary, refresh: () => void): HTMLElement {
     if (!list.length) versions.append(el('div', 'muted', 'no earlier versions'));
     for (const v of [...list].reverse()) {
       const row = el('div', 'row');
-      row.append(el('span', 'muted', `v${v.version} · ${v.reason} · ${when(v.at)}`));
+      const current = v.version === shim.version;
+      row.append(el('span', 'muted', `v${v.version} · ${v.reason} · ${when(v.at)}${current ? ' · current' : ''}`));
       row.append(el('span', 'grow'));
-      const restore = el('button', undefined, 'restore');
-      restore.addEventListener('click', async () => {
-        restore.disabled = true;
-        await ask({ type: 'shims.restore', id: shim.id, version: v.version });
-        refresh();
-      });
-      row.append(restore);
+      // The current version is what runs; there is nothing to restore it to.
+      if (!current) {
+        const restore = el('button', undefined, 'restore');
+        restore.addEventListener('click', async () => {
+          restore.disabled = true;
+          await ask({ type: 'shims.restore', id: shim.id, version: v.version });
+          refresh();
+        });
+        row.append(restore);
+      }
       versions.append(row);
     }
     versions.hidden = false;

@@ -612,14 +612,19 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
       return chained(msg.id, async (): Promise<WorkerAnswer> => {
         const shim = await db.getShim(msg.id);
         if (!shim) return { ok: false, error: 'no such shim' };
+        const current = specVersion(shim.spec);
         const snapshot = await db.versions.get(shim.id, msg.version);
         if (!snapshot) return { ok: false, error: 'no such version' };
         // A restore is a forward change: the chosen spec comes back as the
         // next version (never the old number, so history stays a line). Its
         // rules' reviews and captures are cleared: whatever broke, this is
         // a different spec now, and its fingerprints are the snapshot's.
-        const next = { ...snapshot.spec, id: shim.id, version: specVersion(shim.spec) + 1 };
-        if (!(await db.reviseSpec(shim.id, next, 'restore', specVersion(shim.spec)))) return { ok: false, error: 'the shim changed meanwhile; try again' };
+        // The current version's source is the spec as it stands (its
+        // snapshot is refreshed only as it is revised away), amendments
+        // and all.
+        const source = msg.version === current ? shim.spec : snapshot.spec;
+        const next = { ...source, id: shim.id, version: current + 1 };
+        if (!(await db.reviseSpec(shim.id, next, 'restore', current))) return { ok: false, error: 'the shim changed meanwhile; try again' };
         for (const state of await db.ruleState.listForShim(shim.id)) {
           if (state.quarantine || state.capture) await db.ruleState.put({ ...state, quarantine: undefined, capture: undefined });
         }

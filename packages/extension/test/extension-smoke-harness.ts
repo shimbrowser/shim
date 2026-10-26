@@ -475,14 +475,26 @@ async function main(): Promise<void> {
     await popup.waitForSelector('#list .card .versions:not([hidden]) button');
     const entries = await popup.$$eval('#list .card .versions .row', (rows) => rows.map((r) => r.textContent ?? ''));
     check('history lists every version, newest first: the install and both rebases', entries.length === 3 && entries[0]?.startsWith('v3 · rebase') === true && entries[1]?.startsWith('v2 · rebase') === true && entries[2]?.startsWith('v1 · install') === true, entries);
+    const buttons = await popup.$$eval('#list .card .versions .row', (rows) => rows.map((r) => r.querySelector('button') !== null));
+    check('the current version is marked and has no restore button; the earlier ones do', entries[0]?.includes('current') === true && JSON.stringify(buttons) === '[false,true,true]', { entries, buttons });
     const restoreV1 = (await popup.$$('#list .card .versions .row button')).at(-1);
-    check('a restore button per version', restoreV1 !== undefined);
+    check('a restore button for an earlier version', restoreV1 !== undefined);
     if (restoreV1) await restoreV1.click();
     const restored = await settle(exported, (f) => (f.spec.version ?? 1) === 4, 10000);
     check('restoring v1 is a forward change: version 4 with v1\'s anchors', (restored.spec.version ?? 1) === 4 && restored.spec.rules.find((r) => r.id === 'promote')?.anchor.primary.value === 'button.buy-v1', { version: restored.spec.version });
     check('and with the fingerprints captured on v1 (its snapshot was refreshed as it stood)', restored.spec.rules.filter((r) => r.anchor.witness).length >= 4, restored.spec.rules.map((r) => `${r.id}:${r.anchor.witness ? 'w' : '-'}`));
     const afterRestore = await summaryOf();
     check('and clears the review', afterRestore.review.length === 0 && afterRestore.version === 4, afterRestore);
+    // Restoring the current version (asked for directly: the popup offers
+    // no button for it) takes the spec as it stands, its amendments and all.
+    const p5 = await popupPage();
+    await p5.evaluate(() => chrome.runtime.sendMessage({ type: 'shims.list' }).then((list: { shims: { id: string; name: string; version: number }[] }) => {
+      const shim = list.shims.find((s) => s.name === 'Rebase fixture');
+      return shim ? chrome.runtime.sendMessage({ type: 'shims.restore', id: shim.id, version: shim.version }) : null;
+    }));
+    await p5.close();
+    const again = await settle(exported, (f) => (f.spec.version ?? 1) === 5, 10000);
+    check('restoring the current version is version 5 with the fingerprints the current one carried', (again.spec.version ?? 1) === 5 && again.spec.rules.filter((r) => r.anchor.witness).length >= 4, { version: again.spec.version, witnesses: again.spec.rules.filter((r) => r.anchor.witness).length });
     await popup.close();
     await page.close();
     setDeploy(1);
