@@ -153,6 +153,30 @@ async function main(): Promise<void> {
     check('api.storage persisted through the worker: the next load counts the visit', v2.badge === 'visits:2', v2);
   }
 
+  console.log('a second runtime from the other world on the same page:');
+  {
+    // The user-script runtime holds /strict. An isolated-world runtime
+    // injected beside it (a handover and a reconnect crossing) connects,
+    // and the worker retires the one that does not fit the mode: here the
+    // newcomer. The page keeps one runtime, its rules and its stylesheet.
+    const tabs = await worker.evaluate(() => chrome.tabs.query({ url: '*://127.0.0.1/strict' }).then((t) => t.map((x) => x.id)));
+    const tabId = tabs[0];
+    check('the strict page is open', typeof tabId === 'number');
+    if (typeof tabId === 'number') {
+      await worker.evaluate(async (id) => { await chrome.scripting.executeScript({ target: { tabId: id }, files: ['shim-core.page.js', 'content.js'] }); }, tabId);
+      await sleep(1500);
+      const v = await strictView(strict);
+      check('the page keeps the handler shim, the hide and the spec stylesheet', v.badge !== null && v.ad === 'none' && v.outline === 'rgb(0, 128, 0)', v);
+      const sheets = await strict.evaluate(() => document.querySelectorAll('style[data-shim^="patch-"]').length);
+      check('one spec stylesheet', sheets === 1, sheets);
+      const isolated = await worker.evaluate(async (id) => {
+        const r = await chrome.scripting.executeScript({ target: { tabId: id }, func: () => typeof (globalThis as { __shimForChrome?: unknown }).__shimForChrome });
+        return r.map((x) => x.result);
+      }, tabId);
+      check('the isolated-world newcomer was retired (no runtime flag there)', isolated[0] === 'undefined', isolated);
+    }
+  }
+
   const apply = await ctx.newPage();
   const applySettled = (want: (v: ApplyView) => boolean) => settle(() => applyView(apply), want);
   console.log('replace-root on /apply:');

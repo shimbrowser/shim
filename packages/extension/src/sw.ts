@@ -150,28 +150,52 @@ async function syncRegistrations(): Promise<void> {
 // one document's runtime; the map says which tab it is in. Content
 // scripts connect on onConnect, user scripts on onUserScriptConnect.
 const runtimePorts = new Map<chrome.runtime.Port, { tabId: number; world: RuntimeWorld }>();
+function post(port: chrome.runtime.Port, msg: ToRuntime): void {
+  try {
+    port.postMessage(msg);
+  } catch {
+    runtimePorts.delete(port);
+  }
+}
+/** The world a page's one runtime belongs in: the mode's. */
+function worldFor(mode: ExtensionMode): RuntimeWorld {
+  return mode === 'full' ? 'user-script' : 'isolated';
+}
 function acceptRuntimePort(world: RuntimeWorld): (port: chrome.runtime.Port) => void {
   return (port) => {
     const tabId = port.sender?.tab?.id;
-    if (port.name !== RUNTIME_PORT || tabId === undefined) {
+    if (port.name !== RUNTIME_PORT || tabId === undefined || (port.sender?.frameId ?? 0) !== 0) {
       port.disconnect();
+      return;
+    }
+    // One runtime per page. Two can meet when a handover and a reconnect
+    // cross (a holder's port down for the moment, the other world's
+    // runtime injected beside it): the one that does not fit the mode is
+    // retired, and the winner, whose stylesheets the loser's teardown may
+    // take, reboots. The page's mark is only a hint; this is the decision.
+    const rival = [...runtimePorts].find(([, r]) => r.tabId === tabId && r.world !== world);
+    if (rival) {
+      const [rivalPort, { world: rivalWorld }] = rival;
+      const keep = worldFor(modeNow);
+      if (rivalWorld === keep) {
+        post(port, { type: 'retire' });
+        return;
+      }
+      post(rivalPort, { type: 'retire' });
+      runtimePorts.delete(rivalPort);
+      runtimePorts.set(port, { tabId, world });
+      port.onDisconnect.addListener(() => { runtimePorts.delete(port); });
+      post(port, { type: 'reboot' });
       return;
     }
     runtimePorts.set(port, { tabId, world });
     port.onDisconnect.addListener(() => { runtimePorts.delete(port); });
-    acceptedPort(port);
+    // A connection is a runtime that may have missed a change: the worker
+    // it held a port to went away (idled out) and the change happened
+    // before this one reconnected, when no port was there to nudge. So
+    // every connection starts with a look at what runs there.
+    post(port, { type: 'sync' });
   };
-}
-function acceptedPort(port: chrome.runtime.Port): void {
-  // A connection is a runtime that may have missed a change: the worker
-  // it held a port to went away (idled out) and the change happened
-  // before this one reconnected, when no port was there to nudge. So
-  // every connection starts with a look at what runs there.
-  try {
-    port.postMessage({ type: 'sync' } satisfies ToRuntime);
-  } catch {
-    runtimePorts.delete(port);
-  }
 }
 chrome.runtime.onConnect.addListener(acceptRuntimePort('isolated'));
 const onUserScriptConnect = (chrome.runtime as { onUserScriptConnect?: chrome.events.Event<(port: chrome.runtime.Port) => void> }).onUserScriptConnect;
@@ -235,12 +259,8 @@ async function refreshOpenTabsNow(patterns: readonly string[]): Promise<void> {
   const toIsolated: ToRuntime = canInjectUserScript ? { type: 'retire' } : { type: 'sync' };
   for (const [port, { tabId, world }] of runtimePorts) {
     const nudge: ToRuntime = world === 'isolated' ? toIsolated : { type: 'sync' };
-    try {
-      port.postMessage(nudge);
-      if (nudge.type === 'sync') answered.add(tabId);
-    } catch {
-      runtimePorts.delete(port);
-    }
+    post(port, nudge);
+    if (nudge.type === 'sync' && runtimePorts.has(port)) answered.add(tabId);
   }
   let all: chrome.tabs.Tab[];
   try {

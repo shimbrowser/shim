@@ -359,29 +359,24 @@ async function main(): Promise<void> {
     const released = await settled((s) => s.ad === 'none' && s.injected === 1);
     check('and boots once the mark is gone', released.ad === 'none' && released.injected === 1, released);
 
-    // A mark that never goes is a holder that is alive: the runtime stands
-    // down, and once that holder is gone the next refresh finds the tab
-    // without a runtime (the stood-down one answers nothing) and injects
-    // anew.
+    // A mark that never goes (the page can write the attribute too) only
+    // delays the boot: after the wait the runtime takes the document, and
+    // the worker, not the mark, settles any real duplicate.
     await popup0.click('#list .card input[type=checkbox]');
     await popup0.waitForSelector('#list .card input[type=checkbox]:not(:checked)');
     const dOff2 = Date.now() + 5000;
     while (Date.now() < dOff2 && (await registered()).length !== 0) await sleep(100);
     await fixture.goto(`${origin}/apply`);
     await sleep(300);
-    await fixture.evaluate(() => document.documentElement.setAttribute('data-shim-runtime', 'live-holder'));
+    await fixture.evaluate(() => document.documentElement.setAttribute('data-shim-runtime', 'planted-by-the-page'));
     await popup0.click('#list .card input[type=checkbox]');
-    await sleep(2800);
-    const stood = await styles();
-    check('a mark that outlasts the wait: the runtime stands down', stood.ad !== 'none', stood);
-    await fixture.evaluate(() => document.documentElement.removeAttribute('data-shim-runtime'));
-    await popup0.waitForSelector('#list .card input[type=checkbox]:checked');
-    await popup0.click('#list .card input[type=checkbox]');
-    await popup0.waitForSelector('#list .card input[type=checkbox]:not(:checked)');
-    await popup0.click('#list .card input[type=checkbox]');
-    const anew = await settled((s) => s.ad === 'none' && s.injected === 1);
-    check('once the holder is gone, the next change injects a runtime anew', anew.ad === 'none' && anew.injected === 1, anew);
-    check('which is the one holding the document', (await fixture.evaluate(() => document.documentElement.getAttribute('data-shim-runtime'))) !== null);
+    await sleep(1200);
+    const held2 = await styles();
+    check('a planted mark holds the runtime off for the wait', held2.ad !== 'none', held2);
+    const booted = await settled((s) => s.ad === 'none' && s.injected === 1);
+    check('and no longer: the runtime boots after the wait', booted.ad === 'none' && booted.injected === 1, booted);
+    const heldMark = await fixture.evaluate(() => document.documentElement.getAttribute('data-shim-runtime'));
+    check('and holds the document itself', heldMark !== null && heldMark !== 'planted-by-the-page', heldMark);
     await popup0.close();
     const popup = await ctx.newPage();
     await popup.goto(`chrome-extension://${extId}/popup.html`);

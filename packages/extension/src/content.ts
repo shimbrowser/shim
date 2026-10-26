@@ -28,11 +28,14 @@ import { compileHandlers } from './compile';
 
 const BOOT_FLAG = '__shimForChrome';
 const UNSUPPORTED_ERROR = 'not-available-in-shim-for-chrome';
-// The document carries the mark of the runtime instance that holds it. A
-// runtime from the next extension instance lands in a fresh world and
-// cannot see the old one's globals, but it can see the document: it waits
-// for the old mark to go (the old runtime removes it as it tears down)
-// before it boots, so the two never share the document's stylesheets.
+// The document carries the mark of the runtime that holds it. A runtime
+// from the next extension instance, or from the other world, cannot see
+// the old one's globals, but it can see the document: it waits for the
+// old mark to go (the old runtime removes it as it tears down) before it
+// boots, so the two never share the document's stylesheets. The mark is a
+// hint, not an authority: the page can write it too, so a mark that
+// outlasts the wait only delays a boot, and the worker, which sees every
+// runtime's port per tab and world, settles any real duplicate.
 const RUNTIME_MARK = 'data-shim-runtime';
 const TAKEOVER_WAIT_MS = 2000;
 const TAKEOVER_POLL_MS = 50;
@@ -58,22 +61,21 @@ interface Runtime {
 
   const mark = Math.random().toString(36).slice(2);
   const markHeld = (): string | null => document.documentElement.getAttribute(RUNTIME_MARK);
-  // The previous runtime, if it is still tearing down here: a retiring one
-  // drops its mark at once, so a mark that outlasts the wait is a holder
-  // that is alive (in the other world, say, with its port down for the
-  // moment) and keeps the document; this runtime then stands down rather
-  // than run beside it.
-  const takeover: Promise<boolean> = markHeld() === null
-    ? Promise.resolve(true)
-    : new Promise((resolve) => {
+  // Another runtime's mark, if one is still tearing down here (a retiring
+  // one drops its mark at once): wait for it to go, up to a bound, before
+  // touching the document.
+  const foreignMarkGone = (): Promise<void> => {
+    const foreign = (): boolean => { const held = markHeld(); return held !== null && held !== mark; };
+    if (!foreign()) return Promise.resolve();
+    return new Promise((resolve) => {
       const deadline = Date.now() + TAKEOVER_WAIT_MS;
       const tick = (): void => {
-        if (markHeld() === null) { resolve(true); return; }
-        if (Date.now() >= deadline) { resolve(false); return; }
+        if (!foreign() || Date.now() >= deadline) { resolve(); return; }
         setTimeout(tick, TAKEOVER_POLL_MS);
       };
       tick();
     });
+  };
 
   const ask = (msg: ToWorker): Promise<WorkerAnswer> => chrome.runtime.sendMessage(msg);
   const tell = (msg: ToWorker): void => {
@@ -186,9 +188,8 @@ interface Runtime {
   // runtime must boot nothing: the successor owns the document now.
   const resync = async (): Promise<void> => {
     if (retired) return;
-    const free = await takeover;
+    await foreignMarkGone();
     if (retired || !host[BOOT_FLAG]) return; // retired or invalidated while waiting
-    if (!free) { invalidated(); return; } // a live holder keeps the document
     document.documentElement.setAttribute(RUNTIME_MARK, mark);
     let answer: WorkerAnswer;
     try {
@@ -222,6 +223,9 @@ interface Runtime {
       invalidated();
       return;
     }
+    // A reboot: the other world's runtime on this page was just retired,
+    // and its teardown may have taken stylesheets this one shares.
+    if (msg.type === 'reboot') for (const id of [...controls.keys()]) stop(id);
     sync();
   };
   if (onMessage) {
