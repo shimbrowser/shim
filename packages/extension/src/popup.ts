@@ -79,9 +79,20 @@ async function render(): Promise<void> {
   const shims = answer.shims as ShimSummary[];
   empty.hidden = shims.length > 0;
   for (const shim of shims) list.append(renderShim(shim, () => { void render(); }));
-  mode.textContent = answer.mode === 'full'
-    ? 'user scripts on: shims with handlers run too'
-    : 'declarative mode: shims with handlers (script rules) need user scripts, coming in a later version';
+  mode.replaceChildren();
+  if (answer.mode === 'full') {
+    mode.textContent = 'user scripts on: shims with handlers run too';
+    return;
+  }
+  // The way to full mode is a toggle on the extension's own page; the popup
+  // can open that page but not flip it.
+  mode.append(el('span', undefined, 'declarative mode: shims with script rules need user scripts. '));
+  const turnOn = el('button', 'link', 'turn them on');
+  turnOn.title = 'opens this extension\'s page on chrome://extensions, where "Allow user scripts" lives (developer mode before Chrome 138)';
+  turnOn.addEventListener('click', () => {
+    void chrome.tabs.create({ url: `chrome://extensions/?id=${chrome.runtime.id}` });
+  });
+  mode.append(turnOn);
 }
 
 must<HTMLButtonElement>('install').addEventListener('click', () => {

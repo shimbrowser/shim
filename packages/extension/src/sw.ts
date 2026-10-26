@@ -1,7 +1,16 @@
-// The service worker: owns the store, registers one content script per
-// enabled shim for exactly its hosts, and answers the page runtime, the
-// popup and the install page. It holds no key and runs no model; a session
-// host and the bridge arrive in later phases.
+// The service worker: owns the store, registers one script per enabled shim
+// for exactly its hosts, and answers the page runtime, the popup and the
+// install page. It holds no key and runs no model; a session host and the
+// bridge arrive in later phases.
+//
+// Two modes (capabilities.ts). Full mode, while the user allows user
+// scripts: the engine and the runtime are user scripts in the user-script
+// world, whose CSP permits the handler compile, and rules with handlers
+// run. Declarative mode otherwise: content scripts in the isolated world,
+// declarative rules only. The mode is read from the API's presence; the
+// toggle reloads the extension, so each worker boot syncs the registrations
+// to the mode it finds, and every shim is preflighted against it again
+// (one that no longer fits stops, stays installed, and the popup says why).
 //
 // Registration is serialized: onInstalled, onStartup and the worker's own
 // boot can all fire together, and two concurrent registrations of one id
@@ -10,12 +19,17 @@
 import { hostMatches } from '@shimbrowser/core/host-match';
 import { preflightSpec } from '@shimbrowser/core/capability-preflight';
 import { openShimStore, type ShimStore, type InstalledShim } from './store';
-import { registrationsFor, scriptIdFor, shimIdFor, patternsFor, originsToRelease, RUNTIME_FILES } from './registration';
-import { capabilitiesFor, currentMode } from './capabilities';
+import {
+  registrationsFor, userScriptRegistrationsFor, shimIdFor, patternsFor, originsToRelease, RUNTIME_FILES,
+  USER_SCRIPT_WORLD_CSP,
+} from './registration';
+import { capabilitiesFor, currentMode, type ExtensionMode } from './capabilities';
 import { mintShimId } from './install';
 import { matchPatternsForHosts } from './match-patterns';
 import { senderContext, allowedFrom, type SenderContext } from './sender';
-import { isToWorker, type ToWorker, type ToRuntime, type WorkerAnswer, type BundledShim, type ShimSummary } from './messages';
+import {
+  isToWorker, RUNTIME_PORT, type ToWorker, type ToRuntime, type WorkerAnswer, type BundledShim, type ShimSummary,
+} from './messages';
 
 let storePromise: Promise<ShimStore> | null = null;
 function store(): Promise<ShimStore> {
@@ -37,33 +51,124 @@ function fitsMode(shim: InstalledShim): boolean {
   return preflightSpec(shim.spec, capabilitiesFor(currentMode())).ok;
 }
 
+// The user-script world's configuration, once per worker boot. Chrome keeps
+// the configuration across the toggle going off and on, so a configureWorld
+// that repeats it changes nothing and the renderers, whose copy the toggle
+// cleared, never hear of it again: a page's user-script world then has no
+// chrome.runtime.sendMessage and the runtime cannot reach the worker. A
+// reset first makes the configure a change every renderer receives.
+// (resetWorldConfiguration arrived in Chrome 128.)
+let worldConfigured = false;
+async function configureUserScriptWorld(): Promise<void> {
+  if (worldConfigured) return;
+  const api = chrome.userScripts as { resetWorldConfiguration?: () => Promise<void> };
+  if (typeof api.resetWorldConfiguration === 'function') await api.resetWorldConfiguration();
+  await chrome.userScripts.configureWorld({ csp: USER_SCRIPT_WORLD_CSP, messaging: true });
+  worldConfigured = true;
+}
+
+/** The registrations whose hosts the user has granted: one for a host withheld would only error; the shim waits for the grant. */
+async function granted<T extends { matches: string[] }>(registrations: readonly T[]): Promise<T[]> {
+  const out: T[] = [];
+  for (const registration of registrations) {
+    if (await chrome.permissions.contains({ origins: registration.matches })) out.push(registration);
+  }
+  return out;
+}
+
 async function syncRegistrations(): Promise<void> {
   await serialized(async () => {
+    const mode = currentMode();
     const shims = (await (await store()).listShims()).filter(fitsMode);
-    const wanted = registrationsFor(shims);
+    // Our content scripts go first in both modes: declarative mode replaces
+    // them, full mode runs the engine in the user-script world alone (one
+    // engine per document, and a mode flip leaves the other mode's
+    // registrations behind).
     const existing = await chrome.scripting.getRegisteredContentScripts();
     const ours = existing.map((s) => s.id).filter((id) => shimIdFor(id) !== null);
     if (ours.length) await chrome.scripting.unregisterContentScripts({ ids: ours });
-    const granted = [];
-    for (const registration of wanted) {
-      // A registration for a host the user has not granted would only error;
-      // the shim waits until the install page's grant (or a later one) lands.
-      if (await chrome.permissions.contains({ origins: registration.matches })) granted.push(registration);
+    if (mode === 'full') {
+      await configureUserScriptWorld();
+      const registered = await chrome.userScripts.getScripts();
+      const stale = registered.map((s) => s.id).filter((id) => shimIdFor(id) !== null);
+      if (stale.length) await chrome.userScripts.unregister({ ids: stale });
+      const wanted = await granted(userScriptRegistrationsFor(shims));
+      if (wanted.length) await chrome.userScripts.register(wanted);
+    } else {
+      // Full mode's user scripts, if any are left, are inert while the user
+      // disallows user scripts, and the API to drop them is gone with it;
+      // the next full-mode sync replaces them.
+      const wanted = await granted(registrationsFor(shims));
+      if (wanted.length) await chrome.scripting.registerContentScripts(wanted);
     }
-    if (granted.length) await chrome.scripting.registerContentScripts(granted);
   });
 }
 
-// Every open document looks again at what runs there. First a message to
-// every tab: a document that runs the runtime syncs on it (content.ts),
-// and the message needs no site access, so it reaches a page whose site
-// the extension can no longer touch (access revoked) and the shims that
-// no longer run there are torn down. Then, for the tabs on `patterns` that
-// did not answer (no runtime yet: a shim just enabled on a page loaded
-// before), the engine and the runtime are injected. Every tab is best
-// effort: one the extension cannot reach is skipped.
+// --- the runtimes on open pages ---------------------------------------------------
+
+// A full-mode runtime cannot receive a message (the user-script world has
+// no onMessage), so it holds a port, and the worker nudges it there. Each
+// port is one document's runtime; the map says which tab it is in.
+const runtimePorts = new Map<chrome.runtime.Port, number>();
+const onUserScriptConnect = (chrome.runtime as { onUserScriptConnect?: chrome.events.Event<(port: chrome.runtime.Port) => void> }).onUserScriptConnect;
+if (onUserScriptConnect) {
+  onUserScriptConnect.addListener((port) => {
+    const tabId = port.sender?.tab?.id;
+    if (port.name !== RUNTIME_PORT || tabId === undefined) {
+      port.disconnect();
+      return;
+    }
+    runtimePorts.set(port, tabId);
+    port.onDisconnect.addListener(() => { runtimePorts.delete(port); });
+  });
+}
+
+/** The engine and the runtime into `tabId`, or the runtime alone where the engine already runs, in the mode's world. */
+async function injectRuntime(tabId: number, mode: ExtensionMode): Promise<void> {
+  const [engine, runtime] = RUNTIME_FILES;
+  if (engine === undefined || runtime === undefined) return;
+  if (mode === 'full') {
+    // userScripts.execute arrived in Chrome 135; before that an open page
+    // gets the change on its next load.
+    const api = chrome.userScripts as { execute?: unknown };
+    if (typeof api.execute !== 'function') return;
+    const target = { tabId };
+    const [probe] = await chrome.userScripts.execute({ target, js: [{ code: 'typeof ShimCore !== "undefined"' }] });
+    const js: [{ file: string }, ...{ file: string }[]] = probe?.result === true ? [{ file: runtime }] : [{ file: engine }, { file: runtime }];
+    await chrome.userScripts.execute({ target, js });
+    return;
+  }
+  const target = { tabId };
+  const [probe] = await chrome.scripting.executeScript({
+    target,
+    func: () => typeof (globalThis as { ShimCore?: unknown }).ShimCore !== 'undefined',
+  });
+  // The engine is one instance per document: re-running its bundle would
+  // give a second instance that cannot order its rules against the
+  // first's, so a document that has it gets the runtime alone.
+  const files = probe?.result === true ? [runtime] : [engine, runtime];
+  await chrome.scripting.executeScript({ target, files });
+}
+
+// Every open document looks again at what runs there. First a nudge to
+// every runtime: over its port (full mode) or a message to its tab
+// (declarative mode); a document that runs the runtime syncs on it
+// (content.ts), and the nudge needs no site access, so it reaches a page
+// whose site the extension can no longer touch (access revoked) and the
+// shims that no longer run there are torn down. Then, for the tabs on
+// `patterns` that did not answer (no runtime yet: a shim just enabled on a
+// page loaded before), the engine and the runtime are injected. Every tab
+// is best effort: one the extension cannot reach is skipped.
 async function refreshOpenTabs(patterns: readonly string[]): Promise<void> {
   const answered = new Set<number>();
+  for (const [port, tabId] of runtimePorts) {
+    try {
+      port.postMessage({ type: 'sync' } satisfies ToRuntime);
+      answered.add(tabId);
+    } catch {
+      runtimePorts.delete(port);
+    }
+  }
   let all: chrome.tabs.Tab[];
   try {
     all = await chrome.tabs.query({});
@@ -71,7 +176,7 @@ async function refreshOpenTabs(patterns: readonly string[]): Promise<void> {
     return;
   }
   await Promise.all(all.map(async (tab) => {
-    if (tab.id === undefined) return;
+    if (tab.id === undefined || answered.has(tab.id)) return;
     try {
       const answer: unknown = await chrome.tabs.sendMessage(tab.id, { type: 'sync' } satisfies ToRuntime);
       if (typeof answer === 'object' && answer !== null && (answer as { ok?: unknown }).ok === true) answered.add(tab.id);
@@ -86,19 +191,11 @@ async function refreshOpenTabs(patterns: readonly string[]): Promise<void> {
   } catch {
     return;
   }
+  const mode = currentMode();
   await Promise.all(tabs.map(async (tab) => {
     if (tab.id === undefined || answered.has(tab.id)) return;
     try {
-      const target = { tabId: tab.id };
-      const [probe] = await chrome.scripting.executeScript({
-        target,
-        func: () => typeof (globalThis as { ShimCore?: unknown }).ShimCore !== 'undefined',
-      });
-      // The engine is one instance per document: re-running its bundle would
-      // give a second instance that cannot order its rules against the
-      // first's, so a document that has it gets the runtime alone.
-      const files = probe?.result === true ? [RUNTIME_FILES[1] ?? 'content.js'] : [...RUNTIME_FILES];
-      await chrome.scripting.executeScript({ target, files });
+      await injectRuntime(tab.id, mode);
     } catch {
       // Not reachable: nothing to refresh there.
     }
@@ -159,11 +256,14 @@ export function priorityForRank(rank: number): number {
   return -rank;
 }
 
-async function bundleFor(page: { hostname: string; port: string }): Promise<BundledShim[]> {
+async function bundleFor(page: { hostname: string; port: string }, mode: ExtensionMode): Promise<BundledShim[]> {
   const shims = await (await store()).listShims();
   const out: BundledShim[] = [];
   for (const shim of shims) {
-    if (await runsOn(shim, page)) out.push({ id: shim.id, spec: shim.spec, priority: priorityForRank(shim.rank) });
+    if (!(await runsOn(shim, page))) continue;
+    // Handler source goes only where it compiles: the user-script world.
+    const handlers = mode === 'full' ? { ...shim.handlers } : {};
+    out.push({ id: shim.id, spec: shim.spec, priority: priorityForRank(shim.rank), handlers });
   }
   return out;
 }
@@ -175,9 +275,11 @@ async function handle(msg: ToWorker, from: SenderContext): Promise<WorkerAnswer>
   // that run there; the page named in a message body would be the page's word.
   const page = from.kind === 'content' ? from : null;
   switch (msg.type) {
-    case 'bundle':
+    case 'bundle': {
       if (!page) return { ok: false, error: 'no page' };
-      return { ok: true, mode: currentMode(), shims: await bundleFor(page) };
+      const mode = currentMode();
+      return { ok: true, mode, shims: await bundleFor(page, mode) };
+    }
     case 'storage': {
       if (!page) return { ok: false, error: 'no page' };
       const shim = await db.getShim(msg.shimId);
@@ -263,12 +365,20 @@ async function handle(msg: ToWorker, from: SenderContext): Promise<WorkerAnswer>
   }
 }
 
-chrome.runtime.onMessage.addListener((msg: unknown, sender, sendResponse: (answer: WorkerAnswer) => void) => {
+type MessageListener = (msg: unknown, sender: chrome.runtime.MessageSender, sendResponse: (answer: WorkerAnswer) => void) => boolean;
+
+const onWorkerMessage: MessageListener = (msg, sender, sendResponse) => {
   if (!isToWorker(msg)) return false;
   handle(msg, senderContext(sender, chrome.runtime.id, chrome.runtime.getURL(''))).then(sendResponse, (err: unknown) => {
     sendResponse({ ok: false, error: err instanceof Error ? err.message : String(err) });
   });
   return true;
-});
+};
 
-export { scriptIdFor };
+chrome.runtime.onMessage.addListener(onWorkerMessage);
+// A message from the user-script world (full mode) arrives on its own
+// event, with the same sender Chrome attaches, so the same authorization.
+const onUserScriptMessage = (chrome.runtime as { onUserScriptMessage?: chrome.events.Event<MessageListener> }).onUserScriptMessage;
+if (onUserScriptMessage) onUserScriptMessage.addListener(onWorkerMessage);
+
+export { scriptIdFor } from './registration';

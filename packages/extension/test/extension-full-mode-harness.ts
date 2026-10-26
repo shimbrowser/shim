@@ -1,0 +1,288 @@
+// The built extension in a real Chromium with user scripts allowed: full
+// mode. The real-browser gate for what EXTENSION_CAPABILITIES advertises
+// until the extension has a PageHost and runs the shared conformance
+// suite. The user-scripts toggle is flipped the way a user flips it (the
+// chrome://extensions WebUI's own call) and the profile relaunched, since
+// the toggle reloads the extension and Playwright loses the worker across
+// an in-place reload.
+//
+// Covers: the mode read from the API, the registrations as user scripts
+// (none as content scripts), a `script` handler compiled in the user-script
+// world under a strict page CSP, `api.storage` and `api.cleanup` from a
+// handler, `replace-root`, a declarative shim beside it, live changes on an
+// open page over the runtime's port (disable, enable) and by injection into
+// a page with no runtime, site access withheld and granted back, a handler
+// that does not parse refused at install (the sandboxed check), and the
+// toggle flipped off and on again with shims installed: the one that needs
+// full mode stops and says so, the declarative one keeps running, and both
+// return with the toggle.
+//
+//   npx playwright install chromium   (full Chromium: extensions need it)
+//   node out/packages/extension/test/extension-full-mode-harness.js
+
+import fs from 'fs';
+import path from 'path';
+import type { BrowserContext, Page, Worker } from 'playwright';
+import {
+  workDir, extensionCopy, fixtureServer, shimWriter, css, launch, workerOf, installer, configureExtension, popupOf, settle, sleep,
+} from './smoke-helpers';
+
+let failures = 0;
+let passes = 0;
+function check(label: string, cond: boolean, detail?: unknown): void {
+  if (cond) { passes++; console.log(`  ✓ ${label}`); return; }
+  failures++;
+  console.error(`  ✗ ${label}${detail !== undefined ? ' — ' + JSON.stringify(detail) : ''}`);
+}
+
+interface StrictView { ad: string; badge: string | null; cleanups: number }
+interface ApplyView { ad: string; root: number; original: string | null }
+
+const BADGE = `module.exports = async function badge({ anchor, api }) {
+  const visits = Number(await api.storage.get('visits')) || 0;
+  await api.storage.set('visits', visits + 1);
+  const el = document.createElement('span');
+  el.className = 'fm-badge';
+  el.textContent = 'visits:' + (visits + 1);
+  anchor.appendChild(el);
+  api.cleanup(() => {
+    const html = document.documentElement;
+    html.setAttribute('data-fm-cleanups', String(Number(html.getAttribute('data-fm-cleanups') || 0) + 1));
+  });
+  return el;
+};`;
+const ROOT = `module.exports = function root({ anchor }) {
+  const el = document.createElement('p');
+  el.className = 'fm-root';
+  el.textContent = 'replaced';
+  anchor.appendChild(el);
+  return el;
+};`;
+const BROKEN = 'module.exports = function ( { return 1; };';
+
+async function main(): Promise<void> {
+  console.log('\n=== extension full-mode harness ===\n');
+  const work = workDir('shim-extension-full-');
+  const ext = extensionCopy(work, ['*://127.0.0.1/*']);
+  const { origin, close: closeServer } = await fixtureServer();
+  const shimFile = shimWriter(work);
+
+  const scripted = shimFile('scripted', 'Scripted fixture', [
+    { id: 'hide-strict-ad', anchor: css('#strict-ad'), mutations: [{ kind: 'hide' }] },
+    { id: 'badge', anchor: css('#strict-target'), mutations: [{ kind: 'script', handler: 'badge' }] },
+    { id: 'root', anchor: css('#root-target'), mutations: [{ kind: 'replace-root', handler: 'root' }] },
+  ], {}, { badge: BADGE, root: ROOT });
+  const tidy = shimFile('tidy', 'Tidy fixture', [
+    { id: 'hide-ad', anchor: css('#ad'), mutations: [{ kind: 'hide' }] },
+  ]);
+  const broken = shimFile('broken', 'Broken fixture', [
+    { id: 'bad', anchor: css('body'), mutations: [{ kind: 'script', handler: 'bad' }] },
+  ], {}, { bad: BROKEN });
+
+  const profile = path.join(work, 'profile');
+  let ctx: BrowserContext = await launch(ext, profile);
+  const errors: string[] = [];
+  const watch = (c: BrowserContext): void => { c.on('weberror', (e) => errors.push(String(e.error()))); };
+  watch(ctx);
+  let { worker, extId } = await workerOf(ctx);
+
+  const userScriptsState = (w: Worker): Promise<string> => w.evaluate(() => {
+    try { return typeof (chrome as { userScripts?: unknown }).userScripts; } catch { return 'throws'; }
+  });
+  const userScripts = (): Promise<{ id: string; world?: string; js?: unknown; matches?: string[] }[]> => worker.evaluate(() => chrome.userScripts.getScripts());
+  const contentScripts = (): Promise<unknown[]> => worker.evaluate(() => chrome.scripting.getRegisteredContentScripts());
+  const strictView = (page: Page): Promise<StrictView> => page.evaluate(() => ({
+    ad: getComputedStyle(document.getElementById('strict-ad') as Element).display,
+    badge: document.querySelector('.fm-badge')?.textContent ?? null,
+    cleanups: Number(document.documentElement.getAttribute('data-fm-cleanups') || 0),
+  }));
+  const applyView = (page: Page): Promise<ApplyView> => page.evaluate(() => ({
+    ad: getComputedStyle(document.getElementById('ad') as Element).display,
+    root: document.querySelectorAll('#root-target .fm-root').length,
+    original: (() => { const o = document.querySelector('#root-target .original'); return o ? getComputedStyle(o).display : null; })(),
+  }));
+
+  console.log('the toggle:');
+  {
+    check('a fresh profile boots without user scripts (declarative mode)', (await userScriptsState(worker)) !== 'object');
+    const popup = await popupOf(ctx, extId);
+    check('the popup says so and offers the way to turn them on', ((await popup.textContent('#mode')) ?? '').startsWith('declarative mode') && (await popup.$('#mode button.link')) !== null);
+    await popup.close();
+    check('allowing user scripts answers ok', (await configureExtension(ctx, extId, { userScriptsAccess: true })) === 'ok');
+    await ctx.close();
+    ctx = await launch(ext, profile);
+    watch(ctx);
+    ({ worker, extId } = await workerOf(ctx));
+    check('after a relaunch the worker has the API', (await userScriptsState(worker)) === 'object');
+    const popup2 = await popupOf(ctx, extId);
+    check('and the popup names full mode', ((await popup2.textContent('#mode')) ?? '').startsWith('user scripts on'));
+    await popup2.close();
+  }
+
+  const { install, installAll } = installer(ctx, extId);
+
+  console.log('a shim with handlers installs and runs:');
+  {
+    const { page, heading } = await install(scripted);
+    check('the review is ready (the sandboxed check parsed the handlers)', heading.startsWith('ready to install'), heading);
+    const facts = await page.$$eval('#review dl dd', (dd) => dd.map((d) => d.textContent));
+    check('and names the kinds', (facts[2] ?? '').startsWith('3 (hide, script, replace-root)'), facts);
+    await page.click('#review button.primary');
+    await page.waitForSelector('#result:not([hidden]) h2', { timeout: 15000 });
+    await page.close();
+    const regs = await userScripts();
+    check('one user script, for the shim\'s host, engine then runtime, in the user-script world',
+      regs.length === 1 && (regs[0]?.id ?? '').startsWith('shim:') && JSON.stringify(regs[0]?.matches) === '["*://127.0.0.1/*"]'
+        && JSON.stringify(regs[0]?.js) === '[{"file":"shim-core.page.js"},{"file":"content.js"}]' && regs[0]?.world === 'USER_SCRIPT', regs);
+    check('and no content script', (await contentScripts()).length === 0);
+  }
+
+  const strict = await ctx.newPage();
+  const strictSettled = (want: (v: StrictView) => boolean) => settle(() => strictView(strict), want);
+  console.log('on the strict-CSP page:');
+  {
+    await strict.goto(`${origin}/strict`);
+    const v = await strictSettled((v) => v.ad === 'none' && v.badge !== null);
+    check('the declarative rule applies', v.ad === 'none', v);
+    check('the script handler compiled in the user-script world and ran under script-src \'self\'', v.badge === 'visits:1', v);
+    await strict.reload();
+    const v2 = await strictSettled((v) => v.badge === 'visits:2');
+    check('api.storage persisted through the worker: the next load counts the visit', v2.badge === 'visits:2', v2);
+  }
+
+  const apply = await ctx.newPage();
+  const applySettled = (want: (v: ApplyView) => boolean) => settle(() => applyView(apply), want);
+  console.log('replace-root on /apply:');
+  {
+    await apply.goto(`${origin}/apply`);
+    const v = await applySettled((v) => v.root === 1 && v.original === 'none');
+    check('the handler\'s root is mounted', v.root === 1, v);
+    check('and the anchor\'s original children are hidden', v.original === 'none', v);
+  }
+
+  console.log('live changes over the runtime\'s port:');
+  {
+    const popup = await popupOf(ctx, extId);
+    await popup.waitForSelector('#list .card input[type=checkbox]:checked');
+    await popup.click('#list .card:nth-child(1) input[type=checkbox]');
+    const off = await strictSettled((v) => v.badge === null && v.ad !== 'none');
+    check('disabling tears the shim down on the open page: badge gone, hide gone', off.badge === null && off.ad !== 'none', off);
+    check('and the handler\'s api.cleanup ran once', off.cleanups === 1, off);
+    const offApply = await applySettled((v) => v.root === 0 && v.original !== 'none');
+    check('replace-root is undone on the other open page', offApply.root === 0 && offApply.original !== 'none', offApply);
+    check('nothing registered while it is off', (await userScripts()).length === 0);
+    await popup.waitForSelector('#list .card:nth-child(1) input[type=checkbox]:not(:checked)');
+    await popup.click('#list .card:nth-child(1) input[type=checkbox]');
+    const on = await strictSettled((v) => v.badge !== null && v.ad === 'none');
+    check('re-enabling starts it again on the open page, the handler compiled again', on.badge === 'visits:3' && on.ad === 'none', on);
+    check('registered again', (await userScripts()).length === 1);
+    await popup.close();
+  }
+
+  console.log('injection into a page with no runtime (userScripts.execute):');
+  {
+    const popup = await popupOf(ctx, extId);
+    await popup.click('#list .card:nth-child(1) input[type=checkbox]');
+    await popup.waitForSelector('#list .card:nth-child(1) input[type=checkbox]:not(:checked)');
+    check('nothing registered', (await userScripts()).length === 0);
+    const fresh = await ctx.newPage();
+    await fresh.goto(`${origin}/strict`);
+    await sleep(300);
+    const before = await strictView(fresh);
+    check('a fresh page loads with no runtime', before.badge === null && before.ad !== 'none', before);
+    await popup.click('#list .card:nth-child(1) input[type=checkbox]');
+    const after = await settle(() => strictView(fresh), (v) => v.badge !== null && v.ad === 'none');
+    check('enabling injects the engine and the runtime into it, no reload', after.badge !== null && after.ad === 'none', after);
+    await popup.click('#list .card:nth-child(1) input[type=checkbox]');
+    await settle(() => strictView(fresh), (v) => v.badge === null);
+    await popup.click('#list .card:nth-child(1) input[type=checkbox]');
+    const again = await settle(() => strictView(fresh), (v) => v.badge !== null);
+    check('a second cycle reuses the first runtime (one engine per document)', again.badge !== null && again.cleanups === 1, again);
+    await fresh.close();
+    await popup.close();
+  }
+
+  console.log('a declarative shim beside it, and site access withheld and granted back:');
+  {
+    await installAll(tidy);
+    await apply.goto(`${origin}/apply`);
+    const v = await applySettled((v) => v.ad === 'none' && v.root === 1);
+    check('both shims apply on the open page', v.ad === 'none' && v.root === 1, v);
+    check('two user scripts', (await userScripts()).length === 2);
+    check('withholding site access answers ok', (await configureExtension(ctx, extId, { hostAccess: 'ON_CLICK' })) === 'ok');
+    const gone = await applySettled((v) => v.ad !== 'none' && v.root === 0);
+    check('access gone: the open page is torn down over the port', gone.ad !== 'none' && gone.root === 0, gone);
+    const dGone = Date.now() + 5000;
+    while (Date.now() < dGone && (await userScripts()).length !== 0) await sleep(100);
+    check('access gone: nothing registered', (await userScripts()).length === 0);
+    check('granting access back answers ok', (await configureExtension(ctx, extId, { hostAccess: 'ON_ALL_SITES' })) === 'ok');
+    const back = await applySettled((v) => v.ad === 'none' && v.root === 1);
+    check('access back: the open page applies again without a reload', back.ad === 'none' && back.root === 1, back);
+    const dBack = Date.now() + 5000;
+    while (Date.now() < dBack && (await userScripts()).length !== 2) await sleep(100);
+    check('access back: both registered again', (await userScripts()).length === 2);
+  }
+
+  console.log('a handler that does not parse:');
+  {
+    const { page, heading } = await install(broken);
+    check('is refused at install', heading.startsWith('cannot install'), heading);
+    const problems = await page.$$eval('#review ul.problems li', (li) => li.map((x) => x.textContent ?? ''));
+    check('by the syntax check, naming the handler file', problems.some((t) => t.includes('handlers/bad.js') && t.includes('does not parse as JavaScript')), problems);
+    await page.close();
+  }
+
+  console.log('the toggle flipped off with shims installed:');
+  {
+    check('disallowing user scripts answers ok', (await configureExtension(ctx, extId, { userScriptsAccess: false })) === 'ok');
+    await ctx.close();
+    ctx = await launch(ext, profile);
+    watch(ctx);
+    ({ worker, extId } = await workerOf(ctx));
+    check('after a relaunch the worker runs declarative', (await userScriptsState(worker)) !== 'object');
+    const popup = await popupOf(ctx, extId);
+    check('the popup names declarative mode', ((await popup.textContent('#mode')) ?? '').startsWith('declarative mode'));
+    const pills = await popup.$$eval('#list .card', (cards) => cards.map((c) => ({ name: c.querySelector('.name')?.textContent, pill: c.querySelector('.pill')?.textContent ?? null, toggle: c.querySelector('input[type=checkbox]') !== null })));
+    check('the shim with handlers shows "needs user scripts" and no toggle', pills.some((p) => p.name === 'Scripted fixture' && p.pill === 'needs user scripts' && !p.toggle), pills);
+    check('the declarative shim keeps its toggle', pills.some((p) => p.name === 'Tidy fixture' && p.pill === null && p.toggle), pills);
+    await popup.close();
+    const d = Date.now() + 5000;
+    while (Date.now() < d && (await contentScripts()).length !== 1) await sleep(100);
+    const content = await contentScripts() as { id?: string; world?: string }[];
+    check('one content script, for the declarative shim', content.length === 1 && content[0]?.world === 'ISOLATED', content);
+    const page = await ctx.newPage();
+    await page.goto(`${origin}/apply`);
+    const v = await settle(() => applyView(page), (v) => v.ad === 'none');
+    check('the declarative shim runs', v.ad === 'none', v);
+    check('the shim with handlers does not', v.root === 0 && v.original !== 'none', v);
+    await page.close();
+
+    check('allowing user scripts again answers ok', (await configureExtension(ctx, extId, { userScriptsAccess: true })) === 'ok');
+    await ctx.close();
+    ctx = await launch(ext, profile);
+    watch(ctx);
+    ({ worker } = await workerOf(ctx));
+    const d2 = Date.now() + 5000;
+    while (Date.now() < d2 && (await userScripts()).length !== 2) await sleep(100);
+    check('toggle back on: both shims are user scripts again', (await userScripts()).length === 2 && (await contentScripts()).length === 0);
+    const page2 = await ctx.newPage();
+    await page2.goto(`${origin}/apply`);
+    const v2 = await settle(() => applyView(page2), (v) => v.ad === 'none' && v.root === 1);
+    check('and both run', v2.ad === 'none' && v2.root === 1, v2);
+    await page2.close();
+  }
+
+  check('no page errors in the extension', errors.length === 0, errors);
+  await ctx.close();
+  closeServer();
+  fs.rmSync(work, { recursive: true, force: true });
+
+  console.log('');
+  if (failures) { console.error(`${failures} check(s) failed`); process.exit(1); }
+  console.log(`all extension full-mode checks passed (${passes})`);
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

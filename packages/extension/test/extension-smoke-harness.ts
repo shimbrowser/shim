@@ -5,9 +5,10 @@
 // cross-shim priority, live changes on open pages (install, disable, enable,
 // remove without a reload), site access withheld and granted back from
 // chrome://extensions with the page open, removal of everything, and a
-// refusal. It is the
-// real-browser gate for what EXTENSION_DECLARATIVE_CAPABILITIES advertises
-// until the extension has a PageHost and runs the shared conformance suite.
+// refusal. It is the real-browser gate for what
+// EXTENSION_DECLARATIVE_CAPABILITIES advertises until the extension has a
+// PageHost and runs the shared conformance suite; full mode has its own
+// harness (extension-full-mode-harness.ts) on the same helpers.
 //
 // Chrome's optional-host-permission prompt is browser UI a script cannot
 // click, so the extension is loaded from a copy of dist/ whose manifest
@@ -20,15 +21,9 @@
 //   node out/packages/extension/test/extension-smoke-harness.js
 
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
-import http from 'http';
-import type { AddressInfo } from 'net';
-import { chromium, type BrowserContext, type Page, type Worker } from 'playwright';
-import { conformanceFixture, type FixtureDeploy } from '@shimbrowser/core/page-host-conformance';
-
-const REPO = path.resolve(__dirname, '..', '..', '..', '..');
-const DIST = path.join(REPO, 'packages', 'extension', 'dist');
+import type { BrowserContext } from 'playwright';
+import { workDir, extensionCopy, fixtureServer, shimWriter, css, launch, workerOf, installer, configureExtension, sleep } from './smoke-helpers';
 
 let failures = 0;
 let passes = 0;
@@ -37,38 +32,17 @@ function check(label: string, cond: boolean, detail?: unknown): void {
   failures++;
   console.error(`  ✗ ${label}${detail !== undefined ? ' — ' + JSON.stringify(detail) : ''}`);
 }
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface Styles { ad: string; lead: string; injected: number; grid: string; html: string }
 interface StrictStyles { ad: string; target: string }
 
 async function main(): Promise<void> {
   console.log('\n=== extension smoke harness ===\n');
-  if (!fs.existsSync(path.join(DIST, 'manifest.json'))) throw new Error(`no built extension at ${DIST} (npm run build)`);
+  const work = workDir('shim-extension-smoke-');
+  const ext = extensionCopy(work, ['*://127.0.0.1/*']);
+  const { origin, close: closeServer } = await fixtureServer();
+  const shimFile = shimWriter(work);
 
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-extension-smoke-'));
-  const ext = path.join(work, 'ext');
-  fs.cpSync(DIST, ext, { recursive: true });
-  const manifest = JSON.parse(fs.readFileSync(path.join(ext, 'manifest.json'), 'utf8')) as Record<string, unknown>;
-  manifest.host_permissions = ['*://127.0.0.1/*'];
-  fs.writeFileSync(path.join(ext, 'manifest.json'), JSON.stringify(manifest, null, 2));
-
-  // The conformance fixture site: /apply (style-src allows inline) and /strict (style-src 'self').
-  const state = { deploy: 1 as FixtureDeploy };
-  const server = http.createServer((req, res) => {
-    const r = conformanceFixture(new URL(req.url ?? '/', 'http://x').pathname, state);
-    res.writeHead(r.status, { 'content-type': r.contentType, ...r.headers });
-    res.end(r.body);
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-
-  const shimFile = (id: string, name: string, rules: unknown[], extra: Record<string, unknown> = {}, handlers: Record<string, string> = {}): string => {
-    const file = path.join(work, `${id}.shim`);
-    fs.writeFileSync(file, JSON.stringify({ format: 'shim/1', name, spec: { id, version: 1, match: { hosts: ['127.0.0.1'] }, rules, ...extra }, handlers }));
-    return file;
-  };
-  const css = (selector: string) => ({ primary: { kind: 'css', value: selector } });
   const tidy = shimFile('tidy', 'Tidy fixture', [
     { id: 'hide-ad', anchor: css('#ad'), mutations: [{ kind: 'hide' }] },
     { id: 'red-lead', anchor: css('#lead'), mutations: [{ kind: 'restyle', properties: { color: 'rgb(255, 0, 0)' } }] },
@@ -87,34 +61,12 @@ async function main(): Promise<void> {
   ], {}, { badge: 'module.exports = function badge() { return null; };' });
 
   const profile = path.join(work, 'profile');
-  const ctx: BrowserContext = await chromium.launchPersistentContext(profile, {
-    headless: true,
-    channel: 'chromium',
-    args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`],
-  });
+  const ctx: BrowserContext = await launch(ext, profile);
   const errors: string[] = [];
   ctx.on('weberror', (e) => errors.push(String(e.error())));
-  let sw: Worker | undefined = ctx.serviceWorkers()[0];
-  sw ??= await ctx.waitForEvent('serviceworker', { timeout: 15000 });
-  const extId = new URL(sw.url()).host;
-  const worker: Worker = sw;
+  const { worker, extId } = await workerOf(ctx);
   const registered = () => worker.evaluate(() => chrome.scripting.getRegisteredContentScripts());
-
-  const install = async (file: string): Promise<{ page: Page; heading: string }> => {
-    const page = await ctx.newPage();
-    await page.goto(`chrome-extension://${extId}/install.html`);
-    await page.setInputFiles('#file', file);
-    await page.waitForSelector('#review:not([hidden]) h2');
-    const heading = (await page.textContent('#review h2')) ?? '';
-    return { page, heading };
-  };
-  const installAll = async (file: string): Promise<void> => {
-    const { page, heading } = await install(file);
-    if (!heading.startsWith('ready to install')) throw new Error(`not ready: ${heading}`);
-    await page.click('#review button.primary');
-    await page.waitForSelector('#result:not([hidden]) h2', { timeout: 15000 });
-    await page.close();
-  };
+  const { install, installAll } = installer(ctx, extId);
 
   const fixture = await ctx.newPage();
   const styles = (): Promise<Styles> => fixture.evaluate(() => {
@@ -273,13 +225,7 @@ async function main(): Promise<void> {
     // withholds every host (permissions.onRemoved), "on all sites" grants
     // them back (permissions.onAdded). The WebUI's developerPrivate API is
     // what the chrome://extensions page itself calls.
-    const settings = await ctx.newPage();
-    await settings.goto(`chrome://extensions/?id=${extId}`);
-    const hostAccess = (value: string) => settings.evaluate(([id, hostAccess]) => new Promise<string>((resolve) => {
-      const api = (globalThis as { chrome?: { developerPrivate?: { updateExtensionConfiguration(cfg: object, cb: () => void): void }; runtime?: { lastError?: { message: string } } } }).chrome;
-      if (!api?.developerPrivate) { resolve('no developerPrivate'); return; }
-      api.developerPrivate.updateExtensionConfiguration({ extensionId: id, hostAccess }, () => resolve(api.runtime?.lastError ? `err: ${api.runtime.lastError.message}` : 'ok'));
-    }), [extId, value] as const);
+    const hostAccess = (value: string) => configureExtension(ctx, extId, { hostAccess: value });
     const granted = () => worker.evaluate(() => chrome.permissions.contains({ origins: ['*://127.0.0.1/*'] }));
 
     await fixture.goto(`${origin}/apply`);
@@ -338,7 +284,6 @@ async function main(): Promise<void> {
     check('removing while access is withheld works', (await registered()).length === 0);
     await hostAccess('ON_ALL_SITES');
     await popup.close();
-    await settings.close();
   }
 
   console.log('a refusal:');
@@ -352,7 +297,7 @@ async function main(): Promise<void> {
 
   check('no page errors in the extension', errors.length === 0, errors);
   await ctx.close();
-  server.close();
+  closeServer();
   fs.rmSync(work, { recursive: true, force: true });
 
   console.log('');

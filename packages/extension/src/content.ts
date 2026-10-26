@@ -15,11 +15,14 @@
 // Declarative mode: no handler compiles here (a content script cannot eval),
 // and the worker sends only shims that fit the mode, so no rule needs one.
 // Full mode registers this same runtime in the user-script world, where the
-// handlers compile.
+// handlers compile (compile.ts) before the engine runs the shim. That world
+// has no onMessage, so the runtime there holds a port to the worker and is
+// nudged over it; a dropped port (the worker idled out) is reconnected.
 
 import type * as Core from '@shimbrowser/core';
-import { isToRuntime, type ToWorker, type WorkerAnswer, type BundleAnswer, type BundledShim } from './messages';
+import { isToRuntime, RUNTIME_PORT, type ToWorker, type WorkerAnswer, type BundleAnswer, type BundledShim } from './messages';
 import { reconcileShims } from './reconcile';
+import { compileHandlers } from './compile';
 
 const BOOT_FLAG = '__shimForChrome';
 const UNSUPPORTED_ERROR = 'not-available-in-shim-for-chrome';
@@ -119,9 +122,15 @@ interface Runtime {
   // whose priority moved boots again (reconcile.ts).
   const controls = new Map<string, { control: PatchControl; priority: number }>();
 
-  const boot = (shim: BundledShim): void => {
+  const boot = (shim: BundledShim, mode: BundleAnswer['mode']): void => {
     try {
-      const control = ShimCore.run({ spec: shim.spec, handlers: {}, priority: shim.priority, bundleHash: deployId }, makeApi(shim.id));
+      // Only full mode sends handler source, and only there does it compile.
+      const { handlers, problems } = mode === 'full' ? compileHandlers(shim.handlers, shim.id) : { handlers: {}, problems: [] };
+      for (const problem of problems) {
+        console.error(`[shim] handler "${problem.name}" of ${shim.id} did not compile: ${problem.error}`);
+        emit(shim.id, 'handler-compile-failed', { specId: shim.id, handler: problem.name, error: problem.error, path: location.pathname });
+      }
+      const control = ShimCore.run({ spec: shim.spec, handlers, priority: shim.priority, bundleHash: deployId }, makeApi(shim.id));
       controls.set(shim.id, { control, priority: shim.priority });
     } catch (err) {
       console.error('[shim] boot failed', shim.id, err);
@@ -148,10 +157,11 @@ interface Runtime {
       return; // no worker: nothing changes
     }
     if (!answer.ok || !('shims' in answer)) return;
+    const bundle = answer as BundleAnswer;
     const priorities = new Map([...controls].map(([id, r]) => [id, r.priority]));
-    const { stop: gone, start } = reconcileShims(priorities, (answer as BundleAnswer).shims);
+    const { stop: gone, start } = reconcileShims(priorities, bundle.shims);
     for (const id of gone) stop(id);
-    for (const shim of start) boot(shim);
+    for (const shim of start) boot(shim, bundle.mode);
   };
   let chain: Promise<void> = Promise.resolve();
   const sync = (): void => {
@@ -162,11 +172,30 @@ interface Runtime {
   // The worker's own nudge: a sync without a fresh injection, which reaches
   // this document even once the extension lost access to its site (site
   // access revoked), so the shims that no longer run here are torn down.
-  chrome.runtime.onMessage.addListener((msg: unknown, sender, sendResponse: (answer: { ok: true }) => void) => {
-    if (sender.id !== chrome.runtime.id || !isToRuntime(msg)) return false;
-    sync();
-    sendResponse({ ok: true });
-    return false;
-  });
+  // The isolated world (declarative mode) listens for it; the user-script
+  // world (full mode) has no onMessage and holds a port instead.
+  const onMessage = (chrome.runtime as { onMessage?: typeof chrome.runtime.onMessage }).onMessage;
+  if (onMessage) {
+    onMessage.addListener((msg: unknown, sender, sendResponse: (answer: { ok: true }) => void) => {
+      if (sender.id !== chrome.runtime.id || !isToRuntime(msg)) return false;
+      sync();
+      sendResponse({ ok: true });
+      return false;
+    });
+  } else {
+    const RECONNECT_MS = 1000;
+    const connect = (): void => {
+      let port: chrome.runtime.Port;
+      try {
+        port = chrome.runtime.connect({ name: RUNTIME_PORT });
+      } catch {
+        return; // the extension is gone (unloaded or updated): this document is on its own until it reloads
+      }
+      port.onMessage.addListener((msg: unknown) => { if (isToRuntime(msg)) sync(); });
+      // The worker idles out and restarts; its next nudge needs a port.
+      port.onDisconnect.addListener(() => { setTimeout(connect, RECONNECT_MS); });
+    };
+    connect();
+  }
   sync();
 })();

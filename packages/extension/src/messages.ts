@@ -4,6 +4,10 @@
 // a message it cannot narrow. A message names no page of its own: the
 // worker takes the sender's host and origin from the sender Chrome attaches
 // (sender.ts), and answers each type only to the kind of sender it expects.
+//
+// A runtime in the user-script world (full mode) sends the same messages;
+// they arrive on the worker's onUserScriptMessage. It cannot receive one,
+// so it holds a port (RUNTIME_PORT) the worker nudges instead.
 
 import type { Spec } from '@shimbrowser/core/types';
 import type { PreparedInstall, InstallProvenance } from './install';
@@ -24,11 +28,17 @@ export type ToWorker =
   /** The install page, after the user granted the hosts: write and register. */
   | { type: 'install.commit'; prepared: PreparedInstall; provenance: InstallProvenance };
 
-/** One shim as the page runtime receives it: the spec with the installed id, and its cascade priority. */
+/**
+ * One shim as the page runtime receives it: the spec with the installed id,
+ * its cascade priority, and in full mode its handler modules (source, by
+ * name) for the runtime to compile; empty in declarative mode, where no
+ * rule needs one.
+ */
 export interface BundledShim {
   id: string;
   spec: Spec;
   priority: number;
+  handlers: Record<string, string>;
 }
 
 export interface BundleAnswer {
@@ -59,6 +69,9 @@ export type WorkerAnswer =
 
 /** What the worker sends a page runtime: look again at what runs here. */
 export type ToRuntime = { type: 'sync' };
+
+/** The port a full-mode runtime opens to the worker, which nudges it there. */
+export const RUNTIME_PORT = 'shim-runtime';
 
 export function isToRuntime(msg: unknown): msg is ToRuntime {
   return typeof msg === 'object' && msg !== null && (msg as { type?: unknown }).type === 'sync';

@@ -7,7 +7,8 @@
 
 import { prepareInstall, mintShimId } from '../src/install';
 import {
-  EXTENSION_CAPABILITIES, EXTENSION_DECLARATIVE_CAPABILITIES, HANDLER_KINDS, USER_SCRIPTS_REASON, capabilitiesFor, currentMode,
+  EXTENSION_CAPABILITIES, EXTENSION_DECLARATIVE_CAPABILITIES, HANDLER_KINDS, USER_SCRIPTS_REASON, HOW_TO_ENABLE, capabilitiesFor, currentMode,
+  userScriptsAvailable,
 } from '../src/capabilities';
 import { preflightSpec } from '@shimbrowser/core/capability-preflight';
 import { CONFORMANCE_CAPABILITIES } from '@shimbrowser/core/page-host-conformance';
@@ -52,7 +53,15 @@ check('neither claims iframes, component identity or inspection',
 check('both install the spec stylesheet', EXTENSION_CAPABILITIES.specCss && EXTENSION_DECLARATIVE_CAPABILITIES.specCss);
 check('the constants are frozen', Object.isFrozen(EXTENSION_CAPABILITIES) && Object.isFrozen(EXTENSION_CAPABILITIES.mutationKinds));
 check('capabilitiesFor maps each mode', capabilitiesFor('full') === EXTENSION_CAPABILITIES && capabilitiesFor('declarative') === EXTENSION_DECLARATIVE_CAPABILITIES);
-check('this version runs declarative', currentMode() === 'declarative');
+check('full mode runs script and replace-root, not mount-route', EXTENSION_CAPABILITIES.mutationKinds.includes('script') && EXTENSION_CAPABILITIES.mutationKinds.includes('replace-root') && !EXTENSION_CAPABILITIES.mutationKinds.includes('mount-route'));
+check('declarative mode runs no handler kind', !HANDLER_KINDS.some((k) => EXTENSION_DECLARATIVE_CAPABILITIES.mutationKinds.includes(k)));
+
+console.log('the mode, from the user-scripts API:');
+check('no chrome at all: declarative', !userScriptsAvailable(undefined) && currentMode() === 'declarative');
+check('chrome without the API (user scripts not allowed): declarative', !userScriptsAvailable({}) && !userScriptsAvailable({ userScripts: undefined }));
+check('a read that throws (some versions, not allowed): declarative', !userScriptsAvailable({ get userScripts(): unknown { throw new Error('not available'); } }));
+check('the API present: full', userScriptsAvailable({ userScripts: { register() {} } }));
+check('the refusal names the toggle and says to install again', USER_SCRIPTS_REASON.includes(HOW_TO_ENABLE) && USER_SCRIPTS_REASON.includes('install the shim again') && HOW_TO_ENABLE.includes('Allow user scripts'));
 
 console.log('a good file:');
 {
