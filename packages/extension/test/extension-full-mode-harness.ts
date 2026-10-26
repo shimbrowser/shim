@@ -122,6 +122,7 @@ async function main(): Promise<void> {
   }
 
   const { install, installAll } = installer(ctx, extId);
+  let declarativePage: Page;
 
   console.log('a shim with handlers installs and runs:');
   {
@@ -332,7 +333,7 @@ async function main(): Promise<void> {
     check('a page open from full mode drops its handler shim on the nudge and keeps the declarative one', open.root === 0 && open.original !== 'none' && open.ad === 'none', open);
     const sOpen = await strictSettled((v) => v.badge === null);
     check('on the other open page too, with the handler\'s api.cleanup run', sOpen.badge === null && sOpen.cleanups === s0.cleanups + 1, { sOpen, before: s0.cleanups });
-    await page.close();
+    declarativePage = page;
   }
 
   console.log('the toggle flipped on again, live:');
@@ -351,6 +352,28 @@ async function main(): Promise<void> {
     await page.close();
     const back = await applySettled((v) => v.root === 1 && v.ad === 'none');
     check('the page still open from full mode, nudged over its port, runs the handler shim again', back.root === 1 && back.ad === 'none', back);
+    // The page loaded while user scripts were off ran an isolated-world
+    // runtime, which can never compile a handler: full mode retires it and
+    // the user-script runtime takes the page over, so the handler shim
+    // runs there too, and a shim enabled from the popup reaches it.
+    const handed = await settle(() => applyView(declarativePage), (v) => v.root === 1 && v.ad === 'none');
+    check('the page open from declarative mode is handed to a user-script runtime: the handler shim runs there without a reload', handed.root === 1 && handed.ad === 'none', handed);
+    const sheets = await declarativePage.evaluate(() => ({ marks: document.documentElement.getAttribute('data-shim-runtime') !== null, hide: document.querySelectorAll('style[data-shim]').length }));
+    check('one runtime holds the document', sheets.marks, sheets);
+    const popup = await popupOf(ctx, extId);
+    const toggleScripted = async (): Promise<void> => {
+      const index = await popup.$$eval('#list .card .name', (n) => n.findIndex((x) => x.textContent === 'Scripted fixture'));
+      await popup.click(`#list .card:nth-child(${index + 1}) input[type=checkbox]`);
+    };
+    await toggleScripted();
+    const off = await settle(() => applyView(declarativePage), (v) => v.root === 0);
+    check('disabling the handler shim from the popup reaches that page', off.root === 0 && off.ad === 'none', off);
+    await popup.waitForSelector('#list .card input[type=checkbox]:not(:checked)');
+    await toggleScripted();
+    const on = await settle(() => applyView(declarativePage), (v) => v.root === 1);
+    check('and enabling it again starts it there', on.root === 1 && on.ad === 'none', on);
+    await popup.close();
+    await declarativePage.close();
   }
 
   console.log('the toggle flipped off, then the browser restarted:');

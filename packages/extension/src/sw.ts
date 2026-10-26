@@ -149,15 +149,20 @@ async function syncRegistrations(): Promise<void> {
 // runtime whether this extension instance is still there. Each port is
 // one document's runtime; the map says which tab it is in. Content
 // scripts connect on onConnect, user scripts on onUserScriptConnect.
-const runtimePorts = new Map<chrome.runtime.Port, number>();
-function acceptRuntimePort(port: chrome.runtime.Port): void {
-  const tabId = port.sender?.tab?.id;
-  if (port.name !== RUNTIME_PORT || tabId === undefined) {
-    port.disconnect();
-    return;
-  }
-  runtimePorts.set(port, tabId);
-  port.onDisconnect.addListener(() => { runtimePorts.delete(port); });
+const runtimePorts = new Map<chrome.runtime.Port, { tabId: number; world: RuntimeWorld }>();
+function acceptRuntimePort(world: RuntimeWorld): (port: chrome.runtime.Port) => void {
+  return (port) => {
+    const tabId = port.sender?.tab?.id;
+    if (port.name !== RUNTIME_PORT || tabId === undefined) {
+      port.disconnect();
+      return;
+    }
+    runtimePorts.set(port, { tabId, world });
+    port.onDisconnect.addListener(() => { runtimePorts.delete(port); });
+    acceptedPort(port);
+  };
+}
+function acceptedPort(port: chrome.runtime.Port): void {
   // A connection is a runtime that may have missed a change: the worker
   // it held a port to went away (idled out) and the change happened
   // before this one reconnected, when no port was there to nudge. So
@@ -168,9 +173,9 @@ function acceptRuntimePort(port: chrome.runtime.Port): void {
     runtimePorts.delete(port);
   }
 }
-chrome.runtime.onConnect.addListener(acceptRuntimePort);
+chrome.runtime.onConnect.addListener(acceptRuntimePort('isolated'));
 const onUserScriptConnect = (chrome.runtime as { onUserScriptConnect?: chrome.events.Event<(port: chrome.runtime.Port) => void> }).onUserScriptConnect;
-if (onUserScriptConnect) onUserScriptConnect.addListener(acceptRuntimePort);
+if (onUserScriptConnect) onUserScriptConnect.addListener(acceptRuntimePort('user-script'));
 
 /** The engine and the runtime into `tabId`, or the runtime alone where the engine already runs, in the mode's world. */
 async function injectRuntime(tabId: number, mode: ExtensionMode): Promise<void> {
@@ -201,21 +206,29 @@ async function injectRuntime(tabId: number, mode: ExtensionMode): Promise<void> 
 
 // Every open document looks again at what runs there. First a nudge to
 // every runtime: over its port, and a message to its tab for an
-// isolated-world runtime from before the port; a document that runs the
-// runtime syncs on it (content.ts), and the nudge needs no site access,
-// so it reaches a page whose site the extension can no longer touch
-// (access revoked) and the shims that no longer run there are torn down.
+// isolated-world runtime; a document that runs the runtime syncs on it
+// (content.ts), and the nudge needs no site access, so it reaches a page
+// whose site the extension can no longer touch (access revoked) and the
+// shims that no longer run there are torn down. In full mode an
+// isolated-world runtime (a page loaded while user scripts were off) is
+// retired instead, since it can never compile a handler: it tears down
+// and drops its mark, and the page is treated as one with no runtime.
 // Then, for the tabs on `patterns` that did not answer (no runtime yet: a
-// shim just enabled on a page loaded before, or a page loaded while the
-// mode had nothing registered), the engine and the runtime are injected
-// in the mode's world. Every tab is best effort: one the extension cannot
-// reach is skipped.
+// shim just enabled on a page loaded before, a page loaded while the mode
+// had nothing registered, a page just retired), the engine and the
+// runtime are injected in the mode's world; the user-script runtime waits
+// for the retired one's mark to go before it boots. Every tab is best
+// effort: one the extension cannot reach is skipped.
 async function refreshOpenTabs(patterns: readonly string[]): Promise<void> {
+  const mode = modeNow;
   const answered = new Set<number>();
-  for (const [port, tabId] of runtimePorts) {
+  // What an isolated-world runtime is told: in full mode it leaves.
+  const toIsolated: ToRuntime = mode === 'full' ? { type: 'retire' } : { type: 'sync' };
+  for (const [port, { tabId, world }] of runtimePorts) {
+    const nudge: ToRuntime = world === 'isolated' ? toIsolated : { type: 'sync' };
     try {
-      port.postMessage({ type: 'sync' } satisfies ToRuntime);
-      answered.add(tabId);
+      port.postMessage(nudge);
+      if (nudge.type === 'sync') answered.add(tabId);
     } catch {
       runtimePorts.delete(port);
     }
@@ -229,8 +242,8 @@ async function refreshOpenTabs(patterns: readonly string[]): Promise<void> {
   await Promise.all(all.map(async (tab) => {
     if (tab.id === undefined || answered.has(tab.id)) return;
     try {
-      const answer: unknown = await chrome.tabs.sendMessage(tab.id, { type: 'sync' } satisfies ToRuntime);
-      if (typeof answer === 'object' && answer !== null && (answer as { ok?: unknown }).ok === true) answered.add(tab.id);
+      const answer: unknown = await chrome.tabs.sendMessage(tab.id, toIsolated);
+      if (toIsolated.type === 'sync' && typeof answer === 'object' && answer !== null && (answer as { ok?: unknown }).ok === true) answered.add(tab.id);
     } catch {
       // No runtime in that tab.
     }
@@ -242,7 +255,6 @@ async function refreshOpenTabs(patterns: readonly string[]): Promise<void> {
   } catch {
     return;
   }
-  const mode = modeNow;
   await Promise.all(tabs.map(async (tab) => {
     if (tab.id === undefined || answered.has(tab.id)) return;
     try {

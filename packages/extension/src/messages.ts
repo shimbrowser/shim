@@ -71,14 +71,22 @@ export type WorkerAnswer =
   | { ok: true }
   | { ok: false; error: string };
 
-/** What the worker sends a page runtime: look again at what runs here. */
-export type ToRuntime = { type: 'sync' };
+/**
+ * What the worker sends a page runtime: look again at what runs here
+ * (`sync`), or leave the document to a runtime in the other world
+ * (`retire`: tear everything down, drop the mark, hold no port). Retire
+ * goes to an isolated-world runtime once full mode is on, so the
+ * user-script runtime the worker then injects can take the page over.
+ */
+export type ToRuntime = { type: 'sync' } | { type: 'retire' };
 
 /** The port a full-mode runtime opens to the worker, which nudges it there. */
 export const RUNTIME_PORT = 'shim-runtime';
 
 export function isToRuntime(msg: unknown): msg is ToRuntime {
-  return typeof msg === 'object' && msg !== null && (msg as { type?: unknown }).type === 'sync';
+  if (typeof msg !== 'object' || msg === null) return false;
+  const type = (msg as { type?: unknown }).type;
+  return type === 'sync' || type === 'retire';
 }
 
 export function isToWorker(msg: unknown): msg is ToWorker {

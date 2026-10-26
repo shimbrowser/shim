@@ -22,7 +22,7 @@
 // tears every shim down.
 
 import type * as Core from '@shimbrowser/core';
-import { isToRuntime, RUNTIME_PORT, type ToWorker, type WorkerAnswer, type BundleAnswer, type BundledShim } from './messages';
+import { isToRuntime, RUNTIME_PORT, type ToWorker, type ToRuntime, type WorkerAnswer, type BundleAnswer, type BundledShim } from './messages';
 import { reconcileShims } from './reconcile';
 import { compileHandlers } from './compile';
 
@@ -204,10 +204,20 @@ interface Runtime {
   // The isolated world (declarative mode) listens for it; the user-script
   // world (full mode) has no onMessage and is nudged over the port below.
   const onMessage = (chrome.runtime as { onMessage?: typeof chrome.runtime.onMessage }).onMessage;
+  let port: chrome.runtime.Port | null = null;
+  const onNudge = (msg: ToRuntime): void => {
+    if (retired) return;
+    if (msg.type === 'retire') {
+      invalidated();
+      try { port?.disconnect(); } catch { /* already gone */ }
+      return;
+    }
+    sync();
+  };
   if (onMessage) {
     onMessage.addListener((msg: unknown, sender, sendResponse: (answer: { ok: true }) => void) => {
       if (sender.id !== chrome.runtime.id || !isToRuntime(msg)) return false;
-      sync();
+      onNudge(msg);
       sendResponse({ ok: true });
       return false;
     });
@@ -219,7 +229,14 @@ interface Runtime {
   // no message and no nudge reaches it again, and whatever it applied would
   // stay until the page reloads. So every shim is torn down then, and the
   // boot flag dropped, so an injection from the next instance boots fresh.
+  // Retired: the document is handed to a runtime in the other world (the
+  // worker says so once full mode is on and this is the isolated world),
+  // or this extension instance is gone. Either way everything is torn
+  // down, the mark dropped for the successor, the flag dropped so a
+  // fresh injection boots anew, and no port is held again.
+  let retired = false;
   const invalidated = (): void => {
+    retired = true;
     for (const id of [...controls.keys()]) stop(id);
     delete host[BOOT_FLAG];
     if (markHeld() === mark) document.documentElement.removeAttribute(RUNTIME_MARK);
@@ -239,16 +256,20 @@ interface Runtime {
   // extension instance going makes the reconnect throw.
   const RECONNECT_MS = 1000;
   const connect = (): void => {
-    let port: chrome.runtime.Port;
+    if (retired) return;
+    let next: chrome.runtime.Port;
     try {
       if (contextGone()) throw new Error('extension context invalidated');
-      port = chrome.runtime.connect({ name: RUNTIME_PORT });
+      next = chrome.runtime.connect({ name: RUNTIME_PORT });
     } catch {
       invalidated();
       return;
     }
-    port.onMessage.addListener((msg: unknown) => { if (isToRuntime(msg)) sync(); });
-    port.onDisconnect.addListener(() => {
+    port = next;
+    next.onMessage.addListener((msg: unknown) => { if (isToRuntime(msg)) onNudge(msg); });
+    next.onDisconnect.addListener(() => {
+      if (port === next) port = null;
+      if (retired) return;
       // The context is gone the moment the instance is: tear down now, not
       // after the reconnect delay, so a successor finds the document free.
       if (contextGone()) { invalidated(); return; }
