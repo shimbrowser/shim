@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Shim</title>
+  <link rel="stylesheet" href="ui.css">
+  <style>
+    body { width: 340px; padding: 12px; }
+    header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    #empty { padding: 18px 4px; text-align: center; }
+    footer { margin-top: 10px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>shim</h1>
+    <button id="install" class="primary">install a .shim file</button>
+  </header>
+  <div id="list"></div>
+  <div id="empty" class="muted" hidden>no shims yet. install a .shim file exported from the Shim browser or saved by Claude Code.</div>
+  <footer id="mode" class="muted"></footer>
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+{
+  // The package's own typecheck: extension code runs in Chrome (a service
+  // worker, content scripts and extension pages), so the DOM and the chrome.*
+  // API are typed and Node is not. The repo-root tsconfig also covers src/
+  // and test/ (the harnesses run under Node).
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "customConditions": ["shim-source"],
+    "moduleDetection": "force",
+    "esModuleInterop": true,
+    "noEmit": true,
+    "strict": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["chrome"]
+  },
+  "include": ["src/**/*.ts"]
+}

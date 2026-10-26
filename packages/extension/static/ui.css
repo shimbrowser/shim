@@ -1,0 +1,50 @@
+/* Shim for Chrome: the popup and the install page. One small token set; the
+   values are Shim's own palette so the extension reads as the same product. */
+:root {
+  --surface: #FBF5EC;
+  --surface-raised: #FFFDF7;
+  --text: #2A1F1A;
+  --text-soft: #6B5646;
+  --text-faint: #A89684;
+  --accent: #D97757;
+  --accent-deep: #B4543A;
+  --accent-soft: rgba(217, 119, 87, 0.12);
+  --border: rgba(42, 31, 26, 0.12);
+  --border-soft: rgba(42, 31, 26, 0.06);
+  --ok: #8BA888;
+  --danger: #B84A3E;
+  --radius: 8px;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--surface); color: var(--text); font: 13px/1.45 var(--font); }
+h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: 0.01em; }
+h2 { font-size: 13px; font-weight: 600; margin: 16px 0 6px; color: var(--text-soft); }
+p { margin: 6px 0; }
+a { color: var(--accent-deep); }
+button {
+  font: inherit; color: var(--text); background: var(--surface-raised);
+  border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 10px; cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary:hover { background: var(--accent-deep); }
+button.danger { color: var(--danger); }
+button:disabled { opacity: 0.5; cursor: default; }
+.muted { color: var(--text-faint); }
+.soft { color: var(--text-soft); }
+.mono { font-family: var(--mono); font-size: 12px; }
+.card {
+  background: var(--surface-raised); border: 1px solid var(--border-soft); border-radius: var(--radius);
+  padding: 10px 12px; margin: 8px 0;
+}
+.row { display: flex; align-items: center; gap: 8px; }
+.row .grow { flex: 1; min-width: 0; }
+.name { font-weight: 600; }
+.hosts { color: var(--text-soft); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-deep); }
+.pill.off { background: var(--border-soft); color: var(--text-faint); }
+.error { color: var(--danger); }
+ul.problems { margin: 4px 0 0; padding-left: 18px; }
+ul.problems li { margin: 2px 0; }

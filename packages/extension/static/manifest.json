@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Shim for Chrome",
+  "description": "Runs your shims (personal changes to any website, authored in the Shim browser or with Claude Code) in Chrome.",
+  "version": "0.0.0",
+  "minimum_chrome_version": "120",
+  "permissions": ["scripting"],
+  "optional_host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "sw.js" },
+  "action": { "default_popup": "popup.html", "default_title": "Shim" }
+}

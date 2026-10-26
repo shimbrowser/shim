@@ -8,6 +8,7 @@
 // and the rule-teardown bookkeeping.
 
 import { injectStyle, firstGreaterIndex } from './css-sheets';
+import { syncStyleMirror } from './style-mirror';
 import { isShimOwnedElement } from './own-dom';
 import { applyRule } from './apply-rule';
 import { routeRule } from './route-rule';
@@ -159,8 +160,20 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
     __bundleHashFn: bundleHashFn,
   };
 
+  // Set by teardownAll; read by every later step, including a stylesheet
+  // inject still waiting on DOMContentLoaded.
+  let tornDown = false;
+  // Whether this patch's own stylesheet (`spec.css`) was injected, so a
+  // teardown touches the document only when it has something to remove.
+  const patchSheetId = `patch-${spec.id}`;
+  let patchSheetInjected = false;
+
   for (const { id, css } of collectCssForSpec(spec, mutations)) {
-    const inject = () => injectStyle(id, css);
+    const inject = () => {
+      if (tornDown) return;
+      injectStyle(id, css);
+      if (id === patchSheetId) patchSheetInjected = true;
+    };
     if (document.head) inject();
     else document.addEventListener('DOMContentLoaded', inject, { once: true });
   }
@@ -174,7 +187,6 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
   const ruleTeardowns = new Map<string, () => void>();
   const hasRule = (ruleId: string): boolean => (spec.rules || []).some((r) => r.id === ruleId);
   const suppressedRuleIds = new Set<string>((patch.suppressedRuleIds || []).filter(hasRule));
-  let tornDown = false;
   api.onReady(() => {
     if (tornDown) return;
     for (const [i, rule] of (spec.rules || []).entries()) {
@@ -279,6 +291,18 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
         try { fn(); } catch (err) { console.error('[shim] extra teardown failed', err); }
       }
       extraTeardowns.clear();
+      // The whole-patch stylesheet (`spec.css`) is this patch's alone, so it
+      // goes with the patch; the per-kind sheets stay, shared with every
+      // other patch on the page. The mirror drops its copy on the sync, so a
+      // strict-CSP page loses the styles too.
+      if (patchSheetInjected) {
+        patchSheetInjected = false;
+        const patchSheet = document.querySelector(`style[data-shim="${patchSheetId}"]`);
+        if (patchSheet instanceof HTMLStyleElement) {
+          patchSheet.remove();
+          syncStyleMirror(patchSheet);
+        }
+      }
     },
   };
 }

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Install a shim</title>
+  <link rel="stylesheet" href="ui.css">
+  <style>
+    body { max-width: 640px; margin: 0 auto; padding: 32px 20px 60px; }
+    #drop {
+      border: 2px dashed var(--border); border-radius: 12px; padding: 40px 20px; text-align: center;
+      background: var(--surface-raised); cursor: pointer;
+    }
+    #drop.over { border-color: var(--accent); background: var(--accent-soft); }
+    #file { display: none; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 8px 0; }
+    dt { color: var(--text-soft); }
+    dd { margin: 0; }
+    .actions { display: flex; gap: 8px; margin-top: 14px; }
+  </style>
+</head>
+<body>
+  <h1>install a shim</h1>
+  <p class="soft">A <span class="mono">.shim</span> file is a shim exported from the Shim browser or saved by Claude Code. Installing it asks Chrome for access to exactly the sites it names.</p>
+  <div id="drop" tabindex="0">
+    <p>drop a <span class="mono">.shim</span> file here, or click to choose one</p>
+    <input id="file" type="file" accept=".shim,application/json">
+  </div>
+  <section id="review" hidden></section>
+  <section id="result" hidden></section>
+  <script src="install.js"></script>
+</body>
+</html>

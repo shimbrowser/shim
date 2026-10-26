@@ -1,0 +1,30 @@
+{
+  "name": "@shimbrowser/extension",
+  "version": "0.7.0-dev",
+  "private": true,
+  "description": "Shim for Chrome: runs shims authored in the Shim browser or with Claude Code inside your own Chrome, as an extension.",
+  "license": "Apache-2.0",
+  "author": "Artificial Apps, LLC",
+  "homepage": "https://shimbrowser.com",
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.js",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "@shimbrowser/core": "0.7.0-dev",
+    "@types/chrome": "0.3.5",
+    "esbuild": "0.28.2",
+    "fake-indexeddb": "6.2.6",
+    "typescript": "6.0.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.12"
+  }
+}
