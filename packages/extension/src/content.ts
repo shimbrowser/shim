@@ -77,9 +77,19 @@ interface Runtime {
     });
   };
 
-  const ask = (msg: ToWorker): Promise<WorkerAnswer> => chrome.runtime.sendMessage(msg);
+  // Once the extension instance is gone, chrome.runtime.sendMessage throws
+  // synchronously ("Extension context invalidated") rather than rejecting,
+  // and an engine event reported during the teardown that follows would
+  // surface as a page error. Both helpers turn that into a rejection.
+  const ask = (msg: ToWorker): Promise<WorkerAnswer> => {
+    try {
+      return chrome.runtime.sendMessage(msg);
+    } catch (err) {
+      return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+    }
+  };
   const tell = (msg: ToWorker): void => {
-    chrome.runtime.sendMessage(msg).catch(() => { /* the worker went away; an event is fire-and-forget */ });
+    ask(msg).catch(() => { /* the worker went away; an event is fire-and-forget */ });
   };
   const emit = (shimId: string, kind: string, payload: Record<string, unknown>): void => {
     tell({ type: 'event', shimId, kind, payload });
