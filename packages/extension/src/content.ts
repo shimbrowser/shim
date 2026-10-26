@@ -141,6 +141,7 @@ interface Runtime {
     return api;
   };
 
+  let retired = false;
   const deployId = (): string | null => ShimCore.deployIdForDocument(document);
   // Each running shim's control and the priority it booted with: a shim
   // whose priority moved boots again (reconcile.ts).
@@ -175,9 +176,13 @@ interface Runtime {
 
   // Syncs run one after another: two re-injections in a row must not boot
   // one shim twice. The first waits for a predecessor to leave.
+  // Retirement can land during any await below (the bundle request itself
+  // may be what makes the worker retire this runtime), and a retired
+  // runtime must boot nothing: the successor owns the document now.
   const resync = async (): Promise<void> => {
+    if (retired) return;
     await takeover;
-    if (!host[BOOT_FLAG]) return; // invalidated while waiting
+    if (retired || !host[BOOT_FLAG]) return; // retired or invalidated while waiting
     document.documentElement.setAttribute(RUNTIME_MARK, mark);
     let answer: WorkerAnswer;
     try {
@@ -185,6 +190,7 @@ interface Runtime {
     } catch {
       return; // no worker: nothing changes
     }
+    if (retired) return;
     if (!answer.ok || !('shims' in answer)) return;
     const bundle = answer as BundleAnswer;
     const priorities = new Map([...controls].map(([id, r]) => [id, r.priority]));
@@ -234,7 +240,6 @@ interface Runtime {
   // or this extension instance is gone. Either way everything is torn
   // down, the mark dropped for the successor, the flag dropped so a
   // fresh injection boots anew, and no port is held again.
-  let retired = false;
   const invalidated = (): void => {
     retired = true;
     for (const id of [...controls.keys()]) stop(id);

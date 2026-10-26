@@ -314,7 +314,7 @@ async function main(): Promise<void> {
     check('disallowing user scripts answers ok', (await configureExtension(ctx, extId, { userScriptsAccess: false })) === 'ok');
     check('the worker was not reloaded', (await worker.evaluate(() => 'alive').catch(() => 'gone')) === 'alive');
     const page = await ctx.newPage();
-    await page.goto(`${origin}/apply`);
+    await page.goto(`${origin}/apply?declarative`);
     const v1 = await settle(() => applyView(page), (v) => v.ad === 'none');
     check('a page loaded after the flip runs the declarative shim (the navigation made the worker measure again)', v1.ad === 'none', v1);
     check('and not the shim with handlers', v1.root === 0 && v1.original !== 'none', v1);
@@ -339,6 +339,50 @@ async function main(): Promise<void> {
   console.log('the toggle flipped on again, live:');
   {
     check('allowing user scripts answers ok', (await configureExtension(ctx, extId, { userScriptsAccess: true })) === 'ok');
+    // The handover with a bundle request in flight: the isolated-world
+    // runtime's own request is what makes the worker measure the mode
+    // again, retire it and inject its successor, and its answer arrives
+    // only after. Its bundle answers are held in its world for a while,
+    // then it is nudged: the retired runtime must boot nothing from the
+    // late answer, or the successor's rules would be duplicated and the
+    // old copy deaf to every later change.
+    const declTab = (await worker.evaluate(() => chrome.tabs.query({ url: '*://127.0.0.1/apply?declarative' }).then((t) => t.map((x) => x.id))))[0];
+    check('the declarative-mode page is open', typeof declTab === 'number');
+    if (typeof declTab === 'number') {
+      const wrapped = await worker.evaluate(async (tabId) => {
+        const r = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => {
+            const real = chrome.runtime.sendMessage.bind(chrome.runtime);
+            (chrome.runtime as { sendMessage: unknown }).sendMessage = (msg: { type?: string }) => {
+              const p = real(msg);
+              return msg?.type === 'bundle' ? p.then((a: unknown) => new Promise((r) => setTimeout(() => r(a), 1500))) : p;
+            };
+            return 'wrapped';
+          },
+        });
+        return r.map((x) => x.result);
+      }, declTab);
+      check('its bundle answers are held in its world', wrapped[0] === 'wrapped', wrapped);
+      await worker.evaluate((tabId) => chrome.tabs.sendMessage(tabId, { type: 'sync' }), declTab);
+      await sleep(3500);
+      const after = await declarativePage.evaluate(() => ({
+        sheets: document.querySelectorAll('style[data-shim^="patch-"]').length,
+        marks: document.documentElement.getAttribute('data-shim-runtime') !== null,
+        ad: getComputedStyle(document.getElementById('ad') as Element).display,
+        root: document.querySelectorAll('#root-target .fm-root').length,
+      }));
+      check('after the late answer: one runtime holds the document, the handler shim runs, nothing is duplicated', after.marks && after.root === 1 && after.ad === 'none' && after.sheets === 1, after);
+      const popup = await popupOf(ctx, extId);
+      const tidyIndex = await popup.$$eval('#list .card .name', (n) => n.findIndex((x) => x.textContent === 'Tidy fixture'));
+      await popup.click(`#list .card:nth-child(${tidyIndex + 1}) input[type=checkbox]`);
+      const tidyOff = await settle(() => applyView(declarativePage), (v) => v.ad !== 'none');
+      check('disabling the declarative shim removes its output there (the retired runtime kept nothing)', tidyOff.ad !== 'none' && tidyOff.root === 1, tidyOff);
+      await popup.waitForSelector('#list .card input[type=checkbox]:not(:checked)');
+      await popup.click(`#list .card:nth-child(${tidyIndex + 1}) input[type=checkbox]`);
+      await settle(() => applyView(declarativePage), (v) => v.ad === 'none');
+      await popup.close();
+    }
     const page = await ctx.newPage();
     await page.goto(`${origin}/apply`);
     const v = await settle(() => applyView(page), (v) => v.ad === 'none' && v.root === 1);
