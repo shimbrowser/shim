@@ -22,9 +22,14 @@ Early. What works today:
   user-script world, so a site's own CSP cannot block them.
 - Enable, disable and remove shims from the popup; changes reach the pages already open,
   no reload. Removing a shim releases the site access it asked for.
+- When a site changes, the engine's deterministic rebase ladder runs in the page and the
+  extension keeps the result: a healed anchor becomes a new version of the shim (every
+  earlier version is restorable from the popup), a rule the ladder could not re-find is
+  held for review and shown in the popup, never silently re-pointed. Repair means
+  exporting the `.shim` file and fixing it in the Shim browser or with Claude Code.
 
-What is next: persisted rebases and the needs-review badge, the `PageHost` for authoring
-sessions, and the native messaging bridge so Claude Code can author on a real Chrome tab.
+What is next: the `PageHost` for authoring sessions, and the native messaging bridge so
+Claude Code can author on a real Chrome tab.
 
 ## Modes
 
@@ -72,6 +77,8 @@ Then open `chrome://extensions`, turn on developer mode, choose "Load unpacked" 
 | `src/install.ts` | `prepareInstall`: parse, lint and preflight a `.shim` file. Pure. |
 | `src/prepare.ts` | The sandboxed page that runs `prepareInstall` for the install page. |
 | `src/compile.ts` | The full-mode handler compile, in the user-script world. |
+| `src/rebase.ts` | What the worker keeps of the engine's rebase ladder: anchors, versions, baselines, page memory, reviews. Pure. |
+| `src/arbitrate.ts` | Which of two runtimes on one page stays. Pure. |
 | `src/match-patterns.ts` | `match.hosts` to Chrome match patterns. Pure. |
 | `src/registration.ts` | Which content scripts to register for which shims. Pure. |
 | `src/capabilities.ts` | The two capability constants and the mode. |

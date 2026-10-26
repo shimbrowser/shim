@@ -37,7 +37,7 @@ check('an unparseable url is unknown', ctx({ id: ID, url: 'not a url', tab: {} }
 
 console.log('what each may send:');
 const page = { kind: 'page' } as const;
-const content = { kind: 'content', hostname: 'example.com', port: '', origin: 'https://example.com' } as const;
+const content = { kind: 'content', hostname: 'example.com', port: '', origin: 'https://example.com', pathname: '/' } as const;
 const unknown = { kind: 'unknown' } as const;
 for (const t of PAGE_MESSAGES) check(`a page may ${t}`, allowedFrom(t, page));
 for (const t of CONTENT_MESSAGES) check(`a page may not ${t}`, !allowedFrom(t, page));

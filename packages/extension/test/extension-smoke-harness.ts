@@ -24,7 +24,7 @@ import fs from 'fs';
 import path from 'path';
 import type { BrowserContext } from 'playwright';
 import {
-  workDir, extensionCopy, fixtureServer, shimWriter, css, launch, workerOf, installer, configureExtension, setExtensionEnabled, sleep,
+  workDir, extensionCopy, fixtureServer, shimWriter, css, launch, workerOf, installer, configureExtension, setExtensionEnabled, settle, sleep,
 } from './smoke-helpers';
 
 let failures = 0;
@@ -42,7 +42,7 @@ async function main(): Promise<void> {
   console.log('\n=== extension smoke harness ===\n');
   const work = workDir('shim-extension-smoke-');
   const ext = extensionCopy(work, ['*://127.0.0.1/*']);
-  const { origin, close: closeServer } = await fixtureServer();
+  const { origin, setDeploy, close: closeServer } = await fixtureServer();
   const shimFile = shimWriter(work);
 
   const tidy = shimFile('tidy', 'Tidy fixture', [
@@ -386,6 +386,111 @@ async function main(): Promise<void> {
     await popup.waitForSelector('#empty:not([hidden])');
     await popup.close();
     await settled((s) => s.ad !== 'none');
+  }
+
+  console.log('the rebase ladder persisted across a deploy:');
+  {
+    // The engine runs the deterministic ladder in the page and reports it;
+    // the worker keeps the result. Build 1 of /deploy: the rules resolve,
+    // their fingerprints are captured and kept, the page kind's baseline is
+    // recorded. Build 2 renames the buy button's class (a fallback or a
+    // witness re-finds it), drops the legacy link (nothing to find:
+    // review), and the #ad rule, which only ever applied on /apply, misses
+    // here as a wrong-page miss and is never held for review.
+    const rebase = shimFile('rebase', 'Rebase fixture', [
+      { id: 'refresh', anchor: css('#stable'), mutations: [{ kind: 'restyle', properties: { outline: '1px solid rgb(255, 0, 0)' } }] },
+      { id: 'promote', anchor: { primary: { kind: 'css', value: 'button.buy-v1' }, fallbacks: [{ kind: 'css', value: 'button[data-sku="42"]' }] }, mutations: [{ kind: 'restyle', properties: { outline: '2px solid rgb(0, 0, 255)' } }] },
+      { id: 'recover', anchor: css('button.buy-v1'), mutations: [{ kind: 'restyle', properties: { color: 'rgb(0, 128, 0)' } }] },
+      { id: 'gone', anchor: css('a.legacy-link'), mutations: [{ kind: 'hide' }] },
+      { id: 'elsewhere', anchor: css('#ad'), mutations: [{ kind: 'hide' }] },
+    ]);
+    setDeploy(1);
+    await installAll(rebase);
+    const popupPage = async () => { const p = await ctx.newPage(); await p.goto(`chrome-extension://${extId}/popup.html`); await p.waitForSelector('#mode:not(:empty)'); return p; };
+    const exported = async (): Promise<{ spec: { version?: number; bundleHash?: string; rules: { id: string; anchor: { primary: { kind: string; value: string }; witness?: unknown } }[] } }> => {
+      const p = await popupPage();
+      const answer = await p.evaluate(() => chrome.runtime.sendMessage({ type: 'shims.list' }).then((list: { shims: { id: string; name: string }[] }) => {
+        const shim = list.shims.find((s) => s.name === 'Rebase fixture');
+        return shim ? chrome.runtime.sendMessage({ type: 'shims.export', id: shim.id }) : null;
+      }));
+      await p.close();
+      const file = (answer as { file?: string } | null)?.file;
+      if (!file) throw new Error('no export');
+      return JSON.parse(file) as ReturnType<typeof exported> extends Promise<infer T> ? T : never;
+    };
+    const summaryOf = async (): Promise<{ version: number; review: { ruleId: string; reason: string }[] }> => {
+      const p = await popupPage();
+      const r = await p.evaluate(() => chrome.runtime.sendMessage({ type: 'shims.list' }).then((list: { shims: { name: string; version: number; review: { ruleId: string; reason: string }[] }[] }) => list.shims.find((s) => s.name === 'Rebase fixture') ?? null));
+      await p.close();
+      if (!r) throw new Error('no summary');
+      return r as { version: number; review: { ruleId: string; reason: string }[] };
+    };
+
+    const page = await ctx.newPage();
+    await page.goto(`${origin}/apply`);
+    await settle(() => page.evaluate(() => getComputedStyle(document.getElementById('ad') as Element).display), (d) => d === 'none');
+    await page.goto(`${origin}/deploy`);
+    const view1 = (): Promise<{ stable: string; buy: string; buyColor: string; legacy: string | null }> => page.evaluate(() => ({
+      stable: getComputedStyle(document.getElementById('stable') as Element).outlineColor,
+      buy: getComputedStyle(document.querySelector('button[data-sku="42"]') as Element).outlineColor,
+      buyColor: getComputedStyle(document.querySelector('button[data-sku="42"]') as Element).color,
+      legacy: (() => { const a = document.querySelector('a.legacy-link'); return a ? getComputedStyle(a).display : null; })(),
+    }));
+    const v1 = await settle(view1, (v) => v.stable === 'rgb(255, 0, 0)' && v.buy === 'rgb(0, 0, 255)' && v.buyColor === 'rgb(0, 128, 0)' && v.legacy === 'none');
+    check('build 1: every rule applies', v1.stable === 'rgb(255, 0, 0)' && v1.buy === 'rgb(0, 0, 255)' && v1.buyColor === 'rgb(0, 128, 0)' && v1.legacy === 'none', v1);
+    const kept = await settle(exported, (f) => f.spec.rules.filter((r) => r.anchor.witness).length >= 4 && typeof f.spec.bundleHash === 'string', 10000);
+    check('the captured fingerprints are kept on the rules that had none', kept.spec.rules.filter((r) => r.anchor.witness).length >= 4, kept.spec.rules.map((r) => `${r.id}:${r.anchor.witness ? 'w' : '-'}`));
+    check('and the page kind\'s baseline is recorded (the spec carries a bundle hash)', typeof kept.spec.bundleHash === 'string', kept.spec.bundleHash);
+    check('the spec is still version 1', (kept.spec.version ?? 1) === 1 && (await summaryOf()).version === 1);
+
+    setDeploy(2);
+    await page.reload();
+    const view2 = (): Promise<{ stable: string; buy: string; buyColor: string; hasV2: boolean }> => page.evaluate(() => ({
+      stable: getComputedStyle(document.getElementById('stable') as Element).outlineColor,
+      buy: getComputedStyle(document.querySelector('button.buy-v2') as Element).outlineColor,
+      buyColor: getComputedStyle(document.querySelector('button.buy-v2') as Element).color,
+      hasV2: document.querySelector('button.buy-v2') !== null,
+    }));
+    const v2 = await settle(view2, (v) => v.buy === 'rgb(0, 0, 255)' && v.buyColor === 'rgb(0, 128, 0)', 15000);
+    check('build 2: the renamed button is found again by the fallback and by the fingerprint', v2.hasV2 && v2.buy === 'rgb(0, 0, 255)' && v2.buyColor === 'rgb(0, 128, 0)', v2);
+    check('and the rule that still resolves keeps applying', v2.stable === 'rgb(255, 0, 0)', v2);
+    const healed = await settle(exported, (f) => (f.spec.version ?? 1) >= 3, 15000);
+    const promote = healed.spec.rules.find((r) => r.id === 'promote');
+    const recover = healed.spec.rules.find((r) => r.id === 'recover');
+    check('the rebases are kept: two versions on, the fallback promoted to primary', (healed.spec.version ?? 1) === 3 && promote?.anchor.primary.value === 'button[data-sku="42"]', { version: healed.spec.version, promote: promote?.anchor.primary });
+    check('and the recovered rule carries a primary the engine resolves on the new build', recover !== undefined && recover.anchor.primary.value !== 'button.buy-v1', recover?.anchor.primary);
+    check('the bundle hash advanced to the new build', typeof healed.spec.bundleHash === 'string' && healed.spec.bundleHash !== kept.spec.bundleHash, { before: kept.spec.bundleHash, after: healed.spec.bundleHash });
+    const reviewed = await settle(summaryOf, (s) => s.review.length > 0, 15000);
+    check('the rule whose target is gone is held for review', reviewed.review.length === 1 && reviewed.review[0]?.ruleId === 'gone', reviewed.review);
+    check('with a reason in words', (reviewed.review[0]?.reason ?? '').includes('could not be found'), reviewed.review[0]?.reason);
+    await sleep(2000);
+    const still = await summaryOf();
+    check('the rule that only ever applied on another page kind is not: a wrong-page miss', !still.review.some((r) => r.ruleId === 'elsewhere'), still.review);
+    const popup = await popupPage();
+    await popup.waitForSelector('#list .card .pill.warn');
+    const text = (await popup.textContent('#list')) ?? '';
+    check('the popup shows "needs review" with the rule and the version', text.includes('needs review') && text.includes('gone:') && text.includes('v3'), text.slice(0, 200));
+
+    await popup.click('#list .card button:has-text("history")');
+    await popup.waitForSelector('#list .card .versions:not([hidden]) button');
+    const entries = await popup.$$eval('#list .card .versions .row', (rows) => rows.map((r) => r.textContent ?? ''));
+    check('history lists every version, newest first: the install and both rebases', entries.length === 3 && entries[0]?.startsWith('v3 · rebase') === true && entries[1]?.startsWith('v2 · rebase') === true && entries[2]?.startsWith('v1 · install') === true, entries);
+    const restoreV1 = (await popup.$$('#list .card .versions .row button')).at(-1);
+    check('a restore button per version', restoreV1 !== undefined);
+    if (restoreV1) await restoreV1.click();
+    const restored = await settle(exported, (f) => (f.spec.version ?? 1) === 4, 10000);
+    check('restoring v1 is a forward change: version 4 with v1\'s anchors', (restored.spec.version ?? 1) === 4 && restored.spec.rules.find((r) => r.id === 'promote')?.anchor.primary.value === 'button.buy-v1', { version: restored.spec.version });
+    const afterRestore = await summaryOf();
+    check('and clears the review', afterRestore.review.length === 0 && afterRestore.version === 4, afterRestore);
+    await popup.close();
+    await page.close();
+    setDeploy(1);
+    const popup2 = await popupPage();
+    const index = await popup2.$$eval('#list .card .name', (n) => n.findIndex((x) => x.textContent === 'Rebase fixture'));
+    await popup2.click(`#list .card:nth-child(${index + 1}) button.danger`);
+    await popup2.click(`#list .card:nth-child(${index + 1}) button.danger`);
+    await popup2.waitForFunction((name) => ![...document.querySelectorAll('#list .card .name')].some((n) => n.textContent === name), 'Rebase fixture');
+    await popup2.close();
   }
 
   console.log('a refusal:');
