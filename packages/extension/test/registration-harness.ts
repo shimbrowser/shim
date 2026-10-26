@@ -1,8 +1,12 @@
-// Pins which content scripts the worker registers (src/registration.ts): one
-// per enabled shim for exactly its hosts, the engine before the runtime,
-// and which host access a removal releases (none that a remaining shim needs).
+// Pins which scripts the worker registers (src/registration.ts): one per
+// enabled shim for exactly its hosts, the engine before the runtime, as a
+// content script (declarative mode) or a user script (full mode), and which
+// host access a removal releases (none that a remaining shim needs).
 
-import { registrationsFor, originsToRelease, scriptIdFor, shimIdFor, patternsFor, RUNTIME_FILES, SCRIPT_ID_PREFIX } from '../src/registration';
+import {
+  registrationsFor, userScriptRegistrationsFor, originsToRelease, scriptIdFor, shimIdFor, patternsFor, RUNTIME_FILES, SCRIPT_ID_PREFIX,
+  USER_SCRIPT_WORLD_CSP,
+} from '../src/registration';
 
 let failures = 0;
 let passes = 0;
@@ -41,6 +45,20 @@ console.log('registrations:');
   check('a shim with no registrable host registers nothing', !regs.some((r) => r.id === 'shim:c' || r.id === 'shim:d'));
 }
 check('a shim whose hosts all fail maps to no patterns', patternsFor(shim('x', ['https://nope', ''])).length === 0);
+
+console.log('user-script registrations (full mode):');
+{
+  const shims = [shim('a', ['example.com', '*.example.com']), shim('b', ['other.test'], false), shim('c', []), shim('e', ['localhost:5173'])];
+  const regs = userScriptRegistrationsFor(shims);
+  const content = registrationsFor(shims);
+  check('the same selection as the content scripts, in the same order', JSON.stringify(regs.map((r) => r.id)) === JSON.stringify(content.map((r) => r.id)));
+  const [a] = regs;
+  check('the same matches', JSON.stringify(a?.matches) === JSON.stringify(content[0]?.matches));
+  check('the same files, as script sources, engine before runtime', JSON.stringify(a?.js) === JSON.stringify(RUNTIME_FILES.map((file) => ({ file }))));
+  check('document_start, the user-script world, top frame', a?.runAt === 'document_start' && a.world === 'USER_SCRIPT' && a.allFrames === false);
+  check('no persistAcrossSessions field (user scripts persist on their own)', a !== undefined && !('persistAcrossSessions' in a));
+  check('the world\'s CSP permits the extension\'s files and eval, nothing else', USER_SCRIPT_WORLD_CSP === "script-src 'self' 'unsafe-eval'");
+}
 
 console.log('releasing host access:');
 {

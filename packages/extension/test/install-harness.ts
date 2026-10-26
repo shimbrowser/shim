@@ -7,7 +7,8 @@
 
 import { prepareInstall, mintShimId } from '../src/install';
 import {
-  EXTENSION_CAPABILITIES, EXTENSION_DECLARATIVE_CAPABILITIES, HANDLER_KINDS, USER_SCRIPTS_REASON, capabilitiesFor, currentMode,
+  EXTENSION_CAPABILITIES, EXTENSION_DECLARATIVE_CAPABILITIES, HANDLER_KINDS, USER_SCRIPTS_REASON, HOW_TO_ENABLE, capabilitiesFor, detectMode,
+  userScriptsAvailable,
 } from '../src/capabilities';
 import { preflightSpec } from '@shimbrowser/core/capability-preflight';
 import { CONFORMANCE_CAPABILITIES } from '@shimbrowser/core/page-host-conformance';
@@ -52,7 +53,22 @@ check('neither claims iframes, component identity or inspection',
 check('both install the spec stylesheet', EXTENSION_CAPABILITIES.specCss && EXTENSION_DECLARATIVE_CAPABILITIES.specCss);
 check('the constants are frozen', Object.isFrozen(EXTENSION_CAPABILITIES) && Object.isFrozen(EXTENSION_CAPABILITIES.mutationKinds));
 check('capabilitiesFor maps each mode', capabilitiesFor('full') === EXTENSION_CAPABILITIES && capabilitiesFor('declarative') === EXTENSION_DECLARATIVE_CAPABILITIES);
-check('this version runs declarative', currentMode() === 'declarative');
+check('full mode runs script and replace-root, not mount-route', EXTENSION_CAPABILITIES.mutationKinds.includes('script') && EXTENSION_CAPABILITIES.mutationKinds.includes('replace-root') && !EXTENSION_CAPABILITIES.mutationKinds.includes('mount-route'));
+check('declarative mode runs no handler kind', !HANDLER_KINDS.some((k) => EXTENSION_DECLARATIVE_CAPABILITIES.mutationKinds.includes(k)));
+
+check('the refusal names the toggle and says to install again', USER_SCRIPTS_REASON.includes(HOW_TO_ENABLE) && USER_SCRIPTS_REASON.includes('install the shim again') && HOW_TO_ENABLE.includes('Allow user scripts'));
+
+// The mode is a call on the API, not a read of it: the toggle flipped under
+// a running extension leaves the object in place with every call throwing.
+async function modeChecks(): Promise<void> {
+  console.log('the mode, from the user-scripts API:');
+  check('no chrome at all: declarative', !(await userScriptsAvailable(undefined)) && (await detectMode(undefined)) === 'declarative');
+  check('chrome without the API (a fresh load, not allowed): declarative', !(await userScriptsAvailable({})) && !(await userScriptsAvailable({ userScripts: undefined })));
+  check('a read that throws (some versions, not allowed): declarative', !(await userScriptsAvailable({ get userScripts(): undefined { throw new Error('not available'); } })));
+  check('the API present but its calls throwing (the toggle flipped off, no reload): declarative',
+    !(await userScriptsAvailable({ userScripts: { getScripts: () => Promise.reject(new Error("'userScripts.getScripts' is not available in this context.")) } })));
+  check('the API answering: full', (await detectMode({ userScripts: { getScripts: () => Promise.resolve([]) } })) === 'full');
+}
 
 console.log('a good file:');
 {
@@ -166,6 +182,11 @@ console.log('ids:');
 check('mintShimId is a prefixed, dash-free slice', mintShimId('3b241101-e2bb-4255-8caf-4136c566a962') === 'shim-3b241101e2bb4255');
 check('two uuids mint two ids', mintShimId('3b241101-e2bb-4255-8caf-4136c566a962') !== mintShimId('9b241101-e2bb-4255-8caf-4136c566a962'));
 
-console.log('');
-if (failures) { console.error(`${failures} check(s) failed`); process.exit(1); }
-console.log(`all install checks passed (${passes})`);
+modeChecks().then(() => {
+  console.log('');
+  if (failures) { console.error(`${failures} check(s) failed`); process.exit(1); }
+  console.log(`all install checks passed (${passes})`);
+}, (err: unknown) => {
+  console.error(err);
+  process.exit(1);
+});

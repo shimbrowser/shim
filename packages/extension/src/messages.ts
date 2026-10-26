@@ -4,6 +4,10 @@
 // a message it cannot narrow. A message names no page of its own: the
 // worker takes the sender's host and origin from the sender Chrome attaches
 // (sender.ts), and answers each type only to the kind of sender it expects.
+//
+// A runtime in the user-script world (full mode) sends the same messages;
+// they arrive on the worker's onUserScriptMessage. It cannot receive one,
+// so it holds a port (RUNTIME_PORT) the worker nudges instead.
 
 import type { Spec } from '@shimbrowser/core/types';
 import type { PreparedInstall, InstallProvenance } from './install';
@@ -18,17 +22,26 @@ export type ToWorker =
   | { type: 'storage'; method: StorageMethod; shimId: string; key?: string; value?: unknown }
   /** An engine event the page reports (rule status, rebases, errors). */
   | { type: 'event'; shimId: string; kind: string; payload: Record<string, unknown> }
+  /** The install page: the mode in force, to prepare against. */
+  | { type: 'mode' }
   | { type: 'shims.list' }
   | { type: 'shims.setEnabled'; id: string; enabled: boolean }
   | { type: 'shims.uninstall'; id: string }
   /** The install page, after the user granted the hosts: write and register. */
   | { type: 'install.commit'; prepared: PreparedInstall; provenance: InstallProvenance };
 
-/** One shim as the page runtime receives it: the spec with the installed id, and its cascade priority. */
+/**
+ * One shim as the page runtime receives it: the spec with the installed id,
+ * its cascade priority, and its handler modules (source, by name) for the
+ * runtime to compile. The worker sends handlers only to a runtime in the
+ * user-script world, where they compile; an isolated-world runtime gets
+ * only the shims that run without one, and an empty map.
+ */
 export interface BundledShim {
   id: string;
   spec: Spec;
   priority: number;
+  handlers: Record<string, string>;
 }
 
 export interface BundleAnswer {
@@ -53,15 +66,43 @@ export type WorkerAnswer =
   | BundleAnswer
   | { ok: true; value: unknown }
   | { ok: true; mode: ExtensionMode; shims: ShimSummary[] }
+  | { ok: true; mode: ExtensionMode }
   | { ok: true; id: string }
   | { ok: true }
   | { ok: false; error: string };
 
-/** What the worker sends a page runtime: look again at what runs here. */
-export type ToRuntime = { type: 'sync' };
+/**
+ * What the worker sends a page runtime: look again at what runs here
+ * (`sync`); start every shim afresh (`reboot`: the other world's runtime
+ * on this page was just retired and its teardown may have removed
+ * stylesheets this one shares); or leave the document to a runtime in
+ * the other world (`retire`: tear everything down, drop the mark, hold no
+ * port). Retire goes to an isolated-world runtime once full mode is on,
+ * so the user-script runtime the worker then injects can take the page
+ * over, and to whichever of two runtimes on one page does not fit the mode.
+ */
+export type ToRuntime = { type: 'sync' } | { type: 'reboot' } | { type: 'retire' };
+
+/** The port a full-mode runtime opens to the worker, which nudges it there. */
+export const RUNTIME_PORT = 'shim-runtime';
+
+/**
+ * What a runtime posts on its port: as it retires, whether it had run any
+ * shim, so the worker reboots a surviving rival only when the teardown
+ * can have taken something the survivor shares.
+ */
+export type FromRuntime = { type: 'retiring'; booted: boolean };
+
+export function isFromRuntime(msg: unknown): msg is FromRuntime {
+  if (typeof msg !== 'object' || msg === null) return false;
+  const m = msg as { type?: unknown; booted?: unknown };
+  return m.type === 'retiring' && typeof m.booted === 'boolean';
+}
 
 export function isToRuntime(msg: unknown): msg is ToRuntime {
-  return typeof msg === 'object' && msg !== null && (msg as { type?: unknown }).type === 'sync';
+  if (typeof msg !== 'object' || msg === null) return false;
+  const type = (msg as { type?: unknown }).type;
+  return type === 'sync' || type === 'reboot' || type === 'retire';
 }
 
 export function isToWorker(msg: unknown): msg is ToWorker {

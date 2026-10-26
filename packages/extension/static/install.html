@@ -27,6 +27,8 @@
   </div>
   <section id="review" hidden></section>
   <section id="result" hidden></section>
+  <!-- The install check runs in this sandboxed frame, whose CSP permits the handler syntax probe. -->
+  <iframe id="prepare" src="prepare.html" title="install check" hidden></iframe>
   <script src="install.js"></script>
 </body>
 </html>

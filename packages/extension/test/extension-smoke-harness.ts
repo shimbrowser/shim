@@ -5,9 +5,10 @@
 // cross-shim priority, live changes on open pages (install, disable, enable,
 // remove without a reload), site access withheld and granted back from
 // chrome://extensions with the page open, removal of everything, and a
-// refusal. It is the
-// real-browser gate for what EXTENSION_DECLARATIVE_CAPABILITIES advertises
-// until the extension has a PageHost and runs the shared conformance suite.
+// refusal. It is the real-browser gate for what
+// EXTENSION_DECLARATIVE_CAPABILITIES advertises until the extension has a
+// PageHost and runs the shared conformance suite; full mode has its own
+// harness (extension-full-mode-harness.ts) on the same helpers.
 //
 // Chrome's optional-host-permission prompt is browser UI a script cannot
 // click, so the extension is loaded from a copy of dist/ whose manifest
@@ -20,15 +21,11 @@
 //   node out/packages/extension/test/extension-smoke-harness.js
 
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
-import http from 'http';
-import type { AddressInfo } from 'net';
-import { chromium, type BrowserContext, type Page, type Worker } from 'playwright';
-import { conformanceFixture, type FixtureDeploy } from '@shimbrowser/core/page-host-conformance';
-
-const REPO = path.resolve(__dirname, '..', '..', '..', '..');
-const DIST = path.join(REPO, 'packages', 'extension', 'dist');
+import type { BrowserContext } from 'playwright';
+import {
+  workDir, extensionCopy, fixtureServer, shimWriter, css, launch, workerOf, installer, configureExtension, setExtensionEnabled, sleep,
+} from './smoke-helpers';
 
 let failures = 0;
 let passes = 0;
@@ -37,38 +34,17 @@ function check(label: string, cond: boolean, detail?: unknown): void {
   failures++;
   console.error(`  ✗ ${label}${detail !== undefined ? ' — ' + JSON.stringify(detail) : ''}`);
 }
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 interface Styles { ad: string; lead: string; injected: number; grid: string; html: string }
 interface StrictStyles { ad: string; target: string }
 
 async function main(): Promise<void> {
   console.log('\n=== extension smoke harness ===\n');
-  if (!fs.existsSync(path.join(DIST, 'manifest.json'))) throw new Error(`no built extension at ${DIST} (npm run build)`);
+  const work = workDir('shim-extension-smoke-');
+  const ext = extensionCopy(work, ['*://127.0.0.1/*']);
+  const { origin, close: closeServer } = await fixtureServer();
+  const shimFile = shimWriter(work);
 
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-extension-smoke-'));
-  const ext = path.join(work, 'ext');
-  fs.cpSync(DIST, ext, { recursive: true });
-  const manifest = JSON.parse(fs.readFileSync(path.join(ext, 'manifest.json'), 'utf8')) as Record<string, unknown>;
-  manifest.host_permissions = ['*://127.0.0.1/*'];
-  fs.writeFileSync(path.join(ext, 'manifest.json'), JSON.stringify(manifest, null, 2));
-
-  // The conformance fixture site: /apply (style-src allows inline) and /strict (style-src 'self').
-  const state = { deploy: 1 as FixtureDeploy };
-  const server = http.createServer((req, res) => {
-    const r = conformanceFixture(new URL(req.url ?? '/', 'http://x').pathname, state);
-    res.writeHead(r.status, { 'content-type': r.contentType, ...r.headers });
-    res.end(r.body);
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
-  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-
-  const shimFile = (id: string, name: string, rules: unknown[], extra: Record<string, unknown> = {}, handlers: Record<string, string> = {}): string => {
-    const file = path.join(work, `${id}.shim`);
-    fs.writeFileSync(file, JSON.stringify({ format: 'shim/1', name, spec: { id, version: 1, match: { hosts: ['127.0.0.1'] }, rules, ...extra }, handlers }));
-    return file;
-  };
-  const css = (selector: string) => ({ primary: { kind: 'css', value: selector } });
   const tidy = shimFile('tidy', 'Tidy fixture', [
     { id: 'hide-ad', anchor: css('#ad'), mutations: [{ kind: 'hide' }] },
     { id: 'red-lead', anchor: css('#lead'), mutations: [{ kind: 'restyle', properties: { color: 'rgb(255, 0, 0)' } }] },
@@ -87,34 +63,14 @@ async function main(): Promise<void> {
   ], {}, { badge: 'module.exports = function badge() { return null; };' });
 
   const profile = path.join(work, 'profile');
-  const ctx: BrowserContext = await chromium.launchPersistentContext(profile, {
-    headless: true,
-    channel: 'chromium',
-    args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`],
-  });
+  const ctx: BrowserContext = await launch(ext, profile);
   const errors: string[] = [];
   ctx.on('weberror', (e) => errors.push(String(e.error())));
-  let sw: Worker | undefined = ctx.serviceWorkers()[0];
-  sw ??= await ctx.waitForEvent('serviceworker', { timeout: 15000 });
-  const extId = new URL(sw.url()).host;
-  const worker: Worker = sw;
+  // `worker` is reassigned when the extension is disabled and enabled again (a fresh instance, a fresh handle).
+  let { worker } = await workerOf(ctx);
+  const { extId } = await workerOf(ctx);
   const registered = () => worker.evaluate(() => chrome.scripting.getRegisteredContentScripts());
-
-  const install = async (file: string): Promise<{ page: Page; heading: string }> => {
-    const page = await ctx.newPage();
-    await page.goto(`chrome-extension://${extId}/install.html`);
-    await page.setInputFiles('#file', file);
-    await page.waitForSelector('#review:not([hidden]) h2');
-    const heading = (await page.textContent('#review h2')) ?? '';
-    return { page, heading };
-  };
-  const installAll = async (file: string): Promise<void> => {
-    const { page, heading } = await install(file);
-    if (!heading.startsWith('ready to install')) throw new Error(`not ready: ${heading}`);
-    await page.click('#review button.primary');
-    await page.waitForSelector('#result:not([hidden]) h2', { timeout: 15000 });
-    await page.close();
-  };
+  const { install, installAll } = installer(ctx, extId);
 
   const fixture = await ctx.newPage();
   const styles = (): Promise<Styles> => fixture.evaluate(() => {
@@ -148,6 +104,20 @@ async function main(): Promise<void> {
     check('one content script, for the shim\'s host, engine then runtime at document_start',
       regs.length === 1 && (regs[0]?.id ?? '').startsWith('shim:') && JSON.stringify(regs[0]?.matches) === '["*://127.0.0.1/*"]'
         && JSON.stringify(regs[0]?.js) === '["shim-core.page.js","content.js"]' && regs[0]?.runAt === 'document_start', regs);
+  }
+
+  console.log('the install page with its own script delayed past the sandbox:');
+  {
+    // The sandboxed check frame can finish before install.js runs and its
+    // one unsolicited readiness message be lost; the page then asks.
+    const page = await ctx.newPage();
+    await page.route('**/install.js', async (route) => { await sleep(1500); await route.continue(); });
+    await page.goto(`chrome-extension://${extId}/install.html`);
+    await page.setInputFiles('#file', second);
+    await page.waitForSelector('#review:not([hidden]) h2', { timeout: 15000 });
+    const heading = (await page.textContent('#review h2')) ?? '';
+    check('the review still arrives (readiness asked for, not waited on)', heading.startsWith('ready to install'), heading);
+    await page.close();
   }
 
   console.log('the declarative kinds and the spec stylesheet on /apply:');
@@ -273,13 +243,7 @@ async function main(): Promise<void> {
     // withholds every host (permissions.onRemoved), "on all sites" grants
     // them back (permissions.onAdded). The WebUI's developerPrivate API is
     // what the chrome://extensions page itself calls.
-    const settings = await ctx.newPage();
-    await settings.goto(`chrome://extensions/?id=${extId}`);
-    const hostAccess = (value: string) => settings.evaluate(([id, hostAccess]) => new Promise<string>((resolve) => {
-      const api = (globalThis as { chrome?: { developerPrivate?: { updateExtensionConfiguration(cfg: object, cb: () => void): void }; runtime?: { lastError?: { message: string } } } }).chrome;
-      if (!api?.developerPrivate) { resolve('no developerPrivate'); return; }
-      api.developerPrivate.updateExtensionConfiguration({ extensionId: id, hostAccess }, () => resolve(api.runtime?.lastError ? `err: ${api.runtime.lastError.message}` : 'ok'));
-    }), [extId, value] as const);
+    const hostAccess = (value: string) => configureExtension(ctx, extId, { hostAccess: value });
     const granted = () => worker.evaluate(() => chrome.permissions.contains({ origins: ['*://127.0.0.1/*'] }));
 
     await fixture.goto(`${origin}/apply`);
@@ -338,7 +302,90 @@ async function main(): Promise<void> {
     check('removing while access is withheld works', (await registered()).length === 0);
     await hostAccess('ON_ALL_SITES');
     await popup.close();
-    await settings.close();
+  }
+
+  console.log('the extension disabled and enabled again under an open page:');
+  {
+    await fixture.goto(`${origin}/apply`);
+    await installAll(tidy);
+    const s0 = await settled((s) => s.ad === 'none' && s.injected === 1);
+    check('the shim applies', s0.ad === 'none' && s0.injected === 1, s0);
+    const fresh = ctx.waitForEvent('serviceworker', { timeout: 15000 });
+    check('disabling answers ok', (await setExtensionEnabled(ctx, extId, false)) === 'ok');
+    const s1 = await settled((s) => s.ad !== 'none' && s.injected === 0);
+    check('the orphaned runtime tears the shim down: hide, injected node and stylesheet gone', s1.ad !== 'none' && s1.injected === 0 && s1.grid !== 'rgb(0, 128, 0)', s1);
+    check('enabling answers ok', (await setExtensionEnabled(ctx, extId, true)) === 'ok');
+    worker = await fresh;
+    const s2 = await settled((s) => s.ad === 'none' && s.injected === 1);
+    check('the new instance takes the open page over without a reload', s2.ad === 'none' && s2.injected === 1 && s2.grid === 'rgb(0, 128, 0)', s2);
+    check('one registration in the new instance', (await registered()).length === 1);
+
+    // Disabled and enabled back to back: the old runtime's teardown and the
+    // new instance's injection overlap in time, and the new engine must end
+    // up with its own stylesheet, not one the old teardown removes.
+    const fresh2 = ctx.waitForEvent('serviceworker', { timeout: 15000 });
+    await setExtensionEnabled(ctx, extId, false);
+    check('enabling again at once answers ok', (await setExtensionEnabled(ctx, extId, true)) === 'ok');
+    worker = await fresh2;
+    const s3 = await settled((s) => s.ad === 'none' && s.injected === 1 && s.grid === 'rgb(0, 128, 0)');
+    await sleep(1500);
+    const s4 = await styles();
+    check('after a prompt re-enable the page carries the shim and its stylesheet, and keeps them', s3.grid === 'rgb(0, 128, 0)' && s4.ad === 'none' && s4.injected === 1 && s4.grid === 'rgb(0, 128, 0)', { s3, s4 });
+    const sheets = await fixture.evaluate(() => document.querySelectorAll('style[data-shim^="patch-"]').length);
+    check('one spec stylesheet in the document', sheets === 1, sheets);
+    const marks = await fixture.evaluate(() => document.documentElement.getAttribute('data-shim-runtime'));
+    check('the document carries the live runtime\'s mark', typeof marks === 'string' && marks.length > 0, marks);
+
+    // A predecessor still tearing down holds the document: a runtime that
+    // is new to the document waits for its mark to go before it boots. The
+    // page is loaded with nothing registered, so enabling the shim injects
+    // a fresh runtime into it (an existing one would only sync again).
+    const popup0 = await ctx.newPage();
+    await popup0.goto(`chrome-extension://${extId}/popup.html`);
+    await popup0.waitForSelector('#list .card input[type=checkbox]:checked');
+    await popup0.click('#list .card input[type=checkbox]');
+    await popup0.waitForSelector('#list .card input[type=checkbox]:not(:checked)');
+    const dOff = Date.now() + 5000;
+    while (Date.now() < dOff && (await registered()).length !== 0) await sleep(100);
+    await fixture.goto(`${origin}/apply`);
+    await sleep(300);
+    check('a page loaded with nothing registered has no runtime', (await styles()).ad !== 'none' && (await fixture.evaluate(() => document.documentElement.getAttribute('data-shim-runtime'))) === null);
+    await fixture.evaluate(() => document.documentElement.setAttribute('data-shim-runtime', 'lingering-predecessor'));
+    await popup0.click('#list .card input[type=checkbox]');
+    await sleep(700);
+    const held = await styles();
+    check('while a predecessor\'s mark is on the document, the runtime waits', held.ad !== 'none', held);
+    await fixture.evaluate(() => document.documentElement.removeAttribute('data-shim-runtime'));
+    const released = await settled((s) => s.ad === 'none' && s.injected === 1);
+    check('and boots once the mark is gone', released.ad === 'none' && released.injected === 1, released);
+
+    // A mark that never goes (the page can write the attribute too) only
+    // delays the boot: after the wait the runtime takes the document, and
+    // the worker, not the mark, settles any real duplicate.
+    await popup0.click('#list .card input[type=checkbox]');
+    await popup0.waitForSelector('#list .card input[type=checkbox]:not(:checked)');
+    const dOff2 = Date.now() + 5000;
+    while (Date.now() < dOff2 && (await registered()).length !== 0) await sleep(100);
+    await fixture.goto(`${origin}/apply`);
+    await sleep(300);
+    await fixture.evaluate(() => document.documentElement.setAttribute('data-shim-runtime', 'planted-by-the-page'));
+    await popup0.click('#list .card input[type=checkbox]');
+    await sleep(1200);
+    const held2 = await styles();
+    check('a planted mark holds the runtime off for the wait', held2.ad !== 'none', held2);
+    const booted = await settled((s) => s.ad === 'none' && s.injected === 1);
+    check('and no longer: the runtime boots after the wait', booted.ad === 'none' && booted.injected === 1, booted);
+    const heldMark = await fixture.evaluate(() => document.documentElement.getAttribute('data-shim-runtime'));
+    check('and holds the document itself', heldMark !== null && heldMark !== 'planted-by-the-page', heldMark);
+    await popup0.close();
+    const popup = await ctx.newPage();
+    await popup.goto(`chrome-extension://${extId}/popup.html`);
+    await popup.waitForSelector('#list .card button.danger');
+    await popup.click('#list .card button.danger');
+    await popup.click('#list .card button.danger');
+    await popup.waitForSelector('#empty:not([hidden])');
+    await popup.close();
+    await settled((s) => s.ad !== 'none');
   }
 
   console.log('a refusal:');
@@ -352,7 +399,7 @@ async function main(): Promise<void> {
 
   check('no page errors in the extension', errors.length === 0, errors);
   await ctx.close();
-  server.close();
+  closeServer();
   fs.rmSync(work, { recursive: true, force: true });
 
   console.log('');

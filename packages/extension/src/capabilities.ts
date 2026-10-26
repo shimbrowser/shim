@@ -36,7 +36,14 @@ export const EXTENSION_DECLARATIVE_CAPABILITIES: PageHostCapabilities = Object.f
   trustedInput: false,
 });
 
-/** Full mode: the user-script world, handlers compiled there. Reachable once that world ships. */
+/**
+ * Full mode: the user-script world, handlers compiled there. `script` and
+ * `replace-root` run; `mount-route` needs the route registry the Shim
+ * browser keeps in main, so it stays out. The members a handler can use
+ * are the core ones plus `api.storage`, the same as declarative mode's
+ * engine gives: `apiMembers` lists the host-provided extras, and this host
+ * provides none yet (`fetch` and `settings` are a later phase).
+ */
 export const EXTENSION_CAPABILITIES: PageHostCapabilities = Object.freeze({
   mutationKinds: Object.freeze([...DECLARATIVE_KINDS, 'script', 'replace-root']),
   iframeRules: false,
@@ -52,15 +59,46 @@ export function capabilitiesFor(mode: ExtensionMode): PageHostCapabilities {
 }
 
 /**
- * The mode this browser runs in. Declarative for now: full mode needs the
- * user-script world, which this version does not register. When it does,
- * this reads whether `chrome.userScripts` is available and the user turned
- * it on for this extension.
+ * The user-scripts API as the mode probe sees it: present or not, and a
+ * cheap call on it that succeeds only while the user allows user scripts.
  */
-export function currentMode(): ExtensionMode {
-  return 'declarative';
+export interface UserScriptsProbe {
+  userScripts?: { getScripts?: (filter?: { ids?: string[] }) => Promise<unknown> } | undefined;
 }
 
+/**
+ * Is `chrome.userScripts` usable here? Presence is not enough: after a
+ * fresh load with user scripts disallowed the property is absent (or the
+ * read throws), but while the user flips the toggle under a running
+ * extension (no reload) the object stays and every call on it throws
+ * "not available in this context". So the mode is a call, not a read: the
+ * cheapest one, a filtered getScripts for no ids.
+ */
+export async function userScriptsAvailable(api: UserScriptsProbe | undefined = globalThis.chrome as UserScriptsProbe | undefined): Promise<boolean> {
+  try {
+    const userScripts = api?.userScripts;
+    if (!userScripts || typeof userScripts.getScripts !== 'function') return false;
+    await userScripts.getScripts({ ids: [] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The mode this browser runs in right now: full while user scripts are
+ * allowed, declarative otherwise. The toggle fires no event and reloads
+ * nothing, so the worker asks again on every navigation and message and
+ * reconciles when the answer changes.
+ */
+export async function detectMode(api?: UserScriptsProbe | undefined): Promise<ExtensionMode> {
+  return (await userScriptsAvailable(api)) ? 'full' : 'declarative';
+}
+
+/** How a user turns full mode on, for the popup and for a refusal. */
+export const HOW_TO_ENABLE = 'turn on "Allow user scripts" for Shim for Chrome on chrome://extensions '
+  + '(Chrome 138 and later; before that, turn on developer mode there)';
+
 /** The one line an install refusal adds when the shim needs full mode. */
-export const USER_SCRIPTS_REASON = 'rules with handlers (script, replace-root, mount-route) need user scripts, '
-  + 'which this version of Shim for Chrome does not run yet; the shim runs in the Shim browser as it is';
+export const USER_SCRIPTS_REASON = 'rules with handlers (script, replace-root) need user scripts: '
+  + `${HOW_TO_ENABLE}, then install the shim again`;

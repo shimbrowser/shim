@@ -36,7 +36,7 @@ export function senderContext(sender: SenderLike | undefined, extensionId: strin
 }
 
 /** Message types the extension's own pages may send. */
-export const PAGE_MESSAGES: ReadonlySet<string> = new Set(['shims.list', 'shims.setEnabled', 'shims.uninstall', 'install.commit']);
+export const PAGE_MESSAGES: ReadonlySet<string> = new Set(['mode', 'shims.list', 'shims.setEnabled', 'shims.uninstall', 'install.commit']);
 /** Message types the page runtime may send. */
 export const CONTENT_MESSAGES: ReadonlySet<string> = new Set(['bundle', 'storage', 'event']);
 
