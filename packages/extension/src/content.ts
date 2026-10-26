@@ -22,7 +22,7 @@
 // tears every shim down.
 
 import type * as Core from '@shimbrowser/core';
-import { isToRuntime, RUNTIME_PORT, type ToWorker, type ToRuntime, type WorkerAnswer, type BundleAnswer, type BundledShim } from './messages';
+import { isToRuntime, RUNTIME_PORT, type ToWorker, type ToRuntime, type FromRuntime, type WorkerAnswer, type BundleAnswer, type BundledShim } from './messages';
 import { reconcileShims } from './reconcile';
 import { compileHandlers } from './compile';
 
@@ -230,6 +230,10 @@ interface Runtime {
   const onNudge = (msg: ToRuntime): void => {
     if (retired) return;
     if (msg.type === 'retire') {
+      // Whether anything ran here goes to the worker first: a survivor
+      // reboots only when this teardown can have taken something it shares.
+      const report: FromRuntime = { type: 'retiring', booted: controls.size > 0 };
+      try { port?.postMessage(report); } catch { /* the worker is gone; nothing to repair for */ }
       invalidated();
       return;
     }

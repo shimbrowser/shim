@@ -28,11 +28,12 @@ import {
   USER_SCRIPT_WORLD_CSP,
 } from './registration';
 import { capabilitiesFor, detectMode, type ExtensionMode } from './capabilities';
+import { arbitrate, type RuntimeWorld as ArbitratedWorld } from './arbitrate';
 import { mintShimId } from './install';
 import { matchPatternsForHosts } from './match-patterns';
 import { senderContext, allowedFrom, type SenderContext } from './sender';
 import {
-  isToWorker, RUNTIME_PORT, type ToWorker, type ToRuntime, type WorkerAnswer, type BundledShim, type ShimSummary,
+  isToWorker, isFromRuntime, RUNTIME_PORT, type ToWorker, type ToRuntime, type WorkerAnswer, type BundledShim, type ShimSummary,
 } from './messages';
 
 let storePromise: Promise<ShimStore> | null = null;
@@ -44,7 +45,7 @@ function store(): Promise<ShimStore> {
 // --- the mode ----------------------------------------------------------------------
 
 /** The world a message came from: the isolated world (a content script) or the user-script world. */
-type RuntimeWorld = 'isolated' | 'user-script';
+type RuntimeWorld = ArbitratedWorld;
 
 /** The mode as last measured. Read right after refreshMode. */
 let modeNow: ExtensionMode = 'declarative';
@@ -157,10 +158,18 @@ function post(port: chrome.runtime.Port, msg: ToRuntime): void {
     runtimePorts.delete(port);
   }
 }
-/** The world a page's one runtime belongs in: the mode's. */
-function worldFor(mode: ExtensionMode): RuntimeWorld {
-  return mode === 'full' ? 'user-script' : 'isolated';
+/**
+ * Retire `loser` for `survivor`. The loser says as it goes whether it had
+ * run anything; only then can its teardown have taken stylesheets or
+ * tokens the survivor shares, and only then does the survivor reboot.
+ */
+function retireFor(loser: chrome.runtime.Port, survivor: chrome.runtime.Port): void {
+  loser.onMessage.addListener((msg: unknown) => {
+    if (isFromRuntime(msg) && msg.type === 'retiring' && msg.booted) post(survivor, { type: 'reboot' });
+  });
+  post(loser, { type: 'retire' });
 }
+
 function acceptRuntimePort(world: RuntimeWorld): (port: chrome.runtime.Port) => void {
   return (port) => {
     const tabId = port.sender?.tab?.id;
@@ -170,22 +179,24 @@ function acceptRuntimePort(world: RuntimeWorld): (port: chrome.runtime.Port) => 
     }
     // One runtime per page. Two can meet when a handover and a reconnect
     // cross (a holder's port down for the moment, the other world's
-    // runtime injected beside it): the one that does not fit the mode is
-    // retired, and the winner, whose stylesheets the loser's teardown may
-    // take, reboots. The page's mark is only a hint; this is the decision.
+    // runtime injected beside it, the holder reconnecting later): the one
+    // that does not fit the mode is retired, whichever connected first,
+    // and the survivor reboots if the loser had run, since the loser's
+    // teardown takes stylesheets and tokens the survivor's rules share
+    // (arbitrate.ts).
+    // The page's mark is only a hint; this is the decision.
     const rival = [...runtimePorts].find(([, r]) => r.tabId === tabId && r.world !== world);
     if (rival) {
       const [rivalPort, { world: rivalWorld }] = rival;
-      const keep = worldFor(modeNow);
-      if (rivalWorld === keep) {
-        post(port, { type: 'retire' });
+      const verdict = arbitrate(rivalWorld, world, modeNow);
+      if (verdict?.retire === 'incoming') {
+        retireFor(port, rivalPort);
         return;
       }
-      post(rivalPort, { type: 'retire' });
       runtimePorts.delete(rivalPort);
       runtimePorts.set(port, { tabId, world });
       port.onDisconnect.addListener(() => { runtimePorts.delete(port); });
-      post(port, { type: 'reboot' });
+      retireFor(rivalPort, port);
       return;
     }
     runtimePorts.set(port, { tabId, world });

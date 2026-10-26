@@ -86,6 +86,19 @@ export type ToRuntime = { type: 'sync' } | { type: 'reboot' } | { type: 'retire'
 /** The port a full-mode runtime opens to the worker, which nudges it there. */
 export const RUNTIME_PORT = 'shim-runtime';
 
+/**
+ * What a runtime posts on its port: as it retires, whether it had run any
+ * shim, so the worker reboots a surviving rival only when the teardown
+ * can have taken something the survivor shares.
+ */
+export type FromRuntime = { type: 'retiring'; booted: boolean };
+
+export function isFromRuntime(msg: unknown): msg is FromRuntime {
+  if (typeof msg !== 'object' || msg === null) return false;
+  const m = msg as { type?: unknown; booted?: unknown };
+  return m.type === 'retiring' && typeof m.booted === 'boolean';
+}
+
 export function isToRuntime(msg: unknown): msg is ToRuntime {
   if (typeof msg !== 'object' || msg === null) return false;
   const type = (msg as { type?: unknown }).type;

@@ -163,10 +163,12 @@ async function main(): Promise<void> {
     const tabId = tabs[0];
     check('the strict page is open', typeof tabId === 'number');
     if (typeof tabId === 'number') {
+      const before = await strictView(strict);
       await worker.evaluate(async (id) => { await chrome.scripting.executeScript({ target: { tabId: id }, files: ['shim-core.page.js', 'content.js'] }); }, tabId);
       await sleep(1500);
       const v = await strictView(strict);
       check('the page keeps the handler shim, the hide and the spec stylesheet', v.badge !== null && v.ad === 'none' && v.outline === 'rgb(0, 128, 0)', v);
+      check('and the holder was not rebooted for a newcomer that never ran (no extra cleanup, no extra visit)', v.cleanups === before.cleanups && v.badge === before.badge, { before, v });
       const sheets = await strict.evaluate(() => document.querySelectorAll('style[data-shim^="patch-"]').length);
       check('one spec stylesheet', sheets === 1, sheets);
       const isolated = await worker.evaluate(async (id) => {
