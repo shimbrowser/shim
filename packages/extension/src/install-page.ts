@@ -8,7 +8,7 @@
 // page's CSP permits no eval, and the handler-module check needs it.
 
 import type { PreparedInstall, InstallRefusal } from './install';
-import { currentMode } from './capabilities';
+import type { ExtensionMode } from './capabilities';
 import { isPrepareAnswer, PREPARE_READY, PREPARE_PING, type PrepareRequest } from './prepare';
 import type { ToWorker, WorkerAnswer } from './messages';
 
@@ -65,9 +65,17 @@ function waitForSandbox(deadline: number): Promise<void> {
 let lastToken = 0;
 
 /** Prepare `text` in the sandbox. Answers are matched by token, so a slower earlier file never answers a later one. */
+/** The mode in force, from the worker, which is the one that measures it. */
+async function modeInForce(): Promise<ExtensionMode> {
+  const answer = await ask({ type: 'mode' });
+  if (!answer.ok || !('mode' in answer)) throw new Error(`could not read the mode: ${answer.ok ? 'no mode in the answer' : answer.error}`);
+  return answer.mode;
+}
+
 async function prepare(text: string): Promise<PreparedInstall | InstallRefusal> {
   const token = ++lastToken;
   const deadline = Date.now() + PREPARE_TIMEOUT_MS;
+  const mode = await modeInForce();
   await waitForSandbox(deadline);
   return new Promise((resolve, reject) => {
     const done = (): void => {
@@ -84,7 +92,7 @@ async function prepare(text: string): Promise<PreparedInstall | InstallRefusal> 
       reject(new Error('the install check did not answer'));
     }, Math.max(0, deadline - Date.now()));
     window.addEventListener('message', onAnswer);
-    const request: PrepareRequest = { type: 'prepare', token, text, mode: currentMode() };
+    const request: PrepareRequest = { type: 'prepare', token, text, mode };
     sandbox.contentWindow?.postMessage(request, '*');
   });
 }

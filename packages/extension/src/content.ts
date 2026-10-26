@@ -146,10 +146,12 @@ interface Runtime {
   // whose priority moved boots again (reconcile.ts).
   const controls = new Map<string, { control: PatchControl; priority: number }>();
 
-  const boot = (shim: BundledShim, mode: BundleAnswer['mode']): void => {
+  const boot = (shim: BundledShim): void => {
     try {
-      // Only full mode sends handler source, and only there does it compile.
-      const { handlers, problems } = mode === 'full' ? compileHandlers(shim.handlers, shim.id) : { handlers: {}, problems: [] };
+      // The worker sends handler source only to a runtime in the
+      // user-script world, where it compiles; an isolated-world runtime
+      // gets none and compiles nothing.
+      const { handlers, problems } = compileHandlers(shim.handlers, shim.id);
       for (const problem of problems) {
         console.error(`[shim] handler "${problem.name}" of ${shim.id} did not compile: ${problem.error}`);
         emit(shim.id, 'handler-compile-failed', { specId: shim.id, handler: problem.name, error: problem.error, path: location.pathname });
@@ -188,7 +190,7 @@ interface Runtime {
     const priorities = new Map([...controls].map(([id, r]) => [id, r.priority]));
     const { stop: gone, start } = reconcileShims(priorities, bundle.shims);
     for (const id of gone) stop(id);
-    for (const shim of start) boot(shim, bundle.mode);
+    for (const shim of start) boot(shim);
   };
   let chain: Promise<void> = Promise.resolve();
   const sync = (): void => {

@@ -59,24 +59,40 @@ export function capabilitiesFor(mode: ExtensionMode): PageHostCapabilities {
 }
 
 /**
- * Is `chrome.userScripts` usable here? The API is present only while the
- * user allows user scripts for this extension (the per-extension toggle on
- * chrome://extensions from Chrome 138, developer mode before that): with
- * it off, the property is undefined, and some versions throw on the read.
- * Flipping the toggle reloads the extension, so one read per worker boot
- * is the mode for that worker's life.
+ * The user-scripts API as the mode probe sees it: present or not, and a
+ * cheap call on it that succeeds only while the user allows user scripts.
  */
-export function userScriptsAvailable(api: { userScripts?: unknown } | undefined = globalThis.chrome): boolean {
+export interface UserScriptsProbe {
+  userScripts?: { getScripts?: (filter?: { ids?: string[] }) => Promise<unknown> } | undefined;
+}
+
+/**
+ * Is `chrome.userScripts` usable here? Presence is not enough: after a
+ * fresh load with user scripts disallowed the property is absent (or the
+ * read throws), but while the user flips the toggle under a running
+ * extension (no reload) the object stays and every call on it throws
+ * "not available in this context". So the mode is a call, not a read: the
+ * cheapest one, a filtered getScripts for no ids.
+ */
+export async function userScriptsAvailable(api: UserScriptsProbe | undefined = globalThis.chrome as UserScriptsProbe | undefined): Promise<boolean> {
   try {
-    return api !== undefined && api.userScripts !== undefined && api.userScripts !== null;
+    const userScripts = api?.userScripts;
+    if (!userScripts || typeof userScripts.getScripts !== 'function') return false;
+    await userScripts.getScripts({ ids: [] });
+    return true;
   } catch {
     return false;
   }
 }
 
-/** The mode this browser runs in: full while user scripts are allowed, declarative otherwise. */
-export function currentMode(): ExtensionMode {
-  return userScriptsAvailable() ? 'full' : 'declarative';
+/**
+ * The mode this browser runs in right now: full while user scripts are
+ * allowed, declarative otherwise. The toggle fires no event and reloads
+ * nothing, so the worker asks again on every navigation and message and
+ * reconciles when the answer changes.
+ */
+export async function detectMode(api?: UserScriptsProbe | undefined): Promise<ExtensionMode> {
+  return (await userScriptsAvailable(api)) ? 'full' : 'declarative';
 }
 
 /** How a user turns full mode on, for the popup and for a refusal. */

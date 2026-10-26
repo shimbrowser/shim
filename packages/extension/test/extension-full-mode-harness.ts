@@ -301,7 +301,59 @@ async function main(): Promise<void> {
     await page.close();
   }
 
-  console.log('the toggle flipped off with shims installed:');
+  console.log('the toggle flipped off, live (no restart), with shims installed and pages open:');
+  {
+    // The toggle fires no event and reloads nothing: the running worker
+    // keeps a chrome.userScripts whose calls throw, user scripts go inert,
+    // and nothing is registered for declarative mode until the worker
+    // measures again, which it does on the next navigation or message.
+    const v0 = await applyView(apply);
+    const s0 = await strictView(strict);
+    check('both pages carry the shims', v0.ad === 'none' && v0.root === 1 && s0.badge !== null, { v0, s0 });
+    check('disallowing user scripts answers ok', (await configureExtension(ctx, extId, { userScriptsAccess: false })) === 'ok');
+    check('the worker was not reloaded', (await worker.evaluate(() => 'alive').catch(() => 'gone')) === 'alive');
+    const page = await ctx.newPage();
+    await page.goto(`${origin}/apply`);
+    const v1 = await settle(() => applyView(page), (v) => v.ad === 'none');
+    check('a page loaded after the flip runs the declarative shim (the navigation made the worker measure again)', v1.ad === 'none', v1);
+    check('and not the shim with handlers', v1.root === 0 && v1.original !== 'none', v1);
+    const dReg = Date.now() + 5000;
+    while (Date.now() < dReg && (await contentScripts()).length !== 1) await sleep(100);
+    check('one content script is registered, for the declarative shim', (await contentScripts()).length === 1);
+    await page.reload();
+    const v2 = await settle(() => applyView(page), (v) => v.ad === 'none');
+    check('a reload runs it as a content script', v2.ad === 'none' && v2.root === 0, v2);
+    const popup = await popupOf(ctx, extId);
+    check('the popup names declarative mode', ((await popup.textContent('#mode')) ?? '').startsWith('declarative mode'));
+    const pills = await popup.$$eval('#list .card', (cards) => cards.map((c) => ({ name: c.querySelector('.name')?.textContent, pill: c.querySelector('.pill')?.textContent ?? null })));
+    check('and the shim with handlers shows "needs user scripts"', pills.some((p) => p.name === 'Scripted fixture' && p.pill === 'needs user scripts'), pills);
+    await popup.close();
+    const open = await applySettled((v) => v.root === 0);
+    check('a page open from full mode drops its handler shim on the nudge and keeps the declarative one', open.root === 0 && open.original !== 'none' && open.ad === 'none', open);
+    const sOpen = await strictSettled((v) => v.badge === null);
+    check('on the other open page too, with the handler\'s api.cleanup run', sOpen.badge === null && sOpen.cleanups === s0.cleanups + 1, { sOpen, before: s0.cleanups });
+    await page.close();
+  }
+
+  console.log('the toggle flipped on again, live:');
+  {
+    check('allowing user scripts answers ok', (await configureExtension(ctx, extId, { userScriptsAccess: true })) === 'ok');
+    const page = await ctx.newPage();
+    await page.goto(`${origin}/apply`);
+    const v = await settle(() => applyView(page), (v) => v.ad === 'none' && v.root === 1);
+    check('a page loaded after the flip runs both shims (in the user-script world, on the navigation)', v.ad === 'none' && v.root === 1, v);
+    const dReg = Date.now() + 5000;
+    while (Date.now() < dReg && (await userScripts()).length !== 2) await sleep(100);
+    check('both are user scripts again and no content script is left', (await userScripts()).length === 2 && (await contentScripts()).length === 0);
+    await page.reload();
+    const v2 = await settle(() => applyView(page), (v) => v.ad === 'none' && v.root === 1);
+    check('a reload runs them as user scripts', v2.ad === 'none' && v2.root === 1, v2);
+    await page.close();
+    const back = await applySettled((v) => v.root === 1 && v.ad === 'none');
+    check('the page still open from full mode, nudged over its port, runs the handler shim again', back.root === 1 && back.ad === 'none', back);
+  }
+
+  console.log('the toggle flipped off, then the browser restarted:');
   {
     check('disallowing user scripts answers ok', (await configureExtension(ctx, extId, { userScriptsAccess: false })) === 'ok');
     await ctx.close();

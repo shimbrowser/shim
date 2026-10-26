@@ -37,8 +37,10 @@ developer mode there (Chrome 120 to 137). The popup says which mode is on and op
 page. Without it, the extension runs in **declarative mode** and refuses a shim with
 handler rules at install, naming the toggle. Everything declarative works in both.
 
-Flipping the toggle reloads the extension. Every installed shim is then checked against
-the mode again: one that needs full mode stops while user scripts are disallowed, stays
+Flipping the toggle fires no event and reloads nothing, so the extension measures the
+mode again on every page load and every message, and re-syncs when it changed. Every
+installed shim is checked against the mode in force: one that needs full mode stops
+while user scripts are disallowed (on open pages too, at their next sync), stays
 installed, and shows "needs user scripts" in the popup until they are allowed again.
 
 Each mode is one `PageHostCapabilities` constant (`EXTENSION_CAPABILITIES`,

@@ -22,6 +22,8 @@ export type ToWorker =
   | { type: 'storage'; method: StorageMethod; shimId: string; key?: string; value?: unknown }
   /** An engine event the page reports (rule status, rebases, errors). */
   | { type: 'event'; shimId: string; kind: string; payload: Record<string, unknown> }
+  /** The install page: the mode in force, to prepare against. */
+  | { type: 'mode' }
   | { type: 'shims.list' }
   | { type: 'shims.setEnabled'; id: string; enabled: boolean }
   | { type: 'shims.uninstall'; id: string }
@@ -30,9 +32,10 @@ export type ToWorker =
 
 /**
  * One shim as the page runtime receives it: the spec with the installed id,
- * its cascade priority, and in full mode its handler modules (source, by
- * name) for the runtime to compile; empty in declarative mode, where no
- * rule needs one.
+ * its cascade priority, and its handler modules (source, by name) for the
+ * runtime to compile. The worker sends handlers only to a runtime in the
+ * user-script world, where they compile; an isolated-world runtime gets
+ * only the shims that run without one, and an empty map.
  */
 export interface BundledShim {
   id: string;
@@ -63,6 +66,7 @@ export type WorkerAnswer =
   | BundleAnswer
   | { ok: true; value: unknown }
   | { ok: true; mode: ExtensionMode; shims: ShimSummary[] }
+  | { ok: true; mode: ExtensionMode }
   | { ok: true; id: string }
   | { ok: true }
   | { ok: false; error: string };
