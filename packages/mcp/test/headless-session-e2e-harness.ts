@@ -4,7 +4,10 @@
 // drives a real Playwright Chromium against a local fixture site.
 //
 //   open a new shim on a url → check out → edit → preview (evidence) → look
-//   (view_page, evaluate_in_page) → commit (the .shim file: version, witness,
+//   (view_page, evaluate_in_page) → drive the page (interact_page: the whole
+//   page headless, trusted, popups closed, traffic not observed) and move it
+//   (navigate: the start origin only, previews re-applied, an off-site
+//   redirect contained) → commit (the .shim file: version, witness,
 //   history, deploy baseline; api.storage in its file) → end → reopen the
 //   committed .shim (its rules run again, witnesses stay out of shim.json)
 //   then `shim preview` of an unpacked folder on a new deploy: witness-less
@@ -55,6 +58,28 @@ interface ToolResult { isError?: boolean; content: Array<{ type: string; text?: 
 const PAGE = `<!doctype html><html><head><title>Tracks</title><script src="/app.js?v=1"></script></head><body>
 <div class="promo">Buy the premium plan</div>
 <ul class="tracks"><li class="track" data-id="t1">Alpha</li><li class="track" data-id="t2">Beta</li></ul>
+<button id="site-btn" onclick="this.dataset.clicks = String(Number(this.dataset.clicks || 0) + 1); this.dataset.trusted = String(event.isTrusted)">site button</button>
+<button id="hover-btn" onmouseover="var o = document.getElementById('hover-cover'), r = this.getBoundingClientRect(); o.style.cssText = 'position: fixed; z-index: 9; background: #fc0; left: ' + (r.left - 4) + 'px; top: ' + (r.top - 4) + 'px; width: ' + (r.width + 8) + 'px; height: ' + (r.height + 8) + 'px'" onclick="this.dataset.clicks = '1'">hover me</button>
+<button id="hover-cover" style="display: none" onclick="document.body.dataset.coverClicked = '1'">cover</button>
+<input id="field-a" type="text" onfocus="document.getElementById('field-b').focus()">
+<input id="field-b" type="text" value="keep me">
+<select id="sel-ok" onchange="this.dataset.changed = this.value"><option value="a">a</option><option value="b">b</option></select>
+<button id="slow-btn" onmousedown="location.href = '/slow'" onmouseup="sessionStorage.setItem('slowUp', '1')">slow</button>
+<button id="pop-btn" onclick="window.open('/popup', 'pop', 'width=300,height=200')">open a popup</button>
+<div id="frame-wrap" style="display: inline-block"><iframe id="frame" style="width: 200px; height: 80px; border: 0" srcdoc="<button style='width:100%;height:100%' onclick='parent.document.body.dataset.framed = 1'>in frame</button>"></iframe></div>
+<frame-box id="fbox" style="display: inline-block"></frame-box>
+<script>
+customElements.define('frame-box', class extends HTMLElement {
+  constructor() {
+    super();
+    const f = document.createElement('iframe');
+    f.style.cssText = 'width: 200px; height: 80px; border: 0';
+    f.srcdoc = '<input id="i" style="width: 100%; height: 70px" onkeydown="parent.document.body.dataset.framedKey = 1">';
+    this.attachShadow({ mode: 'open' }).appendChild(f);
+  }
+});
+</script>
+<div style="height: 3000px">tall</div>
 </body></html>`;
 
 async function main(): Promise<void> {
@@ -63,6 +88,24 @@ async function main(): Promise<void> {
     if (pathname === '/app.js') {
       res.writeHead(200, { 'Content-Type': 'text/javascript' });
       res.end('window.__app = 1;');
+      return;
+    }
+    if (pathname === '/away') {
+      // The site's own redirect off its origin (another host name for the
+      // same server): navigate's containment case.
+      res.writeHead(302, { Location: `http://localhost:${(server.address() as AddressInfo).port}/` });
+      res.end();
+      return;
+    }
+    if (pathname === '/late') {
+      // A page that leaves the site two seconds after it loads.
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(PAGE.replace('</body>', `<script>setTimeout(() => { location.href = 'http://localhost:${(server.address() as AddressInfo).port}/'; }, 2000);</script></body>`));
+      return;
+    }
+    if (pathname === '/slow') {
+      // A navigation held pending: the page starts to move long before it commits.
+      setTimeout(() => { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(PAGE); }, 3000);
       return;
     }
     if (pathname === '/set-cookie') {
@@ -78,6 +121,9 @@ async function main(): Promise<void> {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-headless-e2e-'));
   const visible = process.env.SHIM_HEADED === '1';
   const pages: Array<{ cookies(): Promise<unknown[]> }> = [];
+  // A hook run once right after interact_page's next locate (the race
+  // between locating an element and acting on it, made deterministic).
+  let afterLocate: ((host: HeadlessSessionPage['host']) => Promise<void>) | null = null;
 
   const control = createHeadlessControl({
     version: 'test',
@@ -88,7 +134,19 @@ async function main(): Promise<void> {
       const loaded = opened.host.waitForLoad({ timeoutMs: 15_000 });
       opened.host.reload(url);
       await loaded;
-      return { host: opened.host, close: () => opened.close() };
+      const host: HeadlessSessionPage['host'] = {
+        ...opened.host,
+        async evaluate(code, world) {
+          const r = await opened.host.evaluate(code, world);
+          if (afterLocate && code.includes('__shimHeadlessTarget = r')) {
+            const hook = afterLocate;
+            afterLocate = null;
+            await hook(opened.host);
+          }
+          return r;
+        },
+      };
+      return { host, close: () => opened.close() };
     },
   });
   const mcp = createShimMcpServer({
@@ -212,6 +270,106 @@ async function main(): Promise<void> {
     check('verify_across_pages answers requires-shim-browser', verify.isError === true && (verify.content[0]?.text ?? '').startsWith('requires-shim-browser'));
     const q = json(await call('query_page', { description: 'track list' }));
     check('query_page answers candidates', Array.isArray(q.candidates), q);
+
+    // --- drive and move the page (interact_page, navigate) --------------------
+    // Headless is unrestricted: the site's own controls take trusted input.
+    const i1 = json(await call('interact_page', { actions: [{ click: '#site-btn' }, { scroll: { by: 300 } }] }));
+    const steps1 = Array.isArray(i1.steps) ? i1.steps.filter(isRecord) : [];
+    check('interact_page drives the whole page headless (scope page)', i1.scope === 'page' && steps1.length === 2 && steps1.every((st) => st.ok === true), i1);
+    check('…the site saw one trusted click', await evalInPage(`document.querySelector('#site-btn').dataset.clicks + '/' + document.querySelector('#site-btn').dataset.trusted`) === '1/true');
+    const scrolled = isRecord(steps1[1]?.scrolled) ? steps1[1].scrolled : {};
+    check('…the scroll reports requested and observed movement', scrolled.requested === 300 && typeof scrolled.observed === 'number' && scrolled.observed > 0, scrolled);
+    check('…and site traffic is reported as not observed, never as none', i1.calls === null && i1.traffic === 'not observed', i1);
+    await evalInPage(`(() => { const f = document.createElement('iframe'); f.id = 'wheel-cover'; f.srcdoc = '<div style="height:4000px">x</div>'; f.style.cssText = 'position:fixed;inset:0;width:100vw;height:100vh;border:0;z-index:99999'; document.body.append(f); return true; })()`);
+    await new Promise((r) => setTimeout(r, 300));
+    const wf = json(await call('interact_page', { actions: [{ scroll: { by: 200 } }] }));
+    const wst = Array.isArray(wf.steps) ? wf.steps.filter(isRecord)[0] : undefined;
+    const wfY = await evalInPage(`document.querySelector('#wheel-cover').contentWindow.scrollY`);
+    await evalInPage(`(document.querySelector('#wheel-cover').remove(), true)`);
+    check('a scroll over a frame is refused frame-unsupported, and the frame did not scroll', wst?.ok === false && String(wst.error).startsWith('frame-unsupported') && wfY === 0, { wf, wfY });
+    for (const sel of ['#frame', '#frame-wrap']) {
+      const fr = json(await call('interact_page', { actions: [{ click: sel }] }));
+      const st = Array.isArray(fr.steps) ? fr.steps.filter(isRecord)[0] : undefined;
+      check(`a click on ${sel} (into a frame) is refused frame-unsupported`, st?.ok === false && String(st.error).startsWith('frame-unsupported'), fr);
+    }
+    check('…and the frame got no input', await evalInPage(`document.body.dataset.framed === undefined`) === true);
+    const shadowFrame = json(await call('interact_page', { actions: [{ click: '#fbox' }] }));
+    const sf = Array.isArray(shadowFrame.steps) ? shadowFrame.steps.filter(isRecord)[0] : undefined;
+    check('a frame inside a web component\'s shadow root is refused too', sf?.ok === false && String(sf.error).startsWith('frame-unsupported'), shadowFrame);
+    await evalInPage(`(document.querySelector('#fbox').shadowRoot.querySelector('iframe').contentDocument.querySelector('#i').focus(), true)`);
+    const shadowKey = json(await call('interact_page', { actions: [{ press: 'Enter' }] }));
+    const sk = Array.isArray(shadowKey.steps) ? shadowKey.steps.filter(isRecord)[0] : undefined;
+    check('…and a key while that frame holds the focus', sk?.ok === false && String(sk.error).startsWith('frame-unsupported')
+      && await evalInPage(`document.body.dataset.framedKey === undefined`) === true, shadowKey);
+    const covered = json(await call('interact_page', { actions: [{ click: '#hover-btn' }] }));
+    const cv = Array.isArray(covered.steps) ? covered.steps.filter(isRecord)[0] : undefined;
+    check('an overlay raised by the move stops the press headless too', cv?.ok === false && /would land on button#hover-cover/.test(String(cv.error)), covered);
+    check('…and neither the target nor the overlay was clicked', await evalInPage(`document.body.dataset.coverClicked === undefined && document.querySelector('#hover-btn').dataset.clicks === undefined`) === true);
+    const redirected = json(await call('interact_page', { actions: [{ type: '#field-a', text: 'replacement', clear: true }, { click: '#site-btn' }] }));
+    const rd = Array.isArray(redirected.steps) ? redirected.steps.filter(isRecord)[0] : undefined;
+    check('typing stops when a focus handler moves focus off the field, the rest not run', rd?.ok === false && /focus moved off the target/.test(String(rd.error)) && redirected.notRun === 1, redirected);
+    check('…and the other field is untouched', await evalInPage(`document.querySelector('#field-b').value + '|' + document.querySelector('#field-a').value`) === 'keep me|');
+    const okSel = json(await call('interact_page', { actions: [{ select: '#sel-ok', value: 'b' }] }));
+    check('headless select sets the located <select>', Array.isArray(okSel.steps) && isRecord(okSel.steps[0]) && okSel.steps[0].ok === true
+      && await evalInPage(`document.querySelector('#sel-ok').dataset.changed`) === 'b', okSel);
+    // The page replaces the <select> right after it was located (a visible
+    // replacement under the same id): the replacement is never set.
+    afterLocate = async (h) => { await h.evaluate(`(() => { const o = document.querySelector('#sel-ok'); const n = o.cloneNode(true); n.removeAttribute('onchange'); n.dataset.changed = ''; n.addEventListener('change', () => { document.body.dataset.replacedChanged = '1'; }); o.replaceWith(n); return true; })()`, 'main'); };
+    const replacedSel = json(await call('interact_page', { actions: [{ select: '#sel-ok', value: 'b' }] }));
+    const rs = Array.isArray(replacedSel.steps) ? replacedSel.steps.filter(isRecord)[0] : undefined;
+    check('a <select> replaced between locating and setting is refused, the replacement untouched', rs?.ok === false && /left the page/.test(String(rs.error))
+      && await evalInPage(`document.body.dataset.replacedChanged === undefined && document.querySelector('#sel-ok').value === 'a'`) === true, replacedSel);
+    // An overlay over it at that boundary: not set either.
+    afterLocate = async (h) => { await h.evaluate(`(() => { const s = document.querySelector('#sel-ok').getBoundingClientRect(); const o = document.createElement('div'); o.id = 'sel-cover'; o.style.cssText = 'position: fixed; z-index: 9; background: red; left: ' + (s.left - 2) + 'px; top: ' + (s.top - 2) + 'px; width: ' + (s.width + 4) + 'px; height: ' + (s.height + 4) + 'px'; document.body.appendChild(o); return true; })()`, 'main'); };
+    const coveredSel = json(await call('interact_page', { actions: [{ select: '#sel-ok', value: 'b' }] }));
+    const cs = Array.isArray(coveredSel.steps) ? coveredSel.steps.filter(isRecord)[0] : undefined;
+    check('a <select> covered between locating and setting is refused, its value and handler untouched', cs?.ok === false && /covered by div#sel-cover/.test(String(cs.error))
+      && await evalInPage(`document.querySelector('#sel-ok').value === 'a' && document.body.dataset.replacedChanged === undefined`) === true, coveredSel);
+    await evalInPage(`(document.querySelector('#sel-cover').remove(), true)`);
+    // A reload to the same URL at that boundary: nothing is set on the new page.
+    afterLocate = async (h) => { const w = h.waitForLoad({ timeoutMs: 15_000 }); h.reload(); await w; };
+    const reloadedSel = json(await call('interact_page', { actions: [{ select: '#sel-ok', value: 'b' }] }));
+    const rl = Array.isArray(reloadedSel.steps) ? reloadedSel.steps.filter(isRecord)[0] : undefined;
+    check('a same-URL reload between locating and setting is refused', rl?.ok === false, reloadedSel);
+    check('…and the fresh page\'s <select> was not set', await evalInPage(`document.querySelector('#sel-ok').value === 'a' && document.querySelector('#sel-ok').dataset.changed === undefined`) === true);
+    const i2 = json(await call('interact_page', { actions: [{ click: '#pop-btn' }], settleMs: 500 }));
+    check('a popup the batch causes is closed and reported', Array.isArray(i2.linksNotOpened) && i2.linksNotOpened.length === 1, i2);
+    const slow = json(await call('interact_page', { actions: [{ click: '#slow-btn' }, { click: '#site-btn' }] }));
+    // The page has moved on by now; sessionStorage outlives the navigation.
+    const slowAfter = await evalInPage(`sessionStorage.getItem('slowUp') === null`);
+    check('a navigation that has started (not yet committed) stops the batch: no release, nothing after', Number(slow.notRun) >= 1
+      && Array.isArray(slow.steps) && slow.steps.length === 1 && slowAfter === true, { slow, slowAfter });
+    const nav1 = json(await call('navigate', { url: '/next' }));
+    check('navigate loads a page on the start origin and re-applies the previews', nav1.ok === true && nav1.onSite === true && String(nav1.url).endsWith('/next')
+      && nav1.reapplied === 2 && nav1.navigationsLeft === 19, nav1);
+    check('…the previews run on the new page', await evalInPage(`getComputedStyle(document.querySelector('.promo')).display`) === 'none');
+    // A full load the page makes itself, then straight to a fragment of the
+    // new page: the previews were never on it, so the fragment move puts
+    // them back.
+    await call('evaluate_in_page', { expression: `location.href = '/other'` });
+    await new Promise((r) => setTimeout(r, 1500));
+    const navAfterLoad = json(await call('navigate', { url: '/other#top' }));
+    check('a fragment move right after a full load re-applies the previews', navAfterLoad.ok === true && navAfterLoad.sameDocument === true && navAfterLoad.reapplied === 2, navAfterLoad);
+    check('…and they run there', await evalInPage(`getComputedStyle(document.querySelector('.promo')).display`) === 'none');
+    // The same, on a page that leaves the site while the restore settles:
+    // the final state is what's reported.
+    await call('evaluate_in_page', { expression: `location.href = '/late'` });
+    await new Promise((r) => setTimeout(r, 800));
+    const navLate = json(await call('navigate', { url: '/late#x' }));
+    check('a fragment move whose restore settles into an off-site redirect reports the final state', navLate.ok === true && navLate.onSite === false && String(navLate.url).startsWith('http://localhost:'), navLate);
+    await call('navigate', { url: `${origin}/next` });
+    const navFrag = json(await call('navigate', { url: '/next#more' }));
+    check('a fragment navigate keeps the document and its previews', navFrag.ok === true && navFrag.sameDocument === true && String(navFrag.url).endsWith('/next#more'), navFrag);
+    const navTop = json(await call('navigate', { url: '/next#' }));
+    check('an empty fragment is a same-document move too', navTop.ok === true && navTop.sameDocument === true, navTop);
+    const nav2 = json(await call('navigate', { url: 'https://example.com/' }));
+    check('navigate refuses another origin before loading', nav2.error === 'off-origin' && nav2.navigationsLeft === undefined, nav2);
+    const nav3 = json(await call('navigate', { url: '/away' }));
+    check('a redirect off the site is contained and reported', nav3.ok === true && nav3.onSite === false && nav3.redirected === true && typeof nav3.note === 'string', nav3);
+    const offSite = json(await call('query_page', { description: 'track list' }));
+    check('…the page tools refuse until it is back', offSite.error === 'page-away', offSite);
+    const nav4 = json(await call('navigate', { url: `${origin}/` }));
+    check('navigate brings it back to the site', nav4.ok === true && nav4.onSite === true, nav4);
 
     // --- commit ------------------------------------------------------------------
     const c1 = json(await call('shim_commit', { summary: 'Hid the promo and marked tracks.' }));

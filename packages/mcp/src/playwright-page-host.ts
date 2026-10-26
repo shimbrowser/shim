@@ -243,6 +243,7 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
   let worldContextId: number | null = null;
   let worldWaiters: Array<(id: number | null) => void> = [];
   let detached = false;
+  let navigations = 0;
   // Pending load waits, so detach can settle them and drop their listeners
   // at once rather than leaving them watching a page it no longer drives.
   const loadWaits = new Set<(outcome: PageLoadOutcome) => void>();
@@ -296,8 +297,13 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
   });
   cdp.on('Runtime.executionContextsCleared', () => setWorld(null));
   cdp.on('Page.frameNavigated', ({ frame }) => {
-    if (!frame.parentId) mainFrameId = frame.id;
+    if (!frame.parentId) { mainFrameId = frame.id; navigations++; }
   });
+  // Every main-frame navigation advances the count as soon as it is asked
+  // for or starts, and same-document ones too (navigationCount).
+  cdp.on('Page.frameRequestedNavigation', ({ frameId }) => { if (frameId === mainFrameId) navigations++; });
+  cdp.on('Page.frameStartedNavigating', ({ frameId }) => { if (frameId === mainFrameId) navigations++; });
+  cdp.on('Page.navigatedWithinDocument', ({ frameId }) => { if (frameId === mainFrameId) navigations++; });
   cdp.on('Runtime.bindingCalled', ({ name, payload, executionContextId }) => {
     if (name !== BINDING || executionContextId !== worldContextId) return;
     let msg: unknown;
@@ -610,6 +616,20 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
     }
   }
 
+  // Popups while someone listens (an interact_page batch): closed on
+  // creation and reported. A weaker guarantee than the browser's deny at
+  // creation: the popup exists for a moment before it closes.
+  const popupListeners = new Set<(url: string) => void>();
+  page.on('popup', (popup) => {
+    if (popupListeners.size === 0) return;
+    let url = '';
+    try { url = popup.url(); } catch { /* closing already */ }
+    void popup.close().catch(() => undefined);
+    for (const l of [...popupListeners]) {
+      try { l(url); } catch { /* a listener's throw is its own */ }
+    }
+  });
+
   const subscribe = <T>(set: Set<(v: T) => void>, listener: (v: T) => void): Unsubscribe => {
     set.add(listener);
     return () => { set.delete(listener); };
@@ -643,11 +663,14 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
     waitForLoad,
     input,
     documentToken,
+    onPopup: (listener) => subscribe(popupListeners, listener),
+    navigationCount: () => navigations,
     async detach() {
       if (detached) return;
       detached = true;
       runtimeListeners.clear();
       consoleListeners.clear();
+      popupListeners.clear();
       // A detached host reads as closed, so a pending load wait ends the way
       // it would on close — now, with its timer and page listeners removed.
       for (const settle of [...loadWaits]) settle({ kind: 'destroyed' });

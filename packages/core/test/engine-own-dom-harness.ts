@@ -41,6 +41,9 @@
 // call site, so the coverage claim is explicit rather than implied.
 
 import { isShimOwnedElement } from '../src/engine';
+import { closestOutputOwner } from '../src/own-dom';
+import * as fs from 'fs';
+import * as path from 'path';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: unknown): void {
@@ -194,7 +197,35 @@ function mountedRootsFor(...owned: unknown[]): Array<{ contains: (n: unknown) =>
   return [stubRoot(set)];
 }
 
+// The owner registry (apply-rule.ts `outputOwners`, read through
+// `outputOwnerOf`): each mounted output root records the patch it was
+// mounted under, and an element's owner is the closest registered root
+// containing it — what keeps a session's input to the held shim's own
+// controls (another shim's AI button is not the session's to press).
+function tOutputOwner() {
+  console.log('\n(g) output owner: the closest registered root names the patch');
+  const inner = stubEl();
+  const outerOnly = stubEl();
+  const site = stubEl();
+  // Shim B's output sits inside shim A's: the closer root (B) owns `inner`.
+  const rootA = stubRoot(new Set<unknown>([inner, outerOnly]));
+  const rootB = { contains: (n: unknown) => n === inner || n === rootB };
+  const rootAWithB = { contains: (n: unknown) => rootA.contains(n) || n === rootB };
+  check('an element in one root is owned by that root\'s patch', closestOutputOwner(outerOnly, [[rootAWithB, 'shim-a'], [rootB, 'shim-b']]) === 'shim-a');
+  check('nested roots: the closest (innermost) root wins, whatever the order', closestOutputOwner(inner, [[rootAWithB, 'shim-a'], [rootB, 'shim-b']]) === 'shim-b'
+    && closestOutputOwner(inner, [[rootB, 'shim-b'], [rootAWithB, 'shim-a']]) === 'shim-b');
+  check('site DOM has no owner', closestOutputOwner(site, [[rootAWithB, 'shim-a'], [rootB, 'shim-b']]) === null);
+  check('a marker alone names no owner (marker DOM is spoofable)', closestOutputOwner(stubEl({ markers: ['data-shim-mounted'] }), []) === null);
+  check('a root without contains is skipped', closestOutputOwner(inner, [[{}, 'x']]) === null);
+  // The registry stays in step with mountedOutputRoots: set on mount (under
+  // the spec id), deleted on teardown.
+  const src = fs.readFileSync(path.join(__dirname, '..', '..', '..', '..', 'packages', 'core', 'src', 'apply-rule.ts'), 'utf8');
+  check('mountOn records each output root\'s owner as the spec id', /mountedOutputRoots\.add\(o\);\s*outputOwners\.set\(o, spec\.id\);/.test(src));
+  check('teardown forgets the owner with the root', /mountedOutputRoots\.delete\(node\);\s*outputOwners\.delete\(node\);/.test(src));
+}
+
 tContainedByRoot();
+tOutputOwner();
 tClosestHitsMounted();
 tSiteTierOneTargetNotOwned();
 tReplaceRootAnchorNotOwned();

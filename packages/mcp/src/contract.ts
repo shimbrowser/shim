@@ -210,8 +210,9 @@ export const SERVER_INSTRUCTIONS =
   'both against the running Shim browser: shim_status / shim_launch, shim_list_tabs, shim_open_session on a ' +
   'site tab (a shim) or a composition (the user allows it in Shim), shim_checkout into a folder, edit the ' +
   'files (shim.json and handlers/*.js; or manifest.json and the composition\'s files), shim_preview to apply ' +
-  'the folder and read the evidence, the page tools (view_page, query_page, inspect_element, interact_page ' +
-  'for a composition, …) to look, then shim_commit with a summary, and shim_end_session. For a visual change, ' +
+  'the folder and read the evidence, the page tools (view_page, query_page, inspect_element, …) to look, ' +
+  'interact_page to use the shim\'s own controls (or a composition\'s preview) and navigate to move within the ' +
+  'site, then shim_commit with a summary, and shim_end_session. For a visual change, ' +
   'verify with a screenshot before committing. When the work needs a site\'s own API, the API map tools ' +
   '(list_discovered_hosts, request_sources, search_discovered_api, inspect_endpoint, replay_endpoint) read ' +
   'what Shim recorded of it, per site the user grants. inspect_storage and query_db read what the work has ' +

@@ -138,9 +138,11 @@ never applied with different behavior.
 
 Tools that need the Shim browser answer `requires-shim-browser` in a headless session:
 opening a shim from Shim's library, compositions and their tools (`probe_request`,
-`read_calls`, `verify_mint`), `verify_across_pages`, `interact_page`, the API map tools and
-the data tools. A headless-only server (`--headless`) also refuses `shim_launch` and
-`shim_list_tabs`.
+`read_calls`, `verify_mint`), `verify_across_pages`, the API map tools and the data tools.
+A headless-only server (`--headless`) also refuses `shim_launch` and `shim_list_tabs`.
+`interact_page` and `navigate` work headless too; there `interact_page` may drive the whole
+page (`scope: "page"`), while in an attach session it drives only the held shim's own
+controls (`scope: "shim-dom"`).
 
 ## The loop, tool by tool
 
@@ -192,7 +194,7 @@ All tools are registered when the server starts:
 | Group | Tools |
 |---|---|
 | Session | `shim_status`, `shim_launch`, `shim_list_tabs`, `shim_open_session`, `shim_checkout`, `shim_preview`, `shim_commit`, `shim_end_session` |
-| Page | `view_page`, `query_page`, `inspect_element`, `evaluate_in_page`, `read_console`, `reload_page`, `verify_across_pages`, `interact_page` (composition sessions only) |
+| Page | `view_page`, `query_page`, `inspect_element`, `evaluate_in_page`, `read_console`, `reload_page`, `verify_across_pages`, `interact_page` (a composition's preview; in a shim session, the held shim's own controls — the whole page headless), `navigate` (shim sessions: another page on the session's start origin) |
 | API map | `list_discovered_hosts`, `request_sources`, `search_discovered_api`, `inspect_endpoint`, `replay_endpoint` |
 | Data | `inspect_storage`, `query_db` (read-only), `read_sibling_shim` (shim sessions only; the shim's own pack) |
 | Composition | `probe_request`, `read_calls`, `verify_mint` (composition sessions only) |

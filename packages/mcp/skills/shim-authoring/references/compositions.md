@@ -187,7 +187,8 @@ A refused preview answers `applied: false` with `error` and `problems`:
   load failures and console errors.
 - **`interact_page { actions }`** — click, type, select or press in the preview with real
   input (up to 10 actions). Use it to exercise behavior, then check the result with
-  `query_page` / `inspect_element` and `view_page`.
+  `query_page` / `inspect_element` and `view_page`. (`scroll` steps and `navigate` are
+  shim-session tools; a composition session answers `navigate` with `shim-only`.)
 - **`read_calls { all?, limit? }`** — the requests the page made through `api.fetch`:
   method, host, path template, status — never a body. By default only calls from
   documents running your latest code. **A data feature is verified when its call is here

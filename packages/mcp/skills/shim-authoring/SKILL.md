@@ -107,6 +107,8 @@ What to know about a session:
   `evaluate_in_page` runs there too. Anything they do to the site — a click, a form
   submission, a request that changes data — is real and is not undone when the session
   ends. Read freely; never take actions on the user's account they didn't ask for.
+- **Drive your own UI with `interact_page`, move with `navigate`** (section 4). Never
+  dispatch events, call `click()` or set `location` from `evaluate_in_page`.
 - **Shim never uses your Claude Code login**, and a session never spends the user's own
   Anthropic key.
 
@@ -252,9 +254,10 @@ All of them act on the session's tab.
 - **`evaluate_in_page { expression }`** — a read-only JavaScript REPL in the page's main
   world. Pass an expression, or a statement body that `return`s its value (`await` works
   in both). Return primitives or plain objects, not DOM nodes. For counts
-  under a computed criterion, `getComputedStyle`, sampling site globals. Never use it to
-  change the page — that is what the folder is for — and remember it runs as the user.
-  Capped at 5000 characters in, 8000 out, 3 seconds.
+  under a computed criterion, `getComputedStyle`, sampling site globals. It is for
+  reading: never use it to change the page (that is what the folder is for), dispatch
+  events, call `click()` or set `location` — `interact_page` and `navigate` do that — and
+  remember it runs as the user. Capped at 5000 characters in, 8000 out, 3 seconds.
 - **`view_page { selector? }`** — a screenshot, as an image. With `selector`, a crop of that
   element plus margin at native resolution (the verification shot; an element below the
   fold is scrolled into view for the shot and the scroll put back); without, the visible
@@ -293,9 +296,13 @@ All of them act on the session's tab.
   visited routes, never a crawl. Use it after a clean preview when the target recurs across
   views ("on every post"). Report honestly: matched → verified there; your rule no-match
   → it does not apply there (likely different markup); unvisited page-types → unverified.
-- `interact_page` is for composition sessions (`references/compositions.md`); a shim
-  session refuses it with `composition-only` (headless: `requires-shim-browser`). So are
-  `probe_request`, `read_calls` and `verify_mint`.
+- **`interact_page { actions }`** — your shim's own UI with trusted input (click, type,
+  select, press, a small scroll); in attach it touches only your shim's own output.
+  **`navigate { url }`** loads another page of the start origin. Read
+  `references/page-driving.md` first.
+- `probe_request`, `read_calls` and `verify_mint` are for composition sessions
+  (`references/compositions.md`); a shim session refuses them with `composition-only`
+  (headless: `requires-shim-browser`).
 - **The site's own API and the shim's saved data** — the API map tools
   (`list_discovered_hosts`, `request_sources`, `search_discovered_api`, `inspect_endpoint`,
   `replay_endpoint`) and the data tools (`inspect_storage`, `query_db`,
@@ -482,4 +489,5 @@ a file **before** the work it covers, not after a preview goes wrong: a guessed 
 | `references/network-and-modules.md` | a `redirect`, `rewrite-response` or `intercept` rule |
 | `references/site-data.md` | using the site's own API (the API map tools), or reading what a shim saved (`inspect_storage`, `query_db`, `read_sibling_shim`) |
 | `references/compositions.md` | any composition session |
+| `references/page-driving.md` | `interact_page` (your shim's own controls, scroll) or `navigate` in a shim session: what each may touch, the refusal codes, what stops a batch |
 | `references/headless.md` | a headless session: `shim_status` offers only headless, an open answers `mode: "headless"`, or the user wants a standalone `.shim` file |

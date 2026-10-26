@@ -10,8 +10,9 @@
 //   API map tools  forwarded the same way (D13) — Shim asks the user for
 //                  each level of access on its own cards
 //   composition    probe_request, read_calls, verify_mint — forwarded the
-//   tools          same way; a shim session refuses them (and interact_page)
-//                  as composition-only
+//   tools          same way; a shim session refuses them as composition-only
+//                  (interact_page and navigate are page tools: a shim session
+//                  drives its own shim's controls and moves within its site)
 //
 // Three server modes, one tool contract (D2; modes.ts): attach drives the
 // Shim browser over its control endpoint; headless drives headless-control.ts,

@@ -20,9 +20,12 @@ The loop is the same, with three differences:
   the `.shim` file `shimFile`: an existing one is loaded and its rules run on the page at
   once; with `newShimName` a new shim starts there (default `<dir>.shim`). A headless
   session has no tabs and no shim library, so `shimId` answers `requires-shim-browser`,
-  and so do `verify_across_pages`, `interact_page`, compositions and their
-  tools, the API map tools and the data tools (`references/site-data.md`). A headless-only server also
-  refuses `shim_list_tabs` and `shim_launch`.
+  and so do `verify_across_pages`, compositions and their tools, the API map tools and
+  the data tools (`references/site-data.md`). A headless-only server also refuses
+  `shim_list_tabs` and `shim_launch`. `interact_page` drives the **whole page** headless
+  (`scope: "page"`, top frame only) — the site's own controls too, since nothing there is
+  the user's account; use it to test SPA navigation or a site toggle your shim reacts to.
+  A popup it causes is closed and reported. `navigate` works as in attach.
 - **`shim_commit` writes the file**: a new version, with its history and what the session
   verified. `api.storage` lives in `<shimFile>.storage.json`. Hand the `.shim` file to the
   user; they import it into Shim.

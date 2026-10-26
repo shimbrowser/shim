@@ -282,6 +282,23 @@ export interface PageHost {
    * no document the host can read (closed, mid-load).
    */
   documentToken(): Promise<string | null>;
+
+  /**
+   * A count of the page's main-frame navigations, advanced as each one is
+   * requested or started (before it commits) and for same-document ones
+   * (pushState, fragments). Synchronous, for a caller that must stop the
+   * moment the page starts to move. Optional: a host without it leaves the
+   * caller to the document token and URL.
+   */
+  navigationCount?(): number;
+
+  /**
+   * While at least one listener is subscribed, every popup or new window the
+   * page opens is closed as soon as it is created and reported with the URL
+   * it was opened at. Optional: a host that blocks opens elsewhere (the Shim
+   * browser denies them at creation) has no need of it.
+   */
+  onPopup?(listener: (url: string) => void): Unsubscribe;
 }
 
 /**

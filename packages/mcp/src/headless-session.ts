@@ -66,6 +66,10 @@ import {
   QUERY_TIMEOUT_MS, INSPECT_TIMEOUT_MS, EVALUATE_TIMEOUT_MS,
 } from '@shimbrowser/core/page-host-tools';
 import { REQUIRES_SHIM_BROWSER } from './playwright-page-host';
+import {
+  runInteract, locateScript, OBSERVE_START_SCRIPT, OBSERVE_READ_SCRIPT, type InteractDeps,
+} from '@shimbrowser/core/interact';
+import { navigationScopeOf, runNavigate, isSameDocumentNavigation, type NavigationState, type NavigateLoad } from '@shimbrowser/core/navigate-scope';
 
 // How long the page gets to react after an apply before the evidence is read:
 // the Shim browser's window (APPLY_SETTLE_MS), above the engine's 1.5s
@@ -79,8 +83,7 @@ const EVENT_CAP = 2000;
 
 /** Page tools that need a Shim browser subsystem (D2: they answer requires-shim-browser headless). */
 export const BROWSER_ONLY_PAGE_TOOLS: Readonly<Record<string, string>> = Object.freeze({
-  verify_across_pages: 'verify_across_pages loads other pages of the site in a hidden Shim tab; headless mode has one page. Navigate with reload_page or check each page yourself.',
-  interact_page: 'interact_page drives a composition\'s preview, and compositions run only in the Shim browser.',
+  verify_across_pages: 'verify_across_pages loads other pages of the site in a hidden Shim tab; headless mode has one page. Move it with navigate and check each page yourself.',
 });
 
 /** One page a session works on, and how to let go of it. */
@@ -199,6 +202,8 @@ export interface HeadlessHandle {
   /** The token marking the document the live previews were applied to (see documentChanged). */
   docToken: string | null;
   docTokens: number;
+  /** navigate's fixed scope (the start origin) and budget. */
+  navigation: NavigationState;
 }
 
 // A document's mark, kept in the engine world: that world is created afresh
@@ -792,9 +797,266 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
       }
       case 'reload_page':
         return JSON.stringify(await reloadPage(handle, signal));
+      case 'interact_page': {
+        const away = await guardOr();
+        if (away) return away;
+        return JSON.stringify(await interactPage(handle, input, signal));
+      }
+      case 'navigate':
+        return JSON.stringify(await runNavigate(input, handle.navigation, (url) => navigatePage(handle, url, signal)));
       default:
         return JSON.stringify({ error: `unknown tool "${name}"` });
     }
+  }
+
+  // Frame tags interact_page never sends input into (top frame only).
+  const FRAME_TAGS = new Set(['iframe', 'frame', 'object', 'embed']);
+  // Both follow open shadow roots down to the element that really takes the
+  // input: a frame inside a web component is still a frame. (A closed shadow
+  // root can't be looked into — an accepted residual.)
+  const frameAtPointScript = (x: number, y: number): string => `(() => {
+    const X = ${JSON.stringify(x)}, Y = ${JSON.stringify(y)};
+    let h = document.elementFromPoint(X, Y);
+    for (let i = 0; h && h.shadowRoot && i < 32; i++) { const inner = h.shadowRoot.elementFromPoint(X, Y); if (!inner || inner === h) break; h = inner; }
+    return !!h && ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'].includes(h.tagName);
+  })()`;
+  // true when the remembered target is still connected, enabled and what
+  // the point hits (it or a descendant); else what the point hits instead.
+  const targetAtPointScript = (x: number, y: number): string => `(() => {
+    const t = globalThis.__shimHeadlessTarget;
+    if (!t || !t.isConnected) return 'nothing (the target left the page)';
+    if (t.matches(':disabled')) return 'a disabled target';
+    const h = document.elementFromPoint(${JSON.stringify(x)}, ${JSON.stringify(y)});
+    if (h && (h === t || t.contains(h))) return true;
+    return h ? h.tagName.toLowerCase() + (h.id ? '#' + h.id : '') : 'nothing hit-testable';
+  })()`;
+  // true when the deep focused element is the remembered target or inside it.
+  const FOCUS_ON_TARGET_SCRIPT = `(() => {
+    const t = globalThis.__shimHeadlessTarget;
+    let a = document.activeElement;
+    for (let i = 0; a && a.shadowRoot && a.shadowRoot.activeElement && i < 32; i++) a = a.shadowRoot.activeElement;
+    return !!t && t.isConnected && !!a && (a === t || t.contains(a));
+  })()`;
+  // Sets the remembered <select> (connected, still visible) to `value` and
+  // fires input + change.
+  const rememberedSelectScript = (value: string): string => `(() => {
+    const el = globalThis.__shimHeadlessTarget;
+    if (!el || !el.isConnected) return { error: 'the <select> left the page before the option was set' };
+    if (el.tagName !== 'SELECT') return { error: 'the target is not a <select> — use click' };
+    const r = el.getBoundingClientRect(), cs = getComputedStyle(el);
+    if (!(r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none')) return { error: 'the <select> is no longer visible' };
+    const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    if (!top || !(top === el || el.contains(top))) return { error: 'the <select> is covered by ' + (top ? top.tagName.toLowerCase() + (top.id ? '#' + top.id : '') : 'nothing hit-testable') + ' — nothing was set' };
+    const want = ${JSON.stringify(value)};
+    const opt = Array.from(el.options).find((o) => o.value === want || o.text.trim() === want);
+    if (!opt) return { error: 'no option ' + JSON.stringify(want) };
+    if (el.matches(':disabled') || opt.matches(':disabled')) return { error: 'option ' + JSON.stringify(want) + ' is disabled — a user could not pick it' };
+    el.value = opt.value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return { ok: true };
+  })()`;
+  const FOCUS_IN_FRAME_SCRIPT = `(() => {
+    let a = document.activeElement;
+    for (let i = 0; a && a.shadowRoot && a.shadowRoot.activeElement && i < 32; i++) a = a.shadowRoot.activeElement;
+    return !!a && ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'].includes(a.tagName);
+  })()`;
+
+  // interact_page, headless: the whole page (scope "page"), top frame only —
+  // the agent's own browser, no logins, a page it named. Trusted input
+  // through the host; a popup the batch causes is closed on creation and
+  // reported (a weaker guarantee than the browser's deny at creation). The
+  // page's requests are not observed, and the report says so.
+  async function interactPage(handle: HeadlessHandle, input: unknown, signal: AbortSignal): Promise<unknown> {
+    const host = handle.host;
+    const send = host.input?.bind(host);
+    if (!send) return { error: 'interaction-unavailable', detail: 'this page cannot take trusted input' };
+    let token: string | null = null;
+    let point: { x: number; y: number } | null = null;
+    const popups: string[] = [];
+    const offPopup = host.onPopup?.((url) => { popups.push(url || 'a new window'); }) ?? (() => {});
+    const engine = async (code: string): Promise<unknown> => host.evaluate(code, 'engine');
+    const deps: InteractDeps = {
+      guard: () => pageAway(handle),
+      // A new document (its token) or a same-document URL change ends the batch.
+      // The token and URL, plus the host's navigation count when it has one:
+      // a navigation that has started but not committed yet (a slow page)
+      // already moves it, and so does one away and back during a settle.
+      currentDocument: () => (token === null ? null : `${token} ${host.url()} ${host.navigationCount?.() ?? ''}`),
+      async syncDocument() { token = await host.documentToken(); },
+      policy: {
+        accepts: (doc) => doc !== null,
+        refused: { error: 'no-document', detail: 'the page has no document to drive yet — try again once it has loaded' },
+        lost: 'the page navigated',
+        stopped: 'the session ended',
+        unavailable: 'trusted input could not be sent to the page',
+      },
+      aborted: () => signal.aborted || host.isClosed(),
+      async locate(selector) {
+        point = null;
+        try {
+          // Located and remembered in one synchronous script (the press is
+          // later checked against THIS element, never a fresh match).
+          const raw = await engine(`(() => { const r = ${locateScript(selector)}; globalThis.__shimHeadlessTarget = r && r.count === 1 ? document.querySelector(${JSON.stringify(selector)}) : null; return r; })()`);
+          if (!isRecord(raw)) return { error: 'the page could not be read' };
+          const loc = raw as unknown as Awaited<ReturnType<InteractDeps['locate']>>;
+          if ('error' in loc || loc.count !== 1 || typeof loc.x !== 'number' || typeof loc.y !== 'number') return loc;
+          // Top frame only: a frame (or a frame inside the selected element,
+          // where the press would land) is refused before any input.
+          const frame = await engine(frameAtPointScript(loc.x, loc.y));
+          if (FRAME_TAGS.has(String(loc.tag)) || frame === true) {
+            return { ...loc, refused: `frame-unsupported: ${selector} is (or puts the press on) a frame; interact_page reaches only the top frame` };
+          }
+          point = { x: loc.x, y: loc.y };
+          return loc;
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : 'the page could not be read' };
+        }
+      },
+      // Re-checked at the press, the release and every key: input never goes
+      // into a child frame (a frame that moved under the point, or a frame
+      // holding the focus).
+      async boundaryCheck(command, action) {
+        const kind = String(command.params.type ?? '');
+        // A wheel goes to whatever is under its own point: a frame there
+        // would take the scroll.
+        if (command.method === 'Input.dispatchMouseEvent' && kind === 'mouseWheel') {
+          const x = Number(command.params.x), y = Number(command.params.y);
+          if ((await engine(frameAtPointScript(x, y)).catch(() => true)) === true) {
+            return 'frame-unsupported: the scroll would land on a frame — the rest was not sent';
+          }
+          return null;
+        }
+        if (command.method === 'Input.dispatchMouseEvent' && (kind === 'mousePressed' || kind === 'mouseReleased')) {
+          if (!point) return null;
+          if ((await engine(frameAtPointScript(point.x, point.y)).catch(() => true)) === true) {
+            return 'frame-unsupported: the press would land on a frame — the rest was not sent';
+          }
+          // Still the located element under the point: a hover menu or a
+          // layout shift since locating must not take the click.
+          const hit = await engine(targetAtPointScript(point.x, point.y)).catch(() => null);
+          return hit === true ? null : `the press would land on ${typeof hit === 'string' ? hit : 'something else'}, not the target (an overlay or a layout shift moved in) — the rest was not sent`;
+        }
+        if (command.method === 'Input.dispatchKeyEvent' || command.method === 'Input.insertText') {
+          if ((await engine(FOCUS_IN_FRAME_SCRIPT).catch(() => true)) === true) {
+            return 'frame-unsupported: the focus is inside a frame — keys and text reach only the top frame';
+          }
+          // Typing (its clear and its text) goes to the located field and
+          // nowhere else: a focus handler that moved focus stops it.
+          if ('type' in action && (await engine(FOCUS_ON_TARGET_SCRIPT).catch(() => false)) !== true) {
+            return 'the focus moved off the target before the text went out — the rest was not sent';
+          }
+        }
+        return null;
+      },
+      async selectValue(_selector, value) {
+        try {
+          // The element located (and checked visible, uncovered) for this
+          // action, never a fresh match; one that left the page — replaced,
+          // or gone with a reload — is refused.
+          const pinnedToken = token;
+          token = await host.documentToken();
+          if (token !== pinnedToken) return { error: 'the page changed before the option was set' };
+          const out = await engine(rememberedSelectScript(value));
+          if (isRecord(out) && out.ok === true) return { ok: true };
+          return { error: isRecord(out) && typeof out.error === 'string' ? out.error : 'the option could not be set' };
+        } catch (e) {
+          return { error: e instanceof Error ? e.message : 'the option could not be set' };
+        }
+      },
+      async dispatch(commands, pin) {
+        // The document is read afresh before every command: a reload to the
+        // same URL between two commands changes only the token, and the
+        // rest of the action must not reach the new document.
+        const result = await send(commands, async (i) => {
+          token = await host.documentToken();
+          return pin.before(i);
+        });
+        if (result.outcome === 'done') return true;
+        if (result.outcome === 'stopped') {
+          const why = pin.reason();
+          return why ? { stopped: why } : false;
+        }
+        if (result.sent === 0) throw new Error(result.error);
+        return { stopped: `interaction-unavailable: ${result.error} — the rest of the action's input was not sent` };
+      },
+      async viewport() {
+        const raw = await engine('({ width: window.innerWidth, height: window.innerHeight, scrollY: window.scrollY })').catch(() => null);
+        if (!isRecord(raw) || typeof raw.width !== 'number' || typeof raw.height !== 'number' || typeof raw.scrollY !== 'number') return null;
+        return { width: raw.width, height: raw.height, scrollY: raw.scrollY };
+      },
+      wait: (ms) => sleep(ms),
+      async startObserving() { await engine(OBSERVE_START_SCRIPT); },
+      async readObserved() {
+        const n = await engine(OBSERVE_READ_SCRIPT);
+        return typeof n === 'number' ? n : null;
+      },
+      consoleErrorsSince: (ts) => handle.console.ring()
+        .filter((e) => e.ts >= ts && e.level === 'error')
+        .map((e) => e.message.slice(0, 300)),
+      linkCursor: () => popups.length,
+      linksSince: (cursor) => popups.slice(cursor),
+      scope: 'page',
+      now: () => now(),
+      mac: process.platform === 'darwin',
+    };
+    try {
+      return await runInteract(input, deps, { scroll: true });
+    } finally {
+      offPopup();
+    }
+  }
+
+  // navigate, headless: load a page of the start origin (runNavigate checked
+  // it), then — when it landed on the session's site — re-apply the live
+  // previews on the new document, as reload_page does.
+  async function navigatePage(handle: HeadlessHandle, url: string, signal: AbortSignal): Promise<NavigateLoad> {
+    if (handle.host.isClosed()) return { ok: false, url: '', offSite: null, reapplied: 0, error: 'the session\'s page closed' };
+    // A fragment on the page already shown: no new document and no load
+    // event; the previews stay live. Wait for the URL instead.
+    if (isSameDocumentNavigation(handle.host.url(), url)) {
+      handle.host.reload(url);
+      const deadline = now() + 5000;
+      while (now() < deadline && handle.host.url() !== url && !signal.aborted && !handle.host.isClosed()) await sleep(50);
+      if (handle.host.url() !== url) return { ok: false, url: handle.host.url(), offSite: pageAway(handle), reapplied: 0, error: 'the page did not move to the fragment' };
+      const away = pageAway(handle);
+      // The document survived the fragment move, but it may not be the one
+      // the previews were last applied to (a full load since): put them back.
+      let reapplied = 0;
+      if (!away && !(await onMarkedDocument(handle))) {
+        for (const p of handle.live.values()) { apply(handle, p); reapplied++; }
+        await markDocument(handle);
+        if (reapplied > 0) await settle(signal);
+        if (signal.aborted) return { ok: false, url: handle.host.url(), offSite: null, reapplied, error: 'session ended during the navigation' };
+        if (handle.host.isClosed()) return { ok: false, url: '', offSite: null, reapplied, error: 'the page closed during the navigation' };
+      }
+      // The final state decides what is reported: the page may have left the
+      // site, or loaded another document, while the restore settled.
+      const finalAway = pageAway(handle);
+      const survived = !finalAway && (reapplied === 0 || await onMarkedDocument(handle));
+      return { ok: true, url: handle.host.url(), offSite: finalAway, reapplied, sameDocument: survived };
+    }
+    const loaded = handle.host.waitForLoad({ signal, timeoutMs: RELOAD_LOAD_TIMEOUT_MS, failures: 'main-frame' });
+    handle.host.reload(url);
+    const outcome = await loaded;
+    if (signal.aborted) return { ok: false, url: handle.host.url(), offSite: null, reapplied: 0, error: 'session ended during the navigation' };
+    if (handle.host.isClosed()) return { ok: false, url: '', offSite: null, reapplied: 0, error: 'the page closed during the navigation' };
+    if (outcome.kind !== 'finished') {
+      return { ok: false, url: handle.host.url(), offSite: pageAway(handle), reapplied: 0, error: `the page did not finish loading (${describeLoadOutcome(outcome)})` };
+    }
+    const landed = pageAway(handle);
+    if (landed) return { ok: true, url: handle.host.url(), offSite: landed, reapplied: 0 };
+    let reapplied = 0;
+    for (const p of handle.live.values()) {
+      apply(handle, p);
+      reapplied++;
+    }
+    await markDocument(handle);
+    await settle(signal);
+    if (signal.aborted) return { ok: false, url: handle.host.url(), offSite: null, reapplied, error: 'session ended during the navigation' };
+    // Where the page is after the settle decides what is reported: it may
+    // have moved off the site meanwhile (the live set waits for it).
+    return { ok: true, url: handle.host.url(), offSite: pageAway(handle), reapplied };
   }
 
   // reload_page: in place on the session's site, or back to the session's
@@ -963,6 +1225,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         off: [],
         docToken: null,
         docTokens: 0,
+        navigation: { scope: navigationScopeOf(startUrl), used: 0 },
       };
       handle.off.push(host.onRuntimeEvent((event) => {
         handle.events.push({ at: now(), event });

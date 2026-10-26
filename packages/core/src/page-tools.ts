@@ -5,7 +5,8 @@
 //   SHIM_PAGE_TOOLS         what the Shim browser's shim worker offers
 //   COMPOSITION_PAGE_TOOLS  what its composition worker offers
 //   SESSION_PAGE_TOOLS      what @shimbrowser/mcp registers statically for an
-//                           external agent (Claude Code) driving a session
+//                           external agent (Claude Code) driving a session —
+//                           including navigate, which only a session has
 //
 // The worker wordings are load-bearing: they are part of every internal
 // authoring request, and the browser's golden-request harness pins the shim
@@ -50,8 +51,11 @@ export const PAGE_TOOL_NAMES = [
   'reload_page',
   'verify_across_pages',
   'interact_page',
+  'navigate',
 ] as const;
 export type PageToolName = (typeof PAGE_TOOL_NAMES)[number];
+/** The page tools a Shim browser worker can offer: every one but navigate, which only an external session has. */
+export type WorkerPageToolName = Exclude<PageToolName, 'navigate'>;
 
 // --- evaluate_in_page ---------------------------------------------------------
 //
@@ -485,7 +489,7 @@ export const COMPOSITION_PAGE_TOOLS = {
   reload_page: COMPOSITION_RELOAD_PAGE,
   view_page: COMPOSITION_VIEW_PAGE,
   verify_across_pages: COMPOSITION_VERIFY_ACROSS_PAGES,
-} as const satisfies Record<PageToolName, ToolDefinition>;
+} as const satisfies Record<WorkerPageToolName, ToolDefinition>;
 
 // --- the session (external agent) wording ---------------------------------------
 //
@@ -581,7 +585,9 @@ const SESSION_EVALUATE_IN_PAGE: ToolDefinition = makeEvaluateTool(
   'not visible. Use sparingly, only when query_page / inspect_element ' +
   "can't answer the question — examples: count of elements matching a " +
   'computed criterion, getComputedStyle of a specific property, sampling ' +
-  'site globals to understand the page. ',
+  'site globals to understand the page. It is for reading: never dispatch ' +
+  'events, call click(), or set location with it — drive the page with ' +
+  'interact_page and move it with navigate. ',
   'shim_preview',
 );
 
@@ -668,20 +674,80 @@ const SESSION_VERIFY_ACROSS_PAGES: ToolDefinition = {
 const SESSION_INTERACT_PAGE: ToolDefinition = {
   name: 'interact_page',
   description:
-    'Composition sessions only (a shim session answers that the tool is not ' +
-    'offered). Use the composition preview the way the user would: click, ' +
-    'type into a field, pick an option in a <select>, or press a key. Clicks ' +
-    'and typing are real (trusted) input. Up to 10 actions run in order; each ' +
+    'Use the session\'s page the way the user would: click, type into a field, ' +
+    'pick an option in a <select>, press a key, or (shim sessions) scroll a ' +
+    'little. Clicks, typing, keys and scrolls are real (trusted) input; a ' +
+    '<select> is set through the DOM. Up to 10 actions run in order; each ' +
     'selector must match exactly one visible, enabled, uncovered element, or ' +
     'that action fails and the rest do not run. A navigation ends the batch. ' +
-    'The result reports each action, how many DOM changes followed, new ' +
-    'console errors, the calls the page made, and any link it tried to open. ' +
-    'Afterwards check the outcome with query_page / inspect_element and ' +
-    'view_page — the report says what happened, not whether it was right. ' +
-    "While a session holds the composition, the page's storage, database and " +
-    'network writes are refused, and so are its api.ai calls; nothing you do ' +
-    "here reaches the user's data.",
-  input_schema: COMPOSITION_INTERACT_PAGE.input_schema,
+    'What it may touch depends on the session (the result\'s `scope`). ' +
+    'COMPOSITION session: the composition preview; while a session holds the ' +
+    "composition, the page's storage, database and network writes are refused, " +
+    "and so are its api.ai calls, so nothing here reaches the user's data. " +
+    "ATTACH SHIM session (the user's logged-in tab): only YOUR shim's own " +
+    'output — the controls your previews and committed rules put on the page — ' +
+    'in the top frame, outside shadow roots (`scope: "shim-dom"`). The site\'s ' +
+    "own controls, another shim's, and a control whose activation reaches the " +
+    'site (in a site form, inside a site link or button, a label for a site ' +
+    'control) are refused with a typed error (not-shim-dom, other-shim-dom, ' +
+    'site-activation, frame-unsupported, shadow-unsupported); a key or text ' +
+    "goes only to your shim's focused field (focus-not-shim). Scroll steps may " +
+    'happen anywhere and can make the site load or mark things. The user\'s ' +
+    'own keyboard or mouse input on the tab stops the batch (`interrupted: ' +
+    '"user"`). What a click does is real: your handler acts as the signed-in ' +
+    'user. HEADLESS shim session: the whole page (`scope: "page"`), top frame ' +
+    'only. The result reports each action (a scroll: requested and observed ' +
+    'movement), how many DOM changes followed, new console errors, the calls ' +
+    "the page made — a shim session's site requests are not observed " +
+    '(`calls: null`, `traffic: "not observed"`; never read that as "no ' +
+    'requests") — and any window it tried to open (not opened). Afterwards ' +
+    'check the outcome with query_page / inspect_element and view_page — the ' +
+    'report says what happened, not whether it was right. Drive the page with ' +
+    'this, never by dispatching events from evaluate_in_page.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      actions: {
+        type: 'array',
+        description: 'The actions, in order (1–10). Each is exactly one of: {"click": selector}, {"type": selector, "text": string, "clear"?: boolean}, {"select": selector, "value": option value or label}, {"press": "Enter"|"Escape"|"Tab"|"Backspace"|"Delete"|"Space"|"ArrowUp"|"ArrowDown"|"ArrowLeft"|"ArrowRight"}, or, in a shim session, {"scroll": {"by": px}} (viewport, positive down, at most 1500 per step).',
+        items: { type: 'object' },
+      },
+      settleMs: {
+        type: 'number',
+        description: 'How long to wait after each action before the next (default 300, max 3000).',
+      },
+    },
+    required: ['actions'],
+  },
+};
+
+const SESSION_NAVIGATE: ToolDefinition = {
+  name: 'navigate',
+  description:
+    'Shim sessions only (a composition session answers that it is not ' +
+    "offered). Load another page of the session's site in the session's " +
+    'page, to author or verify there (a comment page from a listing, a ' +
+    'search result, a profile). `url` must be on the origin the session ' +
+    'started on — same scheme, host and port; a relative path works — or it ' +
+    'is refused before anything loads. Up to 20 per session. The site\'s own ' +
+    'redirects are contained, not prevented: the result says where the page ' +
+    'landed (`url`, `redirected`), and when the site sent it off the site (a ' +
+    'sign-in page) `onSite` is false — the page tools and previews act only ' +
+    'once the page is back on the site (navigate again, or reload_page). On ' +
+    'the site, your previews are re-applied to the new page (`reapplied`). ' +
+    'Loading a page is a GET as the signed-in user in an attach session, ' +
+    'like following a link: never navigate to logout or action URLs. Move ' +
+    'the page with this, never by setting location from evaluate_in_page.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      url: {
+        type: 'string',
+        description: "The page to load: an absolute http(s) URL on the session's start origin, or a path (\"/r/music/comments/abc/\").",
+      },
+    },
+    required: ['url'],
+  },
 };
 
 export const SESSION_PAGE_TOOLS = {
@@ -693,6 +759,7 @@ export const SESSION_PAGE_TOOLS = {
   reload_page: SESSION_RELOAD_PAGE,
   verify_across_pages: SESSION_VERIFY_ACROSS_PAGES,
   interact_page: SESSION_INTERACT_PAGE,
+  navigate: SESSION_NAVIGATE,
 } as const satisfies Record<PageToolName, ToolDefinition>;
 
 export function isPageToolName(name: string): name is PageToolName {

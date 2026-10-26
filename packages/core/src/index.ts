@@ -11,7 +11,7 @@
 // reachable on its own subpath (`@shimbrowser/core/<module>`), which is how
 // the Shim browser consumes it today.
 
-export { run, isShimOwnedElement } from './engine';
+export { run, isShimOwnedElement, outputOwnerOf } from './engine';
 export {
   resolveAll, resolveAllWithSource, suggestAnchorFor, suggestAnchorLadder,
   witnessRecover, witnessRecoverDetail,

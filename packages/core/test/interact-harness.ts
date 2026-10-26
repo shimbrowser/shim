@@ -13,10 +13,18 @@
 //   - the policy's stop and unavailable wording reach the report
 //   - document identity is compared by value, so a string token works
 //   - the page-side scripts are self-contained expressions
+//   - a session's narrowing: a refused target, a failed boundary check (its
+//     reason is the step's error, and the command it guarded never goes
+//     out), the user's own input (interrupted: "user")
+//   - a scroll step: parsed only where offered, capped, scaled by the host's
+//     wheel units, reporting requested / sent / observed
+//   - steps that completed survive a later dispatch failure
+//   - a host that doesn't observe the page's requests reports calls: null
+//     with traffic "not observed", never an empty list
 
 import {
-  runInteract, parseInteractInput, locateScript, selectScript, OBSERVE_START_SCRIPT, OBSERVE_READ_SCRIPT,
-  type InteractDeps, type InteractDocumentPolicy, type CdpCommand, type LocateResult,
+  runInteract, parseInteractInput, locateScript, selectScript, OBSERVE_START_SCRIPT, OBSERVE_READ_SCRIPT, MAX_SCROLL_PX,
+  type InteractDeps, type InteractDocumentPolicy, type CdpCommand, type LocateResult, type InteractStepEvent,
 } from '../src/interact';
 
 let failures = 0;
@@ -50,10 +58,10 @@ function fake(over: { dispatch?: InteractDeps['dispatch']; afterDispatch?: (f: F
     aborted: () => f.aborted,
     locate: async (sel) => targets[sel] ?? { count: 0 },
     selectValue: async () => ({ ok: true }),
-    dispatch: over.dispatch ?? (async (commands, stillPinned) => {
+    dispatch: over.dispatch ?? (async (commands, pin) => {
       const sent: CdpCommand[] = [];
-      for (const c of commands) {
-        if (!stillPinned()) { f.sent.push(sent); return false; }
+      for (const [i, c] of commands.entries()) {
+        if (!(await pin.before(i))) { f.sent.push(sent); return false; }
         sent.push(c);
       }
       f.sent.push(sent);
@@ -110,6 +118,86 @@ async function main(): Promise<void> {
     const r = await runInteract({ actions: [{ click: '.go' }, { press: 'Enter' }] }, f.deps);
     check('a new (still accepted) document after an action is a navigation: the batch ends',
       !('error' in r) && r.steps[0]?.navigated === true && r.notRun === 1, JSON.stringify(r));
+  }
+
+  console.log('a session\'s narrowing:');
+  {
+    const f = fake();
+    const loc = f.deps.locate;
+    f.deps.locate = async (sel, action) => ({ ...(await loc(sel, action)), refused: 'not-shim-dom: .go is the site\'s own DOM' });
+    const r = await runInteract({ actions: [{ click: '.go' }, { press: 'Enter' }] }, f.deps);
+    check('a refused target fails with the session\'s reason, before any input', !('error' in r) && r.steps[0]?.error?.startsWith('not-shim-dom') === true && r.notRun === 1 && f.sent.length === 0, JSON.stringify(r));
+  }
+  {
+    const f = fake();
+    const seen: string[] = [];
+    f.deps.boundaryCheck = async (c) => { seen.push(String(c.params.type)); return c.params.type === 'mousePressed' ? 'the press would land on div#overlay' : null; };
+    const r = await runInteract({ actions: [{ click: '.go' }] }, f.deps);
+    check('a failed boundary check stops before the command it guards, with its reason',
+      !('error' in r) && r.steps[0]?.error === 'the press would land on div#overlay' && (f.sent[0] ?? []).length === 1 && seen.join() === 'mouseMoved,mousePressed', JSON.stringify({ r, seen }));
+  }
+  {
+    const f = fake();
+    let user = false;
+    f.deps.interrupted = () => user;
+    f.deps.wait = async () => { user = true; };
+    const r = await runInteract({ actions: [{ click: '.go' }, { click: '.go' }] }, f.deps);
+    check('the user\'s own input stops the batch: interrupted "user", the step says so',
+      !('error' in r) && r.interrupted === 'user' && r.steps.length === 2 && r.steps[0]?.ok === true && r.steps[1]?.ok === false && /the user used the page/.test(r.steps[1]?.error ?? '') && f.sent.length === 1, JSON.stringify(r));
+  }
+  {
+    let calls = 0;
+    const f = fake({ dispatch: async () => { calls++; if (calls === 2) throw new Error('channel gone'); return true; } });
+    const r = await runInteract({ actions: [{ click: '.go' }, { click: '.go' }, { press: 'Enter' }] }, f.deps);
+    check('a dispatch failure after a completed step keeps that step in the report',
+      !('error' in r) && r.steps.length === 2 && r.steps[0]?.ok === true && /^interaction-unavailable/.test(r.steps[1]?.error ?? '') && r.notRun === 1, JSON.stringify(r));
+  }
+  {
+    const f = fake();
+    const events: InteractStepEvent[] = [];
+    f.deps.onStep = (e) => { events.push(e); };
+    f.deps.callCursor = undefined;
+    f.deps.callsSince = undefined;
+    f.deps.scope = 'shim-dom';
+    const r = await runInteract({ actions: [{ click: '.go' }] }, f.deps);
+    check('unobserved traffic is calls: null, traffic "not observed" — never []', !('error' in r) && r.calls === null && r.traffic === 'not observed' && r.scope === 'shim-dom', JSON.stringify(r));
+    check('each step streams a start and an end', events.map((e) => `${e.phase}:${e.action}:${e.ok ?? ''}`).join('|') === 'start:click .go:|done:click .go:true', JSON.stringify(events));
+  }
+  {
+    const f = fake();
+    const r = await runInteract({ actions: [{ click: '.go' }] }, f.deps);
+    check('an observing host keeps calls a list and says nothing of traffic', !('error' in r) && Array.isArray(r.calls) && r.traffic === undefined && r.scope === undefined);
+  }
+
+  {
+    // The page moves on between two actions — during the next action's own
+    // document read — so the second must never run against the new page.
+    const f = fake();
+    let syncs = 0;
+    f.deps.syncDocument = async () => { syncs++; if (syncs === 4) f.doc = 'doc-b'; };
+    const r = await runInteract({ actions: [{ click: '.go' }, { click: '.go' }] }, f.deps);
+    check('a document change during the next action\'s sync ends the batch: the last step navigated, the rest not run',
+      !('error' in r) && r.steps.length === 1 && r.steps[0]?.navigated === true && r.notRun === 1 && f.sent.length === 1, JSON.stringify(r));
+  }
+
+  console.log('scroll:');
+  check('scroll is refused unless the session offers it', 'error' in parseInteractInput({ actions: [{ scroll: { by: 100 } }] }));
+  check('a zero or non-number scroll is refused', 'error' in parseInteractInput({ actions: [{ scroll: { by: 0 } }] }, { scroll: true }) && 'error' in parseInteractInput({ actions: [{ scroll: {} }] }, { scroll: true }));
+  {
+    const f = fake();
+    let y = 100;
+    f.deps.viewport = async () => ({ width: 800, height: 600, scrollY: y, wheelScale: 1.5 });
+    f.deps.dispatch = async (commands) => { f.sent.push(commands); y += 1000; return true; };
+    const r = await runInteract({ actions: [{ scroll: { by: 5000 } }] }, f.deps, { scroll: true });
+    const wheel = f.sent[0]?.[0];
+    check('a scroll is one trusted wheel at the viewport centre, capped and scaled to the host\'s wheel units',
+      wheel?.params.type === 'mouseWheel' && wheel.params.x === 400 && wheel.params.y === 300 && wheel.params.deltaY === Math.round(MAX_SCROLL_PX * 1.5), JSON.stringify(wheel));
+    check('…reporting requested, sent and observed movement', !('error' in r) && JSON.stringify(r.steps[0]?.scrolled) === JSON.stringify({ requested: 5000, sent: MAX_SCROLL_PX, observed: 1000 }), JSON.stringify(r));
+  }
+  {
+    const f = fake();
+    const r = await runInteract({ actions: [{ scroll: { by: -200 } }] }, f.deps, { scroll: true });
+    check('a host with no viewport read refuses the scroll step', !('error' in r) && r.steps[0]?.ok === false && /not available/.test(r.steps[0]?.error ?? ''));
   }
 
   console.log('input + scripts:');

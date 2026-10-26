@@ -52,3 +52,22 @@ export function isShimOwnedElement(
   }
   return false;
 }
+
+// Which patch owns `el`: the owner recorded for the CLOSEST registered output
+// root containing it (the deepest, when one shim's output sits inside
+// another's), or null when no registered root contains it. Only the
+// registry answers — a marker attribute alone names no owner (it is DOM any
+// script can stamp), so marker-only DOM (a route host, a detached-and-
+// reattached injected node) reads as unowned here. Duck-typed like
+// isShimOwnedElement, for the bare-node harness.
+export function closestOutputOwner<R extends { contains?(n: unknown): boolean }>(
+  el: unknown,
+  owners: Iterable<readonly [R, string]>,
+): string | null {
+  let best: { root: R; owner: string } | null = null;
+  for (const [root, owner] of owners) {
+    if (typeof root.contains !== 'function' || !root.contains(el)) continue;
+    if (best === null || (typeof best.root.contains === 'function' && best.root.contains(root))) best = { root, owner };
+  }
+  return best ? best.owner : null;
+}

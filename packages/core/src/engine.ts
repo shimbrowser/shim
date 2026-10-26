@@ -10,7 +10,7 @@
 import { injectStyle, firstGreaterIndex } from './css-sheets';
 import { syncStyleMirror } from './style-mirror';
 import { isShimOwnedElement } from './own-dom';
-import { applyRule } from './apply-rule';
+import { applyRule, outputOwnerOf } from './apply-rule';
 import { routeRule } from './route-rule';
 import { bridgeRule } from './bridge-rule';
 import { taggedApi } from './tagged-api';
@@ -311,4 +311,7 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
 // (engine-own-dom-harness) live in ./css-sheets and ./own-dom; re-exported here
 // so those harnesses' engine imports — and engine's
 // public surface — stay unchanged.
-export { run, firstGreaterIndex, isShimOwnedElement };
+// `outputOwnerOf` answers whose mounted output contains an element (the
+// closest registered output root's patch id), for a host that keeps input to
+// one shim's own controls.
+export { run, firstGreaterIndex, isShimOwnedElement, outputOwnerOf };

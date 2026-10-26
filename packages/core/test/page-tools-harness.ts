@@ -48,15 +48,18 @@ for (const [label, roster] of rosters) {
 console.log('session roster:');
 check('the session roster has every page tool, in order',
   JSON.stringify(Object.keys(SESSION_PAGE_TOOLS)) === JSON.stringify(PAGE_TOOL_NAMES), Object.keys(SESSION_PAGE_TOOLS).join(','));
-check('the shim worker offers every page tool but interact_page',
-  JSON.stringify(Object.keys(SHIM_PAGE_TOOLS).sort()) === JSON.stringify(PAGE_TOOL_NAMES.filter((n) => n !== 'interact_page').sort()));
-check('the composition worker offers every page tool',
-  JSON.stringify(Object.keys(COMPOSITION_PAGE_TOOLS).sort()) === JSON.stringify([...PAGE_TOOL_NAMES].sort()));
+// navigate is a session's only, and interact_page the shim worker's never
+// (the internal shim worker gets neither).
+check('the shim worker offers every page tool but interact_page and navigate',
+  JSON.stringify(Object.keys(SHIM_PAGE_TOOLS).sort()) === JSON.stringify(PAGE_TOOL_NAMES.filter((n) => n !== 'interact_page' && n !== 'navigate').sort()));
+check('the composition worker offers every page tool but navigate',
+  JSON.stringify(Object.keys(COMPOSITION_PAGE_TOOLS).sort()) === JSON.stringify(PAGE_TOOL_NAMES.filter((n) => n !== 'navigate').sort()));
 
 for (const name of PAGE_TOOL_NAMES) {
   const session = SESSION_PAGE_TOOLS[name];
-  const workers: ToolDefinition[] = [COMPOSITION_PAGE_TOOLS[name]];
-  if (name !== 'interact_page') workers.push(SHIM_PAGE_TOOLS[name]);
+  const workers: ToolDefinition[] = [];
+  if (name !== 'navigate') workers.push(COMPOSITION_PAGE_TOOLS[name]);
+  if (name !== 'interact_page' && name !== 'navigate') workers.push(SHIM_PAGE_TOOLS[name]);
   for (const worker of workers) {
     for (const [prop, def] of Object.entries(worker.input_schema.properties)) {
       const mine = session.input_schema.properties[prop];
@@ -83,8 +86,20 @@ for (const name of PAGE_TOOL_NAMES) {
 check('the session evaluate points at shim_preview', SESSION_PAGE_TOOLS.evaluate_in_page.description.includes('shim_preview'));
 check('the session view_page makes visual verification a duty',
   /VISUAL VERIFICATION/.test(SESSION_PAGE_TOOLS.view_page.description) && /shim_preview/.test(SESSION_PAGE_TOOLS.view_page.description));
-check('the session interact_page says it is composition-only', /^Composition sessions only/.test(SESSION_PAGE_TOOLS.interact_page.description));
-check('the session interact_page never promises api.ai runs', !/api\.ai runs/.test(SESSION_PAGE_TOOLS.interact_page.description));
+const interact = SESSION_PAGE_TOOLS.interact_page.description;
+check('the session interact_page covers both kinds and says what each may touch',
+  /COMPOSITION session/.test(interact) && /ATTACH SHIM session/.test(interact) && /HEADLESS shim session/.test(interact)
+  && /shim-dom/.test(interact) && /"page"/.test(interact));
+check('…names every attach refusal code', ['not-shim-dom', 'other-shim-dom', 'site-activation', 'frame-unsupported', 'shadow-unsupported', 'focus-not-shim'].every((c) => interact.includes(c)));
+check('…says site traffic is not observed, never "no requests"', /traffic: "not observed"/.test(interact) && /calls: null/.test(interact));
+check('…says the user\'s own input stops the batch', /interrupted: "user"/.test(interact));
+check('the session interact_page never promises api.ai runs', !/api\.ai runs/.test(interact));
+check('the session interact_page accepts a scroll step', /"scroll": \{"by": px\}/.test(String((SESSION_PAGE_TOOLS.interact_page.input_schema.properties.actions as { description?: string }).description)));
+const navigate = SESSION_PAGE_TOOLS.navigate;
+check('navigate is shim-session-only and says so', /^Shim sessions only/.test(navigate.description));
+check('navigate states its fixed origin, budget and contained redirects',
+  /same scheme, host and port/.test(navigate.description) && /20 per session/.test(navigate.description) && /contained, not prevented/.test(navigate.description));
+check('navigate requires a url', JSON.stringify(navigate.input_schema.required) === '["url"]');
 check('the session evaluate warns that site actions are real', /not undone/.test(SESSION_PAGE_TOOLS.evaluate_in_page.description));
 // Both hosts reload an on-site page in place (its current URL, hash and all)
 // and go back to the start URL only after a page-away; the description must

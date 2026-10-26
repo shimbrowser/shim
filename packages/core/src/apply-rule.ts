@@ -10,7 +10,7 @@
 import * as anchors from './anchors';
 import * as witnessMod from './witness';
 import { applyStrategy } from './strategies';
-import { isShimOwnedElement } from './own-dom';
+import { isShimOwnedElement, closestOutputOwner } from './own-dom';
 import {
   injectTier1Rule, removeTier1Rule, tagElement, stripToken, cssPriorityOf,
   removeReplaceRootRule, stripReplaceRootToken,
@@ -62,6 +62,17 @@ import { nextFrame } from './next-frame';
 // stays here because dispatch/apply mutate it, and it's passed into the
 // predicate as the `roots` argument.
 export const mountedOutputRoots = new Set<Node>();
+// The owning patch (the spec id the output was mounted under) per registered
+// output root, kept in step with `mountedOutputRoots`. A host asks "whose
+// output is this element in?" through `outputOwnerOf` — e.g. to keep an
+// agent's input to one shim's own controls. Association, not provenance: a
+// page can move its own nodes into a shim's container.
+export const outputOwners = new Map<Node, string>();
+
+/** The patch whose mounted output (the closest registered root) contains `el`, or null. */
+export function outputOwnerOf(el: Node): string | null {
+  return closestOutputOwner(el, outputOwners);
+}
 
 // Returns a teardown function that unobserves, removes all mounted outputs, runs
 // per-entry cleanups, and strips any Tier-1 CSS this rule stamped onto its
@@ -241,7 +252,10 @@ export function applyRule(
     // Register with the module-level own-DOM registry (see above) so no rule's
     // anchor resolution — this rule's or any other patch's — can ever re-match
     // this mount's output and re-dispatch onto it.
-    for (const o of outputs) mountedOutputRoots.add(o);
+    for (const o of outputs) {
+      mountedOutputRoots.add(o);
+      outputOwners.set(o, spec.id);
+    }
   }
 
   // Strip the tier-1 / replace-root tokens this rule stamped on one anchor.
@@ -261,6 +275,7 @@ export function applyRule(
     }
     for (const node of entry.outputs) {
       mountedOutputRoots.delete(node);
+      outputOwners.delete(node);
       node.remove();
     }
   }
