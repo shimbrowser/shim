@@ -197,7 +197,12 @@ A refused preview answers `applied: false` with `error` and `problems`:
   `interact_page`'s `requestWarnings`, carry the same burst and rate-limit warnings as the
   preview evidence.
 - **`probe_request { host, path }`** — one GET of your own through the composition's real
-  fetch path, answering the status and up to 20,000 characters of the body. The host must
+  fetch path, answering the status and up to 20,000 characters of the body. Anti-forgery
+  token values in it (CSRF / XSRF fields, Reddit's `modhash`, `authenticity_token`, …)
+  read `"[redacted: csrf]"`, counted in `redacted`: the field is there, the value is never
+  yours to need — the page's declared writes carry it. A failed (400+) non-JSON body (a
+  block page) comes back summarized: `summary` `{ format, bytes }`, and `body` is up to
+  500 characters of its visible text. The host must
   be declared in the manifest, allowed by the user (the preview's card), **and** granted to
   your session with `request_sources` — otherwise it answers `host-not-declared`,
   `host-not-allowed` or `host-not-granted` before any request. GET only. For designing a

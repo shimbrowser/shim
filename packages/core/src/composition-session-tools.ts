@@ -60,7 +60,11 @@ export const SESSION_COMPOSITION_TOOLS: Record<CompositionSessionToolName, ToolD
       'grants, mint and same-host redirects) to a host that is all three: declared in the manifest, allowed ' +
       'for the composition by the user, and granted to this session with request_sources — for a URL ' +
       'Discovery never captured: the page or script a key is embedded in (to design a mint), or an endpoint\'s ' +
-      'live response shape. Returns the status and up to 20,000 characters of the body; nothing is stored. A ' +
+      'live response shape. Returns the status and up to 20,000 characters of the body; nothing is stored. ' +
+      'Anti-forgery token values in it (CSRF / XSRF fields, modhash, authenticity_token, …) read "[redacted: ' +
+      'csrf]" — the field is kept, the value never needed: writes go through the page\'s declared operations. A ' +
+      'failed (status 400+) non-JSON body comes back summarized: `summary` { format, bytes } and `body` as up ' +
+      'to 500 characters of its visible text. A ' +
       'probe is your request, not the page\'s: it never shows up in read_calls and is no evidence the page ' +
       'works. A host the manifest does not declare yet must be added to manifest.json and previewed first ' +
       '(the user is asked in Shim to allow a new host). GET only.',
