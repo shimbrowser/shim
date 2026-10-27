@@ -31,6 +31,20 @@ world**, must be pure and synchronous (no `api`, no DOM); a throw or an `undefin
 ships the original body. Only same-registrable-domain JSON responses are touched, and only
 when the site fetches again — reload before concluding a rewrite doesn't work.
 
+`endpoint.path` is a route template matched against the request's pathname (query and
+hash stripped), anchored at both ends and case-sensitive: `/literal`, `/:name` (one
+segment, captured into `ctx.params.name`), `/:name?` (an optional segment), `/*` (the
+rest, as `ctx.params['*']`). `/i/api/graphql/:queryId/:operation` matches every GraphQL
+call and gives you `ctx.params.operation` to branch on — match on stable names like that,
+not on a per-deploy hash. `method` is optional (any method when left out).
+
+A preview installs the rewrite live, for fetches that happen after it. Some sites keep
+their own reference to the original `fetch` or `XMLHttpRequest` from page load (x.com
+does), and those calls bypass a wrapper added later: the stats stay at 0 while the page
+clearly keeps fetching. Only a committed, enabled rewrite is installed from the very start
+of a page load; a preview is re-applied after the page loads, so `reload_page` alone does
+not fix this. Commit, then reload to verify, and tell the user that is how it was checked.
+
 **`intercept`** — wrap a function in the site's own AMD/RequireJS module (check first:
 `evaluate_in_page('typeof define !== "undefined" && !!define.amd')`):
 
