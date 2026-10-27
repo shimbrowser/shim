@@ -31,7 +31,7 @@ export type {
   Mutation, Rule, Spec,
 } from './types';
 export type {
-  CoreApi, HostApiMembers, MountCleanup, CoreHandlerApi, RouteMatch, RouteChangeRegistrar,
+  CoreApi, HostApiMembers, MountCleanup, CoreHandlerApi, AnchorChangeRegistrar, CoreAnchoredHandlerApi, RouteMatch, RouteChangeRegistrar,
   CoreRouteMountApi,
 } from './api';
 export type { FetchBudget, FetchBudgetOpts, FetchBudgetTake } from './fetch-budget';

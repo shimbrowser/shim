@@ -483,6 +483,41 @@ check('flags a guard-less observer+write, no rule prefix', (() => {
 })());
 check('null on the safe disconnect/re-observe pattern', observerLoopWarning('decorate', SAFE_HANDLER) === null);
 check('null on plain code', observerLoopWarning('h', 'function h() { return 1; }') === null);
+check('the warning points at api.onAnchorChange', /api\.onAnchorChange\(fn\)/.test(observerLoopWarning('decorate', LOOP_HANDLER) || ''));
+
+console.log('observerLoopWarning — childList-only observer with attribute-only writes (fail-closed narrowing)');
+// The live-caught false positives (wikipedia table filter, facebook sponsored
+// hider): a childList-only observer can't see a setAttribute.
+const CHILDLIST_ATTR = `function filterTable({ anchor, api }) {
+  const apply = () => { for (const tr of anchor.querySelectorAll('tr')) tr.setAttribute('data-hidden', tr.textContent.includes('x') ? '1' : '0'); };
+  const o = new MutationObserver(() => requestAnimationFrame(apply));
+  o.observe(anchor, { childList: true, subtree: true });
+  api.cleanup(() => o.disconnect());
+  apply();
+}`;
+check('silent: childList-only observer + setAttribute-only writes', observerLoopWarning('filterTable', CHILDLIST_ATTR) === null);
+check('warns: same, but the observer also watches attributes',
+  observerLoopWarning('h', CHILDLIST_ATTR.replace('{ childList: true, subtree: true }', '{ childList: true, subtree: true, attributes: true }')) !== null);
+check('warns: same, but attributeFilter',
+  observerLoopWarning('h', CHILDLIST_ATTR.replace('{ childList: true, subtree: true }', "{ childList: true, attributeFilter: ['data-hidden'] }")) !== null);
+check('warns: same, but characterData',
+  observerLoopWarning('h', CHILDLIST_ATTR.replace('{ childList: true, subtree: true }', '{ childList: true, characterData: true }')) !== null);
+check('warns (fail-closed): options from a variable',
+  observerLoopWarning('h', CHILDLIST_ATTR.replace('{ childList: true, subtree: true }', 'OPTS')) !== null);
+check('warns (fail-closed): options with a spread',
+  observerLoopWarning('h', CHILDLIST_ATTR.replace('{ childList: true, subtree: true }', '{ ...base, childList: true }')) !== null);
+check('warns (fail-closed): a non-literal boolean',
+  observerLoopWarning('h', CHILDLIST_ATTR.replace('{ childList: true, subtree: true }', '{ childList: flag }')) !== null);
+check('warns: a childList-capable write alongside', observerLoopWarning('h', CHILDLIST_ATTR.replace('apply();\n}', "apply(); anchor.appendChild(document.createElement('i'));\n}")) !== null);
+check('warns: a second observe call with attributes',
+  observerLoopWarning('h', CHILDLIST_ATTR.replace('api.cleanup', "o.observe(document.body, { attributes: true }); api.cleanup")) !== null);
+check('silent: two childList-only observe calls', observerLoopWarning('h', CHILDLIST_ATTR.replace('api.cleanup', "o.observe(document.body, { childList: true }); api.cleanup")) === null);
+check('silent: options literal containing a string-literal arg elsewhere does not confuse the parser',
+  observerLoopWarning('h', CHILDLIST_ATTR.replace('o.observe(anchor,', "o.observe(anchor.querySelector('tbody, thead') || anchor,")) === null);
+// Pinned blind spot (inherited from DOM_WRITE_RE): a childList write the regex
+// doesn't know (`before(`) reads as attribute-only. Accepted false negative.
+check('pinned false negative: an unrecognized childList write (before) stays silent',
+  observerLoopWarning('h', CHILDLIST_ATTR.replace('apply();\n}', "apply(); anchor.before(document.createElement('i'));\n}")) === null);
 
 console.log('spec.connections — engine-enum ERROR (cheap same-turn feedback)');
 res = lintSpec({ connections: [{ name: 'warehouse', engine: 'oracle' }], rules: [] });

@@ -34,6 +34,12 @@ time, tell the user once, in these words:**
 Don't repeat it.
 
 - **`api.cleanup(fn)`** — teardown for side effects (`references/handlers.md`).
+- **`api.onAnchorChange(fn)`** — `script` / `replace-root` handlers only: `fn()` runs (no
+  arguments, at most once a frame) after the site changes what is inside the anchor
+  (elements or text added or removed anywhere under it). Not for attribute changes, never for
+  `fn`'s own synchronous writes or for writes inside your own returned DOM. Returns an
+  unsubscribe function; torn down with the mount. Use it instead of a `MutationObserver`
+  (`references/handlers.md`).
 - **`api.origin`, `api.host`** — the page's origin and host, as strings.
 - **`api.storage`** — per-shim, per-origin key/value: `get(key)` resolves the stored value
   itself (null when unset; never an `{ ok, value }` wrapper), `set(key, value)` (any JSON
