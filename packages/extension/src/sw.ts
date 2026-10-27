@@ -27,7 +27,7 @@ import {
   registrationsFor, userScriptRegistrationsFor, shimIdFor, patternsFor, originsToRelease, RUNTIME_FILES,
   USER_SCRIPT_WORLD_CSP,
 } from './registration';
-import { capabilitiesFor, detectMode, type ExtensionMode } from './capabilities';
+import { capabilitiesFor, detectMode, SESSION_CAPABILITIES, type ExtensionMode } from './capabilities';
 import { arbitrate, type RuntimeWorld as ArbitratedWorld } from './arbitrate';
 import { baselineForPath, pagePathKey } from '@shimbrowser/core/deploy-id';
 import {
@@ -185,6 +185,9 @@ function acceptRuntimePort(world: RuntimeWorld): (port: chrome.runtime.Port) => 
       port.disconnect();
       return;
     }
+    port.onMessage.addListener((msg: unknown) => {
+      if (isFromRuntime(msg) && msg.type === 'ack') pendingAcks.get(msg.seq)?.();
+    });
     // One runtime per page. Two can meet when a handover and a reconnect
     // cross (a holder's port down for the moment, the other world's
     // runtime injected beside it, the holder reconnecting later): the one
@@ -553,7 +556,10 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
   switch (msg.type) {
     case 'bundle': {
       if (!page) return { ok: false, error: 'no page' };
-      return { ok: true, mode: modeNow, shims: await bundleFor(page, world) };
+      // The holds a session has on this tab, current as of this sequence.
+      const shims = await bundleFor(page, world);
+      const held = page.tabId === undefined ? undefined : hostOnTab(page.tabId)?.heldAll();
+      return { ok: true, mode: modeNow, shims, ...(held ? { held } : {}), holdSeq };
     }
     case 'storage': {
       if (!page) return { ok: false, error: 'no page' };
@@ -705,15 +711,42 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
 // Previews' api.storage goes to the installed shim's rows when the preview's
 // shim is installed, and to the host's own bucket otherwise.
 
-/** A nudge to the page's committed runtime, over its port (both worlds) or the isolated world's message. */
-function nudgeTab(tabId: number, msg: ToRuntime): void {
-  let nudged = false;
-  for (const [port, r] of runtimePorts) {
-    if (r.tabId !== tabId) continue;
-    post(port, msg);
-    nudged = true;
-  }
-  if (!nudged) chrome.tabs.sendMessage(tabId, msg).catch(() => { /* no runtime there */ });
+// Holds are ordered: every hold nudge carries the next sequence number, a
+// bundle answer carries the current one, and a runtime applies only what is
+// newer than what it has, so a hold that crosses a bundle answer in flight
+// is not undone by it.
+let holdSeq = 0;
+const pendingAcks = new Map<number, () => void>();
+const NUDGE_ACK_MS = 2000;
+
+/**
+ * A nudge to the page's committed runtime, over its port (both worlds) or
+ * the isolated world's message, resolved once a runtime there acked it, or
+ * none is there to, or it took too long: a session is never held up by a
+ * page that does not answer.
+ */
+function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>): Promise<void> {
+  const seq = ++holdSeq;
+  const stamped: ToRuntime = { ...msg, seq };
+  return new Promise((resolve) => {
+    let done = false;
+    const settle = (): void => {
+      if (done) return;
+      done = true;
+      pendingAcks.delete(seq);
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(settle, NUDGE_ACK_MS);
+    pendingAcks.set(seq, settle);
+    let nudged = false;
+    for (const [port, r] of runtimePorts) {
+      if (r.tabId !== tabId) continue;
+      post(port, stamped);
+      nudged = true;
+    }
+    if (!nudged) chrome.tabs.sendMessage(tabId, stamped).then(settle, settle);
+  });
 }
 
 function sessionStorageFor(db: ShimStore, bucket: Map<string, Map<string, unknown>>): SessionStorage {
@@ -726,7 +759,22 @@ function sessionStorageFor(db: ShimStore, bucket: Map<string, Map<string, unknow
     }
     return b;
   };
-  const installed = async (scope: SessionStorageScope): Promise<boolean> => scope.patchId !== '' && !scope.patchId.includes(':') && (await db.getShim(scope.patchId)) !== null;
+  // The installed shim's rows only when that shim runs on the page's origin
+  // (enabled, hosts cover it, granted): a preview of a shim installed for
+  // another site reads nothing of it.
+  const installed = async (scope: SessionStorageScope): Promise<boolean> => {
+    if (scope.patchId === '' || scope.patchId.includes(':')) return false;
+    const shim = await db.getShim(scope.patchId);
+    if (!shim) return false;
+    let page: { hostname: string; port: string };
+    try {
+      const u = new URL(scope.origin);
+      page = { hostname: u.hostname, port: u.port };
+    } catch {
+      return false;
+    }
+    return runsOn(shim, page, SESSION_CAPABILITIES);
+  };
   const asScope = (scope: SessionStorageScope) => ({ shimId: scope.patchId, origin: scope.origin });
   return {
     async get(scope, key) {
@@ -768,9 +816,15 @@ interface OpenHost {
 }
 const openHosts = new Map<string, OpenHost>();
 let hostSeq = 0;
+/** The open host on a tab, if any (one per tab: the debugger attaches once). */
+function hostOnTab(tabId: number): ExtensionPageHost | undefined {
+  for (const { host } of openHosts.values()) if (host.tabId === tabId && !host.isClosed()) return host;
+  return undefined;
+}
 
 /** Opens a PageHost on `tabId`; answers its handle. */
 async function openHost(tabId: number): Promise<string> {
+  if (hostOnTab(tabId)) throw new Error('a session already holds this tab');
   const db = await store();
   const host = await openPageHost(tabId, { engineBundle, storage: sessionStorageFor(db, new Map()), nudge: nudgeTab });
   const id = `host-${++hostSeq}`;
@@ -796,10 +850,10 @@ const pageHosts = {
     await entry.host.close();
     return true;
   },
-  drain(id: string): { url: string; events: PageRuntimeEvent[]; console: PageConsoleMessage[]; popups: string[] } | null {
+  drain(id: string): { url: string; closed: boolean; events: PageRuntimeEvent[]; console: PageConsoleMessage[]; popups: string[] } | null {
     const entry = openHosts.get(id);
     if (!entry) return null;
-    const out = { url: entry.host.url(), events: entry.events, console: entry.console, popups: entry.popups };
+    const out = { url: entry.host.url(), closed: entry.host.isClosed(), events: entry.events, console: entry.console, popups: entry.popups };
     entry.events = [];
     entry.console = [];
     entry.popups = [];
@@ -841,6 +895,8 @@ const pageHosts = {
       case 'input': return h.input?.(args[0] as PageInputCommand[], () => true);
       case 'documentToken': return h.documentToken();
       case 'navigationCount': return h.navigationCount?.();
+      case 'heldFor': return h.heldFor(String(args[0]));
+      case 'heldAll': return h.heldAll();
       default: throw new Error(`unknown host member: ${method}`);
     }
   },

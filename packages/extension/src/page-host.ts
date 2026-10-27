@@ -13,10 +13,17 @@
 //
 // A committed shim keeps running in its own world while a session previews
 // one of its rules; the committed rule is held meanwhile (the worker
-// nudges the page's runtime) and given back when the preview goes.
+// nudges the page's runtime with the set of rules the session holds, and
+// waits for the ack) and given back when the preview goes: a preview is
+// applied only once its twin is down, and the twin comes back only once
+// the preview is gone. The holds die with the document, as the previews do.
 //
 // Attaching the debugger shows Chrome's own bar on the tab for as long as
-// the session lasts: a session is a visible thing, never a silent one.
+// the session lasts: a session is a visible thing, never a silent one. The
+// user can end it from that bar; then the page's runtime, told so, drops
+// the session's previews (a DOM event into the session's world, the one
+// way to reach it) before it releases the holds, and a page with no
+// runtime drops them itself when the host stops answering its pings.
 
 import type {
   PageHost, PageWorld, PreviewRule, PageRuntimeEvent, PageConsoleMessage, Unsubscribe, ScreenshotOptions, ScreenshotResult,
@@ -26,13 +33,51 @@ import { DOCUMENT_TOKEN_SCRIPT, NET_ERR_ABORTED, SUPERSEDED_LOAD_GRACE_MS, sendI
 import { pageRuntimeSource } from '@shimbrowser/core/page-runtime';
 import { remoteObjectValue, netErrorCode, consoleLevel, formatConsoleArg, handlerSource, type RemoteValue } from '@shimbrowser/core/cdp-host';
 import { SESSION_CAPABILITIES, UNSUPPORTED_ERROR } from './capabilities';
-import type { ToRuntime } from './messages';
+import { SESSION_CLOSE_EVENT, type ToRuntime } from './messages';
 
-/** The world the host creates for the engine in a session's page. */
+/**
+ * The world the host creates for the engine in a session's page: this
+ * prefix and a number of its own. A world outlives its session in the
+ * document it was made in (a session ended and another begun on the same
+ * page), and a world reused by name would hand the new session the old
+ * session's runtime, bound to a driver that is gone.
+ */
 export const SESSION_ENGINE_WORLD = 'shim-core';
+let worldSeq = 0;
 const BINDING = '__shimCoreHost';
 const RUNTIME_GLOBAL = '__shimCoreRuntime';
+const PONG_GLOBAL = '__shimCoreHostPong';
 const PROTOCOL_VERSION = '1.3';
+/** How often the session's world asks the host whether it is still there (a detached binding still calls, into nothing). */
+export const HOST_PING_MS = 5000;
+
+/**
+ * What the host adds to its world beside the engine and the page runtime:
+ * the way its previews go when the host cannot reach the world any more.
+ * The page's runtime says so with a DOM event (the session was ended from
+ * Chrome's bar while a committed shim ran here); with no runtime on the
+ * page, the world notices on its own when a ping goes unanswered.
+ */
+export function worldCloseSource(): string {
+  return `(() => {
+  const g = globalThis;
+  const runtime = () => g[${JSON.stringify(RUNTIME_GLOBAL)}];
+  const drop = () => { const r = runtime(); if (r) for (const k of r.previewKeys()) r.remove(k); };
+  document.addEventListener(${JSON.stringify(SESSION_CLOSE_EVENT)}, drop);
+  let nonce = 0;
+  const timer = setInterval(() => {
+    const send = g[${JSON.stringify(BINDING)}];
+    if (!runtime() || typeof send !== 'function') return;
+    if (nonce > 0 && g[${JSON.stringify(PONG_GLOBAL)}] !== nonce) {
+      clearInterval(timer);
+      drop();
+      return;
+    }
+    nonce++;
+    try { send(JSON.stringify({ type: 'ping', nonce })); } catch (_) { /* the next tick finds no pong */ }
+  }, ${HOST_PING_MS});
+})();`;
+}
 
 /** Which bucket an `api.storage` call reads: the preview's shim, on the page's origin. */
 export interface SessionStorageScope {
@@ -52,14 +97,18 @@ export interface PageHostDeps {
   /** The engine's page bundle source (dist/shim-core.page.js). */
   engineBundle(): Promise<string>;
   storage: SessionStorage;
-  /** A nudge to the page's committed runtime (suppress / restore a committed rule under preview). */
-  nudge(tabId: number, msg: ToRuntime): void;
+  /** A nudge to the page's committed runtime (the rules a session holds, or its end), resolved once the runtime acked it, or there is none, or it took too long. */
+  nudge(tabId: number, msg: Extract<ToRuntime, { seq?: number }>): Promise<void>;
   /** How long a preview apply or an engine-world evaluate waits for the world. Default 5000. */
   worldWaitMs?: number;
 }
 
 export interface ExtensionPageHost extends PageHost {
   readonly tabId: number;
+  /** The committed rules of `patchId` this host holds (previews) on the current document. */
+  heldFor(patchId: string): string[];
+  /** Every hold on the current document, by shim. */
+  heldAll(): Record<string, string[]>;
   /** Stop driving the tab: remove every preview, give back held rules, detach the debugger. Leaves the tab open. */
   close(): Promise<void>;
 }
@@ -100,9 +149,19 @@ interface EvaluateResult {
 export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<ExtensionPageHost> {
   const target = { tabId };
   const worldWaitMs = deps.worldWaitMs ?? 5000;
+  const worldName = `${SESSION_ENGINE_WORLD}:${++worldSeq}`;
   await chrome.debugger.attach(target, PROTOCOL_VERSION);
-  const send = <T = Record<string, unknown>>(method: string, params?: Record<string, unknown>): Promise<T> =>
-    chrome.debugger.sendCommand(target, method, params) as Promise<T>;
+  // A command refused because the debugger is no longer attached is the
+  // session's end seen from inside (Chrome fires no onDetach for a detach
+  // the extension itself made elsewhere): the same teardown as from the bar.
+  const send = async <T = Record<string, unknown>>(method: string, params?: Record<string, unknown>): Promise<T> => {
+    try {
+      return await (chrome.debugger.sendCommand(target, method, params) as Promise<T>);
+    } catch (err) {
+      if (!closed && /not attached|detached|no tab with/i.test(errText(err))) lost();
+      throw err;
+    }
+  };
 
   const runtimeListeners = new Set<(event: PageRuntimeEvent) => void>();
   const consoleListeners = new Set<(message: PageConsoleMessage) => void>();
@@ -113,8 +172,19 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
   let worldWaiters: Array<(id: number | null) => void> = [];
   let closed = false;
   let navigations = 0;
-  // Which committed rules are held for which preview, to give back on remove.
-  const held = new Map<string, { patchId: string; ruleId: string }>();
+  // Which shim each preview key belongs to, and which committed rule it
+  // twins: the rules held of each shim, and the only shims a storage call
+  // may name. The page runtime passes the preview's own id, but handler
+  // code runs in the same world as the binding, so the host, not the
+  // payload, decides whose rows a call reaches.
+  const previewed = new Map<string, { patchId: string; ruleId: string }>();
+  const heldFor = (patchId: string): string[] => [...new Set([...previewed.values()].filter((p) => p.patchId === patchId).map((p) => p.ruleId))];
+  const heldAll = (): Record<string, string[]> => {
+    const out: Record<string, string[]> = {};
+    for (const { patchId } of previewed.values()) if (!(patchId in out)) Object.defineProperty(out, patchId, { value: heldFor(patchId), enumerable: true, writable: true, configurable: true });
+    return out;
+  };
+  const holdNudge = (patchId: string): Promise<void> => deps.nudge(tabId, { type: 'hold', patchId, ruleIds: heldFor(patchId) });
   const loadWaits = new Set<(outcome: PageLoadOutcome) => void>();
   let queue: Promise<void> = Promise.resolve();
 
@@ -161,10 +231,15 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
   // --- the api's answering leg ---
   async function answerCall(contextId: number, id: number, method: string, patchId: unknown, origin: unknown, rawArgs: unknown): Promise<void> {
     const args = Array.isArray(rawArgs) ? rawArgs : [];
-    const scope: SessionStorageScope = { patchId: typeof patchId === 'string' ? patchId : '', origin: typeof origin === 'string' ? origin : '' };
     const key = typeof args[0] === 'string' ? args[0] : String(args[0]);
     let expression: string;
     try {
+      // The origin is the host's own view of the page, never the payload's;
+      // the shim is one this host is previewing.
+      const pageOrigin = ((): string => { try { return new URL(currentUrl).origin; } catch { return ''; } })();
+      if (typeof patchId !== 'string' || ![...previewed.values()].some((p) => p.patchId === patchId)) throw new Error('not a previewed shim');
+      if (!pageOrigin || pageOrigin === 'null' || (typeof origin === 'string' && origin !== pageOrigin)) throw new Error('no page origin');
+      const scope: SessionStorageScope = { patchId, origin: pageOrigin };
       let value: unknown;
       if (method === 'storage.get') value = await deps.storage.get(scope, key);
       else if (method === 'storage.set') value = await deps.storage.set(scope, key, args[1]);
@@ -191,7 +266,7 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
         const context = params.context;
         if (!isRecord(context)) return;
         const aux = context.auxData;
-        if (context.name === SESSION_ENGINE_WORLD && isRecord(aux) && aux.frameId === mainFrameId && typeof context.id === 'number') setWorld(context.id);
+        if (context.name === worldName && isRecord(aux) && aux.frameId === mainFrameId && typeof context.id === 'number') setWorld(context.id);
         return;
       }
       case 'Runtime.executionContextDestroyed':
@@ -206,6 +281,10 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
           mainFrameId = frame.id;
           navigations++;
           if (typeof frame.url === 'string') currentUrl = frame.url;
+          // A new document: its world starts with no previews, so the holds
+          // are over too (the new document's runtime boots with the worker's
+          // current list, which this empties).
+          previewed.clear();
         }
         return;
       }
@@ -226,6 +305,8 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
         if (!isRecord(msg)) return;
         if (msg.type === 'event' && typeof msg.kind === 'string') {
           emitRuntime({ ...(isRecord(msg.payload) ? msg.payload : {}), kind: msg.kind });
+        } else if (msg.type === 'ping' && typeof msg.nonce === 'number' && typeof params.executionContextId === 'number') {
+          void send('Runtime.evaluate', { expression: `globalThis[${JSON.stringify(PONG_GLOBAL)}] = ${msg.nonce}`, contextId: params.executionContextId }).catch(() => undefined);
         } else if (msg.type === 'call' && typeof msg.id === 'number' && typeof msg.method === 'string' && typeof params.executionContextId === 'number') {
           void answerCall(params.executionContextId, msg.id, msg.method, msg.patchId, msg.origin, msg.args);
         }
@@ -264,10 +345,25 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
     }
   };
   chrome.debugger.onEvent.addListener(onEvent);
+  // Not this host's own detach (teardown drops this listener first): the
+  // user ended the session from Chrome's bar, or Chrome did. Nothing in
+  // the world can be reached now; the page's runtime, if any, drops the
+  // previews and releases the holds.
   const onDetach = (source: chrome.debugger.Debuggee): void => {
-    if (source.tabId !== tabId) return;
-    markClosed();
+    if (source.tabId === tabId) lost();
   };
+  function lost(): void {
+    if (closed) return;
+    teardown();
+    void deps.nudge(tabId, { type: 'session-closed' });
+  }
+  // The host's own heartbeat: a command the tab refuses is the session's
+  // end (see `send`), found within one interval even when no event or
+  // call would have made the host send anything.
+  const heartbeat = setInterval(() => {
+    if (closed) return;
+    void send('Runtime.evaluate', { expression: '0', returnByValue: true }).catch(() => undefined);
+  }, HOST_PING_MS);
   chrome.debugger.onDetach.addListener(onDetach);
 
   // --- loads, over the navigation events (the tab's, not the protocol's) ---
@@ -286,7 +382,7 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
   chrome.webNavigation.onCommitted.addListener(onCommitted);
 
   const onTabRemoved = (removedId: number): void => {
-    if (removedId === tabId) markClosed();
+    if (removedId === tabId) teardown();
   };
   chrome.tabs.onRemoved.addListener(onTabRemoved);
 
@@ -302,12 +398,25 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
   };
   chrome.tabs.onCreated.addListener(onTabCreated);
 
-  function markClosed(): void {
+  // Over, whichever way: every waiter settled, every listener gone, the
+  // holds forgotten (the document's runtime releases its own). Idempotent.
+  function teardown(): void {
     if (closed) return;
     closed = true;
+    clearInterval(heartbeat);
+    previewed.clear();
+    runtimeListeners.clear();
+    consoleListeners.clear();
+    popupListeners.clear();
     for (const settle of [...loadWaits]) settle({ kind: 'destroyed' });
     for (const w of worldWaiters) w(null);
     worldWaiters = [];
+    chrome.debugger.onEvent.removeListener(onEvent);
+    chrome.debugger.onDetach.removeListener(onDetach);
+    chrome.webNavigation.onBeforeNavigate.removeListener(onBeforeNavigate);
+    chrome.webNavigation.onCommitted.removeListener(onCommitted);
+    chrome.tabs.onRemoved.removeListener(onTabRemoved);
+    chrome.tabs.onCreated.removeListener(onTabCreated);
   }
 
   // --- setup ---
@@ -316,13 +425,13 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
   const { frameTree } = await send<{ frameTree: { frame: { id: string; url?: string } } }>('Page.getFrameTree');
   mainFrameId = frameTree.frame.id;
   if (typeof frameTree.frame.url === 'string' && frameTree.frame.url) currentUrl = frameTree.frame.url;
-  await send('Runtime.addBinding', { name: BINDING, executionContextName: SESSION_ENGINE_WORLD });
-  const worldScript = `${await deps.engineBundle()}\n${pageRuntimeSource({ binding: BINDING, globalName: RUNTIME_GLOBAL, unsupportedError: UNSUPPORTED_ERROR })}`;
-  const { identifier: scriptId } = await send<{ identifier: string }>('Page.addScriptToEvaluateOnNewDocument', { source: worldScript, worldName: SESSION_ENGINE_WORLD });
+  await send('Runtime.addBinding', { name: BINDING, executionContextName: worldName });
+  const worldScript = `${await deps.engineBundle()}\n${pageRuntimeSource({ binding: BINDING, globalName: RUNTIME_GLOBAL, unsupportedError: UNSUPPORTED_ERROR })}\n${worldCloseSource()}`;
+  const { identifier: scriptId } = await send<{ identifier: string }>('Page.addScriptToEvaluateOnNewDocument', { source: worldScript, worldName });
   // The document already loaded never saw the script: give it the world now.
   if (worldContextId === null) {
     try {
-      const { executionContextId } = await send<{ executionContextId: number }>('Page.createIsolatedWorld', { frameId: mainFrameId, worldName: SESSION_ENGINE_WORLD, grantUniveralAccess: false });
+      const { executionContextId } = await send<{ executionContextId: number }>('Page.createIsolatedWorld', { frameId: mainFrameId, worldName, grantUniveralAccess: false });
       const res = await send<EvaluateResult>('Runtime.evaluate', { expression: worldScript, contextId: executionContextId });
       if (!res.exceptionDetails) setWorld(executionContextId);
     } catch {
@@ -399,12 +508,15 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
     const contextId = await waitForWorld(worldWaitMs);
     if (contextId === null || closed) return;
     const { patchId, rule, ruleKey, bundleHash, applyId, autoRepair } = preview;
-    // The committed rule of that shim is held while the preview runs.
-    const before = held.get(ruleKey);
+    // The committed twin of this preview is held, and the page's runtime
+    // has said so, before the preview goes up; a key that moves to another
+    // shim or rule releases what it held.
+    const before = previewed.get(ruleKey);
+    previewed.set(ruleKey, { patchId, ruleId: rule.id });
     if (!before || before.patchId !== patchId || before.ruleId !== rule.id) {
-      if (before) deps.nudge(tabId, { type: 'restore', patchId: before.patchId, ruleId: before.ruleId });
-      held.set(ruleKey, { patchId, ruleId: rule.id });
-      deps.nudge(tabId, { type: 'suppress', patchId, ruleId: rule.id });
+      if (before && before.patchId !== patchId) await holdNudge(before.patchId);
+      await holdNudge(patchId);
+      if (closed) return;
     }
     for (const [name, source] of Object.entries(rule.handlers ?? {})) {
       if (typeof source !== 'string') continue;
@@ -416,17 +528,24 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
     });
   }
   async function removePreviewNow(ruleKey: string): Promise<void> {
-    const was = held.get(ruleKey);
-    held.delete(ruleKey);
-    if (was) deps.nudge(tabId, { type: 'restore', patchId: was.patchId, ruleId: was.ruleId });
-    if (worldContextId === null || closed) return;
-    await send('Runtime.evaluate', {
-      expression: `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].remove(${JSON.stringify(ruleKey)})`,
-      contextId: worldContextId,
-    });
+    const was = previewed.get(ruleKey);
+    if (!was) return;
+    // The preview goes first; its committed twin comes back once it is gone.
+    if (worldContextId !== null && !closed) {
+      await send('Runtime.evaluate', {
+        expression: `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].remove(${JSON.stringify(ruleKey)})`,
+        contextId: worldContextId,
+      }).catch(() => { /* the document went away, and the preview with it */ });
+    }
+    previewed.delete(ruleKey);
+    if (!closed) await holdNudge(was.patchId);
   }
   const enqueue = (work: () => Promise<void>): void => {
-    queue = queue.then(work).catch(() => { /* the document went away mid-step */ });
+    queue = queue.then(work).catch((err: unknown) => {
+      // The document went away mid-step, or the session did; the next step
+      // finds out for itself.
+      if (!closed) console.error('[shim] preview step failed', errText(err));
+    });
   };
 
   async function screenshot(opts: ScreenshotOptions | undefined): Promise<ScreenshotResult> {
@@ -577,32 +696,28 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
     documentToken,
     onPopup: (listener) => subscribe(popupListeners, listener),
     navigationCount: () => navigations,
+    heldFor,
+    heldAll,
     async close() {
-      if (closed) {
-        chrome.debugger.onEvent.removeListener(onEvent);
-        chrome.debugger.onDetach.removeListener(onDetach);
-        return;
-      }
+      if (closed) return;
       runtimeListeners.clear();
       consoleListeners.clear();
       popupListeners.clear();
       await queue;
+      if (closed) return;
+      // The previews go, then the held rules come back, then the connection.
       if (worldContextId !== null) {
         await send('Runtime.evaluate', {
           expression: `(() => { const c = globalThis[${JSON.stringify(RUNTIME_GLOBAL)}]; if (c) for (const k of c.previewKeys()) c.remove(k); })()`,
           contextId: worldContextId,
         }).catch(() => undefined);
       }
-      for (const { patchId, ruleId } of held.values()) deps.nudge(tabId, { type: 'restore', patchId, ruleId });
-      held.clear();
-      markClosed();
+      const heldShims = new Set([...previewed.values()].map((p) => p.patchId));
+      previewed.clear();
+      for (const patchId of heldShims) await deps.nudge(tabId, { type: 'hold', patchId, ruleIds: [] });
+      if (closed) return;
       await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: scriptId }).catch(() => undefined);
-      chrome.debugger.onEvent.removeListener(onEvent);
-      chrome.debugger.onDetach.removeListener(onDetach);
-      chrome.webNavigation.onBeforeNavigate.removeListener(onBeforeNavigate);
-      chrome.webNavigation.onCommitted.removeListener(onCommitted);
-      chrome.tabs.onRemoved.removeListener(onTabRemoved);
-      chrome.tabs.onCreated.removeListener(onTabCreated);
+      teardown();
       await chrome.debugger.detach(target).catch(() => undefined);
     },
   };

@@ -58,6 +58,14 @@ export interface BundleAnswer {
   ok: true;
   mode: ExtensionMode;
   shims: BundledShim[];
+  /**
+   * The rules a session on this tab holds, by shim: each booted suppressed.
+   * Apart from the list, since a held shim the list leaves out (disabled
+   * under the preview) keeps its hold for when it is back.
+   */
+  held?: Record<string, string[]>;
+  /** The hold sequence `held` is current as of; an older hold nudge arriving later is stale. */
+  holdSeq?: number;
 }
 
 /** One installed shim as the popup lists it. */
@@ -110,9 +118,22 @@ export type ToRuntime =
   | { type: 'sync' }
   | { type: 'reboot' }
   | { type: 'retire' }
-  /** A session previews a committed shim's rule: hold the committed one while the preview runs, and give it back after. */
-  | { type: 'suppress'; patchId: string; ruleId: string }
-  | { type: 'restore'; patchId: string; ruleId: string };
+  /**
+   * A session on this tab holds these rules of this shim (the whole set, not
+   * a change): each is previewed, so the committed one stays down while the
+   * hold lasts, through a reboot of the shim too. `seq` orders holds against
+   * one another and against the bundle's `holdSeq`; the runtime acks it.
+   */
+  | { type: 'hold'; patchId: string; ruleIds: string[]; seq?: number }
+  /** The session's connection to the page is gone: drop its previews (the DOM event) and release every hold. */
+  | { type: 'session-closed'; seq?: number };
+
+/**
+ * The DOM event the page runtime dispatches when a session's connection
+ * is gone: the session's own world, which the extension cannot reach any
+ * other way then, drops every preview on it before the held rules come back.
+ */
+export const SESSION_CLOSE_EVENT = 'shim-core:session-closed';
 
 /** The port a full-mode runtime opens to the worker, which nudges it there. */
 export const RUNTIME_PORT = 'shim-runtime';
@@ -120,21 +141,27 @@ export const RUNTIME_PORT = 'shim-runtime';
 /**
  * What a runtime posts on its port: as it retires, whether it had run any
  * shim, so the worker reboots a surviving rival only when the teardown
- * can have taken something the survivor shares.
+ * can have taken something the survivor shares; and the ack of a hold.
  */
-export type FromRuntime = { type: 'retiring'; booted: boolean };
+export type FromRuntime =
+  | { type: 'retiring'; booted: boolean }
+  /** A hold or session-closed nudge with `seq` was applied. */
+  | { type: 'ack'; seq: number };
 
 export function isFromRuntime(msg: unknown): msg is FromRuntime {
   if (typeof msg !== 'object' || msg === null) return false;
-  const m = msg as { type?: unknown; booted?: unknown };
-  return m.type === 'retiring' && typeof m.booted === 'boolean';
+  const m = msg as { type?: unknown; booted?: unknown; seq?: unknown };
+  if (m.type === 'retiring') return typeof m.booted === 'boolean';
+  return m.type === 'ack' && typeof m.seq === 'number';
 }
 
 export function isToRuntime(msg: unknown): msg is ToRuntime {
   if (typeof msg !== 'object' || msg === null) return false;
-  const m = msg as { type?: unknown; patchId?: unknown; ruleId?: unknown };
+  const m = msg as { type?: unknown; patchId?: unknown; ruleIds?: unknown; seq?: unknown };
   if (m.type === 'sync' || m.type === 'reboot' || m.type === 'retire') return true;
-  return (m.type === 'suppress' || m.type === 'restore') && typeof m.patchId === 'string' && typeof m.ruleId === 'string';
+  if (m.seq !== undefined && typeof m.seq !== 'number') return false;
+  if (m.type === 'session-closed') return true;
+  return m.type === 'hold' && typeof m.patchId === 'string' && Array.isArray(m.ruleIds) && m.ruleIds.every((r) => typeof r === 'string');
 }
 
 export function isToWorker(msg: unknown): msg is ToWorker {

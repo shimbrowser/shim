@@ -73,14 +73,26 @@ are a third constant (`SESSION_CAPABILITIES`): every mutation kind including `sc
 `replace-root`, trusted input, no `api` members beyond `storage` and `cleanup`
 (`api.fetch`, `api.ai` and the rest answer `not-available-in-shim-for-chrome` in their
 own shape). A preview of a committed rule holds that rule for the preview's duration and
-gives it back after. Chrome shows its own "is debugging this browser" bar on the tab for
-as long as the session lasts, and the `debugger` permission is the one this asks for.
+gives it back after: the host tells the page's runtime the whole set of rules it holds of
+each shim and waits for the ack before the preview goes up, and removes the preview
+before it releases the hold, so the two forms of one rule never run side by side. A hold
+is a claim the runtime keeps through the shim's reboot (disabled and enabled again under
+the preview) and takes from the worker's bundle answer when it boots after the hold; a
+rule the rebase ladder already swapped for a healed form is held and released in that
+form. Chrome shows its own "is debugging this browser" bar on the tab for as long as the
+session lasts, and the `debugger` permission is the one this asks for. A session ended
+from that bar, or by the tab closing, is cleaned up: the page's runtime drops the
+session's previews (a DOM event into the session's own world, the one way left to reach
+it) before the held rules come back, and a page with no runtime drops them itself once
+the host stops answering its pings.
 
 `test/extension-conformance-harness.ts` runs the shared suite
 (`@shimbrowser/core/page-host-conformance`) against the built extension's host, the way
 the Electron and Playwright hosts run it: a session capability is advertised only while
-its cases pass here too. The harness drives the worker's host through the worker's own
-handle on it (`shimPageHosts`), one member call at a time.
+its cases pass here too. `test/extension-session-harness.ts` runs a session beside an
+installed shim: the hold through every path above, and the session ended from outside.
+Both drive the worker's host through the worker's own handle on it (`shimPageHosts`),
+one member call at a time (`test/host-proxy.ts`).
 
 ## Try it
 
@@ -111,6 +123,7 @@ Then open `chrome://extensions`, turn on developer mode, choose "Load unpacked" 
 | `src/reconcile.ts` | What an open document stops and starts when the worker's answer changes. Pure. |
 | `test/extension-smoke-harness.ts` | The built extension in a real Chromium: install, apply, strict CSP, priority, live toggles, removal, a refusal. |
 | `test/extension-conformance-harness.ts` | The shared `PageHost` conformance suite against the extension's host. |
+| `test/extension-session-harness.ts` | A session beside an installed shim: holds, reboots, a rebased rule, the session ended from outside. |
 | `src/popup.ts`, `src/install-page.ts` | The popup and the install page. |
 
 ## License

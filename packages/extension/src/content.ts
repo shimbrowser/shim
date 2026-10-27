@@ -23,7 +23,7 @@
 
 import type * as Core from '@shimbrowser/core';
 import type { Rule } from '@shimbrowser/core/types';
-import { isToRuntime, RUNTIME_PORT, type ToWorker, type ToRuntime, type FromRuntime, type WorkerAnswer, type BundleAnswer, type BundledShim } from './messages';
+import { isToRuntime, RUNTIME_PORT, SESSION_CLOSE_EVENT, type ToWorker, type ToRuntime, type FromRuntime, type WorkerAnswer, type BundleAnswer, type BundledShim } from './messages';
 import { reconcileShims } from './reconcile';
 import { compileHandlers, type HandlerMap } from './compile';
 import { UNSUPPORTED_ERROR } from './capabilities';
@@ -172,11 +172,30 @@ interface Runtime {
     priority: number;
     version: number;
     handlers: HandlerMap;
+    /** Each rule as the shim has it now, by id. */
     rules: Map<string, string>;
+    /** Each rule as the control booted with it: a rule whose current form differs runs as an extra. */
+    booted: Map<string, string>;
     extras: Set<string>;
+    deploy: DeployGate | undefined;
   }
+  type DeployGate = { bundleHash: string; current: () => string | null; autoRepair?: false };
   const controls = new Map<string, Running>();
   const ruleJson = (rules: readonly Rule[] | undefined): Map<string, string> => new Map((rules ?? []).map((r) => [r.id, JSON.stringify(r)]));
+  const extraKey = (shimId: string, ruleId: string): string => `${shimId}:rebased:${ruleId}`;
+  const deployFor = (spec: BundledShim['spec']): DeployGate | undefined => (typeof spec.bundleHash === 'string'
+    ? { bundleHash: spec.bundleHash, current: deployId, ...(spec.autoRepair === false ? { autoRepair: false as const } : {}) }
+    : undefined);
+
+  // A session's holds: the rules of each shim a preview owns on this
+  // document. A claim outlives the shim's control (the shim disabled and
+  // enabled again under the preview boots suppressed), and a hold that
+  // arrives before the shim ever booted is kept for that boot. The worker
+  // is the authority (its bundle answers carry the lists too); `holdSeq`
+  // keeps a hold that crossed a bundle answer from being undone by it.
+  const claims = new Map<string, Set<string>>();
+  let holdSeq = 0;
+  const claimed = (shimId: string, ruleId: string): boolean => claims.get(shimId)?.has(ruleId) === true;
 
   const boot = (shim: BundledShim): void => {
     try {
@@ -188,8 +207,10 @@ interface Runtime {
         console.error(`[shim] handler "${problem.name}" of ${shim.id} did not compile: ${problem.error}`);
         emit(shim.id, 'handler-compile-failed', { specId: shim.id, handler: problem.name, error: problem.error, path: location.pathname });
       }
-      const control = ShimCore.run({ spec: shim.spec, handlers, priority: shim.priority, bundleHash: deployId }, makeApi(shim.id));
-      controls.set(shim.id, { control, priority: shim.priority, version: shim.version, handlers, rules: ruleJson(shim.spec.rules), extras: new Set() });
+      const suppressedRuleIds = [...(claims.get(shim.id) ?? [])];
+      const control = ShimCore.run({ spec: shim.spec, handlers, priority: shim.priority, bundleHash: deployId, suppressedRuleIds }, makeApi(shim.id));
+      const rules = ruleJson(shim.spec.rules);
+      controls.set(shim.id, { control, priority: shim.priority, version: shim.version, handlers, rules, booted: new Map(rules), extras: new Set(), deploy: deployFor(shim.spec) });
     } catch (err) {
       console.error('[shim] boot failed', shim.id, err);
     }
@@ -214,29 +235,43 @@ interface Runtime {
   // and silence a sibling's quarantine for the very deploy that healed
   // this one (the engine reports a recovery and leaves the apply to the
   // host), and would re-run every handler for one rule's sake.
+  // Takes a rule down in whichever form runs now: the extra it was swapped
+  // to, or the declared rule.
+  const takeDown = (shimId: string, running: Running, ruleId: string): void => {
+    if (running.extras.has(ruleId)) {
+      running.control.removeExtraRule(extraKey(shimId, ruleId));
+      running.extras.delete(ruleId);
+    } else {
+      running.control.suppressRule(ruleId);
+    }
+  };
+  // Brings a rule back in its current form: the declared rule when that is
+  // what the shim has now, an extra when the shim's form moved since boot.
+  const bringBack = (shimId: string, running: Running, ruleId: string): void => {
+    const current = running.rules.get(ruleId);
+    if (current === undefined) return;
+    if (current === running.booted.get(ruleId)) {
+      running.control.restoreRule(ruleId);
+      return;
+    }
+    const rule = JSON.parse(current) as Rule;
+    running.control.applyExtraRule(rule, shimId, extraKey(shimId, ruleId), running.handlers, running.deploy);
+    running.extras.add(ruleId);
+  };
   const update = (shim: BundledShim): void => {
     const running = controls.get(shim.id);
     if (!running) return;
     const next = ruleJson(shim.spec.rules);
-    const key = (ruleId: string): string => `${shim.id}:rebased:${ruleId}`;
-    const takeDown = (ruleId: string): void => {
-      if (running.extras.has(ruleId)) {
-        running.control.removeExtraRule(key(ruleId));
-        running.extras.delete(ruleId);
-      } else {
-        running.control.suppressRule(ruleId);
-      }
-    };
-    const deploy = typeof shim.spec.bundleHash === 'string'
-      ? { bundleHash: shim.spec.bundleHash, current: deployId, ...(shim.spec.autoRepair === false ? { autoRepair: false } : {}) }
-      : undefined;
+    running.deploy = deployFor(shim.spec);
     try {
-      for (const ruleId of running.rules.keys()) if (!next.has(ruleId)) takeDown(ruleId);
+      for (const ruleId of running.rules.keys()) if (!next.has(ruleId)) takeDown(shim.id, running, ruleId);
       for (const rule of shim.spec.rules ?? []) {
         const before = running.rules.get(rule.id);
         if (before === JSON.stringify(rule)) continue;
-        if (before !== undefined) takeDown(rule.id);
-        running.control.applyExtraRule(rule, shim.id, key(rule.id), running.handlers, deploy);
+        if (before !== undefined) takeDown(shim.id, running, rule.id);
+        // A held rule stays down in its new form too; the release brings it back as it is then.
+        if (claimed(shim.id, rule.id)) continue;
+        running.control.applyExtraRule(rule, shim.id, extraKey(shim.id, rule.id), running.handlers, running.deploy);
         running.extras.add(rule.id);
       }
     } catch (err) {
@@ -244,6 +279,23 @@ interface Runtime {
     }
     running.rules = next;
     running.version = shim.version;
+  };
+  // The whole set a session holds of one shim: newly held rules go down,
+  // released ones come back, in their current form.
+  const hold = (shimId: string, ruleIds: readonly string[]): void => {
+    const want = new Set(ruleIds);
+    const have = claims.get(shimId) ?? new Set<string>();
+    const running = controls.get(shimId);
+    for (const ruleId of want) {
+      if (have.has(ruleId) || !running) continue;
+      try { takeDown(shimId, running, ruleId); } catch (err) { console.error(`[shim] could not hold rule ${ruleId} of ${shimId}`, err); }
+    }
+    for (const ruleId of have) {
+      if (want.has(ruleId) || !running) continue;
+      try { bringBack(shimId, running, ruleId); } catch (err) { console.error(`[shim] could not release rule ${ruleId} of ${shimId}`, err); }
+    }
+    if (want.size) claims.set(shimId, want);
+    else claims.delete(shimId);
   };
 
   // Syncs run one after another: two re-injections in a row must not boot
@@ -267,6 +319,13 @@ interface Runtime {
     const bundle = answer as BundleAnswer;
     const stamps = new Map([...controls].map(([id, r]) => [id, { priority: r.priority, version: r.version }]));
     const { stop: gone, start, update: moved } = reconcileShims(stamps, bundle.shims);
+    // The holds first: a shim booting below boots suppressed.
+    if (typeof bundle.holdSeq === 'number' && bundle.holdSeq >= holdSeq) {
+      holdSeq = bundle.holdSeq;
+      const held = bundle.held ?? {};
+      for (const [id, ruleIds] of Object.entries(held)) hold(id, ruleIds);
+      for (const id of [...claims.keys()]) if (!Object.hasOwn(held, id)) hold(id, []);
+    }
     for (const id of gone) stop(id);
     for (const shim of moved) update(shim);
     for (const shim of start) boot(shim);
@@ -293,17 +352,28 @@ interface Runtime {
       invalidated();
       return;
     }
-    // A session previews one of a committed shim's rules: the committed
-    // rule is held while the preview runs (the two never run side by side)
-    // and given back when the preview goes.
-    if (msg.type === 'suppress' || msg.type === 'restore') {
-      const running = controls.get(msg.patchId);
-      if (!running) return;
-      try {
-        if (msg.type === 'suppress') running.control.suppressRule(msg.ruleId);
-        else running.control.restoreRule(msg.ruleId);
-      } catch (err) {
-        console.error(`[shim] could not ${msg.type} rule ${msg.ruleId} of ${msg.patchId}`, err);
+    // A session previews some of a committed shim's rules: the committed
+    // ones are held while the previews run (the two never run side by side)
+    // and given back when the previews go. Acked, so the session applies a
+    // preview only once its twin is down, and restores only once its
+    // preview is gone.
+    if (msg.type === 'hold' || msg.type === 'session-closed') {
+      const seq = msg.seq;
+      if (seq === undefined || seq > holdSeq) {
+        if (seq !== undefined) holdSeq = seq;
+        if (msg.type === 'hold') {
+          hold(msg.patchId, msg.ruleIds);
+        } else {
+          // The session's world cannot be reached by its driver any more:
+          // the event takes its previews down, synchronously, in that
+          // world, before the held rules come back here.
+          try { document.dispatchEvent(new Event(SESSION_CLOSE_EVENT)); } catch { /* no document to tell */ }
+          for (const id of [...claims.keys()]) hold(id, []);
+        }
+      }
+      if (seq !== undefined) {
+        const ack: FromRuntime = { type: 'ack', seq };
+        try { port?.postMessage(ack); } catch { /* the worker is gone */ }
       }
       return;
     }
