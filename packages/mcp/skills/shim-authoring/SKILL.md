@@ -290,14 +290,10 @@ All of them act on the session's tab.
   are re-applied only on the host the session started on. A rule that first matches only
   after such a re-apply commits without a witness, and the commit's `notes` say so: preview
   that rule again while it matches one element to give it one.
-- **`verify_across_pages { routes? }`** — replays the working shim's rules against the
-  *other* page-types the user has already visited on this site (feed, search, profile, …),
-  offscreen, and reports per route and per rule whether each matched. A checklist over
-  visited routes, never a crawl. Use it after a clean preview when the target recurs across
-  views ("on every post"). Report honestly: matched → verified there; your rule no-match
-  → it does not apply there (likely different markup); unvisited page-types → unverified.
-  Sign-in, session, account-action and checkout pages are never replayed (the result
-  counts them in `skippedSensitive`), so a view of that kind stays unverified.
+- **`verify_across_pages { routes? }`** — replays the working shim's rules, offscreen,
+  against the *other* page-types the user already visited on this site, and reports per
+  route and rule whether each matched. Use it after a clean preview when the target recurs
+  across views ("on every post"); read `references/page-driving.md` for how to report it.
 - **`interact_page { actions }`** — your shim's own UI with trusted input (click, type,
   select, press, a small scroll); in attach it touches only your shim's own output.
   **`navigate { url }`** loads another page of the start origin. Read

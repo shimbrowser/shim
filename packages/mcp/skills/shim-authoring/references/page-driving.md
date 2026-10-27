@@ -46,3 +46,14 @@ from outside (AppleScript, another browser).
   with `page-away` until it is back (navigate again, or `reload_page`). On the site your
   previews are re-applied (`reapplied`). In an attach session a page load is a GET as the
   signed-in user, like following a link: never navigate to logout or action URLs.
+
+## `verify_across_pages`
+
+It replays the working shim's rules against the *other* page-types the user has already
+visited on this site (feed, search, profile, …), offscreen. It is a checklist over visited
+routes, never a crawl. Report it honestly: matched → verified there; your rule no-match →
+it does not apply there (likely different markup); unvisited page-types → unverified. A
+route is replayed by its path alone, so a view that depends on the query string may not be
+the one you previewed. Sign-in, session, account-action and checkout pages are never
+replayed (the result counts them in `skippedSensitive`), so a view of that kind stays
+unverified.
