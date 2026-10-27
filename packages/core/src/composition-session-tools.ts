@@ -113,8 +113,10 @@ export const SESSION_COMPOSITION_TOOLS: Record<CompositionSessionToolName, ToolD
       'api.example.net), and either on the mint host itself or on a host granted to this session, declared and ' +
       'allowed — otherwise `test-host-not-allowed` before any card. Never returns the token or any body — only ' +
       'whether extraction worked and, if tested, the status (with `detail` on why not for a `tokenPath` only). ' +
-      'A `token.after` must end at a delimiter — a quote, "=" or ":" — never inside a value. At most 5 calls ' +
-      'per mint host per session (`verify-mint-limit`). probe_request shows JSON bodies only: for a token in an ' +
+      'A `token.after` must end at a delimiter — a quote, "=" or ":" — never inside a value, and the check reads ' +
+      'a text token on the full token alphabet up to its natural end (`chars` and `length` apply at runtime, not ' +
+      'here). At most 5 calls per composition per token source host (the follow host, else the mint host) while ' +
+      'Shim runs (`verify-mint-limit`). probe_request shows JSON bodies only: for a token in an ' +
       'HTML page or a script, ask the user where it sits.',
     input_schema: {
       type: 'object',

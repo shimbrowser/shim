@@ -214,8 +214,10 @@ A refused preview answers `applied: false` with `error` and `problems`:
   host be called signed in as them (and the `follow` host, on a second card), and nothing
   is requested before they answer. Declined, or unanswered in two minutes, it answers
   `denied` — ask the user rather than retrying. A `token.after` must end at a delimiter (a
-  quote, `=` or `:`), never inside a value, and a session gets at most 5 calls per mint host
-  (`verify-mint-limit`). Otherwise it answers whether the token was extracted (`detail` says
+  quote, `=` or `:`), never inside a value; the check reads a text token on the full token
+  alphabet up to its natural end (`chars` / `length` apply at runtime, not to the check);
+  and there are at most 5 calls per composition per token source host (the follow host, else
+  the mint host) while Shim runs (`verify-mint-limit`) — make each one count. Otherwise it answers whether the token was extracted (`detail` says
   why not, for a `tokenPath` only) and, with a `testEndpoint` (a read-only endpoint on the
   mint host's site — same registrable domain, so a mint on `auth.example.com` can test
   `api.example.com` but never `api.example.net` — and either the mint host itself or a host
