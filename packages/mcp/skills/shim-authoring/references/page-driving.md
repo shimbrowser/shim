@@ -9,7 +9,10 @@ from outside (AppleScript, another browser).
   "clear"? }`, `{ "select": selector, "value" }`, `{ "press": key }` or
   `{ "scroll": { "by": px } }` (the viewport, positive down, at most 1500 per step). Clicks,
   typing, keys and scrolls are real (trusted) input; a `<select>` is set through the DOM.
-  Each selector must match exactly one visible, enabled, uncovered element. In an attach
+  Each selector must match exactly one visible, enabled, uncovered element, so a control
+  your handler injects once per matched element (a filter box above every table) needs
+  something that tells the copies apart: give each a `data-*` attribute naming its
+  instance (`data-for="t3"`) when you create it. In an attach
   session (the user's logged-in tab) it touches **only your shim's own output** — what your
   previews and committed rules put on the page — in the top frame, outside shadow roots
   (`scope: "shim-dom"`). Anything else is refused before any input, with a code:
