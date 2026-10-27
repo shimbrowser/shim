@@ -40,6 +40,10 @@ The loop is the same, with three differences:
   `api.db` reads as absent), the preview lists it under `unsupportedApi`, and its rule is
   **`verification: partial`** — tell the user that rule is unverified until they try it in
   Shim. Only a `full` rule behaves the same in Shim.
+- **A page `match.hosts` doesn't cover.** You can open an existing `.shim` on a page its
+  `match.hosts` doesn't cover, but in Shim that shim would not run there at all. Every
+  preview on such a page carries a warning saying so, and no rule there is reported better
+  than `partial`: don't report it as working in Shim.
 - **Requests from a handler, headless.** Since `api.fetch` is refused, a handler's plain
   `fetch` is the only way out, and it runs under the page's CORS. It reaches the page's
   own site, and a third-party API only if that API sends CORS headers for the page's
