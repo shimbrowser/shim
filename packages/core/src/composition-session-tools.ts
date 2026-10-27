@@ -111,10 +111,11 @@ export const SESSION_COMPOSITION_TOOLS: Record<CompositionSessionToolName, ToolD
       'followed. Optionally confirm the token authenticates against `testEndpoint`, a read-only endpoint on the ' +
       'mint host\'s site (same registrable domain: a mint on auth.example.com can test api.example.com, never ' +
       'api.example.net), and either on the mint host itself or on a host granted to this session, declared and ' +
-      'allowed — otherwise `test-host-not-allowed` before any card. Never returns the token or any body — only whether extraction worked (with `detail` ' +
-      'when it did not) and, if tested, the status. probe_request shows JSON bodies only, so for a token in ' +
-      'an HTML page or a script, ask the user where it sits, or try candidate prefixes here: the answer says ' +
-      'whether extraction worked.',
+      'allowed — otherwise `test-host-not-allowed` before any card. Never returns the token or any body — only ' +
+      'whether extraction worked and, if tested, the status (with `detail` on why not for a `tokenPath` only). ' +
+      'A `token.after` must end at a delimiter — a quote, "=" or ":" — never inside a value. At most 5 calls ' +
+      'per mint host per session (`verify-mint-limit`). probe_request shows JSON bodies only: for a token in an ' +
+      'HTML page or a script, ask the user where it sits.',
     input_schema: {
       type: 'object',
       properties: {

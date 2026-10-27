@@ -102,7 +102,7 @@ style.css
   (`header`, with an optional `scheme` such as `"Bearer"`, or `query`). Check it with
   `verify_mint` before you put it in the manifest: it says whether extraction worked.
   `probe_request` shows a JSON mint response, never an HTML page or a script — for a
-  token in one, ask the user where it sits, or try candidate prefixes with `verify_mint`.
+  token in one, ask the user where it sits.
 - **`settings`**, **`permissions`**, **`storage`**, **`connections`** — the same
   declarations a shim makes (`references/api.md`, `references/databases.md`): settings fields (`text | secret | number | boolean
   | select`), `"permissions": ["ai"]`, local tables, remote databases.
@@ -213,8 +213,10 @@ A refused preview answers `applied: false` with `error` and `problems`:
   against the user's real session: Shim first asks the user, on a card, to let the mint
   host be called signed in as them (and the `follow` host, on a second card), and nothing
   is requested before they answer. Declined, or unanswered in two minutes, it answers
-  `denied` — ask the user rather than retrying. Otherwise it answers whether the token was
-  extracted (`detail` says why not) and, with a `testEndpoint` (a read-only endpoint on the
+  `denied` — ask the user rather than retrying. A `token.after` must end at a delimiter (a
+  quote, `=` or `:`), never inside a value, and a session gets at most 5 calls per mint host
+  (`verify-mint-limit`). Otherwise it answers whether the token was extracted (`detail` says
+  why not, for a `tokenPath` only) and, with a `testEndpoint` (a read-only endpoint on the
   mint host's site — same registrable domain, so a mint on `auth.example.com` can test
   `api.example.com` but never `api.example.net` — and either the mint host itself or a host
   `probe_request` may reach; otherwise `test-host-not-allowed` before any card), the status
