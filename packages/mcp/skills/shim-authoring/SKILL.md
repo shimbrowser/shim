@@ -40,6 +40,7 @@ it, each read before the work it covers; section 8 lists them.
    so no card comes). Compositions carry `connect` the same way. Work against the tab
    showing the page the user means. **No tab shows the site?** Open the session on its
    `url` instead (step 3): never open tabs yourself (AppleScript, `open`, another browser).
+   With Shim for Chrome too, tabs carry `host`; `target` picks (`references/hosts.md`).
 3. **Open a session.** `shim_open_session { tabId, intent, shimId | newShimName, dir }`.
    - `shimId` refines an existing shim; `newShimName` starts a new one on the tab's site
      (it is kept only if you commit).
@@ -491,3 +492,4 @@ a file **before** the work it covers, not after a preview goes wrong: a guessed 
 | `references/compositions.md` | any composition session |
 | `references/page-driving.md` | `interact_page` (your shim's own controls, scroll) or `navigate` in a shim session: what each may touch, the refusal codes, what stops a batch |
 | `references/headless.md` | a headless session: `shim_status` offers only headless, an open answers `mode: "headless"`, or the user wants a standalone `.shim` file |
+| `references/hosts.md` | a `chrome` host in `shim_status`, a tab with `host`, `ambiguous-target` / `multiple-targets` |

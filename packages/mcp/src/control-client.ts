@@ -16,6 +16,10 @@ import * as path from 'path';
 
 export const DISCOVERY_FORMAT = 'shim-control/1';
 export const DISCOVERY_FILE = 'control.json';
+// The same format, written by Shim for Chrome's bridge beside the browser's
+// file, with `host: 'chrome-extension'`. SHIM_CONTROL_CHROME_FILE overrides it.
+export const CHROME_DISCOVERY_FILE = 'control-chrome.json';
+export const CHROME_HOST = 'chrome-extension';
 // Electron's app.getPath('userData') folder name: package.json's
 // `productName` (mcp-launch-harness pins it to the app's package.json).
 export const APP_DIR_NAME = 'Shim';
@@ -26,6 +30,8 @@ export interface ControlInfo {
   pid: number;
   appVersion: string;
   startedAt: number;
+  /** Which host wrote the file: absent for the Shim browser, 'chrome-extension' for its bridge. */
+  host?: string;
 }
 
 export interface PathEnv {
@@ -52,6 +58,10 @@ export function discoveryFilePath(input: PathEnv): string {
   return input.env.SHIM_CONTROL_FILE || path.join(userDataDir(input), DISCOVERY_FILE);
 }
 
+export function chromeDiscoveryFilePath(input: PathEnv): string {
+  return input.env.SHIM_CONTROL_CHROME_FILE || path.join(userDataDir(input), CHROME_DISCOVERY_FILE);
+}
+
 /** The discovery file's contents, or null when it is missing or not ours. */
 export function readControlInfo(file: string): ControlInfo | null {
   let parsed: unknown;
@@ -70,6 +80,7 @@ export function readControlInfo(file: string): ControlInfo | null {
     pid: r.pid,
     appVersion: typeof r.appVersion === 'string' ? r.appVersion : 'unknown',
     startedAt: typeof r.startedAt === 'number' ? r.startedAt : 0,
+    ...(typeof r.host === 'string' ? { host: r.host } : {}),
   };
 }
 
