@@ -86,6 +86,7 @@ Then open `chrome://extensions`, turn on developer mode, choose "Load unpacked" 
 | `src/reconcile.ts` | What an open document stops and starts when the worker's answer changes. Pure. |
 | `test/extension-smoke-harness.ts` | The built extension in a real Chromium: install, apply, strict CSP, priority, live toggles, removal, a refusal. |
 | `src/popup.ts`, `src/install-page.ts` | The popup and the install page. |
+| `.claude/skills/chrome-extensions/` | Google's Chrome extension authoring skill (`GoogleChrome/modern-web-guidance`, unmodified). Nested here so an agent loads it only while working in this package. Refresh it by rerunning the installer and copying the skill folder over. |
 
 ## License
 
