@@ -31,6 +31,17 @@ world**, must be pure and synchronous (no `api`, no DOM); a throw or an `undefin
 ships the original body. Only same-registrable-domain JSON responses are touched, and only
 when the site fetches again — reload before concluding a rewrite doesn't work.
 
+`endpoint.path` is a route template matched against the request's pathname (query and
+hash stripped), anchored at both ends and case-sensitive: `/literal`, `/:name` (one
+segment, captured into `ctx.params.name`), `/:name?` (an optional segment), `/*` (the
+rest, as `ctx.params['*']`). `/i/api/graphql/:queryId/:operation` matches every GraphQL
+call and gives you `ctx.params.operation` to branch on — match on stable names like that,
+not on a per-deploy hash. `method` is optional (any method when left out).
+
+The wrapper is installed when a page loads. The first time you preview a rewrite on a
+page that was already open, nothing is intercepted until you `reload_page`; after that,
+further previews swap the transform in live (still only for later fetches).
+
 **`intercept`** — wrap a function in the site's own AMD/RequireJS module (check first:
 `evaluate_in_page('typeof define !== "undefined" && !!define.amd')`):
 
