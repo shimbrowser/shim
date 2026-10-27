@@ -1067,7 +1067,17 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
       if (written.reset) await resetTo(handle, written.reset);
       return { ok: false, error: written.error, ...(written.detail !== undefined ? { detail: written.detail } : {}) };
     }
-    handle.version = version;
+    // The host may have committed at a higher version than this proposal
+    // (a rebase advanced the stored shim before the merge). Follow the
+    // adopted version, so the continuing handle and the history entry name
+    // the version actually written.
+    const committedVersion = (written.adopted && typeof written.adopted.spec.version === 'number') ? written.adopted.spec.version : version;
+    if (committedVersion !== version) {
+      for (const entry of history) {
+        if (isRecord(entry) && entry.versionId === version) entry.versionId = committedVersion;
+      }
+    }
+    handle.version = committedVersion;
     handle.bundleHash = bundleHash;
     handle.envelope = { ...handle.envelope, authoringHistory: history };
     if (written.adopted) {

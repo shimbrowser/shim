@@ -152,6 +152,36 @@ async function main(): Promise<void> {
     check('the prepared history has the external exchange with the intent and summary', history.length >= 2 && JSON.stringify(history).includes('drop tag') && JSON.stringify(history).includes('"external":true'), JSON.stringify(history));
   }
 
+  console.log('a host that commits at a higher version (a rebase) is followed:')
+  {
+    // writeCommit adopts a spec two versions ahead of core's proposal (a
+    // rebase advanced the stored shim before the merge).
+    const adopted: Array<number> = [];
+    const backend = createShimSessionBackend<Source>({
+      settleMs: 0, unsupportedError: 'u', unsupportedDetail: 'd', unsupportedNote: () => 'n', previewCommittedAtBegin: false,
+      async writeCommit(_h, prepared): Promise<CommitWrite> {
+        adopted.push(prepared.version);
+        // Core proposed `prepared.version`; the host commits two ahead.
+        const committed = prepared.version + 2;
+        const next = { ...prepared.file.spec, version: committed } as Spec;
+        return { ok: true, versionId: committed, adopted: { spec: next, handlers: prepared.file.handlers } };
+      },
+    });
+    const handle = await openSession(backend);
+    await backend.preview(handle, { workingCopy: await folderRemoving('tag') }, new AbortController().signal);
+    const first = await backend.commit(handle, { revision: 1, summary: 'one', signal: new AbortController().signal });
+    check('the reply names the committed version, not core\'s proposal', first.ok && first.versionId === 4, JSON.stringify(first));
+    const hist = (handle.envelope.authoringHistory ?? []) as Array<{ role: string; versionId?: number }>;
+    const assistant = hist.find((e) => e.role === 'assistant');
+    check('the persisted history entry is stamped with the committed version', assistant?.versionId === 4, JSON.stringify(assistant));
+    check('the continuing handle is at the committed version', handle.version === 4);
+    // A second change in the same session proposes the next version after
+    // the one actually committed.
+    await backend.preview(handle, { workingCopy: await folderRemoving('hide-ad') }, new AbortController().signal);
+    await backend.commit(handle, { revision: 2, summary: 'two', signal: new AbortController().signal });
+    check('a second commit proposes the version after the committed one', adopted[1] === 5, JSON.stringify(adopted));
+  }
+
   if (failures) {
     console.error(`\nshim-session: ${failures} failed, ${passes} passed`);
     process.exit(1);

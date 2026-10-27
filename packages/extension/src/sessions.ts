@@ -128,6 +128,10 @@ function exclusiveLeases(): SessionLeases & { preempt(key: string): Promise<void
   };
 }
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -286,8 +290,11 @@ export function createSessions(deps: SessionsDeps): Sessions {
       const next: Spec = { ...merged.spec, id: shimId, version, ...(typeof current.spec.bundleHash === 'string' ? { bundleHash: current.spec.bundleHash } : {}) };
       // The authoring exchange core appended to the file's envelope is kept
       // on the installed shim, in the same transaction, so an export carries
-      // this session's history.
-      const envelope = { ...current.envelope, authoringHistory: prepared.history };
+      // this session's history. Core stamped its assistant entry with the
+      // version it proposed; the real version is `version` (a rebase may
+      // have advanced the stored shim), so the entry is restamped.
+      const history = prepared.history.map((e) => (isRecord(e) && e.versionId === prepared.version ? { ...e, versionId: version } : e));
+      const envelope = { ...current.envelope, authoringHistory: history };
       if (!(await db.reviseSpec(shimId, next, merged.handlers, 'commit', specVersion(current.spec), { clearDraft: true, envelope }))) {
         return { ok: false, error: 'commit-failed', detail: 'the shim changed while the commit was being written; try again' };
       }
