@@ -29,6 +29,7 @@ import {
 } from '@shimbrowser/core/shim-session';
 import { anchorDigest, withoutManagedKeys } from '@shimbrowser/core/managed-anchor';
 import { referencedHandlerNames } from '@shimbrowser/core/shim-folder';
+import { ruleModules } from '@shimbrowser/core/rule-form';
 import { preflightSpec } from '@shimbrowser/core/capability-preflight';
 import { isApiMapToolName } from '@shimbrowser/core/api-map-tools';
 import { isDataToolName } from '@shimbrowser/core/data-tools';
@@ -70,6 +71,8 @@ export interface SessionsDeps {
   syncTab(tabId: number, shimId: string, version: number): Promise<NudgeOutcome>;
   /** The other open tabs look again at the shim. */
   refreshTabs(shim: InstalledShim): Promise<void>;
+  /** Remove a draft shim a session created and never committed (its finish). */
+  removeDraft(shimId: string): Promise<void>;
   now?(): number;
   sleep?(ms: number): Promise<void>;
   newId?(): string;
@@ -202,16 +205,30 @@ export function createSessions(deps: SessionsDeps): Sessions {
   const syntaxChecks = new WeakMap<ExtensionSessionHandle, Map<string, { ok: boolean; error?: string }>>();
   let committing: ExtensionSessionHandle | null = null;
 
+  // Keyed by the module's trimmed source: the probe is handed the module
+  // wrapped (and the folder may have normalized its line ends), so the
+  // wrapper is stripped and the source trimmed before the lookup.
+  const PROBE_HEAD = '(function (module, exports) {\n';
+  const PROBE_TAIL = '\n});';
+  const moduleOfProbe = (code: string): string => (code.startsWith(PROBE_HEAD) && code.endsWith(PROBE_TAIL) ? code.slice(PROBE_HEAD.length, -PROBE_TAIL.length) : code).trim();
   async function checkSyntax(handle: ExtensionSessionHandle): Promise<void> {
     const results = new Map<string, { ok: boolean; error?: string }>();
     const host: PageHost = handle.host;
-    for (const [, source] of Object.entries(handle.storedHandlers)) {
-      const code = `(function (module, exports) {\n${source}\n});`;
+    // Every module the commit will pack: a rule's modules are its inline
+    // handlers (read back to module form) over the stored ones, so an
+    // edited handler riding inline on a working rule is checked too.
+    const modules = new Map<string, string>();
+    for (const rule of handle.working.rules ?? []) {
+      for (const [name, source] of Object.entries(ruleModules(rule, handle.storedHandlers))) modules.set(name, source);
+    }
+    for (const [name, source] of Object.entries(handle.storedHandlers)) if (!modules.has(name)) modules.set(name, source);
+    for (const [, source] of modules) {
+      const code = `${PROBE_HEAD}${source}${PROBE_TAIL}`;
       try {
         const out = await host.evaluate(`(() => { try { (0, eval)(${JSON.stringify(code)}); return null; } catch (e) { return String(e && e.message || e); } })()`, 'engine');
-        results.set(code, out === null ? { ok: true } : { ok: false, error: typeof out === 'string' ? out : 'syntax error' });
+        results.set(source.trim(), out === null ? { ok: true } : { ok: false, error: typeof out === 'string' ? out : 'syntax error' });
       } catch (e) {
-        results.set(code, { ok: false, error: `could not be checked: ${e instanceof Error ? e.message : String(e)}` });
+        results.set(source.trim(), { ok: false, error: `could not be checked: ${e instanceof Error ? e.message : String(e)}` });
       }
     }
     syntaxChecks.set(handle, results);
@@ -224,7 +241,7 @@ export function createSessions(deps: SessionsDeps): Sessions {
     unsupportedDetail: 'Shim for Chrome runs hide, restyle, reorder, reshape, remove, inject-element, inject-html, script and replace-root rules, with api.storage and api.cleanup. Nothing was applied. Remove what is listed, or author this shim in the Shim browser.',
     unsupportedNote: (ruleId, member) => `rule "${ruleId}" used api.${member}, which Shim for Chrome does not provide (${UNSUPPORTED_ERROR}) — its result is partial`,
     previewCommittedAtBegin: false,
-    syntaxProbe: (code) => (committing && syntaxChecks.get(committing)?.get(code)) ?? { ok: false, error: 'handler syntax was not checked in the page' },
+    syntaxProbe: (code) => (committing && syntaxChecks.get(committing)?.get(moduleOfProbe(code))) ?? { ok: false, error: 'handler syntax was not checked in the page' },
     async tombstone(handle, ruleId, held) {
       const host = handle.page.host as ExtensionPageHost;
       if (held) await host.holdOnly(handle.source.shimId, ruleId);
@@ -346,6 +363,9 @@ export function createSessions(deps: SessionsDeps): Sessions {
       await activations.get(h.sessionId);
       try {
         await backend.finish(handle, info, release);
+        // A shim created for this session that never got a commit is a
+        // draft to drop now (boot sweeps one a dead worker left behind).
+        if (h.source.created && !info.committed) await deps.removeDraft(h.source.shimId);
       } finally {
         notes.delete(h.sessionId);
       }

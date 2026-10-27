@@ -27,9 +27,10 @@ function must<T extends Element>(id: string): T {
 const cards = must<HTMLElement>('cards');
 const none = must<HTMLElement>('none');
 const shown = new Map<string, HTMLElement>();
-let emptySince: number | null = null;
 
 function render(pending: PendingConsent[]): void {
+  // The worker owns this window: it closes it when nothing waits, and opens
+  // a fresh one for the next request. The page only shows what is pending.
   const ids = new Set(pending.map((p) => p.id));
   for (const [id, node] of [...shown]) {
     if (!ids.has(id)) { node.remove(); shown.delete(id); }
@@ -41,13 +42,6 @@ function render(pending: PendingConsent[]): void {
     cards.append(card);
   }
   none.hidden = pending.length > 0;
-  if (pending.length === 0) {
-    emptySince ??= Date.now();
-    // A moment for the user to read the last answer's outcome, then gone.
-    if (Date.now() - emptySince > 1500) window.close();
-  } else {
-    emptySince = null;
-  }
 }
 
 function renderCard(p: PendingConsent): HTMLElement {

@@ -1078,6 +1078,15 @@ const sessions = createSessions({
   chained,
   syncTab: syncTabForVersion,
   refreshTabs: (shim) => refreshOpenTabs(patternsFor(shim)),
+  removeDraft: async (shimId) => {
+    const db = await store();
+    const shim = await db.getShim(shimId);
+    if (!shim || !shim.sessionDraft) return;
+    await db.deleteShim(shimId);
+    await syncRegistrations();
+    await refreshOpenTabs(patternsFor(shim));
+    await releaseUnusedOrigins(db, patternsFor(shim));
+  },
 });
 
 const consent = createConsentGate();
@@ -1090,27 +1099,44 @@ const rememberedReady = (async () => {
     if (Array.isArray(list)) consent.remember(list.filter((s): s is string => typeof s === 'string'));
   } catch { /* nothing remembered */ }
 })();
+// The attach card is a small window of the extension's own page. The worker
+// owns its lifetime: one window while requests wait, closed a moment after
+// the last is answered, a fresh one for the next. Serialized, so two
+// rapid changes never open two windows or race a close against an open.
 let cardWindowId: number | null = null;
-// The card is a small window of the extension's own page, opened when a
-// request starts waiting and reused while any is.
-async function showCard(): Promise<void> {
-  if (cardWindowId !== null) {
-    try {
-      await chrome.windows.get(cardWindowId);
-      return;
-    } catch { cardWindowId = null; }
-  }
-  try {
-    const win = await chrome.windows.create({ url: chrome.runtime.getURL('attach.html'), type: 'popup', width: 460, height: 420, focused: true });
-    cardWindowId = win?.id ?? null;
-  } catch (e) {
-    console.error('[shim] could not open the attach card', e);
-  }
+let cardCloseTimer: ReturnType<typeof setTimeout> | null = null;
+let cardWork: Promise<void> = Promise.resolve();
+const CARD_CLOSE_GRACE_MS = 1200;
+
+function syncCard(pending: PendingConsent[]): void {
+  cardWork = cardWork.then(async () => {
+    if (pending.length > 0) {
+      if (cardCloseTimer !== null) { clearTimeout(cardCloseTimer); cardCloseTimer = null; }
+      if (cardWindowId !== null) {
+        try { await chrome.windows.get(cardWindowId); return; } catch { cardWindowId = null; }
+      }
+      try {
+        const win = await chrome.windows.create({ url: chrome.runtime.getURL('attach.html'), type: 'popup', width: 460, height: 440, focused: true });
+        cardWindowId = win?.id ?? null;
+      } catch (e) {
+        console.error('[shim] could not open the attach card', e);
+      }
+    } else if (cardWindowId !== null && cardCloseTimer === null) {
+      const id = cardWindowId;
+      cardCloseTimer = setTimeout(() => {
+        cardCloseTimer = null;
+        if (cardWindowId === id && consent.pending().length === 0) {
+          cardWindowId = null;
+          void chrome.windows.remove(id).catch(() => undefined);
+        }
+      }, CARD_CLOSE_GRACE_MS);
+    }
+  }, () => undefined);
 }
 chrome.windows.onRemoved.addListener((id) => { if (id === cardWindowId) cardWindowId = null; });
 consent.onChange((pending) => {
   void chrome.storage.session.set({ [REMEMBERED_KEY]: consent.remembered() }).catch(() => undefined);
-  if (pending.length) void showCard();
+  syncCard(pending);
 });
 
 const hostPattern = (hostname: string, port: string): string => `*://${hostname}${port ? `:${port}` : ''}/*`;
@@ -1128,7 +1154,9 @@ function tabInfoOf(tab: chrome.tabs.Tab): TabInfo | null {
 async function patternsNeeded(req: AttachRequest, tab: TabInfo): Promise<{ patterns: string[]; shim: InstalledShim | null; error?: string; detail?: string }> {
   const db = await store();
   const u = new URL(tab.url);
-  if (req.create !== null) return { patterns: [hostPattern(u.hostname, u.port)], shim: null };
+  // A Chrome host permission carries no port, so a new shim is granted its
+  // host for every port; its match.hosts keeps the port (createShim).
+  if (req.create !== null) return { patterns: [hostPattern(u.hostname, '')], shim: null };
   const shim = await db.getShim(req.artifactId);
   if (!shim) return { patterns: [], shim: null, error: 'unknown-artifact', detail: `no shim "${req.artifactId}" is installed` };
   if (!hostMatches(shim.spec.match?.hosts, u.hostname, u.port || undefined)) {
@@ -1230,13 +1258,16 @@ const controlDeps: ControlDeps = {
     const db = await store();
     const u = new URL(tab.url);
     const id = mintShimId(crypto.randomUUID());
-    const host = u.port ? `${u.hostname}:${u.port}` : u.hostname;
-    const { patterns, problems } = matchPatternsForHosts([host]);
+    // Chrome match patterns carry no port anywhere (permission, content
+    // script, permissions.contains), so a new shim matches the host for
+    // every port. On a dev server that is any port of localhost; the user
+    // can narrow it in the Shim browser.
+    const { patterns, problems } = matchPatternsForHosts([u.hostname]);
     if (problems.length || !patterns.length) return { ok: false, error: 'invalid-target', detail: `the tab's host cannot be registered: ${problems.join('; ')}` };
     const shim: Omit<InstalledShim, 'rank'> = {
       id, name: req.create?.name ?? 'New shim', enabled: true, installedAt: Date.now(),
       provenance: { source: 'session' },
-      mode: modeNow, spec: { id, version: 1, match: { hosts: [host] }, rules: [] }, handlers: {}, envelope: {},
+      mode: modeNow, spec: { id, version: 1, match: { hosts: [u.hostname] }, rules: [] }, handlers: {}, envelope: {},
       sessionDraft: { sessionId: draftId, at: Date.now() },
     };
     await db.addShim(shim);
