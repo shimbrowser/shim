@@ -74,6 +74,11 @@ export interface RewriteEntry {
 export interface RewriteTablePayload {
   regDomain: string;
   entries: RewriteEntry[];
+  // Every shim id on the host in chain order (ascending priority), including
+  // shims with no rewrite rules yet, so an authoring preview of a shim's
+  // first rewrite can take that shim's slot (`mergePreviewEntries`). Stays
+  // on the isolated side: the wrapper's table carries only regDomain+entries.
+  specOrder?: string[];
 }
 
 // A transform handler's storage form — same split `script` handlers use:
@@ -376,40 +381,63 @@ export type PreviewOwner = { specId: string; ruleId: string };
 // A preview of a committed rule REPLACES that rule's entries in place: both
 // running would apply the transform twice, the rewrite analogue of the
 // engine's twin suppression for DOM previews. A new rule of a committed shim
-// goes right after that shim's last entry, its own priority slot. A preview
+// goes right after that shim's last entry, its own priority slot (a shim
+// with no committed rewrite yet is placed by `specOrder`). A preview
 // with no committed shim on this host goes last (the shim being authored has
 // the final say while it is previewed).
 export function mergePreviewEntries(
   committed: RewriteEntry[],
   previews: Array<{ owner: PreviewOwner | null; entries: RewriteEntry[] }>,
+  specOrder: string[] = [],
 ): RewriteEntry[] {
   // Previews keep their own (ruleKey) specId, so placement works off the
   // owner recorded here, never off entries already spliced in: each committed
   // shim's slot is rebuilt from its own committed entries plus its previews.
   const lastIndex = new Map<string, number>();
   committed.forEach((e, i) => { lastIndex.set(e.specId, i); });
-  const twins = new Map<string, RewriteEntry[]>(); // `${specId}\u0000${ruleId}` → preview entries
-  const added = new Map<string, RewriteEntry[]>(); // specId → new-rule previews, preview order
-  const tail: RewriteEntry[] = [];
+  const rank = new Map<string, number>();
+  specOrder.forEach((id, i) => { if (!rank.has(id)) rank.set(id, i); });
   const twinKey = (specId: string, ruleId: string): string => `${specId}\u0000${ruleId}`;
   const committedRules = new Set(committed.map((e) => twinKey(e.specId, e.ruleId)));
+  const twins = new Map<string, RewriteEntry[]>(); // twinKey → preview entries
+  const added = new Map<string, RewriteEntry[]>(); // specId with entries → new-rule previews
+  // A shim on the host with no committed rewrite yet: its previews go where
+  // its priority puts it, before the first entry of any higher-ranked shim.
+  const slotless = new Map<string, RewriteEntry[]>();
+  const tail: RewriteEntry[] = [];
   for (const { owner, entries } of previews) {
-    if (!owner || !lastIndex.has(owner.specId)) { tail.push(...entries); continue; }
+    if (!owner) { tail.push(...entries); continue; }
     const key = twinKey(owner.specId, owner.ruleId);
     if (committedRules.has(key)) { twins.set(key, entries); continue; }
-    const list = added.get(owner.specId) || [];
+    const into = lastIndex.has(owner.specId) ? added : rank.has(owner.specId) ? slotless : null;
+    if (!into) { tail.push(...entries); continue; }
+    const list = into.get(owner.specId) || [];
     list.push(...entries);
-    added.set(owner.specId, list);
+    into.set(owner.specId, list);
   }
+  const pending = [...slotless.entries()]
+    .map(([specId, entries]) => ({ r: rank.get(specId) ?? Infinity, entries }))
+    .sort((x, y) => x.r - y.r);
   const out: RewriteEntry[] = [];
+  const flushBelow = (r: number): void => {
+    let next = pending[0];
+    while (next && next.r < r) {
+      pending.shift();
+      out.push(...next.entries);
+      next = pending[0];
+    }
+  };
   const placed = new Set<string>();
   committed.forEach((e, i) => {
+    const r = rank.get(e.specId);
+    if (r !== undefined) flushBelow(r);
     const key = twinKey(e.specId, e.ruleId);
     const twin = twins.get(key);
     if (!twin) out.push(e);
     else if (!placed.has(key)) { placed.add(key); out.push(...twin); }
     if (lastIndex.get(e.specId) === i) out.push(...(added.get(e.specId) || []));
   });
+  flushBelow(Infinity);
   return [...out, ...tail];
 }
 
