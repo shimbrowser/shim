@@ -40,8 +40,10 @@ not on a per-deploy hash. `method` is optional (any method when left out).
 
 A preview installs the rewrite live, for fetches that happen after it. Some sites keep
 their own reference to the original `fetch` or `XMLHttpRequest` from page load (x.com
-does), and those calls bypass a wrapper added later: if the stats stay at 0 while the page
-clearly keeps fetching, `reload_page` once so the wrapper is there from the start.
+does), and those calls bypass a wrapper added later: the stats stay at 0 while the page
+clearly keeps fetching. Only a committed, enabled rewrite is installed from the very start
+of a page load; a preview is re-applied after the page loads, so `reload_page` alone does
+not fix this. Commit, then reload to verify, and tell the user that is how it was checked.
 
 **`intercept`** — wrap a function in the site's own AMD/RequireJS module (check first:
 `evaluate_in_page('typeof define !== "undefined" && !!define.amd')`):
