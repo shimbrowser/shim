@@ -343,6 +343,13 @@ async function main(): Promise<void> {
     check('with one host left a url goes there, named', oneLeft.host === 'shim' && /one host reachable/.test(String(oneLeft.modeReason)), JSON.stringify(oneLeft));
     await client.close();
 
+    // Only the Chrome bridge reachable: a url attaches there, not headless.
+    up.shim = false; up.chrome = true;
+    const chromeOnly = await connect(deps);
+    const viaChrome2 = json(await call(chromeOnly, 'shim_open_session', { url: 'https://site.test/', intent: 'x', newShimName: 'N' }));
+    check('a url with only Chrome up attaches to Chrome, never headless', viaChrome2.mode === 'attach' && viaChrome2.host === 'chrome' && chrome.sent.some((x) => x.path === '/sessions'), JSON.stringify(viaChrome2));
+    await chromeOnly.close();
+
     const pick = (args: Partial<Parameters<typeof pickAttachHost>[0]>) => pickAttachHost({ reachable: { shim: true, chrome: true }, listedBy: [], url: false, composition: false, ...args });
     check('pickAttachHost: the call\'s target beats the server\'s', (() => { const c = pick({ requested: 'chrome', defaultTarget: 'shim' }); return c.ok && c.host === 'chrome'; })());
     check('pickAttachHost: a pinned host that is down is shim-not-running', (() => { const c = pick({ requested: 'chrome', reachable: { shim: true, chrome: false } }); return !c.ok && c.error === 'shim-not-running'; })());

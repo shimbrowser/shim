@@ -516,15 +516,31 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       return { mode: 'attach', why: 'a tab in the Shim browser, with the user\'s logins; commits go to Shim\'s library' };
     }
     if (requested === 'attach' || (requested === undefined && hasTab)) {
-      return { mode: 'attach', why: 'a tab in the Shim browser, with the user\'s logins; commits go to Shim\'s library' };
+      // With two hosts the host suffix (pickAttachHost) names which; with
+      // one, name the Shim browser.
+      return { mode: 'attach', why: deps.connectChrome ? 'a tab in an attach host, with the user\'s logins; commits go to the host\'s library' : 'a tab in the Shim browser, with the user\'s logins; commits go to Shim\'s library' };
     }
     if (requested === 'headless') return { mode: 'headless', why: 'headless as asked: a fresh Chromium with no logins; commits write the .shim file' };
-    if (!hasUrl) throw new ToolFailure('invalid-request', 'pass tabId (a tab in the Shim browser, from shim_list_tabs) or url (a page to open)');
-    const probe = attachProbe();
-    if (probe.reachable) {
-      return { mode: 'attach', why: `the Shim browser is running (process ${probe.info.pid}): a new Shim tab at the url, once the user allows it, with their logins; commits go to Shim's library` };
+    if (!hasUrl) throw new ToolFailure('invalid-request', 'pass tabId (a tab from shim_list_tabs) or url (a page to open)');
+    // A url in auto mode attaches when an attach host is reachable. With no
+    // Chrome bridge configured, that is the Shim browser (the original
+    // wording). With both, the effective target (the call's, else the
+    // server's) pins which, so with only that host up attach is still chosen.
+    if (!deps.connectChrome) {
+      const probe = attachProbe();
+      if (probe.reachable) {
+        return { mode: 'attach', why: `the Shim browser is running (process ${probe.info.pid}): a new Shim tab at the url, once the user allows it, with their logins; commits go to Shim's library` };
+      }
+      return { mode: 'headless', why: `${probe.reason}, so this session runs headless: a fresh Chromium with no logins; commits write the .shim file` };
     }
-    return { mode: 'headless', why: `${probe.reason}, so this session runs headless: a fresh Chromium with no logins; commits write the .shim file` };
+    const up = reachable();
+    const pinned = target ?? deps.defaultTarget;
+    const attachUp = pinned === 'shim' ? up.shim : pinned === 'chrome' ? up.chrome : up.shim || up.chrome;
+    if (attachUp) {
+      return { mode: 'attach', why: 'an attach host is running: a new tab at the url, once the user allows it, with their logins; commits go to the host\'s library' };
+    }
+    const reason = pinned === 'chrome' ? 'Shim for Chrome is not reachable' : pinned === 'shim' ? 'the Shim browser is not reachable' : 'no attach host is reachable';
+    return { mode: 'headless', why: `${reason}, so this session runs headless: a fresh Chromium with no logins; commits write the .shim file` };
   }
 
   async function runSessionTool(name: SessionToolName, input: Record<string, unknown>): Promise<McpContent[]> {

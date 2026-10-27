@@ -152,9 +152,12 @@ export function createConsentGate(opts: ConsentGateOptions = {}): ConsentGate {
         entry.settle({ allowed: true, via: 'allow-once' });
         return true;
       }
+      // Remember the host before settling: settle notifies the gate's
+      // listeners synchronously (the worker mirrors the remembered set to
+      // storage there), so the new host must already be in it.
+      if (answer === 'allow-host') remembered.add(entry.info.scope);
       entry.settle({ allowed: true, via: answer });
       if (answer === 'allow-host') {
-        remembered.add(entry.info.scope);
         for (const other of [...pending.values()]) {
           if (other.info.scope === entry.info.scope && !askedEachTime(other.info) && other.info.missingOrigins.length === 0) {
             other.settle({ allowed: true, via: 'remembered' });

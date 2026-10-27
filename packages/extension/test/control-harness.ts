@@ -48,6 +48,9 @@ interface Rig {
   landAt: string;
   busy: Set<string>;
   notes: Map<string, string[]>;
+  hostsOpen: Set<string>;
+  hostSeq: number;
+  hostBusy: Set<number>;
 }
 
 function rig(): Rig {
@@ -74,7 +77,7 @@ function rig(): Rig {
     async commit(id, req) { log.push(`commit:${id}:${req.revision}:${req.commitId}`); return { ok: true, versionId: 2, revision: req.revision }; },
     async end(id) { log.push(`end:${id}`); return { ok: true, reason: 'ended', versionId: null }; },
   };
-  const r: Rig = { deps: null as unknown as ControlDeps, log, tabs, gate, timers, granted, shims, landAt: '', busy, notes };
+  const r: Rig = { deps: null as unknown as ControlDeps, log, tabs, gate, timers, granted, shims, landAt: '', busy, notes, hostsOpen: new Set(), hostSeq: 0, hostBusy: new Set() };
   const patternsOf = (req: AttachRequest, tab: TabInfo): string[] => {
     const host = new URL(tab.url).hostname;
     return req.create ? [`*://${host}/*`] : (r.shims.get(req.artifactId)?.hosts ?? []).map((h) => `*://${h}/*`);
@@ -102,7 +105,17 @@ function rig(): Rig {
       return { ok: true, artifactId: id };
     },
     async discardShim(id) { log.push(`discard:${id}`); r.shims.delete(id); },
-    async targetFor(tab, artifactId) { return { tab: tab.tabId, artifactId }; },
+    async targetFor(tab, artifactId) {
+      if (r.hostBusy.has(tab.tabId)) return { ok: false as const, error: 'artifact-busy', detail: 'a session already holds this tab' };
+      const hid = `host-${++r.hostSeq}`;
+      r.hostsOpen.add(hid);
+      log.push(`targetFor:${hid}:${artifactId}`);
+      return { ok: true as const, target: { tab: tab.tabId, artifactId, hid }, dispose: async () => { r.hostsOpen.delete(hid); log.push(`dispose:${hid}`); } };
+    },
+    async shimsOn(tab) {
+      const host = new URL(tab.url).hostname;
+      return [...r.shims].filter(([, v]) => v.hosts.includes(host)).map(([id, v]) => ({ id, name: v.name, enabled: true, connect: 'asks' as const }));
+    },
     async openTab(url, signal) {
       log.push(`openTab:${url}`);
       if (signal.aborted) return { ok: false, error: 'page-load-failed', detail: 'aborted', tabId: 31 };
@@ -252,6 +265,26 @@ async function main(): Promise<void> {
     check('a url is asked every time', first.status === 200 && r.gate.pending().length === 1);
     r.gate.answer(r.gate.pending()[0]?.id ?? '', 'deny');
     await second;
+  }
+
+  console.log('the host and the tab listing:');
+  {
+    const r = rig();
+    // A busy artifact (lease held before begin): the host targetFor opened is disposed, none left.
+    r.busy.add('shim-1');
+    const busy = await openAllowed(r, attach());
+    check('a busy open disposes the host targetFor attached', busy.body.error === 'artifact-busy' && r.hostsOpen.size === 0 && r.log.some((l) => l.startsWith('dispose:')), r.log.join(' | '));
+    // targetFor refusing (a tab already held) leaves nothing and is answered.
+    r.busy.delete('shim-1');
+    r.hostBusy.add(7);
+    const held = await openAllowed(r, attach());
+    check('targetFor refusing a held tab is artifact-busy, nothing opened', held.body.error === 'artifact-busy' && r.hostsOpen.size === 0);
+    r.hostBusy.delete(7);
+    // The tab listing carries the matching installed shims.
+    r.shims.set('shim-1', { name: 'Notes', hosts: ['site.test'] });
+    const tabs = await route(r, 'GET', '/tabs');
+    const t = (tabs.body.windows as Array<{ tabs: Array<{ shims: Array<{ id: string; name: string }> }> }>)[0]?.tabs[0];
+    check('each tab lists the shims on its host, with ids', Array.isArray(t?.shims) && t?.shims.some((x) => x.id === 'shim-1' && x.name === 'Notes'), JSON.stringify(t?.shims));
   }
 
   console.log('session routes:');

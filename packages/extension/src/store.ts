@@ -155,7 +155,7 @@ export interface ShimStore {
    * its spec is no longer at `expectedVersion`: the caller read a version
    * another write has moved since.
    */
-  reviseSpec(id: string, next: Spec, handlers: Record<string, string>, reason: VersionRecord['reason'], expectedVersion: number, opts?: { clearDraft?: boolean }): Promise<boolean>;
+  reviseSpec(id: string, next: Spec, handlers: Record<string, string>, reason: VersionRecord['reason'], expectedVersion: number, opts?: { clearDraft?: boolean; envelope?: Record<string, unknown> }): Promise<boolean>;
   /** Replaces the spec without a snapshot (a baseline refresh, a captured fingerprint); refused when its version moved. */
   amendSpec(id: string, spec: Spec, expectedVersion: number): Promise<boolean>;
   versions: {
@@ -334,7 +334,7 @@ function bind(db: IDBDatabase): ShimStore {
       const held = await request(versions.get([id, current]) as IDBRequest<VersionRecord | undefined>);
       versions.put({ shimId: id, version: current, spec: shim.spec, handlers: shim.handlers, at: held?.at ?? now, reason: held?.reason ?? 'install' } satisfies VersionRecord);
       versions.put({ shimId: id, version: versionOf(next), spec: next, handlers: { ...handlers }, at: now, reason } satisfies VersionRecord);
-      const revised: InstalledShim = { ...shim, spec: next, handlers: { ...handlers } };
+      const revised: InstalledShim = { ...shim, spec: next, handlers: { ...handlers }, ...(opts?.envelope ? { envelope: opts.envelope } : {}) };
       if (opts?.clearDraft) delete revised.sessionDraft;
       shims.put(revised);
       await completion(tx);

@@ -1219,6 +1219,17 @@ const controlDeps: ControlDeps = {
   async tab(tabId) {
     try { return tabInfoOf(await chrome.tabs.get(tabId)); } catch { return null; }
   },
+  async shimsOn(tab) {
+    const db = await store();
+    let u: URL;
+    try { u = new URL(tab.url); } catch { return []; }
+    const out: Array<{ id: string; name: string; enabled: boolean; connect: 'asks' | 'allowed' }> = [];
+    for (const shim of await db.listShims()) {
+      if (!hostMatches(shim.spec.match?.hosts, u.hostname, u.port || undefined)) continue;
+      out.push({ id: shim.id, name: shim.name, enabled: shim.enabled, connect: consent.isRemembered(u.hostname) ? 'allowed' : 'asks' });
+    }
+    return out;
+  },
   sessions: sessions.registry,
   consent: {
     async request(subject, signal) {
@@ -1286,8 +1297,8 @@ const controlDeps: ControlDeps = {
   async targetFor(tab, artifactId) {
     const db = await store();
     const shim = await db.getShim(artifactId);
-    if (!shim) throw new Error(`no shim "${artifactId}"`);
-    if (hostOnTab(tab.tabId)) throw new Error('a session already holds this tab');
+    if (!shim) return { ok: false, error: 'unknown-artifact', detail: `no shim "${artifactId}"` };
+    if (hostOnTab(tab.tabId)) return { ok: false, error: 'artifact-busy', detail: 'a session already holds this tab' };
     const worldId = crypto.randomUUID();
     const host = await openPageHost(tab.tabId, { engineBundle, storage: sessionStorageFor(db, new Map()), nudge: nudgeTab }, { worldId });
     const id = `host-${++hostSeq}`;
@@ -1309,7 +1320,9 @@ const controlDeps: ControlDeps = {
       source: { shimId: shim.id, name: shim.name, spec: shim.spec, handlers: shim.handlers, envelope: shim.envelope, created: shim.sessionDraft !== undefined },
       committedDown,
     };
-    return target;
+    // The disposer the route calls when the open does not take over the host
+    // (a lease busy before begin, a throw): closes it and drops its entry.
+    return { ok: true, target, dispose: () => pageHosts.close(id).then(() => undefined) };
   },
   async openTab(url, signal) {
     let tab: chrome.tabs.Tab;

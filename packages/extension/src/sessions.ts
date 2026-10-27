@@ -203,7 +203,11 @@ export function createSessions(deps: SessionsDeps): Sessions {
   // What the session's world says of a module's syntax, by the probe's
   // code: made just before a commit packs, read by the probe packShim runs.
   const syntaxChecks = new WeakMap<ExtensionSessionHandle, Map<string, { ok: boolean; error?: string }>>();
+  // The probe packShim calls reads `committing`, so the whole check-and-pack
+  // runs under one mutex across every session (commits are bounded), never
+  // two at once with one shared pointer.
   let committing: ExtensionSessionHandle | null = null;
+  let commitGate: Promise<void> = Promise.resolve();
 
   // Keyed by the module's trimmed source: the probe is handed the module
   // wrapped (and the folder may have normalized its line ends), so the
@@ -347,15 +351,22 @@ export function createSessions(deps: SessionsDeps): Sessions {
     async commit(handle, req) {
       const h = handle;
       await activations.get(h.sessionId);
-      await checkSyntax(h);
-      // Commits run one at a time per session, and the registry never
-      // runs two sessions' commits in one tick of this backend: the
-      // probe reads the handle being committed.
-      committing = h;
+      // One session's check-and-pack at a time: the probe packShim runs
+      // reads `committing`, which is shared across sessions.
+      const prior = commitGate;
+      let release: () => void = () => undefined;
+      commitGate = new Promise<void>((r) => { release = r; });
+      await prior;
       try {
-        return await backend.commit(handle, req);
+        await checkSyntax(h);
+        committing = h;
+        try {
+          return await backend.commit(handle, req);
+        } finally {
+          if (committing === h) committing = null;
+        }
       } finally {
-        if (committing === h) committing = null;
+        release();
       }
     },
     async finish(handle, info, release) {

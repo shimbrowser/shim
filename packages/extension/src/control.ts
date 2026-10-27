@@ -73,6 +73,8 @@ export interface ControlDeps {
   /** The tabs whose site is granted (the only ones with a readable url). */
   tabs(): Promise<TabInfo[]>;
   tab(tabId: number): Promise<TabInfo | null>;
+  /** The installed shims that run on `tab`'s host (id, name, enabled), and whether opening one would show a card. */
+  shimsOn(tab: TabInfo): Promise<Array<{ id: string; name: string; enabled: boolean; connect: 'asks' | 'allowed' }>>;
   sessions: Pick<SessionRegistry, 'open' | 'checkout' | 'preview' | 'call' | 'commit' | 'end'>;
   consent: Pick<ConsentGate, 'request'>;
   /** The card's subject for a request against `tab` (the shim checked, the missing origins listed). */
@@ -83,8 +85,8 @@ export interface ControlDeps {
   /** Makes the shim a `create` request names (after consent) as a draft, and removes it when its session did not open. */
   createShim(req: AttachRequest, tab: TabInfo, sessionDraftId: string): Promise<{ ok: true; artifactId: string } | { ok: false; error: string; detail?: string }>;
   discardShim(artifactId: string): Promise<void>;
-  /** The registry's target for a session on `tab`. */
-  targetFor(tab: TabInfo, artifactId: string): Promise<unknown>;
+  /** The registry's target for a session on `tab`, with a disposer that closes the host it attached. A refusal (a tab already held) leaves nothing to dispose. */
+  targetFor(tab: TabInfo, artifactId: string): Promise<{ ok: true; target: unknown; dispose(): Promise<void> } | { ok: false; error: string; detail?: string }>;
   /** Opens a tab at `url` and waits for its main document. */
   openTab(url: string, signal: AbortSignal): Promise<{ ok: true; tab: TabInfo } | { ok: false; error: string; detail: string; tabId: number | null }>;
   closeTab(tabId: number): Promise<void>;
@@ -223,30 +225,47 @@ async function openOn(deps: ControlDeps, req: AttachRequest, tab: TabInfo, signa
   };
   let artifactId = req.artifactId;
   const created = req.create !== null;
-  if (req.create !== null) {
-    const made = await deps.createShim(req, tab, deps.newDraftId());
-    if (!made.ok) return fail(errorResponse(made.error, made.detail));
-    artifactId = made.artifactId;
-    if (signal.aborted) return fail(errorResponse('consent-cancelled', CANCELLED), artifactId);
+  // Every acquisition after consent — the draft, the page host — is undone
+  // on any exit but success, whether it returns a refusal or throws.
+  let dispose: (() => Promise<void>) | null = null;
+  try {
+    if (req.create !== null) {
+      const made = await deps.createShim(req, tab, deps.newDraftId());
+      if (!made.ok) return await fail(errorResponse(made.error, made.detail));
+      artifactId = made.artifactId;
+      if (signal.aborted) return await fail(errorResponse('consent-cancelled', CANCELLED), artifactId);
+    }
+    const made = await deps.targetFor(tab, artifactId);
+    if (!made.ok) return await fail(errorResponse(made.error, made.detail), created ? artifactId : undefined);
+    dispose = made.dispose;
+    const open: OpenRequest = {
+      kind: 'shim', artifactId, target: made.target, agent: req.agent, intent: req.intent, created,
+      approvedScope: tab.url ? new URL(tab.url).hostname : undefined,
+      ...(opts.approvedOrigin ? { approvedOrigin: opts.approvedOrigin } : {}),
+      signal,
+    };
+    const opened = await deps.sessions.open(open);
+    if (!opened.ok) {
+      // open answered without taking over the host (artifact-busy before
+      // begin, or a failed/target-changed begin that tore its own down):
+      // dispose closes the host this acquisition attached.
+      await dispose();
+      dispose = null;
+      if (opened.error === 'open-cancelled') return await fail(errorResponse('consent-cancelled', CANCELLED), created ? artifactId : undefined);
+      return await fail(fromResult(opened), created ? artifactId : undefined);
+    }
+    // Opened: the session owns the host now (its finish closes it).
+    dispose = null;
+    if (signal.aborted) {
+      void Promise.resolve(deps.sessions.end(opened.sessionId, 'ended')).finally(() => { if (opts.ownsTab) void deps.closeTab(tab.tabId); });
+      return errorResponse('consent-cancelled', CANCELLED);
+    }
+    const notes = deps.takeNotes(opened.sessionId);
+    return { status: 200, body: { ...opened, artifactId, consent: opts.consent, tabId: tab.tabId, url: tab.url, ...(notes.length ? { notes } : {}) } };
+  } catch (e) {
+    if (dispose) { try { await dispose(); } catch { /* best effort */ } }
+    return await fail(errorResponse('internal-error', e instanceof Error ? e.message : String(e)), created ? artifactId : undefined);
   }
-  const target = await deps.targetFor(tab, artifactId);
-  const open: OpenRequest = {
-    kind: 'shim', artifactId, target, agent: req.agent, intent: req.intent, created,
-    approvedScope: tab.url ? new URL(tab.url).hostname : undefined,
-    ...(opts.approvedOrigin ? { approvedOrigin: opts.approvedOrigin } : {}),
-    signal,
-  };
-  const opened = await deps.sessions.open(open);
-  if (!opened.ok) {
-    if (opened.error === 'open-cancelled') return fail(errorResponse('consent-cancelled', CANCELLED), created ? artifactId : undefined);
-    return fail(fromResult(opened), created ? artifactId : undefined);
-  }
-  if (signal.aborted) {
-    void Promise.resolve(deps.sessions.end(opened.sessionId, 'ended')).finally(() => { if (opts.ownsTab) void deps.closeTab(tab.tabId); });
-    return errorResponse('consent-cancelled', CANCELLED);
-  }
-  const notes = deps.takeNotes(opened.sessionId);
-  return { status: 200, body: { ...opened, artifactId, consent: opts.consent, tabId: tab.tabId, url: tab.url, ...(notes.length ? { notes } : {}) } };
 }
 
 async function openOnUrl(deps: ControlDeps, req: AttachRequest, signal: AbortSignal): Promise<ControlResponse> {
@@ -326,7 +345,8 @@ export async function routeControlRequest(deps: ControlDeps, req: ControlRequest
     const windows = new Map<number, Record<string, unknown>[]>();
     for (const t of tabs) {
       const list = windows.get(t.windowId) ?? [];
-      list.push({ tabId: t.tabId, webContentsId: t.tabId, url: t.url, title: t.title, active: t.active, host: 'chrome-extension' });
+      const shims = await deps.shimsOn(t);
+      list.push({ tabId: t.tabId, webContentsId: t.tabId, url: t.url, title: t.title, active: t.active, host: 'chrome-extension', shims });
       windows.set(t.windowId, list);
     }
     return { status: 200, body: { ok: true, host: 'chrome-extension', windows: [...windows].map(([windowId, list]) => ({ windowId, tabs: list })), note: 'only tabs on sites Shim for Chrome may see are listed; for another site open the session on its url' } };
