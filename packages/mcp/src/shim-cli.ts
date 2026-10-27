@@ -17,7 +17,7 @@ import {
 } from './cli-commands';
 import type { LaunchOutcome } from './launch';
 import { browserDataDirs, extensionIdProblem, installHost, hostStatus, type InstallFs } from './bridge-install';
-import { readDiscoveryFile } from './bridge-server';
+import { readDiscoveryFile, ensurePrivateDir, BRIDGE_DIR } from './bridge-server';
 import { VERSION } from './version';
 
 export const USAGE = `shim — author Shim shims from the command line
@@ -350,13 +350,39 @@ async function realContext(): Promise<ShimCliContext> {
       env: pathEnv.env,
       nodePath: process.execPath,
       bundlePath: __filename,
-      bridgeDir: path.dirname(paths.socketPath),
+      // The wrapper Chrome executes lives in a fixed place under the user
+      // data directory (never the socket's temp-dir fallback), made private
+      // before anything is written there.
+      bridgeDir: path.join(paths.userData, BRIDGE_DIR),
       discoveryPath: paths.discoveryPath,
       isAlive: processAlive,
       fs: {
         exists: (p) => fs.existsSync(p),
-        mkdir: (p) => { fs.mkdirSync(p, { recursive: true }); },
-        write: (p, text, mode) => { fs.writeFileSync(p, text, { mode }); fs.chmodSync(p, mode); },
+        mkdir: (p) => {
+          if (p === path.join(paths.userData, BRIDGE_DIR)) ensurePrivateDir(p);
+          else fs.mkdirSync(p, { recursive: true });
+        },
+        // Whole or not at all, with the mode from the start, and never
+        // through a symlink at the destination.
+        write: (p, text, mode) => {
+          let st: fs.Stats | null = null;
+          try { st = fs.lstatSync(p); } catch { /* new file */ }
+          if (st?.isSymbolicLink()) throw new CliError('write-failed', `${p} is a symlink; refusing to write through it`);
+          const tmp = `${p}.${process.pid}.${Date.now().toString(36)}.tmp`;
+          const fd = fs.openSync(tmp, 'wx', mode);
+          try {
+            fs.writeFileSync(fd, text);
+            fs.fchmodSync(fd, mode);
+          } finally {
+            fs.closeSync(fd);
+          }
+          try {
+            fs.renameSync(tmp, p);
+          } catch (e) {
+            try { fs.unlinkSync(tmp); } catch { /* best effort */ }
+            throw e;
+          }
+        },
         read: (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return null; } },
       },
     },
