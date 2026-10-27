@@ -25,7 +25,10 @@ the root is still connected. Mount strategies:
   (`align: "below" | "above"`). **Use `portal` or `overlay` for anything inside a
   React/Vue/Angular-rendered region**: inline nodes there get displaced by the framework
   even when they aren't removed.
-- `overlay` — a portal sized to cover the anchor (good for tagging).
+- `overlay` — a portal sized to cover the anchor (good for tagging). It always takes the
+  pointer: clicks anywhere over the anchor reach your overlay, not the site, and your own
+  `pointer-events: none` on it is overridden. To annotate something the user still clicks
+  (a card, a link), mount the badge `inline` or as a `portal` beside it instead.
 - `shadow` — your output inside a shadow root (style isolation). In an attach session
   `interact_page` can't reach into a shadow root (`shadow-unsupported`), so controls you
   need to click or type into while testing are better as `portal`/`overlay` with

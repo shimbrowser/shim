@@ -47,7 +47,9 @@ reads raises its own caps with `"storage": { "limits": { "maxRows": 20000,
 and DDL; `{ ok, changes, lastInsertRowid }`). Parameterized (`?`) only, one statement per
 call. Destructive DDL waits on the user's approval. Errors to handle: `not-declared`,
 `approval-required`, `denied`, `classification: …`, `rejected: …`, `sqlite: …`,
-`bad-params: …`. **`api.db` is absent while previewing**: your preview shows the
+`bad-params: …`. A call takes at most 100 bound parameters (`bad-params: more than 100
+params`), so a multi-row `INSERT … VALUES (?, ?, ?), (…)` has to be split into batches
+(20 rows of 4 columns is 80). **`api.db` is absent while previewing**: your preview shows the
 handler's `api.db &&` fallback. After `shim_commit` the committed rules have it on the
 same tab, so verify the data path there (`references/api.md`).
 **Remote databases** — `connections: [{ "name": "warehouse", "engine": "postgres" }]`
