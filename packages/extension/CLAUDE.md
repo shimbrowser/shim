@@ -7,7 +7,7 @@ this file adds what is specific to working in this package.
 
 `.claude/skills/chrome-extensions/` is Google's Chrome extension authoring skill, copied
 unmodified. Load it for any change to the manifest, the worker, the content runtime, the
-popup or the install page. Two of its rules are wrong for this extension and are overridden
+popup or the install page. Three of its rules are wrong for this extension and are overridden
 here:
 
 - **Code execution.** The skill offers blob: and srcdoc iframes as ways around the extension
@@ -19,10 +19,11 @@ here:
   a host permission for the site already exposes the matching tab's URL and title. The
   extension holds site access per installed shim and never asks for `tabs`, which would
   expose every tab's URL and title. Keep it that way.
-
-## Worker lifetime
-
-Chrome ends an idle worker after about thirty seconds, and an open `chrome.debugger`
-session dies with it. Durable state lives in IndexedDB, the per-instance state in
-`chrome.storage.session`, and anything that must outlast a quiet half minute, such as an
-authoring session, has to hold a port open for as long as it lives.
+- **What keeps the worker alive.** The skill's service-worker reference says an open port
+  keeps the worker alive. Since Chrome 114 opening a port does nothing: only message traffic
+  on it resets the idle timer, and a quiet port lets the worker end after thirty seconds.
+  What does keep it alive is a native messaging connection (Chrome 105) and an active
+  `chrome.debugger` session (Chrome 118), so an open authoring session keeps its worker, and
+  a session's bridge connection does too. Durable state lives in IndexedDB and per-instance
+  state in `chrome.storage.session` regardless, and the content runtime reconnects when the
+  worker has gone, as it does today.
