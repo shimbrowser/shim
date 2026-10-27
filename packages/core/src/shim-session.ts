@@ -1091,6 +1091,19 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
     handle.opsSinceBase = [];
     // The host's writeCommit saw the tombstones and owns their release.
     handle.tombstones.clear();
+    // A host that does not preview the committed rules at begin runs them as
+    // its installed shim, so after a commit they are not the session's to
+    // replay: drop the live/capture set, or a later navigation (followDocument)
+    // would re-apply the pre-commit previews and re-hold the now-committed
+    // rule, resurrecting an anchor a rebase may have healed. Headless keeps
+    // its live set, since it has no installed shim. The host's own preview DOM
+    // and holds are the host's to retire in its commit handoff; this only
+    // drops the logical replay state here.
+    if (!deps.previewCommittedAtBegin) {
+      handle.live.clear();
+      handle.captures.clear();
+      handle.unsupported.clear();
+    }
     handle.source = { ...handle.source, created: false };
     notes.push(...(written.notes ?? []));
     return { ok: true, versionId: written.versionId, ...(notes.length ? { notes } : {}) };

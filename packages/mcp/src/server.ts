@@ -551,19 +551,30 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
     switch (name) {
       case 'shim_status': {
         if (serverMode === 'auto') return [text(await autoStatus())];
-        const c = deps.connect();
-        if (!c) {
-          return [text({ running: false, controlFile: deps.controlFile, hint: 'Shim is not running with its control endpoint on. Call shim_launch, or turn the endpoint on in Shim\'s Settings.' })];
-        }
-        try {
-          const body = replyOrThrow(await c.request('GET', '/status', undefined, { timeoutMs: 5_000 }));
-          return [text({ running: true, ...body, openedHere: [...sessions.keys()], currentSession: current })];
-        } catch (e) {
-          if (e instanceof ControlTransportError) {
-            return [text({ running: false, controlFile: deps.controlFile, detail: e.message, hint: 'Call shim_launch.' })];
+        // Attach mode. With the Chrome bridge host configured, report both
+        // attach hosts (the Shim browser and Shim for Chrome), so a session
+        // can use Chrome when the Shim browser is absent.
+        const shimStatus = async (): Promise<Record<string, unknown>> => {
+          const c = deps.connect();
+          if (!c) return { available: false, controlFile: deps.controlFile, hint: 'The Shim browser is not running with its control endpoint on. Call shim_launch, or turn the endpoint on in its Settings.' };
+          try {
+            const body = replyOrThrow(await c.request('GET', '/status', undefined, { timeoutMs: 5_000 }));
+            return { available: true, ...body };
+          } catch (e) {
+            if (e instanceof ControlTransportError) return { available: false, controlFile: deps.controlFile, detail: e.message, hint: 'Call shim_launch.' };
+            throw e;
           }
-          throw e;
+        };
+        if (deps.connectChrome) {
+          const shim = await shimStatus();
+          const chrome = await chromeStatus();
+          const anyUp = shim.available === true || chrome.available === true;
+          return [text({ mode: 'attach', ...(deps.defaultTarget ? { defaultTarget: deps.defaultTarget } : {}), running: anyUp, attach: shim, chrome, openedHere: [...sessions].map(([sessionId, st]) => ({ sessionId, ...(st.host ? { host: st.host } : {}) })), currentSession: current })];
         }
+        const shim = await shimStatus();
+        if (shim.available !== true) return [text({ running: false, ...shim })];
+        const { available: _a, ...body } = shim;
+        return [text({ running: true, ...body, openedHere: [...sessions.keys()], currentSession: current })];
       }
       case 'shim_launch': {
         if (serverMode === 'headless') {

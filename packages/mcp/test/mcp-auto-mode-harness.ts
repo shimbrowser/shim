@@ -363,6 +363,15 @@ async function main(): Promise<void> {
     await pinned.close();
     await shimDown.close();
 
+    // Attach mode pinned to Chrome, with only Chrome up: status reports it.
+    up.shim = false; up.chrome = true;
+    const attachChrome = await connect({ ...deps, mode: 'attach', defaultTarget: 'chrome' });
+    const st2 = json(await call(attachChrome, 'shim_status'));
+    check('attach --target chrome reports the chrome host and is running, not launch-Shim', st2.running === true && rec(st2.chrome).available === true, JSON.stringify(st2));
+    const tabsC = await call(attachChrome, 'shim_list_tabs');
+    check('…and lists Chrome\'s tabs', !tabsC.isError && chrome.sent.some((x) => x.path === '/tabs'), textOf(tabsC));
+    await attachChrome.close();
+
     const pick = (args: Partial<Parameters<typeof pickAttachHost>[0]>) => pickAttachHost({ reachable: { shim: true, chrome: true }, listedBy: [], url: false, composition: false, ...args });
     check('pickAttachHost: the call\'s target beats the server\'s', (() => { const c = pick({ requested: 'chrome', defaultTarget: 'shim' }); return c.ok && c.host === 'chrome'; })());
     check('pickAttachHost: a pinned host that is down is shim-not-running', (() => { const c = pick({ requested: 'chrome', reachable: { shim: true, chrome: false } }); return !c.ok && c.error === 'shim-not-running'; })());

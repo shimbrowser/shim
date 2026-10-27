@@ -83,6 +83,15 @@ const spec: Spec = {
   ],
 };
 
+async function folderEditing(ruleId: string): Promise<unknown> {
+  const files = checkoutShim({ spec, handlers: {} });
+  const sj = JSON.parse(files['shim.json'] as string) as { rules: Array<{ id: string; mutations: Array<Record<string, unknown>> }> };
+  const rule = sj.rules.find((r) => r.id === ruleId);
+  if (rule) rule.mutations = [{ kind: 'hide' }];
+  files['shim.json'] = JSON.stringify(sj);
+  return encodeWorkingCopy(files);
+}
+
 async function folderRemoving(ruleId: string): Promise<unknown> {
   const files = checkoutShim({ spec, handlers: {} });
   const sj = JSON.parse(files['shim.json'] as string) as { rules: Array<{ id: string }> };
@@ -150,6 +159,19 @@ async function main(): Promise<void> {
     check('the prepared commit carries the ops since base', prepared !== undefined && prepared.opsSinceBase.some((o) => o.op === 'remove-rule' && o.ruleId === 'tag'));
     const history = prepared?.history ?? [];
     check('the prepared history has the external exchange with the intent and summary', history.length >= 2 && JSON.stringify(history).includes('drop tag') && JSON.stringify(history).includes('"external":true'), JSON.stringify(history));
+  }
+
+  console.log('a commit retires the replay set when the host installs the shim:')
+  {
+    const opts = { holds: new Map<string, boolean>(), toldHeld: [] as Array<[string, boolean]>, writes: [] as PreparedCommit[] };
+    const backend = makeBackend(opts);
+    const handle = await openSession(backend);
+    await backend.preview(handle, { workingCopy: await folderRemoving('tag') }, new AbortController().signal);
+    // Previewing the committed rules leaves live entries (the agent edited one).
+    await backend.preview(handle, { workingCopy: await folderEditing('hide-ad') }, new AbortController().signal);
+    check('the session has live previews before the commit', handle.live.size > 0);
+    await backend.commit(handle, { revision: 2, summary: 's', signal: new AbortController().signal });
+    check('the commit clears the replay set (the committed form runs installed, not replayed)', handle.live.size === 0 && handle.captures.size === 0);
   }
 
   console.log('a host that commits at a higher version (a rebase) is followed:')
