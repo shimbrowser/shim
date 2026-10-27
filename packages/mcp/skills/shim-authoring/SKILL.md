@@ -276,13 +276,12 @@ All of them act on the session's tab.
   page — fix the rule first, then reload) or after a `page-away` error (the user navigated
   the tab off the site; every page tool refuses rather than touching the wrong page). It
   never navigates anywhere else, and it is limited to a few uses per session.
-- **An attach session's tab off screen.** Shim keeps the session's tab running at full
-  speed while Shim is behind your terminal. But when the tab is not the selected one in its
-  window, or the window is minimized or hidden, `view_page` answers `tab-not-visible`
-  instead of a screenshot that could show an older frame, and `interact_page` answers it
-  instead of sending input. The other page tools and the
-  preview's evidence still read the live page and carry a `tabWarning`. Ask the user to
-  select the tab before you judge anything visual.
+- **An attach session's tab off screen.** Shim keeps the session's tab running while
+  Shim is behind your terminal, and in a shim session the tab need not be selected: Shim
+  keeps it painting for each `view_page` and `interact_page` batch without showing it (the
+  site may see it as focused meanwhile). If the window is minimized or hidden, or it can't
+  (the detail says why), both answer `tab-not-visible`; the other tools still read the live
+  page with a `tabWarning`. A composition's preview tab must be selected.
 - **A new page under you.** When the tab loads a new document on the site (a handler's
   redirect, a link the user clicked), your previews are put back before your next preview
   or page tool. In attach mode that result carries `newDocument`: how many previews were re-applied,
