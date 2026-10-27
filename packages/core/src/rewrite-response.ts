@@ -383,21 +383,33 @@ export function mergePreviewEntries(
   committed: RewriteEntry[],
   previews: Array<{ owner: PreviewOwner | null; entries: RewriteEntry[] }>,
 ): RewriteEntry[] {
-  let out = committed.slice();
+  // Previews keep their own (ruleKey) specId, so placement works off the
+  // owner recorded here, never off entries already spliced in: each committed
+  // shim's slot is rebuilt from its own committed entries plus its previews.
+  const lastIndex = new Map<string, number>();
+  committed.forEach((e, i) => { lastIndex.set(e.specId, i); });
+  const twins = new Map<string, RewriteEntry[]>(); // `${specId}\u0000${ruleId}` → preview entries
+  const added = new Map<string, RewriteEntry[]>(); // specId → new-rule previews, preview order
   const tail: RewriteEntry[] = [];
+  const twinKey = (specId: string, ruleId: string): string => `${specId}\u0000${ruleId}`;
+  const committedRules = new Set(committed.map((e) => twinKey(e.specId, e.ruleId)));
   for (const { owner, entries } of previews) {
-    if (!owner) { tail.push(...entries); continue; }
-    const twin = out.findIndex((e) => e.specId === owner.specId && e.ruleId === owner.ruleId);
-    if (twin >= 0) {
-      out = out.filter((e, i) => i < twin || !(e.specId === owner.specId && e.ruleId === owner.ruleId));
-      out.splice(twin, 0, ...entries);
-      continue;
-    }
-    let last = -1;
-    out.forEach((e, i) => { if (e.specId === owner.specId) last = i; });
-    if (last >= 0) out.splice(last + 1, 0, ...entries);
-    else tail.push(...entries);
+    if (!owner || !lastIndex.has(owner.specId)) { tail.push(...entries); continue; }
+    const key = twinKey(owner.specId, owner.ruleId);
+    if (committedRules.has(key)) { twins.set(key, entries); continue; }
+    const list = added.get(owner.specId) || [];
+    list.push(...entries);
+    added.set(owner.specId, list);
   }
+  const out: RewriteEntry[] = [];
+  const placed = new Set<string>();
+  committed.forEach((e, i) => {
+    const key = twinKey(e.specId, e.ruleId);
+    const twin = twins.get(key);
+    if (!twin) out.push(e);
+    else if (!placed.has(key)) { placed.add(key); out.push(...twin); }
+    if (lastIndex.get(e.specId) === i) out.push(...(added.get(e.specId) || []));
+  });
   return [...out, ...tail];
 }
 
