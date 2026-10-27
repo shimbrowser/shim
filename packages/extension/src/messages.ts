@@ -13,6 +13,7 @@ import type { Spec } from '@shimbrowser/core/types';
 import type { PreparedInstall, InstallProvenance } from './install';
 import type { ExtensionMode } from './capabilities';
 import type { VersionRecord } from './store';
+import type { PendingConsent } from './attach-consent';
 
 export type StorageMethod = 'get' | 'set' | 'delete' | 'list';
 
@@ -35,7 +36,13 @@ export type ToWorker =
   /** A restore is a forward change: the current spec is snapshotted, the chosen one becomes the next version. */
   | { type: 'shims.restore'; id: string; version: number }
   /** The install page, after the user granted the hosts: write and register. */
-  | { type: 'install.commit'; prepared: PreparedInstall; provenance: InstallProvenance };
+  | { type: 'install.commit'; prepared: PreparedInstall; provenance: InstallProvenance }
+  /** The popup: whether the bridge to Claude Code is on, and its state. */
+  | { type: 'bridge.status' }
+  | { type: 'bridge.setEnabled'; enabled: boolean }
+  /** The attach card: the requests waiting for an answer, and the answer to one. */
+  | { type: 'attach.pending' }
+  | { type: 'attach.answer'; id: string; answer: 'allow-once' | 'allow-host' | 'deny' };
 
 /**
  * One shim as the page runtime receives it: the spec with the installed id,
@@ -100,8 +107,20 @@ export interface ReviewItem {
 /** One snapshot as the popup lists it. */
 export type VersionSummary = Pick<VersionRecord, 'version' | 'at' | 'reason'>;
 
+/** The bridge as the popup shows it. */
+export interface BridgeStatus {
+  enabled: boolean;
+  /** The native host is connected (the extension's port to it is open). */
+  connected: boolean;
+  /** Why the last connection attempt failed, when it did. */
+  error: string | null;
+  sessions: number;
+}
+
 export type WorkerAnswer =
   | BundleAnswer
+  | { ok: true; bridge: BridgeStatus }
+  | { ok: true; pending: PendingConsent[] }
   | { ok: true; value: unknown }
   | { ok: true; mode: ExtensionMode; shims: ShimSummary[] }
   | { ok: true; mode: ExtensionMode }
