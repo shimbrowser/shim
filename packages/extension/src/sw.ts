@@ -186,7 +186,7 @@ function acceptRuntimePort(world: RuntimeWorld): (port: chrome.runtime.Port) => 
       return;
     }
     port.onMessage.addListener((msg: unknown) => {
-      if (isFromRuntime(msg) && msg.type === 'ack') pendingAcks.get(msg.seq)?.();
+      if (isFromRuntime(msg) && msg.type === 'ack') pendingAcks.get(msg.seq)?.(msg.applied);
     });
     // One runtime per page. Two can meet when a handover and a reconnect
     // cross (a holder's port down for the moment, the other world's
@@ -560,6 +560,7 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
       // The holds a session has on this tab, current as of this sequence.
       const shims = await bundleFor(page, world);
       const held = page.tabId === undefined ? undefined : hostOnTab(page.tabId)?.heldAll();
+      await holdSeqReady;
       return { ok: true, mode: modeNow, shims, ...(held ? { held } : {}), holdSeq };
     }
     case 'storage': {
@@ -715,9 +716,32 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
 // Holds are ordered: every hold nudge carries the next sequence number, a
 // bundle answer carries the current one, and a runtime applies only what is
 // newer than what it has, so a hold that crosses a bundle answer in flight
-// is not undone by it.
+// is not undone by it. The sequence outlives this worker: a page's runtime
+// keeps the last it saw across the worker idling out and starting again,
+// so the next worker continues from where the last one was
+// (chrome.storage.session, which lives as long as the browser session, as
+// the pages do), seeded no lower than the clock in case that record is
+// gone. A worker that still fell behind (the clock set back, the record
+// gone) learns so from the runtime's ack, which says whether the nudge was
+// applied; a stale one is no hold.
+const HOLD_SEQ_KEY = 'holdSeq';
 let holdSeq = 0;
-const pendingAcks = new Map<number, () => void>();
+const seedHoldSeq = async (): Promise<void> => {
+  let stored = 0;
+  try {
+    const got = await chrome.storage.session.get(HOLD_SEQ_KEY);
+    if (typeof got[HOLD_SEQ_KEY] === 'number') stored = got[HOLD_SEQ_KEY];
+  } catch { /* no record */ }
+  holdSeq = Math.max(holdSeq, stored, Date.now());
+};
+let holdSeqReady: Promise<void> = seedHoldSeq();
+async function nextHoldSeq(): Promise<number> {
+  await holdSeqReady;
+  holdSeq += 1;
+  void chrome.storage.session.set({ [HOLD_SEQ_KEY]: holdSeq }).catch(() => undefined);
+  return holdSeq;
+}
+const pendingAcks = new Map<number, (applied: boolean) => void>();
 const NUDGE_ACK_MS = 2000;
 // How long a nudge waits for a runtime's port when one is expected and
 // none is connected: a runtime whose port the worker dropped (idled out)
@@ -773,7 +797,7 @@ async function runtimeExpected(tabId: number): Promise<boolean> {
  * answers is uncertainty, not absence.
  */
 async function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>): Promise<NudgeOutcome> {
-  const seq = ++holdSeq;
+  const seq = await nextHoldSeq();
   const stamped: ToRuntime = { ...msg, seq };
   let ports = [...runtimePorts].filter(([, r]) => r.tabId === tabId).map(([port]) => port);
   const expected = ports.length > 0 || await runtimeExpected(tabId);
@@ -791,7 +815,9 @@ async function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>
       resolve(outcome);
     };
     const timer = setTimeout(() => settle('timed-out'), NUDGE_ACK_MS);
-    pendingAcks.set(seq, () => settle('acked'));
+    // A runtime that ignored the nudge as older than what it has answered
+    // too, and that is no hold.
+    pendingAcks.set(seq, (applied) => settle(applied ? 'acked' : 'timed-out'));
     if (ports.length) {
       for (const port of ports) post(port, stamped);
       return;
@@ -909,6 +935,23 @@ const pageHosts = {
     entry.console = [];
     entry.popups = [];
     return out;
+  },
+  /**
+   * For the harnesses: the hold sequence as a worker that starts with no
+   * record of it would seed it (`forgetHoldSeq`), or set to a value the
+   * pages are past (`forceHoldSeq`), since a real restart of the worker
+   * cannot be driven under Playwright (its own attachment keeps the
+   * worker alive).
+   */
+  async forgetHoldSeq(): Promise<number> {
+    await chrome.storage.session.remove(HOLD_SEQ_KEY).catch(() => undefined);
+    holdSeq = 0;
+    holdSeqReady = seedHoldSeq();
+    await holdSeqReady;
+    return holdSeq;
+  },
+  forceHoldSeq(seq: number): void {
+    holdSeq = seq;
   },
   /**
    * For the harnesses: drop the tab's runtime ports the way the worker

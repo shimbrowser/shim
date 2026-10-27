@@ -145,14 +145,14 @@ export const RUNTIME_PORT = 'shim-runtime';
  */
 export type FromRuntime =
   | { type: 'retiring'; booted: boolean }
-  /** A hold or session-closed nudge with `seq` was applied. */
-  | { type: 'ack'; seq: number };
+  /** A hold or session-closed nudge with `seq` was seen: applied, or ignored as older than what the runtime has. */
+  | { type: 'ack'; seq: number; applied: boolean };
 
 export function isFromRuntime(msg: unknown): msg is FromRuntime {
   if (typeof msg !== 'object' || msg === null) return false;
-  const m = msg as { type?: unknown; booted?: unknown; seq?: unknown };
+  const m = msg as { type?: unknown; booted?: unknown; seq?: unknown; applied?: unknown };
   if (m.type === 'retiring') return typeof m.booted === 'boolean';
-  return m.type === 'ack' && typeof m.seq === 'number';
+  return m.type === 'ack' && typeof m.seq === 'number' && typeof m.applied === 'boolean';
 }
 
 export function isToRuntime(msg: unknown): msg is ToRuntime {

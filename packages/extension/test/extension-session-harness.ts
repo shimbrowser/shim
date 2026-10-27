@@ -247,6 +247,39 @@ async function main(): Promise<void> {
       check('released: the committed twin is back', back.committed === 1 && back.committedRuns === runsBefore + 1 && back.twinSeen === null, back);
     }
 
+    console.log('a worker that starts with no record of the hold sequence, and one that fell behind:');
+    {
+      // The page's runtime keeps the last sequence it saw. A worker seeded
+      // afresh (its session record gone) starts no lower than the clock,
+      // which is past anything the page has seen.
+      const seeded = await worker.evaluate(() => (globalThis as unknown as { shimPageHosts: { forgetHoldSeq(): Promise<number> } }).shimPageHosts.forgetHoldSeq());
+      check('a fresh seed is no lower than the clock', seeded >= Date.now() - 5000, seeded);
+      host.applyPreview(previewOfBadge());
+      const up = await settle(() => view(page), (v) => v.preview === 1 && v.committed === 0);
+      check('its first hold is applied: the preview is up, the twin down', up.preview === 1 && up.committed === 0 && up.twinSeen === null, up);
+      host.removePreview('preview:session:badge');
+      await settle(() => view(page), (v) => v.committed === 1 && v.preview === 0);
+      // A worker that still fell behind (its sequence below what the page
+      // has) is answered "not applied", and that is no hold.
+      await worker.evaluate(() => (globalThis as unknown as { shimPageHosts: { forceHoldSeq(seq: number): void } }).shimPageHosts.forceHoldSeq(1));
+      const lines: string[] = [];
+      const off = host.onConsole((m) => { lines.push(m.message); });
+      const { previewRuns: runsBefore } = await view(page);
+      host.applyPreview(previewOfBadge());
+      await sleep(1500);
+      const stale = await view(page);
+      check('a stale hold is no hold: the preview stays down beside the running twin', stale.preview === 0 && stale.previewRuns === runsBefore && stale.committed === 1 && stale.twinSeen === null, stale);
+      check('and the session is told', lines.some((l) => l.includes('did not confirm the hold')), lines);
+      check('nothing is held', JSON.stringify(await heldFor()) === '[]');
+      off();
+      await worker.evaluate(() => (globalThis as unknown as { shimPageHosts: { forgetHoldSeq(): Promise<number> } }).shimPageHosts.forgetHoldSeq());
+      host.applyPreview(previewOfBadge());
+      const again = await settle(() => view(page), (v) => v.preview === 1 && v.committed === 0);
+      check('re-seeded, the hold is applied again', again.preview === 1 && again.committed === 0 && again.twinSeen === null, again);
+      host.removePreview('preview:session:badge');
+      await settle(() => view(page), (v) => v.committed === 1 && v.preview === 0);
+    }
+
     console.log('the hold survives the shim disabled and enabled again under the preview:');
     {
       host.applyPreview(previewOfBadge());

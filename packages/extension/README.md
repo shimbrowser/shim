@@ -77,7 +77,9 @@ gives it back after: the host tells the page's runtime the whole set of rules it
 each shim and waits for the ack before the preview goes up (a hold the page does not
 confirm in time is no hold: the preview stays down and the session is told in its
 console; whether a runtime is there to ask is the install registry's word, not the
-channel's, so a runtime between ports is waited for), and removes the preview before it releases the hold, so the two forms of one
+channel's, so a runtime between ports is waited for; the hold sequence outlives the
+worker, kept in session storage and seeded no lower than the clock, and a runtime
+answers a hold that fell behind as not applied, which is no hold), and removes the preview before it releases the hold, so the two forms of one
 rule never run side by side; a preview key that moves to another rule takes its old
 preview down before the old twin comes back. A hold
 is a claim the runtime keeps through the shim's reboot (disabled and enabled again under

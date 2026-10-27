@@ -359,7 +359,8 @@ interface Runtime {
     // preview is gone.
     if (msg.type === 'hold' || msg.type === 'session-closed') {
       const seq = msg.seq;
-      if (seq === undefined || seq > holdSeq) {
+      const applied = seq === undefined || seq > holdSeq;
+      if (applied) {
         if (seq !== undefined) holdSeq = seq;
         if (msg.type === 'hold') {
           hold(msg.patchId, msg.ruleIds);
@@ -372,7 +373,9 @@ interface Runtime {
         }
       }
       if (seq !== undefined) {
-        const ack: FromRuntime = { type: 'ack', seq };
+        // An older nudge is answered too, as not applied: the worker learns
+        // its sequence fell behind, never that the hold is in place.
+        const ack: FromRuntime = { type: 'ack', seq, applied };
         try { port?.postMessage(ack); } catch { /* the worker is gone */ }
       }
       return;
