@@ -70,7 +70,11 @@ Don't repeat it.
   LAN addresses and hostnames resolving to private or link-local addresses answer
   `{ ok: false, error: 'blocked: …' }`. A preview makes the same real requests through
   the same broker and block, so it shows you that answer; don't build an integration
-  with a local service on `api.fetch`.
+  with a local service on `api.fetch`. The body returned is capped at 5 MB (`truncated:
+  true` past it) and a request gives up after 15 s. Bot-protected sites often answer a
+  cookie-less, non-browser request with a 403 or a challenge page, so check `status` and
+  the text before parsing; for the site's own public pages, the page's `fetch` (same
+  origin) is the request the site expects.
 - **`api.ai.complete({ prompt | messages, system?, model?, maxTokens? })`** — Claude, on the
   user's own Anthropic key, which the shim never sees: `{ ok, text }`. Requires
   `"permissions": ["ai"]`; the user grants it in Shim after the commit, and until then calls
