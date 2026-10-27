@@ -64,7 +64,9 @@ export const SESSION_COMPOSITION_TOOLS: Record<CompositionSessionToolName, ToolD
       'Anti-forgery token values in it (CSRF / XSRF fields, modhash, authenticity_token, …) read "[redacted: ' +
       'csrf]" — the field is kept, the value never needed: writes go through the page\'s declared operations. A ' +
       'failed (status 400+) non-JSON body comes back summarized: `summary` { format, bytes } and `body` as up ' +
-      'to 500 characters of its visible text. A ' +
+      'to 500 characters of its visible text. An HTML body comes back as text, never markup (`htmlAsText`): its ' +
+      'visible text, then its inline scripts and the URLs its script / link / img / iframe / a / source tags ' +
+      'point to (in the page they sit in src="…" / href="…"). A ' +
       'probe is your request, not the page\'s: it never shows up in read_calls and is no evidence the page ' +
       'works. A host the manifest does not declare yet must be added to manifest.json and previewed first ' +
       '(the user is asked in Shim to allow a new host). GET only.',

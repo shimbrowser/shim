@@ -202,7 +202,10 @@ A refused preview answers `applied: false` with `error` and `problems`:
   read `"[redacted: csrf]"`, counted in `redacted`: the field is there, the value is never
   yours to need — the page's declared writes carry it. A failed (400+) non-JSON body (a
   block page) comes back summarized: `summary` `{ format, bytes }`, and `body` is up to
-  500 characters of its visible text. The host must
+  500 characters of its visible text. An HTML body comes back as text, never markup
+  (`htmlAsText`): its visible text, then `[inline scripts]` and the `[urls]` its script,
+  link, img, iframe, a and source tags point to — in the page they sit in `src="…"` /
+  `href="…"`, which is what a mint's `follow.urlAfter` matches. The host must
   be declared in the manifest, allowed by the user (the preview's card), **and** granted to
   your session with `request_sources` — otherwise it answers `host-not-declared`,
   `host-not-allowed` or `host-not-granted` before any request. GET only. For designing a
