@@ -99,9 +99,10 @@ style.css
   with how to read the token (`tokenPath`, a dot-path into a JSON response, or `token`
   `{ after, chars, length? }`, the text right after a literal prefix, optionally in a page
   the mint page links to via `follow` `{ urlAfter, urlHost }`) and where to send it
-  (`header`, with an optional `scheme` such as `"Bearer"`, or `query`). Design one with
-  `probe_request` (the page or script the token is in), and check it with `verify_mint`
-  before you put it in the manifest.
+  (`header`, with an optional `scheme` such as `"Bearer"`, or `query`). Check it with
+  `verify_mint` before you put it in the manifest: it says whether extraction worked.
+  `probe_request` shows a JSON mint response, never an HTML page or a script — for a
+  token in one, ask the user where it sits.
 - **`settings`**, **`permissions`**, **`storage`**, **`connections`** — the same
   declarations a shim makes (`references/api.md`, `references/databases.md`): settings fields (`text | secret | number | boolean
   | select`), `"permissions": ["ai"]`, local tables, remote databases.
@@ -214,7 +215,13 @@ A refused preview answers `applied: false` with `error` and `problems`:
   `interact_page`'s `requestWarnings`, carry the same burst and rate-limit warnings as the
   preview evidence.
 - **`probe_request { host, path }`** — one GET of your own through the composition's real
-  fetch path, answering the status and up to 20,000 characters of the body. The host must
+  fetch path, answering the status and, for a JSON or form body, up to 20,000 characters
+  of it. Anti-forgery token values in it (CSRF / XSRF fields, Reddit's `modhash`,
+  `authenticity_token`, …) read `"[redacted: csrf]"`, counted in `redacted`: the field is
+  there, the value is never yours to need — the page's declared writes carry it. A string
+  value that names such a token reads `"[redacted: possible csrf]"`. Any other body (HTML,
+  a script, text, XML — a block page too) is never shown: you get `withheld`
+  `{ format, bytes }` and the status. The host must
   be declared in the manifest, allowed by the user (the preview's card), **and** granted to
   your session with `request_sources` — otherwise it answers `host-not-declared`,
   `host-not-allowed` or `host-not-granted` before any request. GET only. For designing a
@@ -223,8 +230,12 @@ A refused preview answers `applied: false` with `error` and `problems`:
   against the user's real session: Shim first asks the user, on a card, to let the mint
   host be called signed in as them (and the `follow` host, on a second card), and nothing
   is requested before they answer. Declined, or unanswered in two minutes, it answers
-  `denied` — ask the user rather than retrying. Otherwise it answers whether the token was
-  extracted (`detail` says why not) and, with a `testEndpoint` (a read-only endpoint on the
+  `denied` — ask the user rather than retrying. A `token.after` must end at a delimiter (a
+  quote, `=` or `:`), never inside a value; the check reads a text token on the full token
+  alphabet up to its natural end (`chars` / `length` apply at runtime, not to the check);
+  and there are at most 5 calls per composition per token source host (the follow host, else
+  the mint host) while Shim runs (`verify-mint-limit`) — make each one count. Otherwise it answers whether the token was extracted (`detail` says
+  why not, for a `tokenPath` only) and, with a `testEndpoint` (a read-only endpoint on the
   mint host's site — same registrable domain, so a mint on `auth.example.com` can test
   `api.example.com` but never `api.example.net` — and either the mint host itself or a host
   `probe_request` may reach; otherwise `test-host-not-allowed` before any card), the status
