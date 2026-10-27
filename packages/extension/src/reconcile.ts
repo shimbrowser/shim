@@ -9,26 +9,32 @@
 //
 // A priority and a version are stamped on a control when it boots or is
 // updated, so a shim whose priority moved can only take it by booting
-// again, and one whose spec moved is updated once per version.
+// again, and one whose spec moved is updated once per version. The
+// handler modules are stamped too (as one key): compiled once at boot, a
+// change to them (a session's commit) is a reboot, never an in-place
+// update that would leave old code resident under an unchanged rule.
 
 export interface WantedShim {
   id: string;
   priority: number;
   version: number;
+  /** The handler modules as one comparable key (their JSON); absent on both sides: not compared. */
+  handlersKey?: string;
 }
 
 /** What a document stamps on a running shim's control. */
 export interface RunningShim {
   priority: number;
   version: number;
+  handlersKey?: string;
 }
 
 export interface Reconciliation<T extends WantedShim> {
-  /** Ids running now that the answer no longer lists, or lists at another priority: tear down. */
+  /** Ids running now that the answer no longer lists, or lists at another priority or with other handler modules: tear down. */
   stop: string[];
   /** Listed shims not running (any more), in answer order: boot. */
   start: T[];
-  /** Running shims listed at the same priority but another version, in answer order: swap their changed rules. */
+  /** Running shims listed at the same priority and handlers but another version, in answer order: swap their changed rules. */
   update: T[];
 }
 
@@ -36,7 +42,8 @@ export function reconcileShims<T extends WantedShim>(running: ReadonlyMap<string
   const wantedBy = new Map(wanted.map((s) => [s.id, s]));
   const stop = [...running].filter(([id, r]) => {
     const w = wantedBy.get(id);
-    return !w || w.priority !== r.priority;
+    if (!w || w.priority !== r.priority) return true;
+    return w.handlersKey !== undefined && r.handlersKey !== undefined && w.handlersKey !== r.handlersKey;
   }).map(([id]) => id);
   const stopped = new Set(stop);
   return {

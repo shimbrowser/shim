@@ -31,13 +31,14 @@ import { capabilitiesFor, detectMode, SESSION_CAPABILITIES, type ExtensionMode }
 import { arbitrate, type RuntimeWorld as ArbitratedWorld } from './arbitrate';
 import { baselineForPath, pagePathKey } from '@shimbrowser/core/deploy-id';
 import {
-  rebasedSpec, refreshedSpec, capturedSpec, rememberPath, escalationAllowed, quarantineFrom, emptyRuleState, type RuntimeEventPayload,
+  rebasedSpec, refreshedSpec, capturedSpec, rememberPath, escalationAllowed, quarantineFrom, emptyRuleState, eventFormMatches, ruleForms,
+  type RuntimeEventPayload,
 } from './rebase';
 import { mintShimId } from './install';
 import { matchPatternsForHosts } from './match-patterns';
 import { senderContext, allowedFrom, type SenderContext } from './sender';
 import {
-  isToWorker, isFromRuntime, RUNTIME_PORT, type ToWorker, type ToRuntime, type WorkerAnswer, type BundledShim, type ShimSummary,
+  isToWorker, isFromRuntime, RUNTIME_PORT, type ToWorker, type ToRuntime, type FromRuntime, type WorkerAnswer, type BundledShim, type ShimSummary,
   type ReviewItem,
 } from './messages';
 import { SHIM_FILE_FORMAT } from '@shimbrowser/core/shim-folder';
@@ -186,7 +187,7 @@ function acceptRuntimePort(world: RuntimeWorld): (port: chrome.runtime.Port) => 
       return;
     }
     port.onMessage.addListener((msg: unknown) => {
-      if (isFromRuntime(msg) && msg.type === 'ack') pendingAcks.get(msg.seq)?.(msg.applied);
+      if (isFromRuntime(msg) && msg.type === 'ack') pendingAcks.get(msg.seq)?.(msg);
     });
     // One runtime per page. Two can meet when a handover and a reconnect
     // cross (a holder's port down for the moment, the other world's
@@ -362,8 +363,34 @@ function reconcileMode(): Promise<void> {
 // this one's. A worker that merely idled out and restarted is the same
 // instance, and its runtimes reconnect their ports on their own.
 // chrome.storage.session lives exactly as long as an instance.
+/** Gives back the origins `patterns` needed that no installed shim still needs. */
+async function releaseUnusedOrigins(db: ShimStore, patterns: readonly string[]): Promise<void> {
+  const remaining = await db.listShims();
+  const release = originsToRelease(patterns, remaining);
+  if (!release.length) return;
+  try {
+    await chrome.permissions.remove({ origins: release });
+  } catch {
+    // A pattern the user already revoked: nothing to release.
+  }
+}
+
+// A draft is a shim a session created and never committed. Its session
+// died with the worker that ran it (a finish would have settled it), so
+// the next worker removes it, with the grant it alone needed, before any
+// registration or bridge connection could serve it.
+async function sweepDrafts(): Promise<void> {
+  const db = await store();
+  for (const shim of await db.listShims()) {
+    if (!shim.sessionDraft) continue;
+    await db.deleteShim(shim.id);
+    await releaseUnusedOrigins(db, patternsFor(shim));
+  }
+}
+
 async function bootRefresh(): Promise<void> {
   const { booted } = await chrome.storage.session.get('booted');
+  await sweepDrafts();
   await syncRegistrations();
   if (booted === true) return;
   await chrome.storage.session.set({ booted: true });
@@ -448,13 +475,13 @@ async function ingestEvent(db: ShimStore, shim: InstalledShim, page: { hostname:
   const ruleId = typeof payload.ruleId === 'string' ? payload.ruleId : null;
   switch (kind) {
     case 'rule-rebase': {
-      if (!ruleId) return false;
+      if (!ruleId || !eventFormMatches(shim.spec, shim.handlers, ruleId, payload.form)) return false;
       // The page kind's baseline advances with the rebase, before the page is
       // served its baseline again, so the re-run sees no deploy.
       await recordBaseline(db, shim.id, page.hostname, payload);
       const out = rebasedSpec(shim.spec, ruleId, payload.anchor, payload.bundleHash);
       if (!out) return false;
-      if (!(await db.reviseSpec(shim.id, out.spec, 'rebase', specVersion(shim.spec)))) return false;
+      if (!(await db.reviseSpec(shim.id, out.spec, shim.handlers, 'rebase', specVersion(shim.spec)))) return false;
       // Healed: whatever review it was held for no longer applies, and its
       // fingerprint is the rebase's now, committed, never captured over.
       const state = await ruleStateFor(db, shim.id, ruleId);
@@ -469,7 +496,7 @@ async function ingestEvent(db: ShimStore, shim: InstalledShim, page: { hostname:
       return false;
     }
     case 'rule-witness': {
-      if (!ruleId) return false;
+      if (!ruleId || !eventFormMatches(shim.spec, shim.handlers, ruleId, payload.form)) return false;
       const state = await ruleStateFor(db, shim.id, ruleId);
       const out = capturedSpec(shim.spec, ruleId, state.capture, payload);
       if (!out) return false;
@@ -483,7 +510,7 @@ async function ingestEvent(db: ShimStore, shim: InstalledShim, page: { hostname:
       return false;
     }
     case 'rule-quarantined': {
-      if (!ruleId) return false;
+      if (!ruleId || !eventFormMatches(shim.spec, shim.handlers, ruleId, payload.form)) return false;
       const state = await ruleStateFor(db, shim.id, ruleId);
       // A miss on a page kind the rule has never applied on is a wrong-page
       // miss, not a break: no review.
@@ -541,7 +568,7 @@ async function bundleFor(page: { hostname: string; port: string; pathname: strin
     // a clean resolve records one.
     const baseline = baselineForPath(await db.baselines.forHost(shim.id, page.hostname), page.pathname);
     const spec = { ...shim.spec, bundleHash: baseline ?? undefined };
-    out.push({ id: shim.id, spec, priority: priorityForRank(shim.rank), version: specVersion(shim.spec), handlers });
+    out.push({ id: shim.id, spec, priority: priorityForRank(shim.rank), version: specVersion(shim.spec), handlers, forms: ruleForms(shim.spec, shim.handlers) });
   }
   return out;
 }
@@ -633,8 +660,9 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
         // snapshot is refreshed only as it is revised away), amendments
         // and all.
         const source = msg.version === current ? shim.spec : snapshot.spec;
+        const handlers = msg.version === current ? shim.handlers : snapshot.handlers;
         const next = { ...source, id: shim.id, version: current + 1 };
-        if (!(await db.reviseSpec(shim.id, next, 'restore', current))) return { ok: false, error: 'the shim changed meanwhile; try again' };
+        if (!(await db.reviseSpec(shim.id, next, handlers, 'restore', current))) return { ok: false, error: 'the shim changed meanwhile; try again' };
         for (const state of await db.ruleState.listForShim(shim.id)) {
           if (state.quarantine || state.capture) await db.ruleState.put({ ...state, quarantine: undefined, capture: undefined });
         }
@@ -657,15 +685,7 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
       // Open pages tear the shim down while its hosts are still ours; the
       // release comes after.
       await refreshOpenTabs(patternsFor(shim));
-      const remaining = await db.listShims();
-      const release = originsToRelease(patternsFor(shim), remaining);
-      if (release.length) {
-        try {
-          await chrome.permissions.remove({ origins: release });
-        } catch {
-          // A pattern the user already revoked: nothing to release.
-        }
-      }
+      await releaseUnusedOrigins(db, patternsFor(shim));
       return { ok: true };
     }
     case 'install.commit': {
@@ -741,7 +761,8 @@ async function nextHoldSeq(): Promise<number> {
   void chrome.storage.session.set({ [HOLD_SEQ_KEY]: holdSeq }).catch(() => undefined);
   return holdSeq;
 }
-const pendingAcks = new Map<number, (applied: boolean) => void>();
+type RuntimeAck = Extract<FromRuntime, { type: 'ack' }>;
+const pendingAcks = new Map<number, (ack: RuntimeAck) => void>();
 const NUDGE_ACK_MS = 2000;
 // How long a nudge waits for a runtime's port when one is expected and
 // none is connected: a runtime whose port the worker dropped (idled out)
@@ -796,7 +817,7 @@ async function runtimeExpected(tabId: number): Promise<boolean> {
  * page, a nudge with no port waits for one, and a message no runtime
  * answers is uncertainty, not absence.
  */
-async function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>): Promise<NudgeOutcome> {
+async function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>, accepts: (ack: RuntimeAck) => boolean = (ack) => ack.applied): Promise<NudgeOutcome> {
   const seq = await nextHoldSeq();
   const stamped: ToRuntime = { ...msg, seq };
   let ports = [...runtimePorts].filter(([, r]) => r.tabId === tabId).map(([port]) => port);
@@ -817,7 +838,7 @@ async function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>
     const timer = setTimeout(() => settle('timed-out'), NUDGE_ACK_MS);
     // A runtime that ignored the nudge as older than what it has answered
     // too, and that is no hold.
-    pendingAcks.set(seq, (applied) => settle(applied ? 'acked' : 'timed-out'));
+    pendingAcks.set(seq, (ack) => settle(accepts(ack) ? 'acked' : 'timed-out'));
     if (ports.length) {
       for (const port of ports) post(port, stamped);
       return;

@@ -43,6 +43,8 @@ import { SESSION_CLOSE_EVENT, type ToRuntime } from './messages';
  * session's runtime, bound to a driver that is gone.
  */
 export const SESSION_ENGINE_WORLD = 'shim-core';
+// Only a fallback: a session names its world by its own id (PageHostOptions.worldId),
+// which is unique across worker generations; a counter starts over with each worker.
 let worldSeq = 0;
 const BINDING = '__shimCoreHost';
 const RUNTIME_GLOBAL = '__shimCoreRuntime';
@@ -95,6 +97,16 @@ export interface SessionStorage {
 
 export type NudgeOutcome = 'acked' | 'no-runtime' | 'timed-out';
 
+export interface PageHostOptions {
+  /**
+   * What names the host's world: the session's id, unique across worker
+   * generations, so a document that outlived a dead worker never hands a
+   * new host the old world's runtime and binding. Without it, a per-worker
+   * counter (the conformance runner's hosts).
+   */
+  worldId?: string;
+}
+
 export interface PageHostDeps {
   /** The engine's page bundle source (dist/shim-core.page.js). */
   engineBundle(): Promise<string>;
@@ -107,10 +119,28 @@ export interface PageHostDeps {
 
 export interface ExtensionPageHost extends PageHost {
   readonly tabId: number;
-  /** The committed rules of `patchId` this host holds (previews) on the current document. */
+  /** The committed rules of `patchId` this host holds on the current document: its previews' twins and its holds without a preview. */
   heldFor(patchId: string): string[];
   /** Every hold on the current document, by shim. */
   heldAll(): Record<string, string[]>;
+  /**
+   * Hold a committed rule down with no preview to show (a rule the session
+   * removed): kept through navigation, disable and enable, until released.
+   * Answers whether the page's runtime confirmed it.
+   */
+  holdOnly(patchId: string, ruleId: string): Promise<NudgeOutcome>;
+  /** Release a hold taken by holdOnly. */
+  releaseOnly(patchId: string, ruleId: string): Promise<NudgeOutcome>;
+  /**
+   * A commit's handoff, first step: take every preview of `patchId` off the
+   * page while keeping its twins held, so the committed form that boots
+   * next never runs beside a preview, and nothing comes back early.
+   */
+  retainHolds(patchId: string): Promise<void>;
+  /** A commit's handoff, last step: let every hold on `patchId` go. */
+  releaseHolds(patchId: string): Promise<NudgeOutcome>;
+  /** Told once when the host is over, whichever way: closed, lost from Chrome's bar, the tab gone. */
+  onClosed(listener: () => void): Unsubscribe;
   /** Stop driving the tab: remove every preview, give back held rules, detach the debugger. Leaves the tab open. */
   close(): Promise<void>;
 }
@@ -148,10 +178,10 @@ interface EvaluateResult {
   exceptionDetails?: ExceptionDetails;
 }
 
-export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<ExtensionPageHost> {
+export async function openPageHost(tabId: number, deps: PageHostDeps, options: PageHostOptions = {}): Promise<ExtensionPageHost> {
   const target = { tabId };
   const worldWaitMs = deps.worldWaitMs ?? 5000;
-  const worldName = `${SESSION_ENGINE_WORLD}:${++worldSeq}`;
+  const worldName = `${SESSION_ENGINE_WORLD}:${options.worldId ?? String(++worldSeq)}`;
   await chrome.debugger.attach(target, PROTOCOL_VERSION);
   // A command refused because the debugger is no longer attached is the
   // session's end seen from inside (Chrome fires no onDetach for a detach
@@ -180,12 +210,24 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
   // code runs in the same world as the binding, so the host, not the
   // payload, decides whose rows a call reaches.
   const previewed = new Map<string, { patchId: string; ruleId: string }>();
-  const heldFor = (patchId: string): string[] => [...new Set([...previewed.values()].filter((p) => p.patchId === patchId).map((p) => p.ruleId))];
+  // Holds with no preview behind them: a rule the session removed, or a
+  // preview taken down for a commit's handoff. Unlike previews they survive
+  // a navigation (the next document's runtime boots with them suppressed).
+  const holdsOnly = new Map<string, Set<string>>();
+  const heldFor = (patchId: string): string[] => [...new Set([
+    ...[...previewed.values()].filter((p) => p.patchId === patchId).map((p) => p.ruleId),
+    ...(holdsOnly.get(patchId) ?? []),
+  ])];
   const heldAll = (): Record<string, string[]> => {
     const out: Record<string, string[]> = {};
-    for (const { patchId } of previewed.values()) if (!(patchId in out)) Object.defineProperty(out, patchId, { value: heldFor(patchId), enumerable: true, writable: true, configurable: true });
+    const define = (patchId: string): void => {
+      if (!(patchId in out)) Object.defineProperty(out, patchId, { value: heldFor(patchId), enumerable: true, writable: true, configurable: true });
+    };
+    for (const { patchId } of previewed.values()) define(patchId);
+    for (const patchId of holdsOnly.keys()) define(patchId);
     return out;
   };
+  const closedListeners = new Set<() => void>();
   const holdNudge = (patchId: string): Promise<NudgeOutcome> => deps.nudge(tabId, { type: 'hold', patchId, ruleIds: heldFor(patchId) });
   const removeInWorld = async (ruleKey: string): Promise<void> => {
     if (worldContextId === null || closed) return;
@@ -414,6 +456,7 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
     closed = true;
     clearInterval(heartbeat);
     previewed.clear();
+    holdsOnly.clear();
     runtimeListeners.clear();
     consoleListeners.clear();
     popupListeners.clear();
@@ -426,6 +469,11 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
     chrome.webNavigation.onCommitted.removeListener(onCommitted);
     chrome.tabs.onRemoved.removeListener(onTabRemoved);
     chrome.tabs.onCreated.removeListener(onTabCreated);
+    const told = [...closedListeners];
+    closedListeners.clear();
+    for (const l of told) {
+      try { l(); } catch { /* a listener's throw is its own */ }
+    }
   }
 
   // --- setup ---
@@ -559,6 +607,57 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
     await removeInWorld(ruleKey);
     previewed.delete(ruleKey);
     if (!closed) await holdNudge(was.patchId);
+  }
+  // Queued with the previews, so a hold and a preview on the same rule
+  // never cross. Each answers what the runtime said of the hold set.
+  const queued = <T>(work: () => Promise<T>): Promise<T> => new Promise<T>((resolve, reject) => {
+    enqueue(async () => {
+      try { resolve(await work()); } catch (err) { reject(err instanceof Error ? err : new Error(String(err))); }
+    });
+  });
+  async function holdOnlyNow(patchId: string, ruleId: string): Promise<NudgeOutcome> {
+    if (closed) return 'no-runtime';
+    const set = holdsOnly.get(patchId) ?? new Set<string>();
+    if (set.has(ruleId)) return 'acked';
+    set.add(ruleId);
+    holdsOnly.set(patchId, set);
+    const outcome = await holdNudge(patchId);
+    if (outcome === 'timed-out' && !closed) {
+      // Not confirmed: not held. The session learns so and decides.
+      set.delete(ruleId);
+      if (!set.size) holdsOnly.delete(patchId);
+      void holdNudge(patchId);
+    }
+    return outcome;
+  }
+  async function releaseOnlyNow(patchId: string, ruleId: string): Promise<NudgeOutcome> {
+    if (closed) return 'no-runtime';
+    const set = holdsOnly.get(patchId);
+    if (!set?.delete(ruleId)) return 'acked';
+    if (!set.size) holdsOnly.delete(patchId);
+    return holdNudge(patchId);
+  }
+  async function retainHoldsNow(patchId: string): Promise<void> {
+    if (closed) return;
+    const set = holdsOnly.get(patchId) ?? new Set<string>();
+    for (const [key, p] of [...previewed]) {
+      if (p.patchId !== patchId) continue;
+      await removeInWorld(key);
+      previewed.delete(key);
+      set.add(p.ruleId);
+    }
+    if (set.size) holdsOnly.set(patchId, set);
+    // The held set is unchanged: nothing to tell the runtime.
+  }
+  async function releaseHoldsNow(patchId: string): Promise<NudgeOutcome> {
+    if (closed) return 'no-runtime';
+    holdsOnly.delete(patchId);
+    for (const [key, p] of [...previewed]) {
+      if (p.patchId !== patchId) continue;
+      await removeInWorld(key);
+      previewed.delete(key);
+    }
+    return holdNudge(patchId);
   }
   const enqueue = (work: () => Promise<void>): void => {
     queue = queue.then(work).catch((err: unknown) => {
@@ -718,6 +817,15 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
     navigationCount: () => navigations,
     heldFor,
     heldAll,
+    holdOnly: (patchId, ruleId) => queued(() => holdOnlyNow(patchId, ruleId)),
+    releaseOnly: (patchId, ruleId) => queued(() => releaseOnlyNow(patchId, ruleId)),
+    retainHolds: (patchId) => queued(() => retainHoldsNow(patchId)),
+    releaseHolds: (patchId) => queued(() => releaseHoldsNow(patchId)),
+    onClosed(listener) {
+      if (closed) { try { listener(); } catch { /* its own */ } return () => undefined; }
+      closedListeners.add(listener);
+      return () => { closedListeners.delete(listener); };
+    },
     async close() {
       if (closed) return;
       runtimeListeners.clear();
@@ -732,8 +840,9 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
           contextId: worldContextId,
         }).catch(() => undefined);
       }
-      const heldShims = new Set([...previewed.values()].map((p) => p.patchId));
+      const heldShims = new Set([...[...previewed.values()].map((p) => p.patchId), ...holdsOnly.keys()]);
       previewed.clear();
+      holdsOnly.clear();
       for (const patchId of heldShims) await deps.nudge(tabId, { type: 'hold', patchId, ruleIds: [] });
       if (closed) return;
       await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: scriptId }).catch(() => undefined);

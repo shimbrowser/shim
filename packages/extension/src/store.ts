@@ -49,6 +49,13 @@ export interface InstalledShim {
   handlers: Record<string, string>;
   /** The envelope's other fields, for export. */
   envelope: Record<string, unknown>;
+  /**
+   * Created by an authoring session that has not committed yet: a draft.
+   * Stamped in the transaction that adds the row, cleared by the first
+   * commit; a worker that boots and finds one removes it (the session that
+   * made it died with the worker that ran it).
+   */
+  sessionDraft?: { sessionId: string; at: number };
 }
 
 export interface UserDataScope {
@@ -73,7 +80,7 @@ export interface VersionRecord {
   spec: Spec;
   handlers: Record<string, string>;
   at: number;
-  reason: 'install' | 'rebase' | 'restore';
+  reason: 'install' | 'rebase' | 'restore' | 'commit';
 }
 
 /** Why a rule is held for review, from the engine's quarantine event. */
@@ -135,9 +142,11 @@ export interface ShimStore {
   deleteShim(id: string): Promise<boolean>;
   setEnabled(id: string, enabled: boolean): Promise<boolean>;
   /**
-   * Replaces the shim's spec with `next` (already bumped) and snapshots it
-   * under its version with the reason that produced it, in one
-   * transaction: a rebase, or a restore. The spec as it stood is
+   * Replaces the shim's spec with `next` (already bumped) and its handler
+   * modules with `handlers`, and snapshots both under the new version with
+   * the reason that produced it, in one transaction: a rebase, a restore,
+   * a session's commit (`clearDraft` then settles a draft the session
+   * created). The spec as it stood is
    * snapshotted again under its own version first (keeping that version's
    * reason and time), so what was amended since (captured fingerprints,
    * the advanced baseline) is what a restore of it brings back. Every
@@ -146,7 +155,7 @@ export interface ShimStore {
    * its spec is no longer at `expectedVersion`: the caller read a version
    * another write has moved since.
    */
-  reviseSpec(id: string, next: Spec, reason: VersionRecord['reason'], expectedVersion: number): Promise<boolean>;
+  reviseSpec(id: string, next: Spec, handlers: Record<string, string>, reason: VersionRecord['reason'], expectedVersion: number, opts?: { clearDraft?: boolean }): Promise<boolean>;
   /** Replaces the spec without a snapshot (a baseline refresh, a captured fingerprint); refused when its version moved. */
   amendSpec(id: string, spec: Spec, expectedVersion: number): Promise<boolean>;
   versions: {
@@ -311,7 +320,7 @@ function bind(db: IDBDatabase): ShimStore {
       await completion(tx);
       return true;
     },
-    async reviseSpec(id, next, reason, expectedVersion) {
+    async reviseSpec(id, next, handlers, reason, expectedVersion, opts) {
       const tx = write([SHIMS, VERSIONS]);
       const shims = tx.objectStore(SHIMS);
       const versions = tx.objectStore(VERSIONS);
@@ -324,8 +333,10 @@ function bind(db: IDBDatabase): ShimStore {
       const current = versionOf(shim.spec);
       const held = await request(versions.get([id, current]) as IDBRequest<VersionRecord | undefined>);
       versions.put({ shimId: id, version: current, spec: shim.spec, handlers: shim.handlers, at: held?.at ?? now, reason: held?.reason ?? 'install' } satisfies VersionRecord);
-      versions.put({ shimId: id, version: versionOf(next), spec: next, handlers: shim.handlers, at: now, reason } satisfies VersionRecord);
-      shims.put({ ...shim, spec: next });
+      versions.put({ shimId: id, version: versionOf(next), spec: next, handlers: { ...handlers }, at: now, reason } satisfies VersionRecord);
+      const revised: InstalledShim = { ...shim, spec: next, handlers: { ...handlers } };
+      if (opts?.clearDraft) delete revised.sessionDraft;
+      shims.put(revised);
       await completion(tx);
       return true;
     },
