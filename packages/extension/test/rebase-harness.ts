@@ -4,7 +4,7 @@
 // when it moved; a captured witness lands only on a rule without one; page
 // memory and the escalation gate; the quarantine reason in main's words.
 
-import { rebasedSpec, refreshedSpec, capturedSpec, reportedAnchor, rememberPath, escalationAllowed, quarantineFrom, PAGE_MEMORY_CAP } from '../src/rebase';
+import { rebasedSpec, refreshedSpec, capturedSpec, reportedAnchor, rememberPath, escalationAllowed, quarantineFrom, eventFormMatches, ruleForms, PAGE_MEMORY_CAP } from '../src/rebase';
 import { anchorDigest } from '@shimbrowser/core/managed-anchor';
 import type { Spec } from '@shimbrowser/core/types';
 
@@ -129,6 +129,22 @@ console.log('the quarantine reason:');
   check('and keeps what was expected', JSON.stringify(q.expected) === '{"tag":"button"}');
   check('a set', quarantineFrom({ fingerprint: 'set', seen: [] }, 5).reason === 'the set of elements could not be found after a site update');
   check('a conflicted fingerprint', quarantineFrom({ fingerprint: 'conflicted' }, 5).reason.includes('conflicting fingerprints'));
+}
+
+console.log('the form an event names:');
+{
+  const handlers = { note: 'module.exports = function note() {};' };
+  const withScript: Spec = { ...spec, rules: [...(spec.rules ?? []), { id: 'noted', anchor: { primary: { kind: 'css', value: '#n' } }, mutations: [{ kind: 'script', handler: 'note' }] }] };
+  const forms = ruleForms(withScript, handlers);
+  check('every rule gets a form', Object.keys(forms).sort().join() === 'ad,buy,noted' && Object.values(forms).every((f) => /^[0-9a-f]{16}$/.test(f)));
+  check('an event with no stamp is taken', eventFormMatches(withScript, handlers, 'buy', undefined));
+  check('an event stamped with the rule\'s current form is taken', eventFormMatches(withScript, handlers, 'buy', forms.buy));
+  check('one stamped with another form is dropped', !eventFormMatches(withScript, handlers, 'buy', forms.ad));
+  check('a handler-only change makes the old stamp stale', !eventFormMatches(withScript, { note: 'module.exports = function note() { return 1; };' }, 'noted', forms.noted));
+  const witnessed: Spec = { ...withScript, rules: (withScript.rules ?? []).map((r) => (r.id === 'buy' ? { ...r, anchor: { ...r.anchor!, witness: { tag: 'button' } as never } } : r)) };
+  check('a stored witness leaves the form unchanged', eventFormMatches(witnessed, handlers, 'buy', forms.buy));
+  check('a stamp that is not a string is dropped', !eventFormMatches(withScript, handlers, 'buy', 42));
+  check('a rule the spec no longer has matches nothing', !eventFormMatches(withScript, handlers, 'gone', forms.buy));
 }
 
 console.log('');

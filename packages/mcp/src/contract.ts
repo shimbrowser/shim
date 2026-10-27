@@ -54,7 +54,8 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
   shim_list_tabs: {
     name: 'shim_list_tabs',
     description:
-      "List the Shim browser's open tabs per window: each tab's tabId (what shim_open_session targets), url, " +
+      "List the open tabs per window of every reachable host, the Shim browser and Shim for Chrome: each tab's tabId (what shim_open_session targets), its host " +
+      '("shim" or "chrome"; the two number their tabs separately, so pass target when both list a number), url, ' +
       'title, whether it is the active tab, and for a site tab the shims that run on its host (id and name) and ' +
       'connect ("asks": opening a session shows the user a card; "allowed": they allowed this site until Shim ' +
       'quits, so none comes), for a composition tab its compositionId. Also lists every composition (id, name, ' +
@@ -106,6 +107,11 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
           type: 'string',
           enum: ['attach', 'headless'],
           description: 'Optional. The default is attach for a tabId, and for a url while the Shim browser is reachable (a new tab the user allows); headless for a url while it is not. Pass "headless" to open a url headless even with Shim running.',
+        },
+        target: {
+          type: 'string',
+          enum: ['shim', 'chrome'],
+          description: 'Optional, attach only: which host, the Shim browser or Shim for Chrome. Needed when both are reachable and the tabId was listed by both (or by neither), and for a url while both are reachable; otherwise the host that listed the tabId, or the one host reachable. The answer names the host every later call goes to.',
         },
       },
       required: ['intent'],

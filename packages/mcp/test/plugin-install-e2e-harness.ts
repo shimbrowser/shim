@@ -163,7 +163,7 @@ async function main(): Promise<void> {
     const opened = await call('shim_open_session', { url, intent: 'Hide the promo', newShimName: 'Tracks', dir });
     const o = json(opened);
     check('a url opens a headless session', !opened.isError && typeof o.sessionId === 'string' && o.mode === 'headless', o);
-    check('…and the answer says why it is headless', /no discovery file/.test(String(o.modeReason)) && /runs headless/.test(String(o.modeReason)), o.modeReason);
+    check('…and the answer says why it is headless', /no attach host is reachable/.test(String(o.modeReason)) && /runs headless/.test(String(o.modeReason)), o.modeReason);
     check('the checkout wrote shim.json', fs.existsSync(path.join(dir, 'shim.json')), o.checkout);
 
     const spec = JSON.parse(fs.readFileSync(path.join(dir, 'shim.json'), 'utf8')) as Record<string, unknown>;

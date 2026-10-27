@@ -10,7 +10,11 @@
 import * as anchors from './anchors';
 import * as witnessMod from './witness';
 import { applyStrategy } from './strategies';
-import { isShimOwnedElement, closestOutputOwner } from './own-dom';
+import { isShimOwnedElement, closestOutputOwner, hasOwnDomMarker } from './own-dom';
+import { makeAnchorChangeHub } from './anchor-change';
+import type { ChangeRecordLike, MountRecord } from './anchor-change';
+import { errMessage } from './error';
+import { trimStackForEvent } from './engine-internal';
 import {
   injectTier1Rule, removeTier1Rule, tagElement, stripToken, cssPriorityOf,
   removeReplaceRootRule, stripReplaceRootToken,
@@ -20,12 +24,12 @@ import { dispatchMutation, injectStripNotes } from './dispatch-mutation';
 import { makeCaptureController } from './witness-capture';
 import { fingerprintKind } from './managed-anchor';
 import { matchSetWitness } from './set-witness';
-import type { HandlerMap, MutationRegistry, RuntimeSpec } from './engine-internal';
+import type { HandlerMap, MutationRegistry, RuntimeSpec, RuleMountEntry } from './engine-internal';
 import { makeRuleState } from './rule-state';
 import { makeStatusReporter } from './rule-status';
 import { makeReconciler } from './rule-reconcile';
 import type { Rule, Anchor } from './types';
-import type { CoreApi, CoreHandlerApi, HostApiMembers } from './api';
+import type { CoreApi, CoreAnchoredHandlerApi, HostApiMembers } from './api';
 import { nextFrame } from './next-frame';
 
 // --- Own-DOM guard ----------------------------------------------------------
@@ -127,6 +131,47 @@ export function applyRule(
   const reporter = makeStatusReporter(rule, spec, api, rs);
   const reconciler = makeReconciler(rule, spec, api, rs, mountedOutputRoots);
 
+  // api.onAnchorChange (anchor-change.ts): derived from this rule's own
+  // childList observer below — no observer of its own. `observer` and
+  // `scheduleScan` are assigned further down; the hub only calls into them
+  // after setup.
+  let observer: MutationObserver | null = null;
+  // Set-witnessed members the latest scan counted unverified: mounted, but
+  // their hooks are suspended until they verify again.
+  let unverifiedMembers = new Set<Element>();
+  const changeHub = makeAnchorChangeHub<Node>({
+    parentOf: (node) => node.parentNode,
+    isOwnedNode: (node) => mountedOutputRoots.has(node as HTMLElement) || hasOwnDomMarker(node),
+    now: () => Date.now(),
+    setTimer: (run, ms) => { const t = setTimeout(run, ms); return () => clearTimeout(t); },
+    requestFrame: () => scheduleScan(),
+    reportError: (err, handlerName) => {
+      console.error('[shim] onAnchorChange callback failed', err);
+      if (typeof api.reportEvent !== 'function') return;
+      api.reportEvent('handler-error', {
+        specId: spec.id,
+        handlerName: handlerName || '(anonymous)',
+        ruleId: rule.id,
+        message: `onAnchorChange: ${errMessage(err)}`,
+        stack: trimStackForEvent(err instanceof Error ? err.stack || '' : ''),
+      });
+    },
+    onThrottle: () => {
+      if (rs.anchorChangeNote) return;
+      rs.anchorChangeNote = 'an api.onAnchorChange callback on this rule is re-firing continuously and is being '
+        + 'throttled — something keeps changing the anchor\'s subtree: the callback\'s own async writes into site DOM, '
+        + 'another rule, or the site itself. Write only what changed, and write into your own returned DOM where you can '
+        + '(writes there are never reported back).';
+      reporter.reportStatusIfChanged();
+    },
+  });
+  const isChangeEligible = (record: MountRecord<Node>): boolean => {
+    const anchor = record.anchor as Element;
+    return !tornDown && document.contains(anchor) && rs.state.get(anchor)?.change === record
+      && !unverifiedMembers.has(anchor);
+  };
+  const drainObserver = (): ArrayLike<ChangeRecordLike<Node>> => (observer ? observer.takeRecords() : []);
+
   // Relative reorder: "immediately before/after Y" is a whole-sibling
   // ordering, not a single-element style — CSS `order` is a sort key across ALL
   // siblings (default 0), so the engine stamps EVERY child of the shared parent
@@ -205,6 +250,9 @@ export function applyRule(
     const gen = generation.get(el) ?? 0;
     const outputs: HTMLElement[] = [];
     const cleanups: Array<() => void> = [];
+    const change = changeHub.createRecord(el);
+    // The handler whose dispatch is running — names the hooks it registers.
+    let currentHandler = '';
     // Per-mount api proxy. Handlers call `api.cleanup(fn)` to register tear-down
     // work — event listeners on document, intervals, inner MutationObservers,
     // anything that won't unwind by itself when the handler's returned DOM is
@@ -219,12 +267,16 @@ export function applyRule(
     // property scoped to this mount's `cleanups` array. Concurrent mounts of the
     // same rule on different anchors get distinct proxies — one anchor's cleanup
     // registrations don't leak into another's.
-    const mountApi: CoreHandlerApi = Object.assign(Object.create(api) as CoreApi & HostApiMembers, {
+    const mountApi: CoreAnchoredHandlerApi = Object.assign(Object.create(api) as CoreApi & HostApiMembers, {
       cleanup(fn: () => void) {
         if (typeof fn === 'function') cleanups.push(fn);
       },
+      onAnchorChange(fn: () => unknown) {
+        return changeHub.register(change, fn, currentHandler);
+      },
     });
     for (const mut of rule.mutations || []) {
+      currentHandler = typeof mut.handler === 'string' ? mut.handler : '';
       const raw = await dispatchMutation(el, mut, rule, spec, mountApi, mutations, handlers);
       // dispatchMutation's contract is the broader `Node[]` (handlers may return
       // any Node); applyStrategy's portal/overlay/shadow machinery needs
@@ -238,17 +290,17 @@ export function applyRule(
       // Its tier-1 tokens stay: a replacement under the same spec and rule id
       // stamps the same token names, so stripping here could undo its work.
       if (tornDown) {
-        teardownEntry({ outputs, cleanups });
+        teardownEntry({ outputs, cleanups, change });
         return;
       }
       // The member was revoked while this mount awaited: undo it here.
       if ((generation.get(el) ?? 0) !== gen) {
-        teardownEntry({ outputs, cleanups });
+        teardownEntry({ outputs, cleanups, change });
         stripAnchorTokens(el);
         return;
       }
     }
-    rs.state.set(el, { outputs, cleanups });
+    rs.state.set(el, { outputs, cleanups, change });
     // Register with the module-level own-DOM registry (see above) so no rule's
     // anchor resolution — this rule's or any other patch's — can ever re-match
     // this mount's output and re-dispatch onto it.
@@ -256,6 +308,7 @@ export function applyRule(
       mountedOutputRoots.add(o);
       outputOwners.set(o, spec.id);
     }
+    changeHub.land(change);
   }
 
   // Strip the tier-1 / replace-root tokens this rule stamped on one anchor.
@@ -269,7 +322,9 @@ export function applyRule(
     }
   }
 
-  function teardownEntry(entry: { outputs: HTMLElement[]; cleanups: Array<() => void> }) {
+  function teardownEntry(entry: RuleMountEntry) {
+    // Hooks die first: no callback runs once its mount is going away.
+    if (entry.change) changeHub.kill(entry.change);
     for (const fn of entry.cleanups) {
       try { fn(); } catch (err) { console.error('[shim] cleanup failed', err); }
     }
@@ -334,6 +389,7 @@ export function applyRule(
     rs.verifiedCount = nodes.length;
     const verified = new Set(nodes);
     let unverified = 0;
+    const unverifiedNow = new Set<Element>();
     // A member is judged by its own fingerprint, never by the selector alone:
     // a rule's own output can make the selector stop matching a member that
     // still verifies (an injection filling `.slot:empty`), and revoking it
@@ -364,6 +420,7 @@ export function applyRule(
         generation.set(anchor, (generation.get(anchor) ?? 0) + 1);
       } else if (setWitnessed) {
         unverified += 1;
+        unverifiedNow.add(anchor);
       }
     }
     // A member revoked while its mount is still in flight.
@@ -373,6 +430,7 @@ export function applyRule(
       }
     }
     rs.unverifiedCount = unverified;
+    unverifiedMembers = unverifiedNow;
     rs.verifiedCount = nodes.length + retained;
 
     // Witness capture sees every match BEFORE anything below mounts on it.
@@ -416,13 +474,15 @@ export function applyRule(
   // when the page gets no frames (hidden or behind another window), so a page
   // that re-renders there is still re-shimmed.
   let cancelScan: (() => void) | null = null;
-  const scheduleScan = () => {
-    if (cancelScan) return;
+  function scheduleScan(): void {
+    if (cancelScan || tornDown) return;
     cancelScan = nextFrame(() => {
       cancelScan = null;
       scan();
+      // After the scan (prune, self-heal, membership): the subtree-change hooks.
+      changeHub.deliver(isChangeEligible, drainObserver);
     });
-  };
+  }
 
   scan();
 
@@ -433,7 +493,10 @@ export function applyRule(
   // state bag.
   reconciler.start();
 
-  const observer = new MutationObserver(scheduleScan);
+  observer = new MutationObserver((records) => {
+    if (changeHub.hasHooks()) changeHub.attribute(records);
+    scheduleScan();
+  });
   observer.observe(document.body, {
     childList: true,
     subtree: true,
@@ -441,8 +504,9 @@ export function applyRule(
 
   return function teardownRule() {
     tornDown = true;
+    changeHub.teardown();
     capture.stop();
-    observer.disconnect();
+    observer?.disconnect();
     if (cancelScan) {
       cancelScan();
       cancelScan = null;

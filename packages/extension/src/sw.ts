@@ -31,17 +31,22 @@ import { capabilitiesFor, detectMode, SESSION_CAPABILITIES, type ExtensionMode }
 import { arbitrate, type RuntimeWorld as ArbitratedWorld } from './arbitrate';
 import { baselineForPath, pagePathKey } from '@shimbrowser/core/deploy-id';
 import {
-  rebasedSpec, refreshedSpec, capturedSpec, rememberPath, escalationAllowed, quarantineFrom, emptyRuleState, type RuntimeEventPayload,
+  rebasedSpec, refreshedSpec, capturedSpec, rememberPath, escalationAllowed, quarantineFrom, emptyRuleState, eventFormMatches, ruleForms,
+  type RuntimeEventPayload,
 } from './rebase';
 import { mintShimId } from './install';
 import { matchPatternsForHosts } from './match-patterns';
 import { senderContext, allowedFrom, type SenderContext } from './sender';
 import {
-  isToWorker, isFromRuntime, RUNTIME_PORT, type ToWorker, type ToRuntime, type WorkerAnswer, type BundledShim, type ShimSummary,
+  isToWorker, isFromRuntime, RUNTIME_PORT, type ToWorker, type ToRuntime, type FromRuntime, type WorkerAnswer, type BundledShim, type ShimSummary,
   type ReviewItem,
 } from './messages';
 import { SHIM_FILE_FORMAT } from '@shimbrowser/core/shim-folder';
 import { openPageHost, type ExtensionPageHost, type SessionStorage, type SessionStorageScope, type NudgeOutcome } from './page-host';
+import { createSessions, type ExtensionSessionTarget } from './sessions';
+import { createConsentGate, type ConsentAnswer, type PendingConsent } from './attach-consent';
+import { routeControlRequest, type ControlDeps, type TabInfo, type AttachRequest } from './control';
+import { createBridgePort, type PortLike } from './bridge-port';
 import type { PageRuntimeEvent, PageConsoleMessage, PreviewRule, ScreenshotOptions, LoadWaitOptions, PageInputCommand, PageWorld } from '@shimbrowser/core/page-host';
 
 let storePromise: Promise<ShimStore> | null = null;
@@ -186,7 +191,7 @@ function acceptRuntimePort(world: RuntimeWorld): (port: chrome.runtime.Port) => 
       return;
     }
     port.onMessage.addListener((msg: unknown) => {
-      if (isFromRuntime(msg) && msg.type === 'ack') pendingAcks.get(msg.seq)?.(msg.applied);
+      if (isFromRuntime(msg) && msg.type === 'ack') pendingAcks.get(msg.seq)?.(msg);
     });
     // One runtime per page. Two can meet when a handover and a reconnect
     // cross (a holder's port down for the moment, the other world's
@@ -362,8 +367,34 @@ function reconcileMode(): Promise<void> {
 // this one's. A worker that merely idled out and restarted is the same
 // instance, and its runtimes reconnect their ports on their own.
 // chrome.storage.session lives exactly as long as an instance.
+/** Gives back the origins `patterns` needed that no installed shim still needs. */
+async function releaseUnusedOrigins(db: ShimStore, patterns: readonly string[]): Promise<void> {
+  const remaining = await db.listShims();
+  const release = originsToRelease(patterns, remaining);
+  if (!release.length) return;
+  try {
+    await chrome.permissions.remove({ origins: release });
+  } catch {
+    // A pattern the user already revoked: nothing to release.
+  }
+}
+
+// A draft is a shim a session created and never committed. Its session
+// died with the worker that ran it (a finish would have settled it), so
+// the next worker removes it, with the grant it alone needed, before any
+// registration or bridge connection could serve it.
+async function sweepDrafts(): Promise<void> {
+  const db = await store();
+  for (const shim of await db.listShims()) {
+    if (!shim.sessionDraft) continue;
+    await db.deleteShim(shim.id);
+    await releaseUnusedOrigins(db, patternsFor(shim));
+  }
+}
+
 async function bootRefresh(): Promise<void> {
   const { booted } = await chrome.storage.session.get('booted');
+  await sweepDrafts();
   await syncRegistrations();
   if (booted === true) return;
   await chrome.storage.session.set({ booted: true });
@@ -448,13 +479,13 @@ async function ingestEvent(db: ShimStore, shim: InstalledShim, page: { hostname:
   const ruleId = typeof payload.ruleId === 'string' ? payload.ruleId : null;
   switch (kind) {
     case 'rule-rebase': {
-      if (!ruleId) return false;
+      if (!ruleId || !eventFormMatches(shim.spec, shim.handlers, ruleId, payload.form)) return false;
       // The page kind's baseline advances with the rebase, before the page is
       // served its baseline again, so the re-run sees no deploy.
       await recordBaseline(db, shim.id, page.hostname, payload);
       const out = rebasedSpec(shim.spec, ruleId, payload.anchor, payload.bundleHash);
       if (!out) return false;
-      if (!(await db.reviseSpec(shim.id, out.spec, 'rebase', specVersion(shim.spec)))) return false;
+      if (!(await db.reviseSpec(shim.id, out.spec, shim.handlers, 'rebase', specVersion(shim.spec)))) return false;
       // Healed: whatever review it was held for no longer applies, and its
       // fingerprint is the rebase's now, committed, never captured over.
       const state = await ruleStateFor(db, shim.id, ruleId);
@@ -469,7 +500,7 @@ async function ingestEvent(db: ShimStore, shim: InstalledShim, page: { hostname:
       return false;
     }
     case 'rule-witness': {
-      if (!ruleId) return false;
+      if (!ruleId || !eventFormMatches(shim.spec, shim.handlers, ruleId, payload.form)) return false;
       const state = await ruleStateFor(db, shim.id, ruleId);
       const out = capturedSpec(shim.spec, ruleId, state.capture, payload);
       if (!out) return false;
@@ -483,7 +514,7 @@ async function ingestEvent(db: ShimStore, shim: InstalledShim, page: { hostname:
       return false;
     }
     case 'rule-quarantined': {
-      if (!ruleId) return false;
+      if (!ruleId || !eventFormMatches(shim.spec, shim.handlers, ruleId, payload.form)) return false;
       const state = await ruleStateFor(db, shim.id, ruleId);
       // A miss on a page kind the rule has never applied on is a wrong-page
       // miss, not a break: no review.
@@ -541,7 +572,7 @@ async function bundleFor(page: { hostname: string; port: string; pathname: strin
     // a clean resolve records one.
     const baseline = baselineForPath(await db.baselines.forHost(shim.id, page.hostname), page.pathname);
     const spec = { ...shim.spec, bundleHash: baseline ?? undefined };
-    out.push({ id: shim.id, spec, priority: priorityForRank(shim.rank), version: specVersion(shim.spec), handlers });
+    out.push({ id: shim.id, spec, priority: priorityForRank(shim.rank), version: specVersion(shim.spec), handlers, forms: ruleForms(shim.spec, shim.handlers) });
   }
   return out;
 }
@@ -619,6 +650,9 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
       return { ok: true, versions };
     }
     case 'shims.restore':
+      // A session holding the shim ends first, and its teardown is waited
+      // for outside the write chain (its commit may be queued on it).
+      await sessions.preempt(msg.id);
       return chained(msg.id, async (): Promise<WorkerAnswer> => {
         const shim = await db.getShim(msg.id);
         if (!shim) return { ok: false, error: 'no such shim' };
@@ -633,8 +667,9 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
         // snapshot is refreshed only as it is revised away), amendments
         // and all.
         const source = msg.version === current ? shim.spec : snapshot.spec;
+        const handlers = msg.version === current ? shim.handlers : snapshot.handlers;
         const next = { ...source, id: shim.id, version: current + 1 };
-        if (!(await db.reviseSpec(shim.id, next, 'restore', current))) return { ok: false, error: 'the shim changed meanwhile; try again' };
+        if (!(await db.reviseSpec(shim.id, next, handlers, 'restore', current))) return { ok: false, error: 'the shim changed meanwhile; try again' };
         for (const state of await db.ruleState.listForShim(shim.id)) {
           if (state.quarantine || state.capture) await db.ruleState.put({ ...state, quarantine: undefined, capture: undefined });
         }
@@ -652,20 +687,13 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
     case 'shims.uninstall': {
       const shim = await db.getShim(msg.id);
       if (!shim) return { ok: false, error: 'no such shim' };
+      await sessions.preempt(msg.id);
       await db.deleteShim(msg.id);
       await syncRegistrations();
       // Open pages tear the shim down while its hosts are still ours; the
       // release comes after.
       await refreshOpenTabs(patternsFor(shim));
-      const remaining = await db.listShims();
-      const release = originsToRelease(patternsFor(shim), remaining);
-      if (release.length) {
-        try {
-          await chrome.permissions.remove({ origins: release });
-        } catch {
-          // A pattern the user already revoked: nothing to release.
-        }
-      }
+      await releaseUnusedOrigins(db, patternsFor(shim));
       return { ok: true };
     }
     case 'install.commit': {
@@ -700,6 +728,15 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
       await refreshOpenTabs(patterns);
       return { ok: true, id };
     }
+    case 'bridge.status':
+      return { ok: true, bridge: { enabled: await bridgeEnabled(), connected: bridgePort.connected(), error: bridgePort.lastError(), sessions: sessions.registry.list().length } };
+    case 'bridge.setEnabled':
+      await setBridgeEnabled(msg.enabled);
+      return { ok: true };
+    case 'attach.pending':
+      return { ok: true, pending: consent.pending() };
+    case 'attach.answer':
+      return consent.answer(msg.id, msg.answer) ? { ok: true } : { ok: false, error: 'that request is no longer waiting' };
     default:
       return { ok: false, error: 'unknown message' };
   }
@@ -741,7 +778,8 @@ async function nextHoldSeq(): Promise<number> {
   void chrome.storage.session.set({ [HOLD_SEQ_KEY]: holdSeq }).catch(() => undefined);
   return holdSeq;
 }
-const pendingAcks = new Map<number, (applied: boolean) => void>();
+type RuntimeAck = Extract<FromRuntime, { type: 'ack' }>;
+const pendingAcks = new Map<number, (ack: RuntimeAck) => void>();
 const NUDGE_ACK_MS = 2000;
 // How long a nudge waits for a runtime's port when one is expected and
 // none is connected: a runtime whose port the worker dropped (idled out)
@@ -796,7 +834,7 @@ async function runtimeExpected(tabId: number): Promise<boolean> {
  * page, a nudge with no port waits for one, and a message no runtime
  * answers is uncertainty, not absence.
  */
-async function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>): Promise<NudgeOutcome> {
+async function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>, accepts: (ack: RuntimeAck) => boolean = (ack) => ack.applied): Promise<NudgeOutcome> {
   const seq = await nextHoldSeq();
   const stamped: ToRuntime = { ...msg, seq };
   let ports = [...runtimePorts].filter(([, r]) => r.tabId === tabId).map(([port]) => port);
@@ -817,7 +855,7 @@ async function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>
     const timer = setTimeout(() => settle('timed-out'), NUDGE_ACK_MS);
     // A runtime that ignored the nudge as older than what it has answered
     // too, and that is no hold.
-    pendingAcks.set(seq, (applied) => settle(applied ? 'acked' : 'timed-out'));
+    pendingAcks.set(seq, (ack) => settle(accepts(ack) ? 'acked' : 'timed-out'));
     if (ports.length) {
       for (const port of ports) post(port, stamped);
       return;
@@ -987,6 +1025,11 @@ const pageHosts = {
     }
     return true;
   },
+  /** For the harnesses: the attach card's answer, and the bridge's switch, without the pages. */
+  answerCard: (id: string, answer: ConsentAnswer): boolean => consent.answer(id, answer),
+  pendingCards: (): PendingConsent[] => consent.pending(),
+  sessions: () => sessions.registry.list(),
+  setBridge: (enabled: boolean): Promise<void> => setBridgeEnabled(enabled),
   async call(id: string, method: string, args: unknown[]): Promise<unknown> {
     const entry = openHosts.get(id);
     if (!entry) throw new Error(`no such host: ${id}`);
@@ -1011,6 +1054,339 @@ const pageHosts = {
   },
 };
 (globalThis as unknown as { shimPageHosts: typeof pageHosts }).shimPageHosts = pageHosts;
+
+// --- sessions and the bridge ----------------------------------------------------
+//
+// The session registry runs here (sessions.ts), the routes an MCP client
+// drives are answered here (control.ts), and both reach the worker only
+// through the native messaging port to `shim bridge` (bridge-port.ts),
+// held while the popup's "let Claude Code author here" is on. Every session
+// pends on the attach card (attach-consent.ts, attach.html) before it
+// opens; nothing on a route answers a card.
+
+const BRIDGE_PREF = 'bridge';
+const REMEMBERED_KEY = 'attachRemembered';
+const OPEN_TAB_TIMEOUT_MS = 30_000;
+
+async function syncTabForVersion(tabId: number, shimId: string, version: number): Promise<NudgeOutcome> {
+  return nudgeTab(tabId, { type: 'sync' }, (ack) => ack.applied && (ack.versions?.[shimId] ?? 0) >= version);
+}
+
+const sessions = createSessions({
+  store,
+  mode: () => modeNow,
+  chained,
+  syncTab: syncTabForVersion,
+  refreshTabs: (shim) => refreshOpenTabs(patternsFor(shim)),
+  removeDraft: async (shimId) => {
+    const db = await store();
+    const shim = await db.getShim(shimId);
+    if (!shim || !shim.sessionDraft) return;
+    await db.deleteShim(shimId);
+    await syncRegistrations();
+    await refreshOpenTabs(patternsFor(shim));
+    await releaseUnusedOrigins(db, patternsFor(shim));
+  },
+});
+
+const consent = createConsentGate();
+// "Allow this host until Chrome restarts" outlives the worker: mirrored to
+// session storage, which lives as long as the browser session.
+const rememberedReady = (async () => {
+  try {
+    const got = await chrome.storage.session.get(REMEMBERED_KEY);
+    const list = got[REMEMBERED_KEY];
+    if (Array.isArray(list)) consent.remember(list.filter((s): s is string => typeof s === 'string'));
+  } catch { /* nothing remembered */ }
+})();
+// The attach card is a small window of the extension's own page. The worker
+// owns its lifetime: one window while requests wait, closed a moment after
+// the last is answered, a fresh one for the next. Serialized, so two
+// rapid changes never open two windows or race a close against an open.
+let cardWindowId: number | null = null;
+let cardCloseTimer: ReturnType<typeof setTimeout> | null = null;
+let cardWork: Promise<void> = Promise.resolve();
+const CARD_CLOSE_GRACE_MS = 1200;
+
+function syncCard(pending: PendingConsent[]): void {
+  cardWork = cardWork.then(async () => {
+    if (pending.length > 0) {
+      if (cardCloseTimer !== null) { clearTimeout(cardCloseTimer); cardCloseTimer = null; }
+      if (cardWindowId !== null) {
+        try { await chrome.windows.get(cardWindowId); return; } catch { cardWindowId = null; }
+      }
+      try {
+        const win = await chrome.windows.create({ url: chrome.runtime.getURL('attach.html'), type: 'popup', width: 460, height: 440, focused: true });
+        cardWindowId = win?.id ?? null;
+      } catch (e) {
+        console.error('[shim] could not open the attach card', e);
+      }
+    } else if (cardWindowId !== null && cardCloseTimer === null) {
+      const id = cardWindowId;
+      cardCloseTimer = setTimeout(() => {
+        cardCloseTimer = null;
+        if (cardWindowId === id && consent.pending().length === 0) {
+          cardWindowId = null;
+          void chrome.windows.remove(id).catch(() => undefined);
+        }
+      }, CARD_CLOSE_GRACE_MS);
+    }
+  }, () => undefined);
+}
+chrome.windows.onRemoved.addListener((id) => { if (id === cardWindowId) cardWindowId = null; });
+consent.onChange((pending) => {
+  void chrome.storage.session.set({ [REMEMBERED_KEY]: consent.remembered() }).catch(() => undefined);
+  syncCard(pending);
+});
+
+const hostPattern = (hostname: string, port: string): string => `*://${hostname}${port ? `:${port}` : ''}/*`;
+
+function tabInfoOf(tab: chrome.tabs.Tab): TabInfo | null {
+  if (tab.id === undefined || typeof tab.url !== 'string') return null;
+  let u: URL;
+  try { u = new URL(tab.url); } catch { return null; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  return { tabId: tab.id, windowId: tab.windowId, url: tab.url, title: tab.title ?? '', active: tab.active };
+}
+
+// The origin patterns a session on `tab` needs for its shim: the shim's
+// own (an installed one) or the tab's host (a new one).
+async function patternsNeeded(req: AttachRequest, tab: TabInfo): Promise<{ patterns: string[]; shim: InstalledShim | null; error?: string; detail?: string }> {
+  const db = await store();
+  const u = new URL(tab.url);
+  // A Chrome host permission carries no port, so a new shim is granted its
+  // host for every port; its match.hosts keeps the port (createShim).
+  if (req.create !== null) return { patterns: [hostPattern(u.hostname, '')], shim: null };
+  const shim = await db.getShim(req.artifactId);
+  if (!shim) return { patterns: [], shim: null, error: 'unknown-artifact', detail: `no shim "${req.artifactId}" is installed` };
+  if (!hostMatches(shim.spec.match?.hosts, u.hostname, u.port || undefined)) {
+    return { patterns: [], shim, error: 'invalid-target', detail: `"${shim.name}" does not run on ${u.host}` };
+  }
+  return { patterns: patternsFor(shim), shim };
+}
+
+async function missingOf(patterns: readonly string[]): Promise<string[]> {
+  const out: string[] = [];
+  for (const p of patterns) if (!(await chrome.permissions.contains({ origins: [p] }))) out.push(p);
+  return out;
+}
+
+// What each open still had to acquire when its card was shown.
+const missingAtResolve = new WeakMap<AttachRequest, string[]>();
+
+// Every route open runs under the bridge generation's scope: turning the
+// bridge off aborts them all before the shutdown waits.
+let openScope = new AbortController();
+
+function withScope(signal: AbortSignal): AbortSignal {
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  if (signal.aborted || openScope.signal.aborted) controller.abort();
+  signal.addEventListener('abort', abort, { once: true });
+  openScope.signal.addEventListener('abort', abort, { once: true });
+  return controller.signal;
+}
+
+function waitForTabLoad(tabId: number, signal: AbortSignal): Promise<'finished' | 'failed' | 'timed-out' | 'aborted'> {
+  return new Promise((resolve) => {
+    const settle = (outcome: 'finished' | 'failed' | 'timed-out' | 'aborted'): void => {
+      clearTimeout(timer);
+      chrome.webNavigation.onCompleted.removeListener(onCompleted);
+      chrome.webNavigation.onErrorOccurred.removeListener(onError);
+      signal.removeEventListener('abort', onAbort);
+      resolve(outcome);
+    };
+    const onCompleted = (d: chrome.webNavigation.WebNavigationFramedCallbackDetails): void => { if (d.tabId === tabId && d.frameId === 0) settle('finished'); };
+    const onError = (d: chrome.webNavigation.WebNavigationFramedErrorCallbackDetails): void => { if (d.tabId === tabId && d.frameId === 0) settle('failed'); };
+    const onAbort = (): void => settle('aborted');
+    const timer = setTimeout(() => settle('timed-out'), OPEN_TAB_TIMEOUT_MS);
+    chrome.webNavigation.onCompleted.addListener(onCompleted);
+    chrome.webNavigation.onErrorOccurred.addListener(onError);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+const controlDeps: ControlDeps = {
+  status: () => ({
+    app: 'shim-for-chrome', host: 'chrome-extension', version: SHIM_EXTENSION_VERSION, enabled: true, mode: modeNow,
+    sessions: sessions.registry.list().map((x) => ({ sessionId: x.sessionId, shimId: x.artifactId, revision: x.revision, state: x.state })),
+  }),
+  async tabs() {
+    const all = await chrome.tabs.query({});
+    return all.map(tabInfoOf).filter((t): t is TabInfo => t !== null);
+  },
+  async tab(tabId) {
+    try { return tabInfoOf(await chrome.tabs.get(tabId)); } catch { return null; }
+  },
+  async shimsOn(tab) {
+    const db = await store();
+    let u: URL;
+    try { u = new URL(tab.url); } catch { return []; }
+    const out: Array<{ id: string; name: string; enabled: boolean; connect: 'asks' | 'allowed' }> = [];
+    for (const shim of await db.listShims()) {
+      if (!hostMatches(shim.spec.match?.hosts, u.hostname, u.port || undefined)) continue;
+      out.push({ id: shim.id, name: shim.name, enabled: shim.enabled, connect: consent.isRemembered(u.hostname) ? 'allowed' : 'asks' });
+    }
+    return out;
+  },
+  sessions: sessions.registry,
+  consent: {
+    async request(subject, signal) {
+      await rememberedReady;
+      return consent.request(subject, signal);
+    },
+  },
+  async resolveAttach(req, tab) {
+    const u = new URL(tab.url);
+    const needed = await patternsNeeded(req, tab);
+    if (needed.error) return { ok: false, error: needed.error, ...(needed.detail ? { detail: needed.detail } : {}) };
+    const missing = await missingOf(needed.patterns);
+    // What the card may acquire: the first resolve's view, never the one
+    // after the answer (by then nothing is missing).
+    if (!missingAtResolve.has(req)) missingAtResolve.set(req, missing);
+    return {
+      ok: true,
+      tab,
+      subject: {
+        agent: req.agent, intent: req.intent,
+        shimId: needed.shim?.id ?? '', shimName: needed.shim?.name ?? req.create?.name ?? '',
+        scope: u.hostname, tabId: tab.tabId >= 0 ? tab.tabId : null, url: tab.url, title: tab.title, missingOrigins: missing,
+      },
+    };
+  },
+  async acquiredOrigins(req) {
+    const missing = missingAtResolve.get(req) ?? [];
+    const now: string[] = [];
+    for (const p of missing) if (await chrome.permissions.contains({ origins: [p] })) now.push(p);
+    return now;
+  },
+  async releaseOrigins(origins) {
+    const db = await store();
+    await releaseUnusedOrigins(db, origins);
+  },
+  async createShim(req, tab, draftId) {
+    const db = await store();
+    const u = new URL(tab.url);
+    const id = mintShimId(crypto.randomUUID());
+    // Chrome match patterns carry no port anywhere (permission, content
+    // script, permissions.contains), so a new shim matches the host for
+    // every port. On a dev server that is any port of localhost; the user
+    // can narrow it in the Shim browser.
+    const { patterns, problems } = matchPatternsForHosts([u.hostname]);
+    if (problems.length || !patterns.length) return { ok: false, error: 'invalid-target', detail: `the tab's host cannot be registered: ${problems.join('; ')}` };
+    const shim: Omit<InstalledShim, 'rank'> = {
+      id, name: req.create?.name ?? 'New shim', enabled: true, installedAt: Date.now(),
+      provenance: { source: 'session' },
+      mode: modeNow, spec: { id, version: 1, match: { hosts: [u.hostname] }, rules: [] }, handlers: {}, envelope: {},
+      sessionDraft: { sessionId: draftId, at: Date.now() },
+    };
+    await db.addShim(shim);
+    await syncRegistrations();
+    return { ok: true, artifactId: id };
+  },
+  async discardShim(artifactId) {
+    const db = await store();
+    const shim = await db.getShim(artifactId);
+    if (!shim) return;
+    await db.deleteShim(artifactId);
+    await syncRegistrations();
+    await refreshOpenTabs(patternsFor(shim));
+    await releaseUnusedOrigins(db, patternsFor(shim));
+  },
+  async targetFor(tab, artifactId) {
+    const db = await store();
+    const shim = await db.getShim(artifactId);
+    if (!shim) return { ok: false, error: 'unknown-artifact', detail: `no shim "${artifactId}"` };
+    if (hostOnTab(tab.tabId)) return { ok: false, error: 'artifact-busy', detail: 'a session already holds this tab' };
+    const worldId = crypto.randomUUID();
+    const host = await openPageHost(tab.tabId, { engineBundle, storage: sessionStorageFor(db, new Map()), nudge: nudgeTab }, { worldId });
+    const id = `host-${++hostSeq}`;
+    const entry: OpenHost = { host, events: [], console: [], popups: [], offs: [] };
+    openHosts.set(id, entry);
+    // The host over (Chrome's bar, the tab gone): its session ends at once.
+    entry.offs.push(host.onClosed(() => {
+      const s = sessions.registry.sessionFor('shim', artifactId);
+      if (s) void sessions.registry.end(s.sessionId, 'ended');
+    }));
+    const u = new URL(tab.url);
+    const page = { hostname: u.hostname, port: u.port };
+    const runs = shim.enabled && (await runsOn(shim, page, capabilitiesFor(modeNow)));
+    const committedDown = runs ? null
+      : !shim.enabled ? `"${shim.name}" is disabled in Shim for Chrome: its committed rules are not running on the page; previews still apply`
+        : `"${shim.name}" needs what Shim for Chrome does not run in ${modeNow} mode: its committed rules are not running on the page; previews still apply`;
+    const target: ExtensionSessionTarget = {
+      page: { host, close: () => pageHosts.close(id).then(() => undefined) },
+      source: { shimId: shim.id, name: shim.name, spec: shim.spec, handlers: shim.handlers, envelope: shim.envelope, created: shim.sessionDraft !== undefined },
+      committedDown,
+    };
+    // The disposer the route calls when the open does not take over the host
+    // (a lease busy before begin, a throw): closes it and drops its entry.
+    return { ok: true, target, dispose: () => pageHosts.close(id).then(() => undefined) };
+  },
+  async openTab(url, signal) {
+    let tab: chrome.tabs.Tab;
+    try {
+      tab = await chrome.tabs.create({ url, active: true });
+    } catch (e) {
+      return { ok: false, error: 'page-load-failed', detail: `could not open a tab: ${e instanceof Error ? e.message : String(e)}`, tabId: null };
+    }
+    const tabId = tab.id ?? null;
+    if (tabId === null) return { ok: false, error: 'page-load-failed', detail: 'the tab has no id', tabId: null };
+    const outcome = await waitForTabLoad(tabId, signal);
+    if (outcome !== 'finished') return { ok: false, error: 'page-load-failed', detail: `the page did not finish loading (${outcome})`, tabId };
+    const info = tabInfoOf(await chrome.tabs.get(tabId));
+    if (!info) return { ok: false, error: 'page-load-failed', detail: 'the page is not on a site this extension may see', tabId };
+    return { ok: true, tab: info };
+  },
+  closeTab: (tabId) => chrome.tabs.remove(tabId).catch(() => undefined),
+  takeNotes: (sessionId) => sessions.takeNotes(sessionId),
+  newDraftId: () => crypto.randomUUID(),
+};
+
+// Everything a bridge generation holds, ended in order: no new opens, the
+// ones in flight aborted and waited for, every session ended, every
+// remembered consent forgotten.
+async function shutdownSessions(): Promise<void> {
+  openScope.abort();
+  openScope = new AbortController();
+  await sessions.registry.settleOpens();
+  await Promise.all(sessions.registry.list().map((x) => sessions.registry.end(x.sessionId, 'ended')));
+  consent.reset();
+  await chrome.storage.session.remove(REMEMBERED_KEY).catch(() => undefined);
+}
+
+function nativePort(name: string): PortLike {
+  const port = chrome.runtime.connectNative(name);
+  return {
+    postMessage: (m) => port.postMessage(m),
+    disconnect: () => port.disconnect(),
+    onMessage: { addListener: (cb) => port.onMessage.addListener((m: unknown) => cb(m)) },
+    onDisconnect: { addListener: (cb) => port.onDisconnect.addListener(() => cb()) },
+    lastError: () => chrome.runtime.lastError?.message ?? null,
+  };
+}
+
+const bridgePort = createBridgePort({
+  connect: nativePort,
+  handle: (req, signal) => routeControlRequest(controlDeps, { method: req.method, url: req.url, body: req.body, signal: withScope(signal) }),
+  shutdown: () => shutdownSessions(),
+  version: SHIM_EXTENSION_VERSION,
+  log: (line) => console.log(line),
+});
+
+async function bridgeEnabled(): Promise<boolean> {
+  return (await (await store()).prefs.get(BRIDGE_PREF)) === true;
+}
+
+async function setBridgeEnabled(enabled: boolean): Promise<void> {
+  await (await store()).prefs.set(BRIDGE_PREF, enabled);
+  if (enabled) bridgePort.enable();
+  else await bridgePort.disable();
+}
+
+// On while the setting is on, from every worker boot.
+void bridgeEnabled().then((on) => { if (on) bridgePort.enable(); });
 
 type MessageListener = (msg: unknown, sender: chrome.runtime.MessageSender, sendResponse: (answer: WorkerAnswer) => void) => boolean;
 

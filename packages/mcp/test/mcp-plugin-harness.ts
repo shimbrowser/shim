@@ -104,7 +104,7 @@ for (const tool of staticTools()) {
 // The guide tells the agent that only the api members it names exist, so
 // every concrete member a handler can reach must be named.
 const API_MEMBERS = [
-  'api.origin', 'api.host', 'api.cleanup',
+  'api.origin', 'api.host', 'api.cleanup', 'api.onAnchorChange(',
   'api.storage', 'api.storage.pack', 'api.storage.global', 'api.shared',
   'api.db', 'api.db.query', 'api.db.run', 'api.db.connection',
   'api.settings.get(', 'api.settings.getAll(', 'api.fetch(', 'api.ai.complete(',

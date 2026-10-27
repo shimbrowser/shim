@@ -4,7 +4,8 @@
 // a small stateless helper — no rule/patch state lives in this module.
 
 import type { Spec, Rule, Mutation } from './types';
-import type { CoreApi, CoreHandlerApi, CoreRouteMountApi, RouteMatch } from './api';
+import type { MountRecord } from './anchor-change';
+import type { CoreApi, CoreAnchoredHandlerApi, CoreRouteMountApi, RouteMatch } from './api';
 
 // --- Runtime/engine-only Spec extension ------------------------------------
 //
@@ -26,7 +27,7 @@ export interface RuntimeSpec extends Spec {
 export interface MutationHandlerDef {
   deps?: string[];
   css?: string;
-  mount(el: Element, mut: Mutation, rule: Rule, spec: Spec, api: CoreHandlerApi): unknown;
+  mount(el: Element, mut: Mutation, rule: Rule, spec: Spec, api: CoreAnchoredHandlerApi): unknown;
 }
 export type MutationRegistry = Record<string, MutationHandlerDef>;
 
@@ -43,7 +44,7 @@ export interface ScriptHandlerArgs {
   mutation: Mutation;
   rule: Rule;
   spec: Spec;
-  api: CoreHandlerApi;
+  api: CoreAnchoredHandlerApi;
 }
 export interface RouteHandlerArgs {
   match: RouteMatch;
@@ -61,6 +62,8 @@ export type HandlerMap = Record<string, PatchHandler>;
 export interface RuleMountEntry {
   outputs: HTMLElement[];
   cleanups: Array<() => void>;
+  // This mount's api.onAnchorChange record (anchor-change.ts).
+  change?: MountRecord<Node>;
 }
 
 // Structural echo of anchors.ts's (unexported) RejectedSample — only the

@@ -11,6 +11,7 @@
 //   dist/popup.html|js       the popup
 //   dist/install.html|js     the install page
 //   dist/prepare.html|js     the install check, a sandboxed page (its CSP permits the syntax probe)
+//   dist/attach.html|js      the attach card: a session asks, the user answers here
 //   dist/ui.css              their stylesheet
 //   dist/icons/              the toolbar icon, the browser's, in the manifest's sizes
 //
@@ -36,6 +37,7 @@ const ENTRIES = {
   popup: 'popup.ts',
   install: 'install-page.ts',
   prepare: 'prepare.ts',
+  attach: 'attach-page.ts',
 };
 
 function coreBuild() {

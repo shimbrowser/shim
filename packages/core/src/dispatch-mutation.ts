@@ -13,7 +13,7 @@ import {
 import { normalizeOutputs, trimStackForEvent } from './engine-internal';
 import type { MutationRegistry, HandlerMap } from './engine-internal';
 import type { Mutation, Rule, Spec } from './types';
-import type { CoreHandlerApi } from './api';
+import type { CoreAnchoredHandlerApi } from './api';
 import { errMessage } from './error';
 
 // Apply-time strip feedback for inject-html: when the strip pass removed
@@ -29,7 +29,7 @@ export function dispatchMutation(
   mut: Mutation,
   rule: Rule,
   spec: Spec,
-  api: CoreHandlerApi,
+  api: CoreAnchoredHandlerApi,
   mutations: MutationRegistry,
   handlers: HandlerMap,
 ): Promise<Node[]> {

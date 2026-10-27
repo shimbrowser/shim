@@ -15,6 +15,8 @@
     .pill.warn { background: var(--accent-soft); color: var(--accent); }
     .versions { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); font-size: 12px; }
     .versions .row { margin: 2px 0; }
+    .bridge { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 12px; }
+    .bridge label { cursor: pointer; }
   </style>
 </head>
 <body>
@@ -24,6 +26,7 @@
   </header>
   <div id="list"></div>
   <div id="empty" class="muted" hidden>no shims yet. install a .shim file exported from the Shim browser or saved by Claude Code.</div>
+  <section id="bridge" class="bridge"></section>
   <footer id="mode" class="muted"></footer>
   <script src="popup.js"></script>
 </body>

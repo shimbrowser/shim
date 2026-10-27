@@ -169,4 +169,32 @@ must<HTMLButtonElement>('install').addEventListener('click', () => {
   void chrome.tabs.create({ url: chrome.runtime.getURL('install.html') });
 });
 
+// The bridge to Claude Code: off by default. On, the worker holds a port to
+// the native host `shim extension install-host` set up, and an agent can
+// open sessions here (each one asks on the attach card first).
+async function renderBridge(): Promise<void> {
+  const box = must<HTMLElement>('bridge');
+  const answer = await ask({ type: 'bridge.status' });
+  box.replaceChildren();
+  if (!answer.ok || !('bridge' in answer)) return;
+  const b = answer.bridge;
+  const row = el('label', 'row');
+  const toggle = el('input');
+  toggle.type = 'checkbox';
+  toggle.checked = b.enabled;
+  toggle.addEventListener('change', async () => {
+    toggle.disabled = true;
+    await ask({ type: 'bridge.setEnabled', enabled: toggle.checked });
+    await renderBridge();
+  });
+  row.append(toggle, el('span', 'grow', 'let Claude Code author here'));
+  box.append(row);
+  const state = !b.enabled ? 'off'
+    : b.connected ? `connected${b.sessions ? ` · ${b.sessions} session${b.sessions === 1 ? '' : 's'} open` : ''}`
+      : b.error ? `not connected: ${b.error}. Run \`shim extension install-host --extension-id ${chrome.runtime.id}\` once, then try again.`
+        : 'connecting…';
+  box.append(el('div', b.enabled && !b.connected ? 'error' : 'muted', state));
+}
+
 void render();
+void renderBridge();

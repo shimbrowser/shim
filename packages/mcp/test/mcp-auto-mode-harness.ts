@@ -23,7 +23,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { createShimMcpServer, type ShimMcpDeps } from '../src/server';
 import { ControlTransportError, type ControlClient, type ControlReply, type ControlInfo } from '../src/control-client';
-import { probeAttach, type AttachProbe } from '../src/modes';
+import { probeAttach, pickAttachHost, type AttachProbe } from '../src/modes';
 import { createHeadlessControl } from '../src/headless-control';
 import { HeadlessUnavailableError, PLAYWRIGHT_INSTALL_COMMAND, PLAYWRIGHT_MISSING, type HeadlessReadiness } from '../src/playwright-launch';
 import * as fs from 'fs';
@@ -290,6 +290,93 @@ async function main(): Promise<void> {
     const st = json(await call(ac, 'shim_status'));
     check('attach-only status keeps its shape', st.running === true);
     await ac.close();
+  }
+
+  console.log('two attach hosts:');
+  {
+    // The Shim browser and Shim for Chrome's bridge, each a scripted
+    // endpoint listing one tab numbered 7 (the hosts number their tabs
+    // separately) and the browser a tab 8 of its own.
+    const tabsOf = (host: 'shim' | 'chrome') => ok({ windows: [{ id: 1, tabs: [{ tabId: 70, webContentsId: 7, url: `https://${host}.test/`, title: host }, ...(host === 'shim' ? [{ tabId: 80, webContentsId: 8, url: 'https://only.shim/', title: 'only' }] : [])] }] });
+    const make = (host: 'shim' | 'chrome') => scripted(host, (req) => (req.path === '/tabs' ? tabsOf(host) : endpoint('attach', host === 'shim' ? 's' : 'c')(req)));
+    const shim = make('shim');
+    const chrome = make('chrome');
+    const headlessScript = scripted('headless', endpoint('headless', 'h'));
+    const up = { shim: true, chrome: true };
+    const deps: ShimMcpDeps = {
+      version: 'test', mode: 'auto', controlFile: '/u/control.json', chromeControlFile: '/u/control-chrome.json',
+      connect: () => (up.shim ? shim.client : null),
+      connectChrome: () => (up.chrome ? chrome.client : null),
+      probeAttach: () => (up.shim ? { reachable: true, info: INFO } : { reachable: false, reason: 'no Shim browser (no discovery file at /u/control.json)' }),
+      probeChrome: () => (up.chrome ? { reachable: true, info: { ...INFO, pid: 4343, host: 'chrome-extension' } } : { reachable: false, reason: 'no Shim for Chrome bridge (no discovery file at /u/control-chrome.json)' }),
+      headlessControl: headlessScript.client,
+      headlessReadiness: () => FOUND,
+      launch: async () => ({ ok: true, how: 'attached', info: INFO, detail: 'running' }),
+      newCommitId: () => 'c1', maxOutputTokens: 25_000,
+    };
+    const client = await connect(deps);
+    const st = json(await call(client, 'shim_status'));
+    check('status reports the chrome host beside attach and headless', rec(st.chrome).available === true && rec(st.attach).available === true, JSON.stringify(st.chrome));
+    const tabs = json(await call(client, 'shim_list_tabs'));
+    const listed = (tabs.windows as Array<{ host?: string; tabs: Array<{ tabId: number; host?: string }> }>).flatMap((w) => w.tabs.map((t) => `${t.host}:${t.tabId}`));
+    check('shim_list_tabs merges both hosts and marks each tab with its host', listed.sort().join() === 'chrome:7,shim:7,shim:8', listed.join());
+    const ambiguous = await call(client, 'shim_open_session', { tabId: 7, intent: 'x', newShimName: 'N' });
+    check('a tab number both hosts listed is ambiguous-target', ambiguous.isError === true && textOf(ambiguous).startsWith('ambiguous-target'), textOf(ambiguous));
+    check('…and reached neither', !shim.sent.some((x) => x.path === '/sessions') && !chrome.sent.some((x) => x.path === '/sessions'));
+    const onlyShim = json(await call(client, 'shim_open_session', { tabId: 8, intent: 'x', newShimName: 'N' }));
+    check('a number one host listed goes there, and the answer names it', onlyShim.host === 'shim' && /tab list carried/.test(String(onlyShim.modeReason)), JSON.stringify(onlyShim));
+    const viaChrome = json(await call(client, 'shim_open_session', { tabId: 7, intent: 'x', newShimName: 'N', target: 'chrome' }));
+    check('target "chrome" pins the open to the bridge', viaChrome.host === 'chrome' && chrome.sent.some((x) => x.path === '/sessions') && JSON.stringify(rec(chrome.sent.find((x) => x.path === '/sessions')?.body).target) === '{"webContentsId":7}', JSON.stringify(viaChrome));
+    const cid = String(viaChrome.sessionId);
+    shim.sent.length = 0;
+    const view = await call(client, 'view_page', { sessionId: cid });
+    check('a later call on that session goes to the bridge, never the browser', textOf(view) === 'attach:view_page' && !shim.sent.some((x) => x.path.endsWith('/call')), textOf(view));
+    const urlBoth = await call(client, 'shim_open_session', { url: 'https://site.test/', intent: 'x', newShimName: 'N' });
+    check('a url with both reachable is multiple-targets', urlBoth.isError === true && textOf(urlBoth).startsWith('multiple-targets'), textOf(urlBoth));
+    const comp = json(await call(client, 'shim_open_session', { intent: 'x', newCompositionName: 'Board' }));
+    check('a composition goes to the Shim browser without being asked', comp.host === 'shim' && !comp.error, JSON.stringify(comp));
+    const compChrome = await call(client, 'shim_open_session', { intent: 'x', newCompositionName: 'Board', target: 'chrome' });
+    check('…and refuses target "chrome"', compChrome.isError === true && textOf(compChrome).startsWith('requires-shim-browser'), textOf(compChrome));
+    up.chrome = false;
+    const gone = await call(client, 'shim_commit', { sessionId: cid, summary: 's' });
+    check('the bridge gone: its session fails as shim-not-running for that host, never falling through to the browser', gone.isError === true && textOf(gone).startsWith('shim-not-running') && /Shim for Chrome/.test(textOf(gone)) && !shim.sent.some((x) => x.path.endsWith('/commit')), textOf(gone));
+    const oneLeft = json(await call(client, 'shim_open_session', { url: 'https://site.test/', intent: 'x', newShimName: 'N' }));
+    check('with one host left a url goes there, named', oneLeft.host === 'shim' && /one host reachable/.test(String(oneLeft.modeReason)), JSON.stringify(oneLeft));
+    await client.close();
+
+    // Only the Chrome bridge reachable: a url attaches there, not headless.
+    up.shim = false; up.chrome = true;
+    const chromeOnly = await connect(deps);
+    const viaChrome2 = json(await call(chromeOnly, 'shim_open_session', { url: 'https://site.test/', intent: 'x', newShimName: 'N' }));
+    check('a url with only Chrome up attaches to Chrome, never headless', viaChrome2.mode === 'attach' && viaChrome2.host === 'chrome' && chrome.sent.some((x) => x.path === '/sessions'), JSON.stringify(viaChrome2));
+    await chromeOnly.close();
+
+    // A server default target that is down refuses, never falls to headless.
+    up.shim = true; up.chrome = false;
+    const pinned = await connect({ ...deps, defaultTarget: 'chrome' });
+    const downDefault = await call(pinned, 'shim_open_session', { url: 'https://site.test/', intent: 'x', newShimName: 'N' });
+    check('a url with the default target (chrome) down refuses, not headless', downDefault.isError === true && textOf(downDefault).startsWith('shim-not-running') && !headlessScript.sent.some((x) => x.path === '/sessions'), textOf(downDefault));
+    const shimDown = await connect({ ...deps, defaultTarget: 'shim' });
+    up.shim = false; up.chrome = true;
+    const downShim = await call(shimDown, 'shim_open_session', { url: 'https://site.test/', intent: 'x', newShimName: 'N' });
+    check('a url with the default target (shim) down refuses too', downShim.isError === true && textOf(downShim).startsWith('shim-not-running'), textOf(downShim));
+    await pinned.close();
+    await shimDown.close();
+
+    // Attach mode pinned to Chrome, with only Chrome up: status reports it.
+    up.shim = false; up.chrome = true;
+    const attachChrome = await connect({ ...deps, mode: 'attach', defaultTarget: 'chrome' });
+    const st2 = json(await call(attachChrome, 'shim_status'));
+    check('attach --target chrome reports the chrome host and is running, not launch-Shim', st2.running === true && rec(st2.chrome).available === true, JSON.stringify(st2));
+    const tabsC = await call(attachChrome, 'shim_list_tabs');
+    check('…and lists Chrome\'s tabs', !tabsC.isError && chrome.sent.some((x) => x.path === '/tabs'), textOf(tabsC));
+    await attachChrome.close();
+
+    const pick = (args: Partial<Parameters<typeof pickAttachHost>[0]>) => pickAttachHost({ reachable: { shim: true, chrome: true }, listedBy: [], url: false, composition: false, ...args });
+    check('pickAttachHost: the call\'s target beats the server\'s', (() => { const c = pick({ requested: 'chrome', defaultTarget: 'shim' }); return c.ok && c.host === 'chrome'; })());
+    check('pickAttachHost: a pinned host that is down is shim-not-running', (() => { const c = pick({ requested: 'chrome', reachable: { shim: true, chrome: false } }); return !c.ok && c.error === 'shim-not-running'; })());
+    check('pickAttachHost: neither reachable is shim-not-running', (() => { const c = pick({ reachable: { shim: false, chrome: false } }); return !c.ok && c.error === 'shim-not-running'; })());
+    check('pickAttachHost: the server\'s target applies when the call names none', (() => { const c = pick({ defaultTarget: 'chrome' }); return c.ok && c.host === 'chrome'; })());
   }
 
   console.log('the attach probe:');

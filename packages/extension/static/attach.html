@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Shim: a coding agent wants to connect</title>
+  <link rel="stylesheet" href="ui.css">
+  <style>
+    body { width: 420px; padding: 14px 16px; }
+    header { margin-bottom: 10px; }
+    .card p { margin: 4px 0; }
+    .intent { white-space: pre-wrap; background: var(--border-soft); border-radius: var(--radius); padding: 6px 8px; margin: 6px 0; max-height: 120px; overflow: auto; }
+    .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+    .warn { color: var(--text-soft); font-size: 12px; margin-top: 8px; }
+    #none { padding: 12px 0; }
+  </style>
+</head>
+<body>
+  <header><h1>a coding agent wants to connect</h1></header>
+  <div id="cards"></div>
+  <p id="none" class="muted" hidden>nothing is waiting for an answer.</p>
+  <script src="attach.js"></script>
+</body>
+</html>

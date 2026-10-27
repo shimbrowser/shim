@@ -60,6 +60,14 @@ console.log('\n=== reconcile harness ===\n');
   check('the same version is left alone', r.stop.length === 0 && r.start.length === 0 && r.update.length === 0);
 }
 {
+  const r = reconcileShims(new Map([['a', { priority: -1, version: 1, handlersKey: 'h1' }]]), [{ ...w('a', -1, 2), handlersKey: 'h2' }]);
+  check('a version move with other handler modules restarts the shim (its code was compiled at boot)', r.stop.join() === 'a' && ids(r.start) === 'a' && r.update.length === 0);
+  const same = reconcileShims(new Map([['a', { priority: -1, version: 1, handlersKey: 'h1' }]]), [{ ...w('a', -1, 2), handlersKey: 'h1' }]);
+  check('a version move with the same handler modules is an in-place update', same.stop.length === 0 && ids(same.update) === 'a');
+  const unknown = reconcileShims(new Map([['a', { priority: -1, version: 1 }]]), [{ ...w('a', -1, 2), handlersKey: 'h2' }]);
+  check('a side without a key is not compared', unknown.stop.length === 0 && ids(unknown.update) === 'a');
+}
+{
   const r = reconcileShims(running([['a', -1, 1]]), [w('a', -5, 2)]);
   check('a moved priority and version together: restart, not update', r.stop.join() === 'a' && ids(r.start) === 'a' && r.update.length === 0);
 }

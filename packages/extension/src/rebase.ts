@@ -11,6 +11,7 @@
 // for review. No LLM re-anchor: review is the ceiling here.
 
 import type { Spec, Anchor, AnchorSpec, Rule } from '@shimbrowser/core/types';
+import { ruleFormDigest } from '@shimbrowser/core/rule-form';
 import { pagePathKey } from '@shimbrowser/core/deploy-id';
 import { readCaptureEvent, inCaptureBinding, supersedes, fingerprintOfCapture, type CaptureEvent } from '@shimbrowser/core/capture-event';
 import { anchorDigest, withManagedFingerprint, withoutManagedKeys, managedFingerprintOf, hasManagedKeys } from '@shimbrowser/core/managed-anchor';
@@ -42,6 +43,8 @@ export interface RuntimeEventPayload {
   setWitness?: unknown;
   anchorDigest?: unknown;
   documentId?: unknown;
+  /** The authored form of the rule the reporting runtime ran (BundledShim.forms). */
+  form?: unknown;
   rev?: unknown;
   applyId?: unknown;
   captureNote?: unknown;
@@ -115,6 +118,30 @@ function rebasedAnchor(existing: Anchor | undefined, reported: Anchor): Anchor {
   if (authored?.iframe) base.iframe = authored.iframe;
   if (authored?.cardinality === 'many' || reported.cardinality === 'many') base.cardinality = 'many';
   return withManagedFingerprint(base, managedFingerprintOf(reported));
+}
+
+/**
+ * Whether an event about `ruleId` was reported by a runtime running the
+ * rule's current authored form (core's rule-form digest, over the stored
+ * handler modules). An event with no stamp is taken (a runtime older than
+ * the stamp); one with another form's stamp is a tab still running the rule
+ * as it was before a commit, or an old handler module under an unchanged
+ * rule, and its outcome is dropped. A missing rule matches nothing.
+ */
+export function eventFormMatches(spec: Spec, handlers: Record<string, string>, ruleId: string, form: unknown): boolean {
+  if (form === undefined) return true;
+  if (typeof form !== 'string') return false;
+  const rule = (spec.rules ?? []).find((r) => r.id === ruleId);
+  return rule !== undefined && ruleFormDigest(rule, handlers) === form;
+}
+
+/** Each rule's authored form, by id: what a bundle stamps on the rules it serves. */
+export function ruleForms(spec: Spec, handlers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const rule of spec.rules ?? []) {
+    if (typeof rule?.id === 'string') Object.defineProperty(out, rule.id, { value: ruleFormDigest(rule, handlers), enumerable: true, writable: true, configurable: true });
+  }
+  return out;
 }
 
 export interface RebaseOutcome {
