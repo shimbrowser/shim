@@ -38,9 +38,10 @@ rest, as `ctx.params['*']`). `/i/api/graphql/:queryId/:operation` matches every 
 call and gives you `ctx.params.operation` to branch on — match on stable names like that,
 not on a per-deploy hash. `method` is optional (any method when left out).
 
-The wrapper is installed when a page loads. The first time you preview a rewrite on a
-page that was already open, nothing is intercepted until you `reload_page`; after that,
-further previews swap the transform in live (still only for later fetches).
+A preview installs the rewrite live, for fetches that happen after it. Some sites keep
+their own reference to the original `fetch` or `XMLHttpRequest` from page load (x.com
+does), and those calls bypass a wrapper added later: if the stats stay at 0 while the page
+clearly keeps fetching, `reload_page` once so the wrapper is there from the start.
 
 **`intercept`** — wrap a function in the site's own AMD/RequireJS module (check first:
 `evaluate_in_page('typeof define !== "undefined" && !!define.amd')`):
