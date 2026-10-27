@@ -99,9 +99,10 @@ style.css
   with how to read the token (`tokenPath`, a dot-path into a JSON response, or `token`
   `{ after, chars, length? }`, the text right after a literal prefix, optionally in a page
   the mint page links to via `follow` `{ urlAfter, urlHost }`) and where to send it
-  (`header`, with an optional `scheme` such as `"Bearer"`, or `query`). Design one with
-  `probe_request` (the page or script the token is in), and check it with `verify_mint`
-  before you put it in the manifest.
+  (`header`, with an optional `scheme` such as `"Bearer"`, or `query`). Check it with
+  `verify_mint` before you put it in the manifest: it says whether extraction worked.
+  `probe_request` shows a JSON mint response, never an HTML page or a script — for a
+  token in one, ask the user where it sits, or try candidate prefixes with `verify_mint`.
 - **`settings`**, **`permissions`**, **`storage`**, **`connections`** — the same
   declarations a shim makes (`references/api.md`, `references/databases.md`): settings fields (`text | secret | number | boolean
   | select`), `"permissions": ["ai"]`, local tables, remote databases.
@@ -197,15 +198,13 @@ A refused preview answers `applied: false` with `error` and `problems`:
   `interact_page`'s `requestWarnings`, carry the same burst and rate-limit warnings as the
   preview evidence.
 - **`probe_request { host, path }`** — one GET of your own through the composition's real
-  fetch path, answering the status and up to 20,000 characters of the body. Anti-forgery
-  token values in it (CSRF / XSRF fields, Reddit's `modhash`, `authenticity_token`, …)
-  read `"[redacted: csrf]"`, counted in `redacted`: the field is there, the value is never
-  yours to need — the page's declared writes carry it. A failed (400+) non-JSON body (a
-  block page) comes back summarized: `summary` `{ format, bytes }`, and `body` is up to
-  500 characters of its visible text. An HTML body comes back as text, never markup
-  (`htmlAsText`): its visible text, then `[inline scripts]` and the `[urls]` its script,
-  link, img, iframe, a and source tags point to — in the page they sit in `src="…"` /
-  `href="…"`, which is what a mint's `follow.urlAfter` matches. The host must
+  fetch path, answering the status and, for a JSON or form body, up to 20,000 characters
+  of it. Anti-forgery token values in it (CSRF / XSRF fields, Reddit's `modhash`,
+  `authenticity_token`, …) read `"[redacted: csrf]"`, counted in `redacted`: the field is
+  there, the value is never yours to need — the page's declared writes carry it. A string
+  value that names such a token reads `"[redacted: possible csrf]"`. Any other body (HTML,
+  a script, text, XML — a block page too) is never shown: you get `withheld`
+  `{ format, bytes }` and the status. The host must
   be declared in the manifest, allowed by the user (the preview's card), **and** granted to
   your session with `request_sources` — otherwise it answers `host-not-declared`,
   `host-not-allowed` or `host-not-granted` before any request. GET only. For designing a

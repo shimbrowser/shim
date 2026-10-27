@@ -58,18 +58,15 @@ export const SESSION_COMPOSITION_TOOLS: Record<CompositionSessionToolName, ToolD
     description:
       'Composition sessions only. Make one GET yourself through the composition\'s real fetch path (its ' +
       'grants, mint and same-host redirects) to a host that is all three: declared in the manifest, allowed ' +
-      'for the composition by the user, and granted to this session with request_sources — for a URL ' +
-      'Discovery never captured: the page or script a key is embedded in (to design a mint), or an endpoint\'s ' +
-      'live response shape. Returns the status and up to 20,000 characters of the body; nothing is stored. ' +
-      'Anti-forgery token values in it (CSRF / XSRF fields, modhash, authenticity_token, …) read "[redacted: ' +
-      'csrf]" — the field is kept, the value never needed: writes go through the page\'s declared operations. A ' +
-      'failed (status 400+) non-JSON body comes back summarized: `summary` { format, bytes } and `body` as up ' +
-      'to 500 characters of its visible text. An HTML body comes back as text, never markup (`htmlAsText`): its ' +
-      'visible text, then its inline scripts and the URLs its script / link / img / iframe / a / source tags ' +
-      'point to (in the page they sit in src="…" / href="…"). A ' +
-      'probe is your request, not the page\'s: it never shows up in read_calls and is no evidence the page ' +
-      'works. A host the manifest does not declare yet must be added to manifest.json and previewed first ' +
-      '(the user is asked in Shim to allow a new host). GET only.',
+      'for the composition by the user, and granted to this session with request_sources — for an endpoint\'s ' +
+      'live response shape Discovery never captured. Returns the status and, for a JSON or form body, up to ' +
+      '20,000 characters of it; nothing is stored. Anti-forgery token values in it (CSRF / XSRF fields, ' +
+      'modhash, authenticity_token, …) read "[redacted: csrf]" (the field is kept; you never need the value — ' +
+      'writes go through the page\'s declared operations), and a string value that names such a token reads ' +
+      '"[redacted: possible csrf]". Any other body (HTML, script, text, XML) is never shown: you get ' +
+      '`withheld` { format, bytes } instead. A probe is your request, not the page\'s: it never shows up in ' +
+      'read_calls and is no evidence the page works. A host the manifest does not declare yet must be added ' +
+      'to manifest.json and previewed first (the user is asked in Shim to allow a new host). GET only.',
     input_schema: {
       type: 'object',
       properties: {
@@ -115,7 +112,9 @@ export const SESSION_COMPOSITION_TOOLS: Record<CompositionSessionToolName, ToolD
       'mint host\'s site (same registrable domain: a mint on auth.example.com can test api.example.com, never ' +
       'api.example.net), and either on the mint host itself or on a host granted to this session, declared and ' +
       'allowed — otherwise `test-host-not-allowed` before any card. Never returns the token or any body — only whether extraction worked (with `detail` ' +
-      'when it did not) and, if tested, the status. Use probe_request to find where the token is.',
+      'when it did not) and, if tested, the status. probe_request shows JSON bodies only, so for a token in ' +
+      'an HTML page or a script, ask the user where it sits, or try candidate prefixes here: the answer says ' +
+      'whether extraction worked.',
     input_schema: {
       type: 'object',
       properties: {
