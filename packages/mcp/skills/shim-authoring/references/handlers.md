@@ -26,7 +26,10 @@ the root is still connected. Mount strategies:
   React/Vue/Angular-rendered region**: inline nodes there get displaced by the framework
   even when they aren't removed.
 - `overlay` — a portal sized to cover the anchor (good for tagging).
-- `shadow` — your output inside a shadow root (style isolation).
+- `shadow` — your output inside a shadow root (style isolation). In an attach session
+  `interact_page` can't reach into a shadow root (`shadow-unsupported`), so controls you
+  need to click or type into while testing are better as `portal`/`overlay` with
+  prefixed class names.
 
 Rules that keep handlers safe — every one learned from real breakage:
 

@@ -420,7 +420,7 @@ nothing (`nothing-to-commit`).
 preview (a list that loads lazily). Such a rule is never fingerprinted as one element: with
 two or more members on the page it gets a set witness, and with one it gets none and the
 preview says "load more items and preview again" — scroll or expand until several are on
-the page, then preview again (no edit needed: such a rule, unchanged and still without a
+the page (or `navigate` to a page of the site that shows several), then preview again (no edit needed: such a rule, unchanged and still without a
 fingerprint, is re-applied on every preview). Leave it out for a rule meant for one element.
 
 ```json
