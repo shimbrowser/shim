@@ -212,6 +212,7 @@ function acceptRuntimePort(world: RuntimeWorld): (port: chrome.runtime.Port) => 
     }
     runtimePorts.set(port, { tabId, world });
     port.onDisconnect.addListener(() => { runtimePorts.delete(port); });
+    for (const waiter of [...(portWaiters.get(tabId) ?? [])]) waiter(port);
     // A connection is a runtime that may have missed a change: the worker
     // it held a port to went away (idled out) and the change happened
     // before this one reconnected, when no port was there to nudge. So
@@ -718,19 +719,68 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
 let holdSeq = 0;
 const pendingAcks = new Map<number, () => void>();
 const NUDGE_ACK_MS = 2000;
+// How long a nudge waits for a runtime's port when one is expected and
+// none is connected: a runtime whose port the worker dropped (idled out)
+// reconnects a second later, and gets its hold then.
+const PORT_WAIT_MS = 3000;
+const portWaiters = new Map<number, Array<(port: chrome.runtime.Port) => void>>();
+function waitForPort(tabId: number, ms: number): Promise<chrome.runtime.Port | null> {
+  return new Promise((resolve) => {
+    const waiters = portWaiters.get(tabId) ?? [];
+    const settle = (port: chrome.runtime.Port | null): void => {
+      clearTimeout(timer);
+      const list = portWaiters.get(tabId) ?? [];
+      const i = list.indexOf(settle);
+      if (i >= 0) list.splice(i, 1);
+      if (!list.length) portWaiters.delete(tabId);
+      resolve(port);
+    };
+    const timer = setTimeout(() => settle(null), ms);
+    waiters.push(settle);
+    portWaiters.set(tabId, waiters);
+  });
+}
+
+/** Does an installed shim run on the tab's page (so a committed runtime is there, port or no port)? */
+async function runtimeExpected(tabId: number): Promise<boolean> {
+  let url: URL;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    url = new URL(tab.url ?? '');
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+  const page = { hostname: url.hostname, port: url.port };
+  const capabilities = capabilitiesFor(modeNow);
+  for (const shim of await (await store()).listShims()) if (await runsOn(shim, page, capabilities)) return true;
+  return false;
+}
 
 /**
  * A nudge to the page's committed runtime, over its port (both worlds) or
  * the isolated world's message. Answers what became of it: `acked` by a
  * runtime, `no-runtime` when none is there to, `timed-out` when one may be
- * there but did not answer in time (the page's thread busy), which the
- * host treats as a hold not taken: a session is never held up by a page
- * that does not answer, and never previews beside a twin it is not sure is
- * down.
+ * there but did not answer in time, which the host treats as a hold not
+ * taken: a session is never held up by a page that does not answer, and
+ * never previews beside a twin it is not sure is down.
+ *
+ * "None is there" is the registry's word, not the channel's: a user-script
+ * runtime has no message listener and may be between ports (the worker
+ * idled out and woke, the runtime reconnects a second later) with its
+ * committed rules still running. So when an installed shim runs on the
+ * page, a nudge with no port waits for one, and a message no runtime
+ * answers is uncertainty, not absence.
  */
-function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>): Promise<NudgeOutcome> {
+async function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>): Promise<NudgeOutcome> {
   const seq = ++holdSeq;
   const stamped: ToRuntime = { ...msg, seq };
+  let ports = [...runtimePorts].filter(([, r]) => r.tabId === tabId).map(([port]) => port);
+  const expected = ports.length > 0 || await runtimeExpected(tabId);
+  if (!ports.length && expected) {
+    const port = await waitForPort(tabId, PORT_WAIT_MS);
+    if (port) ports = [port];
+  }
   return new Promise((resolve) => {
     let done = false;
     const settle = (outcome: NudgeOutcome): void => {
@@ -742,13 +792,11 @@ function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>): Pro
     };
     const timer = setTimeout(() => settle('timed-out'), NUDGE_ACK_MS);
     pendingAcks.set(seq, () => settle('acked'));
-    let nudged = false;
-    for (const [port, r] of runtimePorts) {
-      if (r.tabId !== tabId) continue;
-      post(port, stamped);
-      nudged = true;
+    if (ports.length) {
+      for (const port of ports) post(port, stamped);
+      return;
     }
-    if (!nudged) chrome.tabs.sendMessage(tabId, stamped).then(() => settle('acked'), () => settle('no-runtime'));
+    chrome.tabs.sendMessage(tabId, stamped).then(() => settle('acked'), () => settle(expected ? 'timed-out' : 'no-runtime'));
   });
 }
 
@@ -861,6 +909,21 @@ const pageHosts = {
     entry.console = [];
     entry.popups = [];
     return out;
+  },
+  /**
+   * For the harnesses: drop the tab's runtime ports the way the worker
+   * idling out does (the runtime reconnects a second later, its committed
+   * rules running meanwhile). Answers how many it dropped.
+   */
+  dropRuntimePorts(tabId: number): number {
+    let n = 0;
+    for (const [port, r] of [...runtimePorts]) {
+      if (r.tabId !== tabId) continue;
+      runtimePorts.delete(port);
+      try { port.disconnect(); } catch { /* already gone */ }
+      n++;
+    }
+    return n;
   },
   /** Watch popups (closed on creation and reported in `drain`) or stop. */
   watchPopups(id: string, on: boolean): boolean {

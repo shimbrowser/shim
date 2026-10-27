@@ -76,7 +76,8 @@ own shape). A preview of a committed rule holds that rule for the preview's dura
 gives it back after: the host tells the page's runtime the whole set of rules it holds of
 each shim and waits for the ack before the preview goes up (a hold the page does not
 confirm in time is no hold: the preview stays down and the session is told in its
-console), and removes the preview before it releases the hold, so the two forms of one
+console; whether a runtime is there to ask is the install registry's word, not the
+channel's, so a runtime between ports is waited for), and removes the preview before it releases the hold, so the two forms of one
 rule never run side by side; a preview key that moves to another rule takes its old
 preview down before the old twin comes back. A hold
 is a claim the runtime keeps through the shim's reboot (disabled and enabled again under

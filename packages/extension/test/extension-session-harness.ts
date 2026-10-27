@@ -233,6 +233,20 @@ async function main(): Promise<void> {
       check('and releases', back.committed === 1 && back.twinSeen === null && back.committedRuns >= runsBefore + 1, back);
     }
 
+    console.log('a hold while the runtime is between ports (the worker idled out and woke):');
+    {
+      const runsBefore = (await view(page)).committedRuns;
+      const dropped = await worker.evaluate((t) => (globalThis as unknown as { shimPageHosts: { dropRuntimePorts(tabId: number): number } }).shimPageHosts.dropRuntimePorts(t), tabId);
+      check('the runtime\'s port was dropped', dropped >= 1, dropped);
+      host.applyPreview(previewOfBadge());
+      const up = await settle(() => view(page), (v) => v.preview === 1 && v.committed === 0, 10000);
+      check('the preview waited for the port and went up with the twin down', up.preview === 1 && up.committed === 0 && up.twinSeen === null, up);
+      check('the hold is listed', JSON.stringify(await heldFor()) === '["badge"]');
+      host.removePreview('preview:session:badge');
+      const back = await settle(() => view(page), (v) => v.committed === 1 && v.preview === 0);
+      check('released: the committed twin is back', back.committed === 1 && back.committedRuns === runsBefore + 1 && back.twinSeen === null, back);
+    }
+
     console.log('the hold survives the shim disabled and enabled again under the preview:');
     {
       host.applyPreview(previewOfBadge());
