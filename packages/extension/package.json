@@ -16,7 +16,7 @@
   },
   "devDependencies": {
     "@shimbrowser/core": "0.7.0-dev",
-    "@types/chrome": "0.3.5",
+    "@types/chrome": "0.3.6",
     "esbuild": "0.28.2",
     "fake-indexeddb": "6.2.6",
     "typescript": "6.0.3"
