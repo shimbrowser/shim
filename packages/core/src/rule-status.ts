@@ -80,6 +80,15 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
   //    a container removed from the DOM without a re-commit keeps the cover
   //    warning until the next reload — a hidden thing doesn't un-hide itself.
   const MEDIA_COVER_FRACTION = 0.55;
+  // A cover is a page-level container, not just a tall block: the part of it
+  // on screen must blanket most of the viewport AND the element must span
+  // most of the whole document. Live-caught on google.com: the AI Overview
+  // block (one ~1378px-tall card in the results column of a 791px-wide
+  // viewport) read as a cover by raw area/viewport-area alone, and the note
+  // told the agent to stop hiding a "full-page container". Accepted residual:
+  // an app shell that scrolls an inner pane (document == viewport) still reads
+  // any tall block on screen as page-level.
+  const PAGE_COVER_FRACTION = 0.5;
   const isMedia = (el: Element): boolean => {
     try { return typeof el.matches === 'function' && el.matches('video, audio'); } catch { return false; }
   };
@@ -88,13 +97,29 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
   };
   const isMediaEl = (el: Element): boolean => isMedia(el) || containsMedia(el);
   let sawLargeCover = false;
+  // Each matched element's box as measured at mount, BEFORE a hide stamps
+  // display:none (or a remove detaches it): the status box falls back to it
+  // when the post-apply box is 0x0, so the evidence names the element the rule
+  // hid instead of an empty rect.
+  const preApplyBox = new WeakMap<Element, { x: number; y: number; w: number; h: number }>();
   const noteLargeCoverAtMount = (el: Element): void => {
-    if (!hasHideOrRemoveKind || sawLargeCover || isMedia(el)) return;
+    if (!hasHideOrRemoveKind) return;
     try {
-      const win = el.ownerDocument?.defaultView;
       const r = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null;
-      if (win && r && win.innerWidth > 0 && win.innerHeight > 0
-        && (r.width * r.height) / (win.innerWidth * win.innerHeight) >= MEDIA_COVER_FRACTION) {
+      if (!r) return;
+      preApplyBox.set(el, { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) });
+      if (sawLargeCover || isMedia(el)) return;
+      const win = el.ownerDocument?.defaultView;
+      if (!win || !(win.innerWidth > 0) || !(win.innerHeight > 0)) return;
+      const vw = win.innerWidth;
+      const vh = win.innerHeight;
+      const onScreen = Math.max(0, Math.min(r.x + r.width, vw) - Math.max(r.x, 0))
+        * Math.max(0, Math.min(r.y + r.height, vh) - Math.max(r.y, 0));
+      if (onScreen / (vw * vh) < MEDIA_COVER_FRACTION) return;
+      const root = el.ownerDocument?.documentElement;
+      const docW = Math.max(vw, root?.scrollWidth || 0);
+      const docH = Math.max(vh, root?.scrollHeight || 0);
+      if ((Math.min(r.width, docW) * Math.min(r.height, docH)) / (docW * docH) >= PAGE_COVER_FRACTION) {
         sawLargeCover = true;
       }
     } catch { /* box / viewport read failed — no cover verdict */ }
@@ -142,6 +167,8 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
     lastReportedNote = note;
     if (typeof api.reportEvent !== 'function') return;
     // Measured box of the first matched anchor (viewport CSS px, post-apply —
+    // except a single hide/remove match that now measures 0x0, which reports
+    // its pre-apply box flagged `boxBeforeApply` —
     // tier-1 stamps land synchronously in mountOn, and mountOn's .finally
     // re-report runs after handler mounts too). This is the deterministic half
     // of authoring-time visual verification: "make X the same size as Y" is a
@@ -153,9 +180,14 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
     // Amazon. With nothing visible the box stays the first match's.
     let box: { x: number; y: number; w: number; h: number } | undefined;
     let visible: number | undefined;
+    let boxBeforeApply = false;
     if (first) {
       const toBox = (r: DOMRect) => ({ x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) });
       box = toBox(first.getBoundingClientRect());
+      if (rs.state.size === 1 && box.w === 0 && box.h === 0) {
+        const before = preApplyBox.get(first);
+        if (before && (before.w > 0 || before.h > 0)) { box = before; boxBeforeApply = true; }
+      }
       if (rs.state.size > 1) {
         visible = 0;
         let firstVisible: typeof box | undefined;
@@ -173,6 +205,9 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
       matchedVia: rs.matchedSource,
       ...(box ? { box } : {}),
       ...(visible !== undefined ? { visible } : {}),
+      // A single hide/remove match measures 0x0 once applied; `box` is then its
+      // pre-apply box (captured at mount) and this says so.
+      ...(boxBeforeApply ? { boxBeforeApply: true } : {}),
       ...(note ? { note } : {}),
       // Mounted members of a set-witnessed script rule that no longer verify
       // against its set witness (kept mounted, not torn down: apply-rule.ts).

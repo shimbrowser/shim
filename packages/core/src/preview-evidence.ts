@@ -17,6 +17,8 @@ export interface RuleStatusEvent {
   box?: { x: number; y: number; w: number; h: number };
   /** Multi-match only: how many matches measure a non-empty box (`box` is the first of them). */
   visible?: number;
+  /** `box` was measured before the rule applied: a single hide/remove match measures 0×0 once hidden. */
+  boxBeforeApply?: boolean;
   /** Set-witnessed rules: mounted members that no longer verify (kept mounted). */
   unverified?: number;
   note?: unknown;
@@ -97,7 +99,8 @@ export function describeRuleStatus(
     return 'matched 0 elements — the anchor does not resolve on this page';
   }
   // The box is the anchor's measured viewport rect AFTER the mutation
-  // applied — for size/position work the model compares these numbers to
+  // applied (a single hidden/removed match, which measures 0×0 then, reports
+  // its pre-apply box and says so) — for size/position work the model compares these numbers to
   // the reference element (inspect_element) instead of guessing from a
   // screenshot. A multi-match status from an engine that counts visible
   // matches names the counts and the first visible match's box (or says none
@@ -110,7 +113,8 @@ export function describeRuleStatus(
       ? ` — ${status.visible} visible, ${hidden} hidden${status.box ? `; first visible match ${boxText(status.box)}` : ''}`
       : ` — 0 visible, ${hidden} hidden (every match measures 0×0 after apply)`;
   } else if (status.box) {
-    box = ` — ${status.matched > 1 ? 'first match' : 'anchor'} ${boxText(status.box)}`;
+    box = ` — ${status.matched > 1 ? 'first match' : 'anchor'} ${boxText(status.box)}`
+      + (status.boxBeforeApply ? ' before the rule applied (0×0 once hidden or removed)' : '');
   }
   const note = typeof status.note === 'string' && status.note ? ` — NOTE: ${status.note}` : '';
   const unverified = typeof status.unverified === 'number' && status.unverified > 0
