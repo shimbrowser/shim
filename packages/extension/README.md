@@ -28,8 +28,13 @@ Early. What works today:
   held for review and shown in the popup, never silently re-pointed. Repair means
   exporting the `.shim` file and fixing it in the Shim browser or with Claude Code.
 
-What is next: the `PageHost` for authoring sessions, and the native messaging bridge so
-Claude Code can author on a real Chrome tab.
+- The extension is a `PageHost` (`src/page-host.ts`): what an authoring session needs
+  from one tab, over the Chrome DevTools Protocol through `chrome.debugger`. Previews,
+  evaluate in the engine world and the page's, screenshots, trusted input, loads, runtime
+  events and the engine's console lines, under the same conformance suite the Shim
+  browser and the headless host run (below). Nothing drives it yet.
+
+What is next: the native messaging bridge so Claude Code can author on a real Chrome tab.
 
 ## Modes
 
@@ -58,6 +63,25 @@ The install check itself (parse, lint, the handler syntax probe) runs in a sandb
 extension page (`prepare.html`), the one kind of extension page whose CSP permits `eval`,
 so a handler that does not parse is refused before anything is written.
 
+## Sessions
+
+An authoring session does not depend on the mode. Its `PageHost` attaches Chrome's
+debugger to the tab and creates an isolated world of its own there (`shim-core`), where
+it evaluates the engine and compiles each preview's handlers: the protocol's evaluate is
+subject to neither the site's CSP nor the user-scripts toggle. The session's capabilities
+are a third constant (`SESSION_CAPABILITIES`): every mutation kind including `script` and
+`replace-root`, trusted input, no `api` members beyond `storage` and `cleanup`
+(`api.fetch`, `api.ai` and the rest answer `not-available-in-shim-for-chrome` in their
+own shape). A preview of a committed rule holds that rule for the preview's duration and
+gives it back after. Chrome shows its own "is debugging this browser" bar on the tab for
+as long as the session lasts, and the `debugger` permission is the one this asks for.
+
+`test/extension-conformance-harness.ts` runs the shared suite
+(`@shimbrowser/core/page-host-conformance`) against the built extension's host, the way
+the Electron and Playwright hosts run it: a session capability is advertised only while
+its cases pass here too. The harness drives the worker's host through the worker's own
+handle on it (`shimPageHosts`), one member call at a time.
+
 ## Try it
 
 ```
@@ -81,10 +105,12 @@ Then open `chrome://extensions`, turn on developer mode, choose "Load unpacked" 
 | `src/arbitrate.ts` | Which of two runtimes on one page stays. Pure. |
 | `src/match-patterns.ts` | `match.hosts` to Chrome match patterns. Pure. |
 | `src/registration.ts` | Which content scripts to register for which shims. Pure. |
-| `src/capabilities.ts` | The two capability constants and the mode. |
+| `src/page-host.ts` | The `PageHost` for authoring sessions, over `chrome.debugger`. |
+| `src/capabilities.ts` | The three capability constants (two modes, the session) and the mode. |
 | `src/sender.ts` | Who may send what to the worker: its own pages, or the runtime on a site. Pure. |
 | `src/reconcile.ts` | What an open document stops and starts when the worker's answer changes. Pure. |
 | `test/extension-smoke-harness.ts` | The built extension in a real Chromium: install, apply, strict CSP, priority, live toggles, removal, a refusal. |
+| `test/extension-conformance-harness.ts` | The shared `PageHost` conformance suite against the extension's host. |
 | `src/popup.ts`, `src/install-page.ts` | The popup and the install page. |
 
 ## License

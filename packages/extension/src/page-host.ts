@@ -1,0 +1,609 @@
+// The extension as a PageHost (@shimbrowser/core/page-host): what an
+// authoring session needs from one tab, over the Chrome DevTools Protocol
+// through chrome.debugger. The same shape as the headless Playwright host,
+// which is a CDP host too: the host creates an isolated world of its own in
+// the page, evaluates the engine's page bundle and the shared page runtime
+// (@shimbrowser/core/page-runtime) there, compiles each preview's handlers
+// in that world (the protocol's evaluate is not subject to the page's CSP,
+// nor to the user-scripts toggle, so a session does not depend on the
+// mode), applies previews through the runtime's control object, and reads
+// events and api calls back over a binding. Console lines are vouched for
+// as the engine's only by the protocol's execution context, never by their
+// text. Screenshots and trusted input are the protocol's own.
+//
+// A committed shim keeps running in its own world while a session previews
+// one of its rules; the committed rule is held meanwhile (the worker
+// nudges the page's runtime) and given back when the preview goes.
+//
+// Attaching the debugger shows Chrome's own bar on the tab for as long as
+// the session lasts: a session is a visible thing, never a silent one.
+
+import type {
+  PageHost, PageWorld, PreviewRule, PageRuntimeEvent, PageConsoleMessage, Unsubscribe, ScreenshotOptions, ScreenshotResult,
+  LoadWaitOptions, PageLoadOutcome, PageInputCommand, PageInputResult,
+} from '@shimbrowser/core/page-host';
+import { DOCUMENT_TOKEN_SCRIPT, NET_ERR_ABORTED, SUPERSEDED_LOAD_GRACE_MS, sendInputCommands } from '@shimbrowser/core/page-host';
+import { pageRuntimeSource } from '@shimbrowser/core/page-runtime';
+import { remoteObjectValue, netErrorCode, consoleLevel, formatConsoleArg, handlerSource, type RemoteValue } from '@shimbrowser/core/cdp-host';
+import { SESSION_CAPABILITIES, UNSUPPORTED_ERROR } from './capabilities';
+import type { ToRuntime } from './messages';
+
+/** The world the host creates for the engine in a session's page. */
+export const SESSION_ENGINE_WORLD = 'shim-core';
+const BINDING = '__shimCoreHost';
+const RUNTIME_GLOBAL = '__shimCoreRuntime';
+const PROTOCOL_VERSION = '1.3';
+
+/** Which bucket an `api.storage` call reads: the preview's shim, on the page's origin. */
+export interface SessionStorageScope {
+  patchId: string;
+  origin: string;
+}
+
+/** Backs previews' `api.storage`: the installed shim's rows, or a session's own bucket. */
+export interface SessionStorage {
+  get(scope: SessionStorageScope, key: string): Promise<unknown>;
+  set(scope: SessionStorageScope, key: string, value: unknown): Promise<unknown>;
+  delete(scope: SessionStorageScope, key: string): Promise<boolean>;
+  list(scope: SessionStorageScope): Promise<Record<string, unknown>>;
+}
+
+export interface PageHostDeps {
+  /** The engine's page bundle source (dist/shim-core.page.js). */
+  engineBundle(): Promise<string>;
+  storage: SessionStorage;
+  /** A nudge to the page's committed runtime (suppress / restore a committed rule under preview). */
+  nudge(tabId: number, msg: ToRuntime): void;
+  /** How long a preview apply or an engine-world evaluate waits for the world. Default 5000. */
+  worldWaitMs?: number;
+}
+
+export interface ExtensionPageHost extends PageHost {
+  readonly tabId: number;
+  /** Stop driving the tab: remove every preview, give back held rules, detach the debugger. Leaves the tab open. */
+  close(): Promise<void>;
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function errText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** A PNG's pixel size from its header (IHDR width and height), or zeros. */
+export function pngSize(base64: string): { width: number; height: number } {
+  try {
+    const head = atob(base64.slice(0, 44));
+    const b = (i: number): number => head.charCodeAt(i) & 0xff;
+    if (b(0) !== 0x89 || b(1) !== 0x50 || b(2) !== 0x4e || b(3) !== 0x47) return { width: 0, height: 0 };
+    const u32 = (i: number): number => ((b(i) << 24) >>> 0) + (b(i + 1) << 16) + (b(i + 2) << 8) + b(i + 3);
+    return { width: u32(16), height: u32(20) };
+  } catch {
+    return { width: 0, height: 0 };
+  }
+}
+
+interface ExceptionDetails {
+  text: string;
+  url?: string;
+  executionContextId?: number;
+  exception?: { description?: string };
+}
+
+interface EvaluateResult {
+  result: RemoteValue & { objectId?: string };
+  exceptionDetails?: ExceptionDetails;
+}
+
+export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<ExtensionPageHost> {
+  const target = { tabId };
+  const worldWaitMs = deps.worldWaitMs ?? 5000;
+  await chrome.debugger.attach(target, PROTOCOL_VERSION);
+  const send = <T = Record<string, unknown>>(method: string, params?: Record<string, unknown>): Promise<T> =>
+    chrome.debugger.sendCommand(target, method, params) as Promise<T>;
+
+  const runtimeListeners = new Set<(event: PageRuntimeEvent) => void>();
+  const consoleListeners = new Set<(message: PageConsoleMessage) => void>();
+  const popupListeners = new Set<(url: string) => void>();
+  let mainFrameId = '';
+  let currentUrl = '';
+  let worldContextId: number | null = null;
+  let worldWaiters: Array<(id: number | null) => void> = [];
+  let closed = false;
+  let navigations = 0;
+  // Which committed rules are held for which preview, to give back on remove.
+  const held = new Map<string, { patchId: string; ruleId: string }>();
+  const loadWaits = new Set<(outcome: PageLoadOutcome) => void>();
+  let queue: Promise<void> = Promise.resolve();
+
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    currentUrl = tab.url ?? tab.pendingUrl ?? '';
+  } catch { /* the tab is gone already; isClosed says so once the debugger says so */ }
+
+  const setWorld = (id: number | null): void => {
+    worldContextId = id;
+    if (id === null) return;
+    const waiters = worldWaiters;
+    worldWaiters = [];
+    for (const w of waiters) w(id);
+  };
+  const waitForWorld = (ms: number): Promise<number | null> => {
+    if (closed) return Promise.resolve(null);
+    if (worldContextId !== null) return Promise.resolve(worldContextId);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        worldWaiters = worldWaiters.filter((w) => w !== settle);
+        resolve(null);
+      }, ms);
+      const settle = (id: number | null): void => {
+        clearTimeout(timer);
+        resolve(id);
+      };
+      worldWaiters.push(settle);
+    });
+  };
+  const emitRuntime = (event: PageRuntimeEvent): void => {
+    for (const l of [...runtimeListeners]) {
+      try { l(event); } catch { /* a listener's throw is its own */ }
+    }
+  };
+  const emitConsole = (message: PageConsoleMessage): void => {
+    for (const l of [...consoleListeners]) {
+      try { l(message); } catch { /* a listener's throw is its own */ }
+    }
+  };
+  const inEngineWorld = (contextId: number | undefined): boolean =>
+    contextId !== undefined && worldContextId !== null && contextId === worldContextId;
+
+  // --- the api's answering leg ---
+  async function answerCall(contextId: number, id: number, method: string, patchId: unknown, origin: unknown, rawArgs: unknown): Promise<void> {
+    const args = Array.isArray(rawArgs) ? rawArgs : [];
+    const scope: SessionStorageScope = { patchId: typeof patchId === 'string' ? patchId : '', origin: typeof origin === 'string' ? origin : '' };
+    const key = typeof args[0] === 'string' ? args[0] : String(args[0]);
+    let expression: string;
+    try {
+      let value: unknown;
+      if (method === 'storage.get') value = await deps.storage.get(scope, key);
+      else if (method === 'storage.set') value = await deps.storage.set(scope, key, args[1]);
+      else if (method === 'storage.delete') value = await deps.storage.delete(scope, key);
+      else if (method === 'storage.list') value = await deps.storage.list(scope);
+      else value = undefined;
+      // Crosses as a quoted JSON string parsed page-side, never as an object
+      // literal: a literal would turn an own `__proto__` key into a
+      // prototype setter.
+      const json: string | undefined = value === undefined ? undefined : JSON.stringify(value);
+      const literal = json === undefined ? 'undefined' : `JSON.parse(${JSON.stringify(json)})`;
+      expression = `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].resolve(${id}, ${literal})`;
+    } catch (err) {
+      expression = `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].reject(${id}, ${JSON.stringify(`${method} failed: ${errText(err)}`)})`;
+    }
+    await send('Runtime.evaluate', { expression, contextId }).catch(() => { /* the document went away */ });
+  }
+
+  // --- protocol events ---
+  const onEvent = (source: chrome.debugger.Debuggee, method: string, params?: unknown): void => {
+    if (source.tabId !== tabId || !isRecord(params)) return;
+    switch (method) {
+      case 'Runtime.executionContextCreated': {
+        const context = params.context;
+        if (!isRecord(context)) return;
+        const aux = context.auxData;
+        if (context.name === SESSION_ENGINE_WORLD && isRecord(aux) && aux.frameId === mainFrameId && typeof context.id === 'number') setWorld(context.id);
+        return;
+      }
+      case 'Runtime.executionContextDestroyed':
+        if (params.executionContextId === worldContextId) setWorld(null);
+        return;
+      case 'Runtime.executionContextsCleared':
+        setWorld(null);
+        return;
+      case 'Page.frameNavigated': {
+        const frame = params.frame;
+        if (isRecord(frame) && !frame.parentId && typeof frame.id === 'string') {
+          mainFrameId = frame.id;
+          navigations++;
+          if (typeof frame.url === 'string') currentUrl = frame.url;
+        }
+        return;
+      }
+      case 'Page.frameRequestedNavigation':
+      case 'Page.frameStartedNavigating':
+        if (params.frameId === mainFrameId) navigations++;
+        return;
+      case 'Page.navigatedWithinDocument':
+        if (params.frameId === mainFrameId) {
+          navigations++;
+          if (typeof params.url === 'string') currentUrl = params.url;
+        }
+        return;
+      case 'Runtime.bindingCalled': {
+        if (params.name !== BINDING || params.executionContextId !== worldContextId) return;
+        let msg: unknown;
+        try { msg = JSON.parse(String(params.payload)); } catch { return; }
+        if (!isRecord(msg)) return;
+        if (msg.type === 'event' && typeof msg.kind === 'string') {
+          emitRuntime({ ...(isRecord(msg.payload) ? msg.payload : {}), kind: msg.kind });
+        } else if (msg.type === 'call' && typeof msg.id === 'number' && typeof msg.method === 'string' && typeof params.executionContextId === 'number') {
+          void answerCall(params.executionContextId, msg.id, msg.method, msg.patchId, msg.origin, msg.args);
+        }
+        return;
+      }
+      case 'Runtime.consoleAPICalled': {
+        const args = Array.isArray(params.args) ? params.args as RemoteValue[] : [];
+        const stack = isRecord(params.stackTrace) && Array.isArray(params.stackTrace.callFrames) ? params.stackTrace.callFrames[0] : undefined;
+        const url = isRecord(stack) && typeof stack.url === 'string' ? stack.url : '';
+        const contextId = typeof params.executionContextId === 'number' ? params.executionContextId : undefined;
+        emitConsole({
+          level: consoleLevel(String(params.type)),
+          message: args.map((a) => formatConsoleArg(a)).join(' '),
+          source: url,
+          ...(inEngineWorld(contextId) ? { engineWorld: true } : {}),
+        });
+        return;
+      }
+      case 'Runtime.exceptionThrown': {
+        const details = params.exceptionDetails;
+        if (!isRecord(details)) return;
+        const exception = isRecord(details.exception) ? details.exception : undefined;
+        const description = typeof exception?.description === 'string' ? exception.description : String(details.text ?? '');
+        const firstLine = description.split('\n')[0] ?? description;
+        const contextId = typeof details.executionContextId === 'number' ? details.executionContextId : undefined;
+        emitConsole({
+          level: 'error',
+          message: firstLine.startsWith('Uncaught') ? firstLine : `Uncaught ${firstLine}`,
+          source: typeof details.url === 'string' ? details.url : '',
+          ...(inEngineWorld(contextId) ? { engineWorld: true } : {}),
+        });
+        return;
+      }
+      default:
+        return;
+    }
+  };
+  chrome.debugger.onEvent.addListener(onEvent);
+  const onDetach = (source: chrome.debugger.Debuggee): void => {
+    if (source.tabId !== tabId) return;
+    markClosed();
+  };
+  chrome.debugger.onDetach.addListener(onDetach);
+
+  // --- loads, over the navigation events (the tab's, not the protocol's) ---
+  let navSeq = 0;
+  let lastNavigationUrl = '';
+  const onBeforeNavigate = (details: chrome.webNavigation.WebNavigationBaseCallbackDetails): void => {
+    if (details.tabId !== tabId || details.frameId !== 0) return;
+    navSeq++;
+    lastNavigationUrl = details.url;
+  };
+  const onCommitted = (details: chrome.webNavigation.WebNavigationTransitionCallbackDetails): void => {
+    if (details.tabId !== tabId || details.frameId !== 0) return;
+    currentUrl = details.url;
+  };
+  chrome.webNavigation.onBeforeNavigate.addListener(onBeforeNavigate);
+  chrome.webNavigation.onCommitted.addListener(onCommitted);
+
+  const onTabRemoved = (removedId: number): void => {
+    if (removedId === tabId) markClosed();
+  };
+  chrome.tabs.onRemoved.addListener(onTabRemoved);
+
+  // Popups while someone listens (an interact_page batch): closed on
+  // creation and reported with the URL they opened at.
+  const onTabCreated = (tab: chrome.tabs.Tab): void => {
+    if (tab.openerTabId !== tabId || popupListeners.size === 0 || tab.id === undefined) return;
+    const url = tab.pendingUrl ?? tab.url ?? '';
+    void chrome.tabs.remove(tab.id).catch(() => undefined);
+    for (const l of [...popupListeners]) {
+      try { l(url); } catch { /* a listener's throw is its own */ }
+    }
+  };
+  chrome.tabs.onCreated.addListener(onTabCreated);
+
+  function markClosed(): void {
+    if (closed) return;
+    closed = true;
+    for (const settle of [...loadWaits]) settle({ kind: 'destroyed' });
+    for (const w of worldWaiters) w(null);
+    worldWaiters = [];
+  }
+
+  // --- setup ---
+  await send('Runtime.enable');
+  await send('Page.enable');
+  const { frameTree } = await send<{ frameTree: { frame: { id: string; url?: string } } }>('Page.getFrameTree');
+  mainFrameId = frameTree.frame.id;
+  if (typeof frameTree.frame.url === 'string' && frameTree.frame.url) currentUrl = frameTree.frame.url;
+  await send('Runtime.addBinding', { name: BINDING, executionContextName: SESSION_ENGINE_WORLD });
+  const worldScript = `${await deps.engineBundle()}\n${pageRuntimeSource({ binding: BINDING, globalName: RUNTIME_GLOBAL, unsupportedError: UNSUPPORTED_ERROR })}`;
+  const { identifier: scriptId } = await send<{ identifier: string }>('Page.addScriptToEvaluateOnNewDocument', { source: worldScript, worldName: SESSION_ENGINE_WORLD });
+  // The document already loaded never saw the script: give it the world now.
+  if (worldContextId === null) {
+    try {
+      const { executionContextId } = await send<{ executionContextId: number }>('Page.createIsolatedWorld', { frameId: mainFrameId, worldName: SESSION_ENGINE_WORLD, grantUniveralAccess: false });
+      const res = await send<EvaluateResult>('Runtime.evaluate', { expression: worldScript, contextId: executionContextId });
+      if (!res.exceptionDetails) setWorld(executionContextId);
+    } catch {
+      /* a navigation raced the attach; its new document runs the script itself */
+    }
+  }
+
+  // --- the members ---
+  async function evaluateIn(code: string, contextId: number | undefined): Promise<unknown> {
+    const res = await send<EvaluateResult>('Runtime.evaluate', {
+      expression: code,
+      ...(contextId !== undefined ? { contextId } : {}),
+      returnByValue: true,
+      awaitPromise: true,
+      userGesture: true,
+    });
+    if (res.exceptionDetails) {
+      const ex = res.exceptionDetails;
+      throw new Error(ex.exception?.description ?? ex.text);
+    }
+    return remoteObjectValue(res.result);
+  }
+  async function evaluate(code: string, world: PageWorld): Promise<unknown> {
+    if (closed) throw new Error('page is closed');
+    if (world === 'main') return evaluateIn(code, undefined);
+    const contextId = await waitForWorld(worldWaitMs);
+    if (contextId === null) throw new Error('the engine world is not available on this page');
+    return evaluateIn(code, contextId);
+  }
+
+  async function compileHandler(contextId: number, patchId: string, ruleKey: string, name: string, source: string): Promise<void> {
+    const objectGroup = `shim-compile-${ruleKey}`;
+    const rt = `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}]`;
+    const shareKey = `${patchId}\u0000${name}\u0000${source}`;
+    const reused = await send<EvaluateResult>('Runtime.evaluate', {
+      expression: `${rt}.defineShared(${JSON.stringify(ruleKey)}, ${JSON.stringify(name)}, ${JSON.stringify(shareKey)})`,
+      contextId,
+      returnByValue: true,
+    });
+    if (reused.result.value === true) return;
+    try {
+      const res = await send<EvaluateResult>('Runtime.evaluate', { expression: handlerSource(source, ruleKey, name), contextId, objectGroup });
+      if (res.exceptionDetails) {
+        const ex = res.exceptionDetails;
+        const detail = ex.exception?.description ?? ex.text;
+        await send('Runtime.evaluate', {
+          expression: `console.error(${JSON.stringify(`[shim] failed to compile inline handler "${name}"`)}, ${JSON.stringify(detail)})`,
+          contextId,
+        });
+        return;
+      }
+      const fnId = res.result.objectId;
+      if (fnId) {
+        await send('Runtime.callFunctionOn', {
+          functionDeclaration: `function (fn, key) { ${rt}.shareHandler(key, fn); return ${rt}.defineHandler(${JSON.stringify(ruleKey)}, ${JSON.stringify(name)}, fn); }`,
+          executionContextId: contextId,
+          arguments: [{ objectId: fnId }, { value: shareKey }],
+          returnByValue: true,
+        });
+      } else {
+        await send('Runtime.callFunctionOn', {
+          functionDeclaration: `function (v) { return ${rt}.defineHandler(${JSON.stringify(ruleKey)}, ${JSON.stringify(name)}, v); }`,
+          executionContextId: contextId,
+          arguments: [res.result.unserializableValue !== undefined ? { unserializableValue: res.result.unserializableValue } : { value: res.result.value }],
+          returnByValue: true,
+        });
+      }
+    } finally {
+      await send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined);
+    }
+  }
+
+  async function applyPreviewNow(preview: PreviewRule): Promise<void> {
+    const contextId = await waitForWorld(worldWaitMs);
+    if (contextId === null || closed) return;
+    const { patchId, rule, ruleKey, bundleHash, applyId, autoRepair } = preview;
+    // The committed rule of that shim is held while the preview runs.
+    const before = held.get(ruleKey);
+    if (!before || before.patchId !== patchId || before.ruleId !== rule.id) {
+      if (before) deps.nudge(tabId, { type: 'restore', patchId: before.patchId, ruleId: before.ruleId });
+      held.set(ruleKey, { patchId, ruleId: rule.id });
+      deps.nudge(tabId, { type: 'suppress', patchId, ruleId: rule.id });
+    }
+    for (const [name, source] of Object.entries(rule.handlers ?? {})) {
+      if (typeof source !== 'string') continue;
+      await compileHandler(contextId, patchId, ruleKey, name, source);
+    }
+    await send('Runtime.evaluate', {
+      expression: `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].apply(${JSON.stringify(patchId)}, ${JSON.stringify(rule)}, ${JSON.stringify(ruleKey)}, ${JSON.stringify(bundleHash ?? null)}, ${JSON.stringify(applyId ?? null)}, ${JSON.stringify(autoRepair ?? null)})`,
+      contextId,
+    });
+  }
+  async function removePreviewNow(ruleKey: string): Promise<void> {
+    const was = held.get(ruleKey);
+    held.delete(ruleKey);
+    if (was) deps.nudge(tabId, { type: 'restore', patchId: was.patchId, ruleId: was.ruleId });
+    if (worldContextId === null || closed) return;
+    await send('Runtime.evaluate', {
+      expression: `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].remove(${JSON.stringify(ruleKey)})`,
+      contextId: worldContextId,
+    });
+  }
+  const enqueue = (work: () => Promise<void>): void => {
+    queue = queue.then(work).catch(() => { /* the document went away mid-step */ });
+  };
+
+  async function screenshot(opts: ScreenshotOptions | undefined): Promise<ScreenshotResult> {
+    if (closed) return { error: 'page is closed' };
+    try {
+      const vp = await evaluateIn('({ w: window.innerWidth, h: window.innerHeight, x: window.scrollX, y: window.scrollY })', undefined);
+      const view = isRecord(vp) ? vp : {};
+      const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+      const capture = async (clip: { x: number; y: number; width: number; height: number; scale: number } | undefined): Promise<string> => {
+        const shot = await send<{ data: string }>('Page.captureScreenshot', { format: 'png', ...(clip ? { clip } : {}), captureBeyondViewport: false });
+        return shot.data;
+      };
+      let data: string;
+      const clip = opts?.clip;
+      if (clip) {
+        // A viewport rectangle; the protocol's clip is in document coordinates.
+        data = await capture({ x: clip.x + num(view.x), y: clip.y + num(view.y), width: clip.width, height: clip.height, scale: 1 });
+      } else {
+        data = await capture(undefined);
+        const maxWidth = opts?.maxWidth;
+        const size = pngSize(data);
+        if (maxWidth !== undefined && size.width > maxWidth && num(view.w) > 0) {
+          // Downscale at capture, one corrective pass if the first lands off target.
+          const frame = { x: num(view.x), y: num(view.y), width: num(view.w), height: num(view.h) };
+          let scale = maxWidth / size.width;
+          let scaled = await capture({ ...frame, scale });
+          const got = pngSize(scaled).width;
+          if (got > 0 && Math.abs(got - maxWidth) > 1) {
+            scale *= maxWidth / got;
+            scaled = await capture({ ...frame, scale });
+          }
+          data = scaled;
+        }
+      }
+      if (!data.length) return { error: 'screenshot returned an empty image' };
+      const size = pngSize(data);
+      return { mediaType: 'image/png', dataBase64: data, sizeBytes: Math.floor(data.length * 3 / 4), width: size.width, height: size.height };
+    } catch (err) {
+      return { error: 'screenshot failed: ' + errText(err) };
+    }
+  }
+
+  function waitForLoad({ signal, timeoutMs, failures = 'main-frame' }: LoadWaitOptions): Promise<PageLoadOutcome> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let abortGrace: ReturnType<typeof setTimeout> | null = null;
+      const settle = (outcome: PageLoadOutcome): void => {
+        if (settled) return;
+        settled = true;
+        loadWaits.delete(settle);
+        clearTimeout(timer);
+        if (abortGrace) clearTimeout(abortGrace);
+        chrome.webNavigation.onCompleted.removeListener(onCompleted);
+        chrome.webNavigation.onErrorOccurred.removeListener(onError);
+        if (signal) {
+          try { signal.removeEventListener('abort', onAbort); } catch { /* no-op */ }
+        }
+        resolve(outcome);
+      };
+      const onCompleted = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails): void => {
+        if (details.tabId === tabId && details.frameId === 0) settle({ kind: 'finished' });
+      };
+      const onError = (details: chrome.webNavigation.WebNavigationFramedErrorCallbackDetails): void => {
+        if (details.tabId !== tabId) return;
+        const mainFrame = details.frameId === 0;
+        if (!mainFrame && failures !== 'any-frame') return;
+        const text = details.error || 'net::ERR_FAILED';
+        const failed: PageLoadOutcome = { kind: 'failed', code: netErrorCode(text), description: text.replace(/^net::/, '') };
+        if (mainFrame && failed.code === NET_ERR_ABORTED) {
+          // Superseded: a newer main-frame navigation is on its way, or
+          // arrives within the grace.
+          if (lastNavigationUrl !== details.url) return;
+          const seq = navSeq;
+          if (abortGrace) clearTimeout(abortGrace);
+          abortGrace = setTimeout(() => {
+            abortGrace = null;
+            if (navSeq === seq) settle(failed);
+          }, SUPERSEDED_LOAD_GRACE_MS);
+          return;
+        }
+        settle(failed);
+      };
+      const onAbort = (): void => settle({ kind: 'aborted' });
+      const timer = setTimeout(() => settle({ kind: 'timed-out' }), timeoutMs);
+      if (closed) { settle({ kind: 'destroyed' }); return; }
+      loadWaits.add(settle);
+      chrome.webNavigation.onCompleted.addListener(onCompleted);
+      chrome.webNavigation.onErrorOccurred.addListener(onError);
+      if (signal) {
+        if (signal.aborted) { onAbort(); return; }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+    });
+  }
+
+  let inputQueue: Promise<unknown> = Promise.resolve();
+  function input(commands: readonly PageInputCommand[], stillPinned: (index: number) => boolean | Promise<boolean>): Promise<PageInputResult> {
+    const run = inputQueue.then(async (): Promise<PageInputResult> => {
+      if (closed) return { sent: 0, outcome: 'failed', error: 'page is closed' };
+      return sendInputCommands(commands, stillPinned, async (c) => {
+        if (closed) throw new Error('page is closed');
+        await send(c.method, c.params);
+      });
+    });
+    inputQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  async function documentToken(): Promise<string | null> {
+    if (closed) return null;
+    try {
+      const token = await evaluate(DOCUMENT_TOKEN_SCRIPT, 'engine');
+      return typeof token === 'string' ? token : null;
+    } catch {
+      return null;
+    }
+  }
+
+  const subscribe = <T>(set: Set<(v: T) => void>, listener: (v: T) => void): Unsubscribe => {
+    set.add(listener);
+    return () => { set.delete(listener); };
+  };
+
+  return {
+    tabId,
+    capabilities: SESSION_CAPABILITIES,
+    url: () => (closed ? '' : currentUrl),
+    isClosed: () => closed,
+    evaluate,
+    screenshot,
+    applyPreview(preview) {
+      if (closed) return;
+      enqueue(() => applyPreviewNow(preview));
+    },
+    removePreview(ruleKey) {
+      if (closed) return;
+      enqueue(() => removePreviewNow(ruleKey));
+    },
+    onRuntimeEvent: (listener) => subscribe(runtimeListeners, listener),
+    onConsole: (listener) => subscribe(consoleListeners, listener),
+    reload(url) {
+      if (closed) return;
+      if (url === undefined) void chrome.tabs.reload(tabId).catch(() => undefined);
+      else void chrome.tabs.update(tabId, { url }).catch(() => undefined);
+    },
+    waitForLoad,
+    input,
+    documentToken,
+    onPopup: (listener) => subscribe(popupListeners, listener),
+    navigationCount: () => navigations,
+    async close() {
+      if (closed) {
+        chrome.debugger.onEvent.removeListener(onEvent);
+        chrome.debugger.onDetach.removeListener(onDetach);
+        return;
+      }
+      runtimeListeners.clear();
+      consoleListeners.clear();
+      popupListeners.clear();
+      await queue;
+      if (worldContextId !== null) {
+        await send('Runtime.evaluate', {
+          expression: `(() => { const c = globalThis[${JSON.stringify(RUNTIME_GLOBAL)}]; if (c) for (const k of c.previewKeys()) c.remove(k); })()`,
+          contextId: worldContextId,
+        }).catch(() => undefined);
+      }
+      for (const { patchId, ruleId } of held.values()) deps.nudge(tabId, { type: 'restore', patchId, ruleId });
+      held.clear();
+      markClosed();
+      await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: scriptId }).catch(() => undefined);
+      chrome.debugger.onEvent.removeListener(onEvent);
+      chrome.debugger.onDetach.removeListener(onDetach);
+      chrome.webNavigation.onBeforeNavigate.removeListener(onBeforeNavigate);
+      chrome.webNavigation.onCommitted.removeListener(onCommitted);
+      chrome.tabs.onRemoved.removeListener(onTabRemoved);
+      chrome.tabs.onCreated.removeListener(onTabCreated);
+      await chrome.debugger.detach(target).catch(() => undefined);
+    },
+  };
+}

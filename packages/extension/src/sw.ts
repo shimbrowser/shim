@@ -41,6 +41,8 @@ import {
   type ReviewItem,
 } from './messages';
 import { SHIM_FILE_FORMAT } from '@shimbrowser/core/shim-folder';
+import { openPageHost, type ExtensionPageHost, type SessionStorage, type SessionStorageScope } from './page-host';
+import type { PageRuntimeEvent, PageConsoleMessage, PreviewRule, ScreenshotOptions, LoadWaitOptions, PageInputCommand, PageWorld } from '@shimbrowser/core/page-host';
 
 let storePromise: Promise<ShimStore> | null = null;
 function store(): Promise<ShimStore> {
@@ -694,6 +696,156 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
       return { ok: false, error: 'unknown message' };
   }
 }
+
+// --- the session hosts --------------------------------------------------------------
+//
+// A PageHost per tab a session drives (page-host.ts). Opened and driven from
+// inside the worker (a session's registry, the bridge) and, in the
+// conformance runner, through the handle below over the worker's own global.
+// Previews' api.storage goes to the installed shim's rows when the preview's
+// shim is installed, and to the host's own bucket otherwise.
+
+/** A nudge to the page's committed runtime, over its port (both worlds) or the isolated world's message. */
+function nudgeTab(tabId: number, msg: ToRuntime): void {
+  let nudged = false;
+  for (const [port, r] of runtimePorts) {
+    if (r.tabId !== tabId) continue;
+    post(port, msg);
+    nudged = true;
+  }
+  if (!nudged) chrome.tabs.sendMessage(tabId, msg).catch(() => { /* no runtime there */ });
+}
+
+function sessionStorageFor(db: ShimStore, bucket: Map<string, Map<string, unknown>>): SessionStorage {
+  const own = (scope: SessionStorageScope): Map<string, unknown> => {
+    const id = `${scope.origin}\n${scope.patchId}`;
+    let b = bucket.get(id);
+    if (!b) {
+      b = new Map();
+      bucket.set(id, b);
+    }
+    return b;
+  };
+  const installed = async (scope: SessionStorageScope): Promise<boolean> => scope.patchId !== '' && !scope.patchId.includes(':') && (await db.getShim(scope.patchId)) !== null;
+  const asScope = (scope: SessionStorageScope) => ({ shimId: scope.patchId, origin: scope.origin });
+  return {
+    async get(scope, key) {
+      if (await installed(scope)) return db.userData.get(asScope(scope), key);
+      const v = own(scope).get(key);
+      return v === undefined ? null : v;
+    },
+    async set(scope, key, value) {
+      if (await installed(scope)) return db.userData.set(asScope(scope), key, value);
+      const stored: unknown = JSON.parse(JSON.stringify(value) ?? 'null');
+      own(scope).set(key, stored);
+      return stored;
+    },
+    async delete(scope, key) {
+      if (await installed(scope)) return db.userData.delete(asScope(scope), key);
+      return own(scope).delete(key);
+    },
+    async list(scope) {
+      if (await installed(scope)) return db.userData.list(asScope(scope));
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of own(scope)) Object.defineProperty(out, k, { value: v, enumerable: true, writable: true, configurable: true });
+      return out;
+    },
+  };
+}
+
+let engineBundleText: Promise<string> | null = null;
+function engineBundle(): Promise<string> {
+  engineBundleText ??= fetch(chrome.runtime.getURL(RUNTIME_FILES[0] ?? 'shim-core.page.js')).then((r) => r.text());
+  return engineBundleText;
+}
+
+interface OpenHost {
+  host: ExtensionPageHost;
+  events: PageRuntimeEvent[];
+  console: PageConsoleMessage[];
+  popups: string[];
+  offs: Array<() => void>;
+}
+const openHosts = new Map<string, OpenHost>();
+let hostSeq = 0;
+
+/** Opens a PageHost on `tabId`; answers its handle. */
+async function openHost(tabId: number): Promise<string> {
+  const db = await store();
+  const host = await openPageHost(tabId, { engineBundle, storage: sessionStorageFor(db, new Map()), nudge: nudgeTab });
+  const id = `host-${++hostSeq}`;
+  const entry: OpenHost = { host, events: [], console: [], popups: [], offs: [] };
+  entry.offs.push(host.onRuntimeEvent((e) => { entry.events.push(e); }));
+  entry.offs.push(host.onConsole((m) => { entry.console.push(m); }));
+  openHosts.set(id, entry);
+  return id;
+}
+
+/**
+ * The worker's handle on its session hosts, for a driver outside the worker
+ * (the conformance runner, over the worker's global): open, call a member
+ * by name, drain what the page reported since the last drain, close.
+ */
+const pageHosts = {
+  open: openHost,
+  async close(id: string): Promise<boolean> {
+    const entry = openHosts.get(id);
+    if (!entry) return false;
+    openHosts.delete(id);
+    for (const off of entry.offs) off();
+    await entry.host.close();
+    return true;
+  },
+  drain(id: string): { url: string; events: PageRuntimeEvent[]; console: PageConsoleMessage[]; popups: string[] } | null {
+    const entry = openHosts.get(id);
+    if (!entry) return null;
+    const out = { url: entry.host.url(), events: entry.events, console: entry.console, popups: entry.popups };
+    entry.events = [];
+    entry.console = [];
+    entry.popups = [];
+    return out;
+  },
+  /** Watch popups (closed on creation and reported in `drain`) or stop. */
+  watchPopups(id: string, on: boolean): boolean {
+    const entry = openHosts.get(id);
+    if (!entry) return false;
+    if (on && !entry.offs.some((f) => f.name === 'popups')) {
+      const off = entry.host.onPopup?.((url) => { entry.popups.push(url); });
+      if (off) {
+        const named = Object.defineProperty(() => off(), 'name', { value: 'popups' }) as () => void;
+        entry.offs.push(named);
+      }
+    } else if (!on) {
+      const i = entry.offs.findIndex((f) => f.name === 'popups');
+      if (i >= 0) {
+        entry.offs[i]?.();
+        entry.offs.splice(i, 1);
+      }
+    }
+    return true;
+  },
+  async call(id: string, method: string, args: unknown[]): Promise<unknown> {
+    const entry = openHosts.get(id);
+    if (!entry) throw new Error(`no such host: ${id}`);
+    const h = entry.host;
+    switch (method) {
+      case 'url': return h.url();
+      case 'isClosed': return h.isClosed();
+      case 'capabilities': return h.capabilities;
+      case 'evaluate': return h.evaluate(String(args[0]), args[1] as PageWorld);
+      case 'screenshot': return h.screenshot(args[0] as ScreenshotOptions | undefined);
+      case 'applyPreview': h.applyPreview(args[0] as PreviewRule); return undefined;
+      case 'removePreview': h.removePreview(String(args[0])); return undefined;
+      case 'reload': h.reload(typeof args[0] === 'string' ? args[0] : undefined); return undefined;
+      case 'waitForLoad': return h.waitForLoad(args[0] as LoadWaitOptions);
+      case 'input': return h.input?.(args[0] as PageInputCommand[], () => true);
+      case 'documentToken': return h.documentToken();
+      case 'navigationCount': return h.navigationCount?.();
+      default: throw new Error(`unknown host member: ${method}`);
+    }
+  },
+};
+(globalThis as unknown as { shimPageHosts: typeof pageHosts }).shimPageHosts = pageHosts;
 
 type MessageListener = (msg: unknown, sender: chrome.runtime.MessageSender, sendResponse: (answer: WorkerAnswer) => void) => boolean;
 

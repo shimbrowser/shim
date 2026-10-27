@@ -54,6 +54,28 @@ export const EXTENSION_CAPABILITIES: PageHostCapabilities = Object.freeze({
   trustedInput: false,
 });
 
+/**
+ * What a session's PageHost (page-host.ts) can run: the engine in a world
+ * the host creates over the DevTools protocol, where handler source
+ * compiles whatever the page's CSP says and whatever the user-scripts
+ * toggle says, so a session does not depend on the mode. Previews are per
+ * rule, so nothing installs the spec-level stylesheet; trusted input is the
+ * protocol's own. Each entry is advertised only while its conformance case
+ * passes on this host.
+ */
+export const SESSION_CAPABILITIES: PageHostCapabilities = Object.freeze({
+  mutationKinds: Object.freeze([...DECLARATIVE_KINDS, 'script', 'replace-root']),
+  iframeRules: false,
+  specCss: false,
+  apiMembers: Object.freeze([]),
+  componentIdentity: false,
+  engineInspection: false,
+  trustedInput: true,
+});
+
+/** What a never-throw api member this host lacks resolves with (D15). */
+export const UNSUPPORTED_ERROR = 'not-available-in-shim-for-chrome';
+
 export function capabilitiesFor(mode: ExtensionMode): PageHostCapabilities {
   return mode === 'full' ? EXTENSION_CAPABILITIES : EXTENSION_DECLARATIVE_CAPABILITIES;
 }

@@ -106,7 +106,13 @@ export type WorkerAnswer =
  * so the user-script runtime the worker then injects can take the page
  * over, and to whichever of two runtimes on one page does not fit the mode.
  */
-export type ToRuntime = { type: 'sync' } | { type: 'reboot' } | { type: 'retire' };
+export type ToRuntime =
+  | { type: 'sync' }
+  | { type: 'reboot' }
+  | { type: 'retire' }
+  /** A session previews a committed shim's rule: hold the committed one while the preview runs, and give it back after. */
+  | { type: 'suppress'; patchId: string; ruleId: string }
+  | { type: 'restore'; patchId: string; ruleId: string };
 
 /** The port a full-mode runtime opens to the worker, which nudges it there. */
 export const RUNTIME_PORT = 'shim-runtime';
@@ -126,8 +132,9 @@ export function isFromRuntime(msg: unknown): msg is FromRuntime {
 
 export function isToRuntime(msg: unknown): msg is ToRuntime {
   if (typeof msg !== 'object' || msg === null) return false;
-  const type = (msg as { type?: unknown }).type;
-  return type === 'sync' || type === 'reboot' || type === 'retire';
+  const m = msg as { type?: unknown; patchId?: unknown; ruleId?: unknown };
+  if (m.type === 'sync' || m.type === 'reboot' || m.type === 'retire') return true;
+  return (m.type === 'suppress' || m.type === 'restore') && typeof m.patchId === 'string' && typeof m.ruleId === 'string';
 }
 
 export function isToWorker(msg: unknown): msg is ToWorker {

@@ -26,9 +26,9 @@ import type { Rule } from '@shimbrowser/core/types';
 import { isToRuntime, RUNTIME_PORT, type ToWorker, type ToRuntime, type FromRuntime, type WorkerAnswer, type BundleAnswer, type BundledShim } from './messages';
 import { reconcileShims } from './reconcile';
 import { compileHandlers, type HandlerMap } from './compile';
+import { UNSUPPORTED_ERROR } from './capabilities';
 
 const BOOT_FLAG = '__shimForChrome';
-const UNSUPPORTED_ERROR = 'not-available-in-shim-for-chrome';
 // The document carries the mark of the runtime that holds it. A runtime
 // from the next extension instance, or from the other world, cannot see
 // the old one's globals, but it can see the document: it waits for the
@@ -291,6 +291,20 @@ interface Runtime {
       const report: FromRuntime = { type: 'retiring', booted: controls.size > 0 };
       try { port?.postMessage(report); } catch { /* the worker is gone; nothing to repair for */ }
       invalidated();
+      return;
+    }
+    // A session previews one of a committed shim's rules: the committed
+    // rule is held while the preview runs (the two never run side by side)
+    // and given back when the preview goes.
+    if (msg.type === 'suppress' || msg.type === 'restore') {
+      const running = controls.get(msg.patchId);
+      if (!running) return;
+      try {
+        if (msg.type === 'suppress') running.control.suppressRule(msg.ruleId);
+        else running.control.restoreRule(msg.ruleId);
+      } catch (err) {
+        console.error(`[shim] could not ${msg.type} rule ${msg.ruleId} of ${msg.patchId}`, err);
+      }
       return;
     }
     // A reboot: the other world's runtime on this page was just retired,
