@@ -9,6 +9,17 @@
 
 import { makeAnchorChangeHub, makeTokenBucket, BUCKET_BURST } from '../src/anchor-change';
 import type { ChangeRecordLike, HubDeps } from '../src/anchor-change';
+import type { ScriptHandlerArgs, MutationHandlerDef } from '../src/engine-internal';
+
+// Compile-time: the handler contracts an anchored handler and a custom kind's
+// mount are typed against expose a callable api.onAnchorChange (typecheck
+// fails here if they regress to the plain CoreHandlerApi, whose index
+// signature makes the member `unknown`).
+const typedScriptHandler = ({ api }: ScriptHandlerArgs): (() => void) => api.onAnchorChange(() => {});
+const typedCustomKind: Pick<MutationHandlerDef, 'mount'> = {
+  mount: (_el, _mut, _rule, _spec, api) => api.onAnchorChange(() => {}),
+};
+void typedScriptHandler; void typedCustomKind;
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: unknown): void {
