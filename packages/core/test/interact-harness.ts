@@ -18,6 +18,10 @@
 //     out), the user's own input (interrupted: "user")
 //   - a scroll step: parsed only where offered, capped, scaled by the host's
 //     wheel units, reporting requested / sent / observed
+//   - a press is one user action: key-down, character and key-up go out as
+//     separate commands; once the key-down went out, a refusal before the
+//     rest withholds it but reports the press delivered (with a note), never
+//     "not sent"; a refusal before the key-down still fails the step
 //   - steps that completed survive a later dispatch failure
 //   - a host that doesn't observe the page's requests reports calls: null
 //     with traffic "not observed", never an empty list
@@ -178,6 +182,56 @@ async function main(): Promise<void> {
     const r = await runInteract({ actions: [{ click: '.go' }, { click: '.go' }] }, f.deps);
     check('a document change during the next action\'s sync ends the batch: the last step navigated, the rest not run',
       !('error' in r) && r.steps.length === 1 && r.steps[0]?.navigated === true && r.notRun === 1 && f.sent.length === 1, JSON.stringify(r));
+  }
+
+  console.log('a press is one user action:');
+  {
+    const f = fake();
+    const types = (i: number): string => (f.sent[i] ?? []).map((c) => String(c.params.type)).join();
+    await runInteract({ actions: [{ press: 'Enter' }, { press: 'Escape' }] }, f.deps);
+    check('a character key goes out as key-down, character, key-up (each its own command); others without the character',
+      types(0) === 'rawKeyDown,char,keyUp' && (f.sent[0]?.[1]?.params.text) === '\r' && types(1) === 'rawKeyDown,keyUp', JSON.stringify(f.sent));
+  }
+  for (const refusedAt of ['char', 'keyUp'] as const) {
+    // The shim's handler closed its focused field on the key-down: the check
+    // before the rest of the key refuses.
+    const f = fake();
+    f.deps.boundaryCheck = async (c) => (c.params.type === refusedAt ? 'focus-not-shim: nothing of this shim\'s has focus' : null);
+    const r = await runInteract({ actions: [{ press: 'Enter' }, { click: '.go' }] }, f.deps);
+    const sent = (f.sent[0] ?? []).map((c) => String(c.params.type)).join();
+    check(`refused before its ${refusedAt}, a press whose key-down went out is delivered, with a note — the batch goes on`,
+      !('error' in r) && r.steps[0]?.ok === true && r.steps[0]?.error === undefined && r.steps[0]?.note?.startsWith('the key was delivered') === true
+        && r.steps[0]?.note?.includes('focus-not-shim') === true && r.steps[1]?.ok === true && r.notRun === 0, JSON.stringify(r));
+    check(`…and nothing from the ${refusedAt} on went out`, sent === (refusedAt === 'char' ? 'rawKeyDown' : 'rawKeyDown,char'), sent);
+    const note = 'error' in r ? undefined : r.steps[0]?.note;
+    check('…the note names what was withheld', refusedAt === 'char'
+      ? note?.includes('its character and its key-up were not sent') === true
+      : note?.includes('its key-up was not sent') === true, note);
+  }
+  {
+    const f = fake();
+    f.deps.boundaryCheck = async (c) => (c.params.type === 'rawKeyDown' ? 'focus-not-shim: nothing of this shim\'s has focus' : null);
+    const r = await runInteract({ actions: [{ press: 'Enter' }, { click: '.go' }] }, f.deps);
+    check('refused before its key-down, a press is not sent: the step fails, the rest not run',
+      !('error' in r) && r.steps[0]?.ok === false && r.steps[0]?.error?.startsWith('focus-not-shim') === true && r.notRun === 1 && (f.sent[0] ?? []).length === 0, JSON.stringify(r));
+  }
+  {
+    // The user's own input arrives between the key-down and the rest.
+    const f = fake();
+    let user = false;
+    f.deps.interrupted = () => user;
+    f.deps.boundaryCheck = async (c) => { if (c.params.type === 'char') user = true; return null; };
+    const r = await runInteract({ actions: [{ press: 'Enter' }, { click: '.go' }] }, f.deps);
+    check('the user\'s input after the key-down: the press is delivered, the batch stops (interrupted "user")',
+      !('error' in r) && r.interrupted === 'user' && r.steps.length === 1 && r.steps[0]?.ok === true && /the user used the page/.test(r.steps[0]?.note ?? '') && r.notRun === 1, JSON.stringify(r));
+  }
+  {
+    // Enter's key-down navigated (a form submitted): the key went; the page moved on.
+    const f = fake();
+    f.deps.boundaryCheck = async (c) => { if (c.params.type === 'char') f.doc = 'doc-b'; return null; };
+    const r = await runInteract({ actions: [{ press: 'Enter' }, { click: '.go' }] }, f.deps);
+    check('a key-down that navigates: the press is delivered and marked navigated, the batch ends',
+      !('error' in r) && r.steps[0]?.ok === true && r.steps[0]?.navigated === true && r.notRun === 1, JSON.stringify(r));
   }
 
   console.log('scroll:');

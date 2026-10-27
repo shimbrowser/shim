@@ -199,6 +199,13 @@ export interface InteractStepReport {
   trusted?: false;
   /** A scroll step: what was asked, what was sent (capped), how far the page actually moved. */
   scrolled?: { requested: number; sent: number; observed: number | null };
+  /**
+   * A press whose key-down went out but whose character or key-up was
+   * withheld (what has focus changed after the key-down, e.g. the field the
+   * key went to closed itself): the key was delivered; this says what of it
+   * was not sent, and why.
+   */
+  note?: string;
 }
 
 export interface InteractReport {
@@ -296,15 +303,19 @@ export function clickCommands(x: number, y: number): CdpCommand[] {
 export function keyCommands(key: string): CdpCommand[] {
   const k = KEYS[key];
   if (!k) return [];
-  // A key that types a character goes down as 'keyDown' with its text (so
-  // Enter submits a form); the rest as 'rawKeyDown'.
+  // A key that types a character goes down as 'rawKeyDown' then 'char' with
+  // its text (the keypress, which is what makes Enter submit a form) — two
+  // commands, not one 'keyDown' with text. One command sends the keypress to
+  // whatever has focus once the keydown's handlers ran: when a handler closes
+  // the focused field and the focus lands on the site's own control, that
+  // keypress would reach it with no check in between. Split, a session's
+  // boundary check runs before the character as before the key-up.
   const domKey = k.key ?? key;
-  const down: Record<string, unknown> = { type: k.text ? 'keyDown' : 'rawKeyDown', key: domKey, code: k.code, windowsVirtualKeyCode: k.keyCode };
-  if (k.text) down.text = k.text;
-  return [
-    { method: 'Input.dispatchKeyEvent', params: down },
-    { method: 'Input.dispatchKeyEvent', params: { type: 'keyUp', key: domKey, code: k.code, windowsVirtualKeyCode: k.keyCode } },
-  ];
+  const base = { key: domKey, code: k.code, windowsVirtualKeyCode: k.keyCode };
+  const commands: CdpCommand[] = [{ method: 'Input.dispatchKeyEvent', params: { type: 'rawKeyDown', ...base } }];
+  if (k.text) commands.push({ method: 'Input.dispatchKeyEvent', params: { type: 'char', ...base, text: k.text, unmodifiedText: k.text } });
+  commands.push({ method: 'Input.dispatchKeyEvent', params: { type: 'keyUp', ...base } });
+  return commands;
 }
 
 /**
@@ -391,6 +402,10 @@ export async function runInteract(
     // accepted, not stopped, no user input — and the session's own boundary
     // check for that command.
     let reason: string | null = null;
+    // The last command index a dispatch asked about: `before(i)` runs only
+    // once commands 0..i-1 went out (PageHost.input's contract), so a press
+    // asked about its key-up had its key-down delivered.
+    let reached = -1;
     const pinNow = (): boolean => {
       if (deps.aborted()) { reason = policy.stopped; return false; }
       if (deps.interrupted?.()) { interrupted = true; reason = USER_INPUT; return false; }
@@ -400,6 +415,7 @@ export async function runInteract(
     const pinFor = (commands: CdpCommand[]): InteractPin => ({
       now: pinNow,
       async before(i) {
+        reached = Math.max(reached, i);
         if (!pinNow()) return false;
         const command = commands[i];
         if (command && deps.boundaryCheck) {
@@ -428,9 +444,22 @@ export async function runInteract(
       } else if ('press' in action) {
         if (!pinNow()) { fail(reason ?? 'the page changed before the action ran'); break; }
         const commands = keyCommands(action.press);
+        reached = -1;
         const why = stopReason(await deps.dispatch(commands, pinFor(commands)), 'the page changed during the action');
-        if (why) { fail(why); break; }
-        finish({ action: label, ok: true });
+        if (why && reached < 1) { fail(why); break; }
+        if (why) {
+          // A press is one user action, and its key-down is what acts: once
+          // that went out, the key was delivered — never report it as not
+          // sent. The rest of it was withheld (the check before it refused: a
+          // handler closed the focused field, moved focus or navigated), so
+          // it never reaches whatever has focus now. The batch goes on — each
+          // later action is checked afresh — unless it was stopped.
+          const rest = commands.slice(reached).map((c) => (c.params.type === 'char' ? 'its character' : 'its key-up')).join(' and ');
+          finish({ action: label, ok: true, note: `the key was delivered; ${rest} ${rest.includes(' and ') ? 'were' : 'was'} not sent — ${why}` });
+          if (interrupted || deps.aborted()) { stopped = true; break; }
+        } else {
+          finish({ action: label, ok: true });
+        }
       } else if ('scroll' in action) {
         if (!deps.viewport) { fail('scrolling is not available here'); break; }
         const before = await deps.viewport();

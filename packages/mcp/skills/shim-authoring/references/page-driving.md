@@ -24,7 +24,10 @@ from outside (AppleScript, another browser).
   a label for a site control), `frame-unsupported`, `shadow-unsupported`, and
   `focus-not-shim` (a key or text while your shim's field doesn't have focus). The target
   and focus are re-checked right before every press and keystroke; an overlay or a focus
-  change stops the batch. The tab need not be the selected one in its Shim window: Shim
+  change stops the batch. A `press` whose key-down your own handler acts on by closing the
+  field (save on Enter, then remove the input) is reported delivered, with a `note`: the
+  rest of that key (its character, its key-up) is withheld from whatever has focus
+  afterwards, and the batch goes on. The tab need not be the selected one in its Shim window: Shim
   keeps it painting for the batch without showing it (the site may see the tab as focused
   meanwhile), and the batch goes on if the user selects or leaves the tab. While the window
   is minimized or hidden, or Shim can't keep the tab painting, nothing is sent: the call
