@@ -74,8 +74,11 @@ are a third constant (`SESSION_CAPABILITIES`): every mutation kind including `sc
 (`api.fetch`, `api.ai` and the rest answer `not-available-in-shim-for-chrome` in their
 own shape). A preview of a committed rule holds that rule for the preview's duration and
 gives it back after: the host tells the page's runtime the whole set of rules it holds of
-each shim and waits for the ack before the preview goes up, and removes the preview
-before it releases the hold, so the two forms of one rule never run side by side. A hold
+each shim and waits for the ack before the preview goes up (a hold the page does not
+confirm in time is no hold: the preview stays down and the session is told in its
+console), and removes the preview before it releases the hold, so the two forms of one
+rule never run side by side; a preview key that moves to another rule takes its old
+preview down before the old twin comes back. A hold
 is a claim the runtime keeps through the shim's reboot (disabled and enabled again under
 the preview) and takes from the worker's bundle answer when it boots after the hold; a
 rule the rebase ladder already swapped for a healed form is held and released in that

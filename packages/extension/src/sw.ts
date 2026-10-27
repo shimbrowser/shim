@@ -41,7 +41,7 @@ import {
   type ReviewItem,
 } from './messages';
 import { SHIM_FILE_FORMAT } from '@shimbrowser/core/shim-folder';
-import { openPageHost, type ExtensionPageHost, type SessionStorage, type SessionStorageScope } from './page-host';
+import { openPageHost, type ExtensionPageHost, type SessionStorage, type SessionStorageScope, type NudgeOutcome } from './page-host';
 import type { PageRuntimeEvent, PageConsoleMessage, PreviewRule, ScreenshotOptions, LoadWaitOptions, PageInputCommand, PageWorld } from '@shimbrowser/core/page-host';
 
 let storePromise: Promise<ShimStore> | null = null;
@@ -721,31 +721,34 @@ const NUDGE_ACK_MS = 2000;
 
 /**
  * A nudge to the page's committed runtime, over its port (both worlds) or
- * the isolated world's message, resolved once a runtime there acked it, or
- * none is there to, or it took too long: a session is never held up by a
- * page that does not answer.
+ * the isolated world's message. Answers what became of it: `acked` by a
+ * runtime, `no-runtime` when none is there to, `timed-out` when one may be
+ * there but did not answer in time (the page's thread busy), which the
+ * host treats as a hold not taken: a session is never held up by a page
+ * that does not answer, and never previews beside a twin it is not sure is
+ * down.
  */
-function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>): Promise<void> {
+function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>): Promise<NudgeOutcome> {
   const seq = ++holdSeq;
   const stamped: ToRuntime = { ...msg, seq };
   return new Promise((resolve) => {
     let done = false;
-    const settle = (): void => {
+    const settle = (outcome: NudgeOutcome): void => {
       if (done) return;
       done = true;
       pendingAcks.delete(seq);
       clearTimeout(timer);
-      resolve();
+      resolve(outcome);
     };
-    const timer = setTimeout(settle, NUDGE_ACK_MS);
-    pendingAcks.set(seq, settle);
+    const timer = setTimeout(() => settle('timed-out'), NUDGE_ACK_MS);
+    pendingAcks.set(seq, () => settle('acked'));
     let nudged = false;
     for (const [port, r] of runtimePorts) {
       if (r.tabId !== tabId) continue;
       post(port, stamped);
       nudged = true;
     }
-    if (!nudged) chrome.tabs.sendMessage(tabId, stamped).then(settle, settle);
+    if (!nudged) chrome.tabs.sendMessage(tabId, stamped).then(() => settle('acked'), () => settle('no-runtime'));
   });
 }
 

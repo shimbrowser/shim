@@ -48,8 +48,12 @@ const twin = (mine: string, other: string): string => `function ${mine}({ anchor
 // The installed one is a module (the .shim file's handler form); a preview's inline handler is the expression itself.
 const COMMITTED = `module.exports = ${twin('committed', 'preview')}`;
 const PREVIEW = twin('preview', 'committed');
+// A second committed rule with twins of its own, for a preview key that moves between rules.
+const COMMITTED2 = `module.exports = ${twin('committed2', 'preview2')}`;
+const PREVIEW2 = twin('preview2', 'committed2');
 
 interface View { committed: number; preview: number; committedRuns: number; previewRuns: number; twinSeen: string | null }
+interface View2 { committed2: number; preview2: number; committed2Runs: number; preview2Runs: number; twinSeen: string | null }
 
 async function main(): Promise<void> {
   console.log('\n=== extension session harness ===\n');
@@ -62,9 +66,10 @@ async function main(): Promise<void> {
   let SHIM_ID = '';
   const fixture = shimFile('session-fixture', SHIM_NAME, [
     { id: 'badge', anchor: css('#note-target'), mutations: [{ kind: 'script', handler: 'committed' }] },
+    { id: 'tag', anchor: css('#storage-target'), mutations: [{ kind: 'script', handler: 'committed2' }] },
     { id: 'stable', anchor: css('#stable'), mutations: [{ kind: 'restyle', properties: { outline: '1px solid rgb(255, 0, 0)' } }] },
     { id: 'promote', anchor: { primary: { kind: 'css', value: 'button.buy-v1' }, fallbacks: [{ kind: 'css', value: 'button[data-sku="42"]' }] }, mutations: [{ kind: 'restyle', properties: { outline: '2px solid rgb(0, 0, 255)' } }] },
-  ], {}, { committed: COMMITTED });
+  ], {}, { committed: COMMITTED, committed2: COMMITTED2 });
 
   const profile = path.join(work, 'profile');
   let ctx: BrowserContext = await launch(ext, profile);
@@ -92,6 +97,17 @@ async function main(): Promise<void> {
     previewRuns: Number(document.documentElement.getAttribute('data-preview-runs') || 0),
     twinSeen: document.documentElement.getAttribute('data-twin-seen'),
   }));
+  const view2 = (page: Page): Promise<View2> => page.evaluate(() => ({
+    committed2: document.querySelectorAll('#storage-target .committed2').length,
+    preview2: document.querySelectorAll('#storage-target .preview2').length,
+    committed2Runs: Number(document.documentElement.getAttribute('data-committed2-runs') || 0),
+    preview2Runs: Number(document.documentElement.getAttribute('data-preview2-runs') || 0),
+    twinSeen: document.documentElement.getAttribute('data-twin-seen'),
+  }));
+  const previewOfTag = (key: string): PreviewRule => ({
+    patchId: SHIM_ID, ruleKey: key,
+    rule: { id: 'tag', anchor: { primary: { kind: 'css', value: '#storage-target' } }, mutations: [{ kind: 'script', handler: 'preview2' }], handlers: { preview2: PREVIEW2 } },
+  });
   const previewOfBadge = (key = 'preview:session:badge'): PreviewRule => ({
     patchId: SHIM_ID, ruleKey: key,
     rule: { id: 'badge', anchor: { primary: { kind: 'css', value: '#note-target' } }, mutations: [{ kind: 'script', handler: 'preview' }], handlers: { preview: PREVIEW } },
@@ -101,12 +117,12 @@ async function main(): Promise<void> {
     await popup.evaluate(([id, on]) => chrome.runtime.sendMessage({ type: 'shims.setEnabled', id, enabled: on }), [SHIM_ID, enabled] as const);
     await popup.close();
   };
-  const exported = async (): Promise<{ spec: { version?: number; bundleHash?: string } }> => {
+  const exported = async (): Promise<{ spec: { version?: number; bundleHash?: string; rules: { id: string; anchor: { witness?: unknown } }[] } }> => {
     const popup = await popupOf(ctx, extId);
     const answer = await popup.evaluate((id) => chrome.runtime.sendMessage({ type: 'shims.export', id }), SHIM_ID) as { file?: string };
     await popup.close();
     if (!answer.file) throw new Error('no export');
-    return JSON.parse(answer.file) as { spec: { version?: number; bundleHash?: string } };
+    return JSON.parse(answer.file) as { spec: { version?: number; bundleHash?: string; rules: { id: string; anchor: { witness?: unknown } }[] } };
   };
 
   try {
@@ -170,6 +186,53 @@ async function main(): Promise<void> {
       check('the host lists the held rules by shim (none now)', JSON.stringify(await heldFor()) === '[]');
     }
 
+    console.log('a preview key that moves to another rule takes its old preview down before it releases the old twin:');
+    {
+      const key = 'preview:session:moving';
+      host.applyPreview(previewOfBadge(key));
+      const a = await settle(() => view(page), (v) => v.preview === 1 && v.committed === 0);
+      check('the key previews the first rule', a.preview === 1 && a.committed === 0, a);
+      const t0 = await view2(page);
+      check('the second rule runs committed meanwhile', t0.committed2 === 1 && t0.preview2 === 0, t0);
+      host.applyPreview(previewOfTag(key));
+      const b = await settle(() => view2(page), (v) => v.preview2 === 1 && v.committed2 === 0);
+      check('the key now previews the second rule, its twin down', b.preview2 === 1 && b.committed2 === 0, b);
+      const a2 = await settle(() => view(page), (v) => v.committed === 1 && v.preview === 0);
+      check('and the first rule is back committed, its preview gone', a2.committed === 1 && a2.preview === 0, a2);
+      check('the held rules are the second only', JSON.stringify(await heldFor()) === '["tag"]');
+      host.removePreview(key);
+      const t1 = await settle(() => view2(page), (v) => v.committed2 === 1 && v.preview2 === 0);
+      check('released: the second rule is back', t1.committed2 === 1 && t1.preview2 === 0, t1);
+      const seen = await view(page);
+      check('neither pair ever saw its twin', seen.twinSeen === null && t1.twinSeen === null, { a: seen.twinSeen, b: t1.twinSeen });
+    }
+
+    console.log('a hold the page does not confirm in time is no hold:');
+    {
+      const lines: string[] = [];
+      const off = host.onConsole((m) => { lines.push(m.message); });
+      const { committedRuns: runsBefore, previewRuns: previewRunsBefore } = await view(page);
+      // The page's thread is busy for longer than the host waits for the
+      // ack: the runtime cannot take the hold in time.
+      const busy = page.evaluate(() => { const t = Date.now(); while (Date.now() - t < 3500) { /* spin */ } return 'done'; });
+      await sleep(100);
+      host.applyPreview(previewOfBadge());
+      await busy;
+      await sleep(1500);
+      const v = await view(page);
+      check('the preview did not go up beside the twin', v.preview === 0 && v.previewRuns === previewRunsBefore && v.twinSeen === null, v);
+      check('the committed rule runs', v.committed === 1 && v.twinSeen === null, v);
+      check('the session was told in its console', lines.some((l) => l.includes('did not confirm the hold')), lines);
+      check('nothing is held', JSON.stringify(await heldFor()) === '[]');
+      off();
+      host.applyPreview(previewOfBadge());
+      const again = await settle(() => view(page), (x) => x.preview === 1 && x.committed === 0);
+      check('a later apply, with the page answering, holds and previews', again.preview === 1 && again.committed === 0 && again.twinSeen === null, again);
+      host.removePreview('preview:session:badge');
+      const back = await settle(() => view(page), (x) => x.committed === 1 && x.preview === 0);
+      check('and releases', back.committed === 1 && back.twinSeen === null && back.committedRuns >= runsBefore + 1, back);
+    }
+
     console.log('the hold survives the shim disabled and enabled again under the preview:');
     {
       host.applyPreview(previewOfBadge());
@@ -216,13 +279,20 @@ async function main(): Promise<void> {
       check('build 1 of /deploy loaded', (await loaded).kind === 'finished');
       const buyOutline = (): Promise<string> => page.evaluate(() => { const b = document.querySelector('button[data-sku="42"]'); return b ? getComputedStyle(b).outlineColor : 'none'; });
       check('build 1: the committed rule applies', (await settle(buyOutline, (c) => c === 'rgb(0, 0, 255)')) === 'rgb(0, 0, 255)');
-      await settle(exported, (f) => typeof f.spec.bundleHash === 'string', 10000);
+      // The /deploy page kind's baseline is recorded once every rule has
+      // settled there, the two that miss on this page after the engine's
+      // settle delay and reconcile retry (about 4 s). The committed
+      // runtime's events go to the worker, not the session, and the
+      // spec-wide hash is the same on /apply at this deploy, so nothing
+      // observable here says when; the wait covers it with margin.
+      await settle(exported, (f) => f.spec.rules.find((r) => r.id === 'promote')?.anchor.witness !== undefined, 10000);
+      await sleep(6000);
       setDeploy(2);
       const loaded2 = host.waitForLoad({ timeoutMs: 10000 });
-      host.reload(`${origin}/deploy`);
-      check('build 2 loaded', (await loaded2).kind === 'finished');
+      host.reload();
+      check('build 2 loaded', (await loaded2).kind === 'finished' && (await page.evaluate(() => document.querySelector('button.buy-v2') !== null)));
       const healed = await settle(exported, (f) => (f.spec.version ?? 1) >= 2, 15000);
-      check('the ladder promoted the fallback: a new version', (healed.spec.version ?? 1) >= 2, healed.spec.version);
+      check('the ladder promoted the fallback: a new version', (healed.spec.version ?? 1) >= 2, { version: healed.spec.version, promote: healed.spec.rules.find((r) => r.id === 'promote')?.anchor });
       await sleep(800);
       check('the rebased form runs on the page (swapped in as an extra)', (await settle(buyOutline, (c) => c === 'rgb(0, 0, 255)')) === 'rgb(0, 0, 255)');
       host.applyPreview({

@@ -93,12 +93,14 @@ export interface SessionStorage {
   list(scope: SessionStorageScope): Promise<Record<string, unknown>>;
 }
 
+export type NudgeOutcome = 'acked' | 'no-runtime' | 'timed-out';
+
 export interface PageHostDeps {
   /** The engine's page bundle source (dist/shim-core.page.js). */
   engineBundle(): Promise<string>;
   storage: SessionStorage;
-  /** A nudge to the page's committed runtime (the rules a session holds, or its end), resolved once the runtime acked it, or there is none, or it took too long. */
-  nudge(tabId: number, msg: Extract<ToRuntime, { seq?: number }>): Promise<void>;
+  /** A nudge to the page's committed runtime (the rules a session holds, or its end): acked by a runtime, none there, or not answered in time. */
+  nudge(tabId: number, msg: Extract<ToRuntime, { seq?: number }>): Promise<NudgeOutcome>;
   /** How long a preview apply or an engine-world evaluate waits for the world. Default 5000. */
   worldWaitMs?: number;
 }
@@ -184,7 +186,14 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
     for (const { patchId } of previewed.values()) if (!(patchId in out)) Object.defineProperty(out, patchId, { value: heldFor(patchId), enumerable: true, writable: true, configurable: true });
     return out;
   };
-  const holdNudge = (patchId: string): Promise<void> => deps.nudge(tabId, { type: 'hold', patchId, ruleIds: heldFor(patchId) });
+  const holdNudge = (patchId: string): Promise<NudgeOutcome> => deps.nudge(tabId, { type: 'hold', patchId, ruleIds: heldFor(patchId) });
+  const removeInWorld = async (ruleKey: string): Promise<void> => {
+    if (worldContextId === null || closed) return;
+    await send('Runtime.evaluate', {
+      expression: `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].remove(${JSON.stringify(ruleKey)})`,
+      contextId: worldContextId,
+    }).catch(() => { /* the document went away, and the preview with it */ });
+  };
   const loadWaits = new Set<(outcome: PageLoadOutcome) => void>();
   let queue: Promise<void> = Promise.resolve();
 
@@ -509,14 +518,30 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
     if (contextId === null || closed) return;
     const { patchId, rule, ruleKey, bundleHash, applyId, autoRepair } = preview;
     // The committed twin of this preview is held, and the page's runtime
-    // has said so, before the preview goes up; a key that moves to another
-    // shim or rule releases what it held.
+    // has said so, before the preview goes up. A key that moves to another
+    // shim or rule first takes its old preview down, then releases what it
+    // held: the old twin comes back only once its preview is gone.
     const before = previewed.get(ruleKey);
-    previewed.set(ruleKey, { patchId, ruleId: rule.id });
-    if (!before || before.patchId !== patchId || before.ruleId !== rule.id) {
-      if (before && before.patchId !== patchId) await holdNudge(before.patchId);
-      await holdNudge(patchId);
+    const moved = before !== undefined && (before.patchId !== patchId || before.ruleId !== rule.id);
+    if (moved) {
+      await removeInWorld(ruleKey);
+      previewed.delete(ruleKey);
+      if (before.patchId !== patchId) await holdNudge(before.patchId);
+    }
+    if (!before || moved) {
+      previewed.set(ruleKey, { patchId, ruleId: rule.id });
+      const outcome = await holdNudge(patchId);
       if (closed) return;
+      if (outcome === 'timed-out') {
+        // A runtime may be there and may not have taken the hold: the
+        // preview does not go up beside a twin that may still run. The
+        // claim is withdrawn (the late hold, if it lands, is undone by this
+        // newer one) and the session is told in its console.
+        previewed.delete(ruleKey);
+        void holdNudge(patchId);
+        emitConsole({ level: 'error', message: `[shim] preview ${ruleKey} not applied: the page's runtime did not confirm the hold on rule "${rule.id}" of ${patchId} in time`, source: '' });
+        return;
+      }
     }
     for (const [name, source] of Object.entries(rule.handlers ?? {})) {
       if (typeof source !== 'string') continue;
@@ -531,12 +556,7 @@ export async function openPageHost(tabId: number, deps: PageHostDeps): Promise<E
     const was = previewed.get(ruleKey);
     if (!was) return;
     // The preview goes first; its committed twin comes back once it is gone.
-    if (worldContextId !== null && !closed) {
-      await send('Runtime.evaluate', {
-        expression: `globalThis[${JSON.stringify(RUNTIME_GLOBAL)}].remove(${JSON.stringify(ruleKey)})`,
-        contextId: worldContextId,
-      }).catch(() => { /* the document went away, and the preview with it */ });
-    }
+    await removeInWorld(ruleKey);
     previewed.delete(ruleKey);
     if (!closed) await holdNudge(was.patchId);
   }
