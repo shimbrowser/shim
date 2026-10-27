@@ -27,7 +27,7 @@ import {
   registrationsFor, userScriptRegistrationsFor, shimIdFor, patternsFor, originsToRelease, RUNTIME_FILES,
   USER_SCRIPT_WORLD_CSP,
 } from './registration';
-import { capabilitiesFor, detectMode, type ExtensionMode } from './capabilities';
+import { capabilitiesFor, detectMode, SESSION_CAPABILITIES, type ExtensionMode } from './capabilities';
 import { arbitrate, type RuntimeWorld as ArbitratedWorld } from './arbitrate';
 import { baselineForPath, pagePathKey } from '@shimbrowser/core/deploy-id';
 import {
@@ -41,6 +41,8 @@ import {
   type ReviewItem,
 } from './messages';
 import { SHIM_FILE_FORMAT } from '@shimbrowser/core/shim-folder';
+import { openPageHost, type ExtensionPageHost, type SessionStorage, type SessionStorageScope, type NudgeOutcome } from './page-host';
+import type { PageRuntimeEvent, PageConsoleMessage, PreviewRule, ScreenshotOptions, LoadWaitOptions, PageInputCommand, PageWorld } from '@shimbrowser/core/page-host';
 
 let storePromise: Promise<ShimStore> | null = null;
 function store(): Promise<ShimStore> {
@@ -183,6 +185,9 @@ function acceptRuntimePort(world: RuntimeWorld): (port: chrome.runtime.Port) => 
       port.disconnect();
       return;
     }
+    port.onMessage.addListener((msg: unknown) => {
+      if (isFromRuntime(msg) && msg.type === 'ack') pendingAcks.get(msg.seq)?.(msg.applied);
+    });
     // One runtime per page. Two can meet when a handover and a reconnect
     // cross (a holder's port down for the moment, the other world's
     // runtime injected beside it, the holder reconnecting later): the one
@@ -207,6 +212,7 @@ function acceptRuntimePort(world: RuntimeWorld): (port: chrome.runtime.Port) => 
     }
     runtimePorts.set(port, { tabId, world });
     port.onDisconnect.addListener(() => { runtimePorts.delete(port); });
+    for (const waiter of [...(portWaiters.get(tabId) ?? [])]) waiter(port);
     // A connection is a runtime that may have missed a change: the worker
     // it held a port to went away (idled out) and the change happened
     // before this one reconnected, when no port was there to nudge. So
@@ -551,7 +557,11 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
   switch (msg.type) {
     case 'bundle': {
       if (!page) return { ok: false, error: 'no page' };
-      return { ok: true, mode: modeNow, shims: await bundleFor(page, world) };
+      // The holds a session has on this tab, current as of this sequence.
+      const shims = await bundleFor(page, world);
+      const held = page.tabId === undefined ? undefined : hostOnTab(page.tabId)?.heldAll();
+      await holdSeqReady;
+      return { ok: true, mode: modeNow, shims, ...(held ? { held } : {}), holdSeq };
     }
     case 'storage': {
       if (!page) return { ok: false, error: 'no page' };
@@ -694,6 +704,313 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
       return { ok: false, error: 'unknown message' };
   }
 }
+
+// --- the session hosts --------------------------------------------------------------
+//
+// A PageHost per tab a session drives (page-host.ts). Opened and driven from
+// inside the worker (a session's registry, the bridge) and, in the
+// conformance runner, through the handle below over the worker's own global.
+// Previews' api.storage goes to the installed shim's rows when the preview's
+// shim is installed, and to the host's own bucket otherwise.
+
+// Holds are ordered: every hold nudge carries the next sequence number, a
+// bundle answer carries the current one, and a runtime applies only what is
+// newer than what it has, so a hold that crosses a bundle answer in flight
+// is not undone by it. The sequence outlives this worker: a page's runtime
+// keeps the last it saw across the worker idling out and starting again,
+// so the next worker continues from where the last one was
+// (chrome.storage.session, which lives as long as the browser session, as
+// the pages do), seeded no lower than the clock in case that record is
+// gone. A worker that still fell behind (the clock set back, the record
+// gone) learns so from the runtime's ack, which says whether the nudge was
+// applied; a stale one is no hold.
+const HOLD_SEQ_KEY = 'holdSeq';
+let holdSeq = 0;
+const seedHoldSeq = async (): Promise<void> => {
+  let stored = 0;
+  try {
+    const got = await chrome.storage.session.get(HOLD_SEQ_KEY);
+    if (typeof got[HOLD_SEQ_KEY] === 'number') stored = got[HOLD_SEQ_KEY];
+  } catch { /* no record */ }
+  holdSeq = Math.max(holdSeq, stored, Date.now());
+};
+let holdSeqReady: Promise<void> = seedHoldSeq();
+async function nextHoldSeq(): Promise<number> {
+  await holdSeqReady;
+  holdSeq += 1;
+  void chrome.storage.session.set({ [HOLD_SEQ_KEY]: holdSeq }).catch(() => undefined);
+  return holdSeq;
+}
+const pendingAcks = new Map<number, (applied: boolean) => void>();
+const NUDGE_ACK_MS = 2000;
+// How long a nudge waits for a runtime's port when one is expected and
+// none is connected: a runtime whose port the worker dropped (idled out)
+// reconnects a second later, and gets its hold then.
+const PORT_WAIT_MS = 3000;
+const portWaiters = new Map<number, Array<(port: chrome.runtime.Port) => void>>();
+function waitForPort(tabId: number, ms: number): Promise<chrome.runtime.Port | null> {
+  return new Promise((resolve) => {
+    const waiters = portWaiters.get(tabId) ?? [];
+    const settle = (port: chrome.runtime.Port | null): void => {
+      clearTimeout(timer);
+      const list = portWaiters.get(tabId) ?? [];
+      const i = list.indexOf(settle);
+      if (i >= 0) list.splice(i, 1);
+      if (!list.length) portWaiters.delete(tabId);
+      resolve(port);
+    };
+    const timer = setTimeout(() => settle(null), ms);
+    waiters.push(settle);
+    portWaiters.set(tabId, waiters);
+  });
+}
+
+/** Does an installed shim run on the tab's page (so a committed runtime is there, port or no port)? */
+async function runtimeExpected(tabId: number): Promise<boolean> {
+  let url: URL;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    url = new URL(tab.url ?? '');
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+  const page = { hostname: url.hostname, port: url.port };
+  const capabilities = capabilitiesFor(modeNow);
+  for (const shim of await (await store()).listShims()) if (await runsOn(shim, page, capabilities)) return true;
+  return false;
+}
+
+/**
+ * A nudge to the page's committed runtime, over its port (both worlds) or
+ * the isolated world's message. Answers what became of it: `acked` by a
+ * runtime, `no-runtime` when none is there to, `timed-out` when one may be
+ * there but did not answer in time, which the host treats as a hold not
+ * taken: a session is never held up by a page that does not answer, and
+ * never previews beside a twin it is not sure is down.
+ *
+ * "None is there" is the registry's word, not the channel's: a user-script
+ * runtime has no message listener and may be between ports (the worker
+ * idled out and woke, the runtime reconnects a second later) with its
+ * committed rules still running. So when an installed shim runs on the
+ * page, a nudge with no port waits for one, and a message no runtime
+ * answers is uncertainty, not absence.
+ */
+async function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>): Promise<NudgeOutcome> {
+  const seq = await nextHoldSeq();
+  const stamped: ToRuntime = { ...msg, seq };
+  let ports = [...runtimePorts].filter(([, r]) => r.tabId === tabId).map(([port]) => port);
+  const expected = ports.length > 0 || await runtimeExpected(tabId);
+  if (!ports.length && expected) {
+    const port = await waitForPort(tabId, PORT_WAIT_MS);
+    if (port) ports = [port];
+  }
+  return new Promise((resolve) => {
+    let done = false;
+    const settle = (outcome: NudgeOutcome): void => {
+      if (done) return;
+      done = true;
+      pendingAcks.delete(seq);
+      clearTimeout(timer);
+      resolve(outcome);
+    };
+    const timer = setTimeout(() => settle('timed-out'), NUDGE_ACK_MS);
+    // A runtime that ignored the nudge as older than what it has answered
+    // too, and that is no hold.
+    pendingAcks.set(seq, (applied) => settle(applied ? 'acked' : 'timed-out'));
+    if (ports.length) {
+      for (const port of ports) post(port, stamped);
+      return;
+    }
+    chrome.tabs.sendMessage(tabId, stamped).then(() => settle('acked'), () => settle(expected ? 'timed-out' : 'no-runtime'));
+  });
+}
+
+function sessionStorageFor(db: ShimStore, bucket: Map<string, Map<string, unknown>>): SessionStorage {
+  const own = (scope: SessionStorageScope): Map<string, unknown> => {
+    const id = `${scope.origin}\n${scope.patchId}`;
+    let b = bucket.get(id);
+    if (!b) {
+      b = new Map();
+      bucket.set(id, b);
+    }
+    return b;
+  };
+  // The installed shim's rows only when that shim runs on the page's origin
+  // (enabled, hosts cover it, granted): a preview of a shim installed for
+  // another site reads nothing of it.
+  const installed = async (scope: SessionStorageScope): Promise<boolean> => {
+    if (scope.patchId === '' || scope.patchId.includes(':')) return false;
+    const shim = await db.getShim(scope.patchId);
+    if (!shim) return false;
+    let page: { hostname: string; port: string };
+    try {
+      const u = new URL(scope.origin);
+      page = { hostname: u.hostname, port: u.port };
+    } catch {
+      return false;
+    }
+    return runsOn(shim, page, SESSION_CAPABILITIES);
+  };
+  const asScope = (scope: SessionStorageScope) => ({ shimId: scope.patchId, origin: scope.origin });
+  return {
+    async get(scope, key) {
+      if (await installed(scope)) return db.userData.get(asScope(scope), key);
+      const v = own(scope).get(key);
+      return v === undefined ? null : v;
+    },
+    async set(scope, key, value) {
+      if (await installed(scope)) return db.userData.set(asScope(scope), key, value);
+      const stored: unknown = JSON.parse(JSON.stringify(value) ?? 'null');
+      own(scope).set(key, stored);
+      return stored;
+    },
+    async delete(scope, key) {
+      if (await installed(scope)) return db.userData.delete(asScope(scope), key);
+      return own(scope).delete(key);
+    },
+    async list(scope) {
+      if (await installed(scope)) return db.userData.list(asScope(scope));
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of own(scope)) Object.defineProperty(out, k, { value: v, enumerable: true, writable: true, configurable: true });
+      return out;
+    },
+  };
+}
+
+let engineBundleText: Promise<string> | null = null;
+function engineBundle(): Promise<string> {
+  engineBundleText ??= fetch(chrome.runtime.getURL(RUNTIME_FILES[0] ?? 'shim-core.page.js')).then((r) => r.text());
+  return engineBundleText;
+}
+
+interface OpenHost {
+  host: ExtensionPageHost;
+  events: PageRuntimeEvent[];
+  console: PageConsoleMessage[];
+  popups: string[];
+  offs: Array<() => void>;
+}
+const openHosts = new Map<string, OpenHost>();
+let hostSeq = 0;
+/** The open host on a tab, if any (one per tab: the debugger attaches once). */
+function hostOnTab(tabId: number): ExtensionPageHost | undefined {
+  for (const { host } of openHosts.values()) if (host.tabId === tabId && !host.isClosed()) return host;
+  return undefined;
+}
+
+/** Opens a PageHost on `tabId`; answers its handle. */
+async function openHost(tabId: number): Promise<string> {
+  if (hostOnTab(tabId)) throw new Error('a session already holds this tab');
+  const db = await store();
+  const host = await openPageHost(tabId, { engineBundle, storage: sessionStorageFor(db, new Map()), nudge: nudgeTab });
+  const id = `host-${++hostSeq}`;
+  const entry: OpenHost = { host, events: [], console: [], popups: [], offs: [] };
+  entry.offs.push(host.onRuntimeEvent((e) => { entry.events.push(e); }));
+  entry.offs.push(host.onConsole((m) => { entry.console.push(m); }));
+  openHosts.set(id, entry);
+  return id;
+}
+
+/**
+ * The worker's handle on its session hosts, for a driver outside the worker
+ * (the conformance runner, over the worker's global): open, call a member
+ * by name, drain what the page reported since the last drain, close.
+ */
+const pageHosts = {
+  open: openHost,
+  async close(id: string): Promise<boolean> {
+    const entry = openHosts.get(id);
+    if (!entry) return false;
+    openHosts.delete(id);
+    for (const off of entry.offs) off();
+    await entry.host.close();
+    return true;
+  },
+  drain(id: string): { url: string; closed: boolean; events: PageRuntimeEvent[]; console: PageConsoleMessage[]; popups: string[] } | null {
+    const entry = openHosts.get(id);
+    if (!entry) return null;
+    const out = { url: entry.host.url(), closed: entry.host.isClosed(), events: entry.events, console: entry.console, popups: entry.popups };
+    entry.events = [];
+    entry.console = [];
+    entry.popups = [];
+    return out;
+  },
+  /**
+   * For the harnesses: the hold sequence as a worker that starts with no
+   * record of it would seed it (`forgetHoldSeq`), or set to a value the
+   * pages are past (`forceHoldSeq`), since a real restart of the worker
+   * cannot be driven under Playwright (its own attachment keeps the
+   * worker alive).
+   */
+  async forgetHoldSeq(): Promise<number> {
+    await chrome.storage.session.remove(HOLD_SEQ_KEY).catch(() => undefined);
+    holdSeq = 0;
+    holdSeqReady = seedHoldSeq();
+    await holdSeqReady;
+    return holdSeq;
+  },
+  forceHoldSeq(seq: number): void {
+    holdSeq = seq;
+  },
+  /**
+   * For the harnesses: drop the tab's runtime ports the way the worker
+   * idling out does (the runtime reconnects a second later, its committed
+   * rules running meanwhile). Answers how many it dropped.
+   */
+  dropRuntimePorts(tabId: number): number {
+    let n = 0;
+    for (const [port, r] of [...runtimePorts]) {
+      if (r.tabId !== tabId) continue;
+      runtimePorts.delete(port);
+      try { port.disconnect(); } catch { /* already gone */ }
+      n++;
+    }
+    return n;
+  },
+  /** Watch popups (closed on creation and reported in `drain`) or stop. */
+  watchPopups(id: string, on: boolean): boolean {
+    const entry = openHosts.get(id);
+    if (!entry) return false;
+    if (on && !entry.offs.some((f) => f.name === 'popups')) {
+      const off = entry.host.onPopup?.((url) => { entry.popups.push(url); });
+      if (off) {
+        const named = Object.defineProperty(() => off(), 'name', { value: 'popups' }) as () => void;
+        entry.offs.push(named);
+      }
+    } else if (!on) {
+      const i = entry.offs.findIndex((f) => f.name === 'popups');
+      if (i >= 0) {
+        entry.offs[i]?.();
+        entry.offs.splice(i, 1);
+      }
+    }
+    return true;
+  },
+  async call(id: string, method: string, args: unknown[]): Promise<unknown> {
+    const entry = openHosts.get(id);
+    if (!entry) throw new Error(`no such host: ${id}`);
+    const h = entry.host;
+    switch (method) {
+      case 'url': return h.url();
+      case 'isClosed': return h.isClosed();
+      case 'capabilities': return h.capabilities;
+      case 'evaluate': return h.evaluate(String(args[0]), args[1] as PageWorld);
+      case 'screenshot': return h.screenshot(args[0] as ScreenshotOptions | undefined);
+      case 'applyPreview': h.applyPreview(args[0] as PreviewRule); return undefined;
+      case 'removePreview': h.removePreview(String(args[0])); return undefined;
+      case 'reload': h.reload(typeof args[0] === 'string' ? args[0] : undefined); return undefined;
+      case 'waitForLoad': return h.waitForLoad(args[0] as LoadWaitOptions);
+      case 'input': return h.input?.(args[0] as PageInputCommand[], () => true);
+      case 'documentToken': return h.documentToken();
+      case 'navigationCount': return h.navigationCount?.();
+      case 'heldFor': return h.heldFor(String(args[0]));
+      case 'heldAll': return h.heldAll();
+      default: throw new Error(`unknown host member: ${method}`);
+    }
+  },
+};
+(globalThis as unknown as { shimPageHosts: typeof pageHosts }).shimPageHosts = pageHosts;
 
 type MessageListener = (msg: unknown, sender: chrome.runtime.MessageSender, sendResponse: (answer: WorkerAnswer) => void) => boolean;
 
