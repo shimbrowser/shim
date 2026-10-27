@@ -258,20 +258,25 @@ async function openOnUrl(deps: ControlDeps, req: AttachRequest, signal: AbortSig
   if (!resolved.ok) return errorResponse(resolved.error, resolved.detail);
   const consent = await deps.consent.request({ ...resolved.subject, openUrl: target.url, openOrigin: target.origin }, signal);
   if (!consent.allowed) return consentRefusal(consent);
-  if (signal.aborted) return errorResponse('consent-cancelled', CANCELLED);
+  const acquired = await deps.acquiredOrigins(req, probe);
+  const fail = async (response: ControlResponse): Promise<ControlResponse> => {
+    if (acquired.length) await deps.releaseOrigins(acquired);
+    return response;
+  };
+  if (signal.aborted) return fail(errorResponse('consent-cancelled', CANCELLED));
   const again = await deps.resolveAttach(req, probe);
-  if (!again.ok) return errorResponse(again.error, again.detail);
+  if (!again.ok) return fail(errorResponse(again.error, again.detail));
   const opened = await deps.openTab(target.url, signal);
   if (!opened.ok) {
     if (opened.tabId !== null) await deps.closeTab(opened.tabId);
-    if (signal.aborted) return errorResponse('consent-cancelled', CANCELLED);
-    return errorResponse(opened.error, opened.detail);
+    if (signal.aborted) return fail(errorResponse('consent-cancelled', CANCELLED));
+    return fail(errorResponse(opened.error, opened.detail));
   }
   const tab = opened.tab;
   const landed = originOf(tab.url);
   if (landed !== target.origin) {
     await deps.closeTab(tab.tabId);
-    return { status: statusForError('target-changed'), body: { ok: false, error: 'target-changed', landedHost: landed ?? tab.url, detail: `the page loaded at ${landed ?? (tab.url || 'an empty page')}, not ${target.origin} that was approved; the tab was closed` } };
+    return fail({ status: statusForError('target-changed'), body: { ok: false, error: 'target-changed', landedHost: landed ?? tab.url, detail: `the page loaded at ${landed ?? (tab.url || 'an empty page')}, not ${target.origin} that was approved; the tab was closed` } });
   }
   return openOn(deps, req, tab, signal, { approvedOrigin: target.origin, ownsTab: true, consent: 'asked' });
 }
@@ -291,11 +296,18 @@ async function openSession(deps: ControlDeps, body: unknown, signal: AbortSignal
   if (!resolved.ok) return errorResponse(resolved.error, resolved.detail);
   const consent = await deps.consent.request(resolved.subject, signal);
   if (!consent.allowed) return consentRefusal(consent);
+  // From here the card's allow may have acquired origins: every exit but
+  // the open's success gives back the ones nothing else needs.
+  const acquired = await deps.acquiredOrigins(req, tab);
+  const fail = async (response: ControlResponse): Promise<ControlResponse> => {
+    if (acquired.length) await deps.releaseOrigins(acquired);
+    return response;
+  };
   const current = await deps.tab(tabId);
   const again = current ? await deps.resolveAttach(req, current) : null;
-  if (!current || !again) return errorResponse('target-changed', 'the tab went away while the card waited for an answer');
-  if (!again.ok) return errorResponse(again.error, again.detail);
-  if (again.subject.scope !== resolved.subject.scope) return errorResponse('target-changed', `the tab left ${resolved.subject.scope} while the card waited for an answer`);
+  if (!current || !again) return fail(errorResponse('target-changed', 'the tab went away while the card waited for an answer'));
+  if (!again.ok) return fail(errorResponse(again.error, again.detail));
+  if (again.subject.scope !== resolved.subject.scope) return fail(errorResponse('target-changed', `the tab left ${resolved.subject.scope} while the card waited for an answer`));
   return openOn(deps, req, current, signal, { ownsTab: false, consent: consent.via === 'remembered' ? 'remembered' : 'asked' });
 }
 

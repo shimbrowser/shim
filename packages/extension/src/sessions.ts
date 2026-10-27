@@ -23,7 +23,7 @@
 
 import type { Spec, Rule } from '@shimbrowser/core/types';
 import type { PageHost } from '@shimbrowser/core/page-host';
-import { createSessionRegistry, LEASE_TIMEOUT, BeginRefusal, type SessionLease, type SessionLeases, type SessionRegistry, type SessionBackend } from '@shimbrowser/core/session-registry';
+import { createSessionRegistry, LEASE_TIMEOUT, BeginRefusal, TargetChangedError, type SessionLease, type SessionLeases, type SessionRegistry, type SessionBackend } from '@shimbrowser/core/session-registry';
 import {
   createShimSessionBackend, type ShimSessionSource, type ShimSessionTarget, type ShimSessionHandle, type PreparedCommit, type CommitWrite,
 } from '@shimbrowser/core/shim-session';
@@ -296,6 +296,17 @@ export function createSessions(deps: SessionsDeps): Sessions {
     async begin(args) {
       const target = args.target as ExtensionSessionTarget;
       const sessionId = args.sessionId;
+      // The page as attached must still be what the card approved: the
+      // lease wait and the attach leave room for a navigation. A mismatch
+      // closes the host and answers target-changed.
+      const url = target.page.host.url();
+      const now = ((): URL | null => { try { return new URL(url); } catch { return null; } })();
+      const scopeOk = args.approvedScope === undefined || (now !== null && now.hostname === args.approvedScope);
+      const originOk = args.approvedOrigin === undefined || (now !== null && now.origin === args.approvedOrigin);
+      if (!scopeOk || !originOk) {
+        await target.page.close().catch(() => undefined);
+        throw new TargetChangedError(`the tab moved to ${url || 'an empty page'} before the session opened; ask again`);
+      }
       const handle = await backend.begin(args);
       if (target.committedDown) note(sessionId, target.committedDown);
       return handle;

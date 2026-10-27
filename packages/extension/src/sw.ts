@@ -1203,7 +1203,9 @@ const controlDeps: ControlDeps = {
     const needed = await patternsNeeded(req, tab);
     if (needed.error) return { ok: false, error: needed.error, ...(needed.detail ? { detail: needed.detail } : {}) };
     const missing = await missingOf(needed.patterns);
-    missingAtResolve.set(req, missing);
+    // What the card may acquire: the first resolve's view, never the one
+    // after the answer (by then nothing is missing).
+    if (!missingAtResolve.has(req)) missingAtResolve.set(req, missing);
     return {
       ok: true,
       tab,
