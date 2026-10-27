@@ -286,6 +286,10 @@ export function createSessions(deps: SessionsDeps): Sessions {
           reset: { spec: current.spec, handlers: current.handlers },
         };
       }
+      // The signal may have aborted during the awaited read above (the
+      // bridge turned off, the session ended): the last check before the
+      // durable write, after which the commit has happened.
+      if (signal.aborted) return { ok: false, error: 'session-ended' };
       const version = specVersion(current.spec) + 1;
       const next: Spec = { ...merged.spec, id: shimId, version, ...(typeof current.spec.bundleHash === 'string' ? { bundleHash: current.spec.bundleHash } : {}) };
       // The authoring exchange core appended to the file's envelope is kept
