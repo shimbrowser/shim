@@ -270,7 +270,7 @@ export const CONFORMANCE_CAPABILITIES = [
   'mount:inline', 'mount:portal', 'mount:overlay', 'mount:shadow', 'self-healing',
   'witness:capture', 'witness:verify', 'witness:set', 'rebase:refresh', 'rebase:promote', 'rebase:recover', 'rebase:quarantine',
   'api.storage', 'api.cleanup', 'handler-errors', 'console', 'spa-navigation', 'teardown', 'page-tools', 'strict-csp',
-  'no-match', 'trusted-input', 'superseded-load',
+  'no-match', 'trusted-input', 'superseded-load', 'api.onAnchorChange',
 ] as const;
 export type ConformanceCapability = (typeof CONFORMANCE_CAPABILITIES)[number];
 
@@ -527,6 +527,36 @@ const H = {
   console.warn('conf-warn-message');
 }`,
   broken: 'function broken( { return 1; }',
+  // api.onAnchorChange: counts deliveries on the anchor, and on each one writes
+  // a site-like (unowned) node into its own anchor synchronously — a write
+  // that must never be reported back to it.
+  watchList: `function watchList({ anchor, api }) {
+  let n = 0;
+  api.onAnchorChange(() => {
+    n += 1;
+    anchor.setAttribute('data-conf-changes', String(n));
+    const old = anchor.querySelector('.conf-echo');
+    if (old) old.remove();
+    const echo = document.createElement('li');
+    echo.className = 'conf-echo';
+    anchor.appendChild(echo);
+  });
+  anchor.setAttribute('data-conf-changes', '0');
+}`,
+  watchListB: `function watchListB({ anchor, api }) {
+  let n = 0;
+  api.onAnchorChange(() => { n += 1; anchor.setAttribute('data-conf-changes-b', String(n)); });
+}`,
+  watchThrows: `function watchThrows({ anchor, api }) {
+  api.onAnchorChange(() => { throw new Error('conf-change-boom'); });
+  anchor.setAttribute('data-conf-watch-throws', 'ready');
+}`,
+  watchAsyncMount: `function watchAsyncMount({ anchor, api }) {
+  let n = 0;
+  api.onAnchorChange(() => { n += 1; anchor.setAttribute('data-conf-async-changes', String(n)); });
+  anchor.setAttribute('data-conf-async', 'waiting');
+  return new Promise((resolve) => setTimeout(() => { anchor.setAttribute('data-conf-async', 'landed'); resolve(); }, 700));
+}`,
   strictNote: `function strictNote({ anchor }) {
   const s = document.createElement('span');
   s.className = 'conf-strict';
@@ -1554,9 +1584,76 @@ const inputCase: ConformanceCase = {
   },
 };
 
+const anchorChangeCase: ConformanceCase = {
+  id: 'anchor-change',
+  title: 'api.onAnchorChange fires for childList changes inside its anchor, and nothing else',
+  covers: ['api.onAnchorChange', 'script', 'handler-errors'],
+  async run(kit) {
+    if (!(await kit.load('/apply'))) return;
+    const count = (attr = 'data-conf-changes', sel = '#list') =>
+      kit.read(`document.querySelector(${JSON.stringify(sel)}).getAttribute(${JSON.stringify(attr)})`);
+    const watchKey = kit.apply({ id: 'watch-list', anchor: css('#list'), mutations: [{ kind: 'script', handler: 'watchList' }], handlers: { watchList: H.watchList } });
+    kit.check('the handler mounted', (await kit.until(async () => (await count()) === '0' ? true : null)) === true, await count());
+
+    await kit.read(`document.querySelector('#a').setAttribute('title', 'changed')`);
+    await kit.sleep(400);
+    kit.check('an attribute change inside the anchor is not delivered', (await count()) === '0', await count());
+    await kit.read(`document.querySelector('#grid').appendChild(document.createElement('span'))`);
+    await kit.sleep(400);
+    kit.check('a childList change outside the anchor is not delivered', (await count()) === '0', await count());
+
+    await kit.read(`document.querySelector('#b').appendChild(document.createElement('b'))`);
+    kit.check('a childList change deep inside the anchor is delivered', (await kit.until(async () => (await count()) === '1' ? true : null)) === true, await count());
+    await kit.sleep(600);
+    kit.check('the hook\'s own synchronous write into its anchor is never delivered back', (await count()) === '1', await count());
+    kit.check('…and that write landed', (await kit.read(`document.querySelectorAll('#list > .conf-echo').length`)) === 1);
+    await kit.read(`document.querySelector('#c').textContent = 'C2'`);
+    kit.check('a second site change is delivered again', (await kit.until(async () => (await count()) === '2' ? true : null)) === true, await count());
+
+    // Same-key replacement: only the new application's hook runs.
+    kit.apply({ id: 'watch-list', anchor: css('#list'), mutations: [{ kind: 'script', handler: 'watchListB' }], handlers: { watchListB: H.watchListB } });
+    await kit.sleep(300);
+    await kit.read(`document.querySelector('#a').appendChild(document.createElement('i'))`);
+    kit.check('after a same-key replacement the new hook fires', (await kit.until(async () => (await count('data-conf-changes-b')) === '1' ? true : null)) === true, await count('data-conf-changes-b'));
+    kit.check('…and the replaced one never does', (await count()) === '2', await count());
+    kit.remove(watchKey);
+    await kit.sleep(200);
+    await kit.read(`document.querySelector('#a').appendChild(document.createElement('i'))`);
+    await kit.sleep(400);
+    kit.check('after teardown no hook fires', (await count('data-conf-changes-b')) === '1', await count('data-conf-changes-b'));
+
+    // A throwing hook is reported on the handler-error channel and stays registered.
+    const throwKey = kit.apply({ id: 'watch-throws', anchor: css('#note-target'), mutations: [{ kind: 'script', handler: 'watchThrows' }], handlers: { watchThrows: H.watchThrows } });
+    await kit.until(async () => (await count('data-conf-watch-throws', '#note-target')) === 'ready' ? true : null);
+    await kit.read(`document.querySelector('#note-target').appendChild(document.createElement('i'))`);
+    const err = await kit.event((e) => e.kind === 'handler-error' && e.specId === throwKey);
+    kit.check('a throwing hook reports handler-error with its handler name and an onAnchorChange message',
+      err?.handlerName === 'watchThrows' && err.ruleId === 'watch-throws' && typeof err.message === 'string' && err.message === 'onAnchorChange: conf-change-boom', err);
+    kit.remove(throwKey);
+
+    // A change while the initial (async) mount is still awaiting is delivered once, after it lands.
+    const asyncKey = kit.apply({ id: 'watch-async', anchor: css('#lead'), mutations: [{ kind: 'script', handler: 'watchAsyncMount' }], handlers: { watchAsyncMount: H.watchAsyncMount } });
+    await kit.until(async () => (await count('data-conf-async', '#lead')) === 'waiting' ? true : null);
+    await kit.read(`document.querySelector('#lead').appendChild(document.createTextNode(' more'))`);
+    await kit.sleep(200);
+    kit.check('nothing is delivered while the mount is in flight', (await count('data-conf-async-changes', '#lead')) === null, await count('data-conf-async-changes', '#lead'));
+    kit.check('a change during the in-flight mount is delivered once after it lands',
+      (await kit.until(async () => (await count('data-conf-async-changes', '#lead')) === '1' ? true : null, 3000)) === true, await count('data-conf-async-changes', '#lead'));
+    kit.remove(asyncKey);
+
+    // Torn down while the mount is still in flight: never delivers.
+    const doomedKey = kit.apply({ id: 'watch-doomed', anchor: css('#ad'), mutations: [{ kind: 'script', handler: 'watchAsyncMount' }], handlers: { watchAsyncMount: H.watchAsyncMount } });
+    await kit.until(async () => (await count('data-conf-async', '#ad')) === 'waiting' ? true : null);
+    kit.remove(doomedKey);
+    await kit.read(`document.querySelector('#ad').appendChild(document.createElement('i'))`);
+    await kit.sleep(1200);
+    kit.check('a mount torn down in flight never delivers', (await count('data-conf-async-changes', '#ad')) === null, await count('data-conf-async-changes', '#ad'));
+  },
+};
+
 export const CONFORMANCE_CASES: readonly ConformanceCase[] = [
   applyCase, setWitnessCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, cropScrollCase, strictCspCase, sharedModuleCase, noMatchCase,
-  inputCase, supersededLoadCase,
+  inputCase, supersededLoadCase, anchorChangeCase,
 ];
 
 /** Every capability some case vouches for. */

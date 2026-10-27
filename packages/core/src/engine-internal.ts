@@ -4,6 +4,7 @@
 // a small stateless helper — no rule/patch state lives in this module.
 
 import type { Spec, Rule, Mutation } from './types';
+import type { MountRecord } from './anchor-change';
 import type { CoreApi, CoreHandlerApi, CoreRouteMountApi, RouteMatch } from './api';
 
 // --- Runtime/engine-only Spec extension ------------------------------------
@@ -61,6 +62,8 @@ export type HandlerMap = Record<string, PatchHandler>;
 export interface RuleMountEntry {
   outputs: HTMLElement[];
   cleanups: Array<() => void>;
+  // This mount's api.onAnchorChange record (anchor-change.ts).
+  change?: MountRecord<Node>;
 }
 
 // Structural echo of anchors.ts's (unexported) RejectedSample — only the

@@ -55,6 +55,19 @@ export interface MountCleanup {
 // `mount`) receives, as the engine sees it.
 export type CoreHandlerApi = CoreApi & MountCleanup & HostApiMembers;
 
+// The per-mount subtree-change hook an ANCHORED handler's api carries
+// (apply-rule.ts; not a mount-route handler's). `fn` runs, with no arguments,
+// in a frame after the site changes the children of the anchor or of anything
+// inside it (childList under <body> only; never for the hook's own synchronous
+// writes or writes inside shim-owned DOM). Torn down with the mount. Returns an
+// unsubscribe function. Mechanics: anchor-change.ts.
+export interface AnchorChangeRegistrar {
+  onAnchorChange(fn: () => unknown): () => void;
+}
+
+// What an anchored rule's handler receives.
+export type CoreAnchoredHandlerApi = CoreHandlerApi & AnchorChangeRegistrar;
+
 // The route match a mount-route handler receives, and receives again on each
 // in-place inner navigation via api.onRouteChange (nested
 // sub-routes).

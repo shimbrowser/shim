@@ -32,6 +32,10 @@ export interface RuleRuntimeState {
   // Written by apply-rule's restamp path, read by the status reporter's
   // layoutNote. Reset to null each restamp pass.
   relativeReorderNote: string | null;
+  // Set once when an api.onAnchorChange hook on this rule is throttled (it
+  // re-fired continuously). Persistent for the rule's life; composed into the
+  // rule-status note by the reporter.
+  anchorChangeNote: string | null;
   // Matches that passed the rule's fingerprint on the latest scan — what the
   // reconciler judges resolution by. `state.size` can be larger: a script
   // rule's member that stopped verifying stays mounted (apply-rule.ts).
@@ -48,6 +52,7 @@ export function makeRuleState(): RuleRuntimeState {
     resolvedEl: null,
     witnessRejection: null,
     relativeReorderNote: null,
+    anchorChangeNote: null,
     verifiedCount: 0,
     unverifiedCount: 0,
   };

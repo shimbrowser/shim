@@ -54,8 +54,12 @@ Rules that keep handlers safe — every one learned from real breakage:
 - **Never move or reparent the site's own DOM into containers you create.** When the rule
   tears down, your container goes and the site's nodes go with it, permanently. Clone
   (`node.cloneNode(true)`) and `hide` the original instead.
-- **If you must observe mutations, never observe DOM you also mutate**: `disconnect()` at
-  the top of the callback, re-`observe()` at the end, make the work idempotent (a marker
+- **React to the site changing the inside of your anchor with `api.onAnchorChange(fn)`**,
+  not a `MutationObserver`: a feed item whose content renders after you ran, a table whose
+  rows get re-sorted, a list that re-renders. See "Re-running when the anchor's content
+  changes" below.
+- **If you still must observe mutations, never observe DOM you also mutate**: `disconnect()`
+  at the top of the callback, re-`observe()` at the end, make the work idempotent (a marker
   attribute), and `api.cleanup(() => observer.disconnect())`. An observer that sees its own
   writes freezes the page.
 - **A rule can't anchor on DOM a shim created** (a handler's output, a portal host). To
@@ -70,6 +74,38 @@ Rules that keep handlers safe — every one learned from real breakage:
   `border`, `border-radius`, `padding`, `box-shadow`; and the site's CSS custom properties
   (`getComputedStyle(document.documentElement).getPropertyValue('--color-primary')`). A
   default-styled button next to the site's own is a first-preview failure, not polish.
+
+### Re-running when the anchor's content changes: `api.onAnchorChange`
+
+The engine runs a handler once per anchor. When the site later changes what is *inside*
+that anchor (a virtualized feed fills a unit's content after mount, tablesorter re-orders a
+table's rows, a list re-renders its items), register `api.onAnchorChange(fn)` and redo the
+work there:
+
+```js
+module.exports = function hideSponsored({ anchor, api }) {
+  const classify = () => {
+    const sponsored = /\bSponsored\b/.test(anchor.innerText);
+    if ((anchor.style.display === 'none') !== sponsored) anchor.style.display = sponsored ? 'none' : '';
+  };
+  api.onAnchorChange(classify);
+  classify();
+};
+```
+
+- `fn` runs with no arguments, in a frame after the change, at most once a frame per anchor,
+  after the engine's own re-scan. Re-read the anchor; don't trust earlier references.
+- It sees elements and text added or removed **anywhere under the anchor** (under `<body>`;
+  not inside shadow roots). It does **not** see attribute or style changes.
+- It is never told about `fn`'s own synchronous writes, nor about writes inside the DOM your
+  handler returned. Writes you make later (after an `await`, in a timer) into the site's DOM
+  are reported like the site's own, so write only what changed.
+- It stops when the mount goes (the anchor leaves, the rule tears down, a re-mount); a member
+  of a multi-match rule that stops matching its fingerprint gets no calls until it matches
+  again. It returns an unsubscribe function.
+- If `fn` returns a promise, the next call waits until it settles. A throw is reported like a
+  handler error and `fn` stays registered. A hook that keeps re-firing is throttled and the
+  preview's rule status says so.
 
 ### A page-level script, and in-site navigation
 
@@ -141,13 +177,14 @@ rules so the framework that owns the list keeps working:
   item, so your controller must re-apply. But writing every value on every pass churns
   layout and can loop. Compare first, as in
   `if (el.style.order !== want) el.style.order = want`.
-- **Guard the observer against its own writes.** New items arrive as the user scrolls,
-  and a re-render can reset an item's `style` without adding a node. So the controller
-  does need a `MutationObserver` on the container, watching `childList` and the `style`
-  attribute across the subtree (`{ childList: true, subtree: true, attributes: true,
-  attributeFilter: ['style'] }`). Batch the work into one `requestAnimationFrame`,
-  `disconnect()` before you write and re-`observe()` after, so your own writes are never
-  observed, and add `api.cleanup(() => observer.disconnect())`.
+- **Re-apply with `api.onAnchorChange`.** New items arrive as the user scrolls and the
+  list re-renders: register `api.onAnchorChange(apply)` on the controller and re-run the
+  sort/filter there (it never sees its own `style` writes, and it's batched per frame).
+- **Only if the site resets an item's `style` without adding or removing any node** (check:
+  your order is lost but `onAnchorChange` never fired) add an attribute observer:
+  `{ subtree: true, attributes: true, attributeFilter: ['style'] }`, batch into one
+  `requestAnimationFrame`, `disconnect()` before you write and re-`observe()` after, so your
+  own writes are never observed, and add `api.cleanup(() => observer.disconnect())`.
 - Put the control (the sort menu, the filter box) in the same handler's returned DOM, and
   refresh on in-site navigation as above.
 
