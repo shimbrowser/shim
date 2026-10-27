@@ -29,7 +29,10 @@ right):
 with `ctx = { url, method, status, params }`. The transform runs in the page's **main
 world**, must be pure and synchronous (no `api`, no DOM); a throw or an `undefined` return
 ships the original body. Only same-registrable-domain JSON responses are touched, and only
-when the site fetches again — reload before concluding a rewrite doesn't work.
+when the site fetches again — reload before concluding a rewrite doesn't work. Rules whose
+endpoints overlap (in this shim or another on the host) all run, chained in priority order:
+each transform gets the previous one's output, the top shim in the sidebar runs last, and a
+throw or `undefined` from one passes its input on to the next.
 
 **`intercept`** — wrap a function in the site's own AMD/RequireJS module (check first:
 `evaluate_in_page('typeof define !== "undefined" && !!define.amd')`):

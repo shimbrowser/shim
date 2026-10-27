@@ -368,6 +368,39 @@ export function collectRewriteEntries(bags: RewriteBag[]): RewriteEntry[] {
   return entries;
 }
 
+// The committed shim/rule an authoring preview stands for.
+export type PreviewOwner = { specId: string; ruleId: string };
+
+// Pure: splice preview entries into the committed table's chain order (the
+// wrapper runs EVERY matching entry in table order, highest priority last).
+// A preview of a committed rule REPLACES that rule's entries in place: both
+// running would apply the transform twice, the rewrite analogue of the
+// engine's twin suppression for DOM previews. A new rule of a committed shim
+// goes right after that shim's last entry, its own priority slot. A preview
+// with no committed shim on this host goes last (the shim being authored has
+// the final say while it is previewed).
+export function mergePreviewEntries(
+  committed: RewriteEntry[],
+  previews: Array<{ owner: PreviewOwner | null; entries: RewriteEntry[] }>,
+): RewriteEntry[] {
+  let out = committed.slice();
+  const tail: RewriteEntry[] = [];
+  for (const { owner, entries } of previews) {
+    if (!owner) { tail.push(...entries); continue; }
+    const twin = out.findIndex((e) => e.specId === owner.specId && e.ruleId === owner.ruleId);
+    if (twin >= 0) {
+      out = out.filter((e, i) => i < twin || !(e.specId === owner.specId && e.ruleId === owner.ruleId));
+      out.splice(twin, 0, ...entries);
+      continue;
+    }
+    let last = -1;
+    out.forEach((e, i) => { if (e.specId === owner.specId) last = i; });
+    if (last >= 0) out.splice(last + 1, 0, ...entries);
+    else tail.push(...entries);
+  }
+  return [...out, ...tail];
+}
+
 // Wrap a transform's raw handler source into a self-invoking literal the
 // generated wrapper source can embed directly:
 //   - "expr" form: the LLM's bare function-expression convention
@@ -414,7 +447,7 @@ export function transformLiteral(src: string, form: TransformForm): string {
 
 // The once-guarded main-world IIFE: installs (and, on a live update, re-
 // installs) the fetch/XHR wrapper, matches same-registrable-domain JSON
-// requests against the table, runs the matched transform, and publishes
+// requests against the table, chains every matching transform, and publishes
 // per-rule apply/error stats onto `<html data-shim-rewrite-stats>` for the
 // engine to read at settle time (component-id's cross-world attribute-bridge
 // pattern). `matchSerializedTokens`/`hostInScope` are interpolated via
@@ -448,31 +481,60 @@ function buildInfraSrc(): string {
     }
     publish();
   };
-  function findEntry(method, urlStr) {
+  // EVERY matching entry runs, chained in table order: each transform gets
+  // the previous one's output. Table order is ascending cascade priority
+  // (the host sorts the bags it collects; within a shim, rule then
+  // mutation order), so the highest-priority shim's transform runs LAST and has the
+  // final say on the body, the same way its CSS rule sits last in the sorted
+  // sheet and wins. First-match-wins used to silently shadow every later
+  // rule on an overlapping endpoint.
+  function findEntries(method, urlStr) {
     if (!table.entries.length) return null;
     var u; try { u = new URL(urlStr, location.href); } catch (e) { return null; }
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
     if (!IN_SCOPE(u.hostname, table.regDomain)) return null;
+    var hits = [];
     for (var i = 0; i < table.entries.length; i++) {
       var e = table.entries[i];
       if (e.method && e.method !== method) continue;
       var m = MATCH(e.toks, e.hasWildcard, u.pathname);
-      if (m) return { entry: e, params: m.params, url: u.href };
+      if (m) hits.push({ entry: e, params: m.params, url: u.href });
     }
-    return null;
+    return hits.length ? hits : null;
   }
+  // One entry's transform. An entry counts as applied only once its output
+  // serializes, so an unserializable return (a cycle) is that entry's error
+  // and its input passes on, never the whole response's failure.
   function runTransform(hit, json, method, status) {
     var fn = transforms[hit.entry.key];
-    if (typeof fn !== 'function') return undefined;
+    if (typeof fn !== 'function') return null;
     try {
       var out = fn(json, { url: hit.url, method: method, status: status, params: hit.params });
-      if (out === undefined) return undefined;
+      if (out === undefined) return null;
+      var text = JSON.stringify(out);
+      if (typeof text !== 'string') return null;
       bump(hit.entry.key, 'applied');
-      return out;
+      return { value: out, text: text };
     } catch (err) {
       bump(hit.entry.key, 'errors', err);
-      return undefined;
+      return null;
     }
+  }
+  // Run the chain. "text" is the current body as JSON text; "first" is an
+  // already-parsed copy the first entry may take (saves a parse). Every later
+  // entry gets a fresh parse of the last good text, so a transform that
+  // mutated its input in place and then threw or returned undefined can't
+  // leak a half-edit into the next one. Returns null when nothing changed.
+  function runChain(hits, text, first, method, status) {
+    var cur = null;
+    for (var i = 0; i < hits.length; i++) {
+      var input;
+      if (i === 0 && first !== undefined) input = first;
+      else { try { input = JSON.parse(cur ? cur.text : text); } catch (e) { break; } }
+      var r = runTransform(hits[i], input, method, status);
+      if (r) cur = r;
+    }
+    return cur;
   }
   function isJson(ct) { return typeof ct === 'string' && ct.toLowerCase().indexOf('json') !== -1; }
   var origFetch = window.fetch;
@@ -485,20 +547,20 @@ function buildInfraSrc(): string {
         if (init && init.method) method = init.method;
         method = String(method).toUpperCase();
       } catch (e) {}
-      var hit = urlStr ? findEntry(method, urlStr) : null;
+      var hits = urlStr ? findEntries(method, urlStr) : null;
       var p = origFetch.apply(this, arguments);
-      if (!hit) return p;
+      if (!hits) return p;
       return p.then(function (res) {
         try {
           if (!isJson(res.headers.get('content-type'))) return res;
           return res.clone().text().then(function (text) {
             var json; try { json = JSON.parse(text); } catch (e) { return res; }
-            var out = runTransform(hit, json, method, res.status);
-            if (out === undefined) return res;
+            var out = runChain(hits, text, json, method, res.status);
+            if (!out) return res;
             try {
               var headers = new Headers(res.headers);
               headers.delete('content-length');
-              var rewritten = new Response(JSON.stringify(out), { status: res.status, statusText: res.statusText, headers: headers });
+              var rewritten = new Response(out.text, { status: res.status, statusText: res.statusText, headers: headers });
               try {
                 Object.defineProperty(rewritten, 'url', { value: res.url });
                 Object.defineProperty(rewritten, 'redirected', { value: res.redirected });
@@ -529,24 +591,29 @@ function buildInfraSrc(): string {
             if (xhr.readyState !== 4) return;
             var req = xhr.__shimRewriteReq;
             if (!req) return;
-            var hit = findEntry(req.method, req.url);
-            if (!hit) return;
+            var hits = findEntries(req.method, req.url);
+            if (!hits) return;
             var ct; try { ct = xhr.getResponseHeader('content-type'); } catch (e) { return; }
             if (!isJson(ct)) return;
             try {
               var rt = xhr.responseType;
+              var text;
               var json;
-              if (rt === '' || rt === 'text') json = JSON.parse(xhr.responseText);
-              else if (rt === 'json') json = xhr.response;
+              if (rt === '' || rt === 'text') { text = xhr.responseText; json = JSON.parse(text); }
+              else if (rt === 'json') {
+                json = xhr.response;
+                // Later entries re-parse from text; take it before the first
+                // transform can touch the page's own object.
+                text = hits.length > 1 ? JSON.stringify(json) : '';
+              }
               else return;
-              var out = runTransform(hit, json, req.method, xhr.status);
-              if (out === undefined) return;
+              var out = runChain(hits, text, json, req.method, xhr.status);
+              if (!out) return;
               if (rt === 'json') {
-                Object.defineProperty(xhr, 'response', { value: out, configurable: true });
+                Object.defineProperty(xhr, 'response', { value: out.value, configurable: true });
               } else {
-                var text = JSON.stringify(out);
-                Object.defineProperty(xhr, 'responseText', { value: text, configurable: true });
-                Object.defineProperty(xhr, 'response', { value: text, configurable: true });
+                Object.defineProperty(xhr, 'responseText', { value: out.text, configurable: true });
+                Object.defineProperty(xhr, 'response', { value: out.text, configurable: true });
               }
             } catch (e) {}
           });
@@ -567,7 +634,7 @@ function buildInfraSrc(): string {
 export function buildWrapperSrc(payload: RewriteTablePayload, formFor: (src: string) => TransformForm): string {
   // The table sent into the page never carries transform SOURCE — only the
   // compiled matcher shape (key/method/toks/hasWildcard) the wrapper's
-  // findEntry() needs. The actual functions live in `transforms`, spliced in
+  // findEntries() needs. The actual functions live in `transforms`, spliced in
   // as source text below (keyed the same way), never round-tripped through
   // JSON (functions aren't JSON-serializable in the first place).
   const strippedEntries = payload.entries.map(({ transformSource, ...rest }) => rest);
