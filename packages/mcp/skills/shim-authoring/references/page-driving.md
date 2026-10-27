@@ -15,7 +15,10 @@ from outside (AppleScript, another browser).
   instance (`data-for="t3"`) when you create it. In an attach
   session (the user's logged-in tab) it touches **only your shim's own output** — what your
   previews and committed rules put on the page — in the top frame, outside shadow roots
-  (`scope: "shim-dom"`). Anything else is refused before any input, with a code:
+  (`scope: "shim-dom"`). Your output is what a `script` handler **returns** (and an inject
+  rule's root), with everything inside it; DOM a handler appends anywhere else — an editor
+  or menu it adds to `document.body` on a click — is not, so open such controls inside the
+  returned root. Anything else is refused before any input, with a code:
   `not-shim-dom` (the site's own controls), `other-shim-dom` (another installed shim's),
   `site-activation` (your control sits in a site form, inside a site link or button, or in
   a label for a site control), `frame-unsupported`, `shadow-unsupported`, and
