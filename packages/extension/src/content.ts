@@ -101,6 +101,15 @@ interface Runtime {
     else fn();
   };
 
+  // Each shim's rule forms as the worker stamped them (BundledShim.forms),
+  // set before the engine runs the shim so an event it reports while
+  // booting is stamped too. The worker keeps an outcome only while the
+  // stored rule is still the form the event names.
+  const formsByShim = new Map<string, Record<string, string>>();
+  const formOf = (shimId: string, ruleId: unknown): string | undefined => {
+    const forms = formsByShim.get(shimId);
+    return forms && typeof ruleId === 'string' && Object.hasOwn(forms, ruleId) ? forms[ruleId] : undefined;
+  };
   const makeApi = (patchId: string): Core.CoreApi & Record<string, unknown> => {
     const unsupported = (member: string): void => {
       emit(patchId, 'unsupported-api', { specId: patchId, member, path: location.pathname });
@@ -150,7 +159,8 @@ interface Runtime {
       ai: { complete: refusal('ai.complete') },
       modules: { invoke: refusal('modules.invoke') },
       reportEvent(kind: string, payload?: Record<string, unknown>) {
-        emit(patchId, kind, { ...(payload || {}), path: location.pathname });
+        const form = formOf(patchId, payload?.ruleId);
+        emit(patchId, kind, { ...(payload || {}), path: location.pathname, ...(form !== undefined ? { form } : {}) });
       },
       onReady,
     };
@@ -172,6 +182,8 @@ interface Runtime {
     priority: number;
     version: number;
     handlers: HandlerMap;
+    /** The handler modules the control compiled, as one key: a bundle with another key reboots the shim (reconcile.ts). */
+    handlersKey: string;
     /** Each rule as the shim has it now, by id. */
     rules: Map<string, string>;
     /** Each rule as the control booted with it: a rule whose current form differs runs as an extra. */
@@ -182,6 +194,7 @@ interface Runtime {
   type DeployGate = { bundleHash: string; current: () => string | null; autoRepair?: false };
   const controls = new Map<string, Running>();
   const ruleJson = (rules: readonly Rule[] | undefined): Map<string, string> => new Map((rules ?? []).map((r) => [r.id, JSON.stringify(r)]));
+  const handlersKeyOf = (shim: BundledShim): string => JSON.stringify(Object.entries(shim.handlers ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
   const extraKey = (shimId: string, ruleId: string): string => `${shimId}:rebased:${ruleId}`;
   const deployFor = (spec: BundledShim['spec']): DeployGate | undefined => (typeof spec.bundleHash === 'string'
     ? { bundleHash: spec.bundleHash, current: deployId, ...(spec.autoRepair === false ? { autoRepair: false as const } : {}) }
@@ -208,9 +221,10 @@ interface Runtime {
         emit(shim.id, 'handler-compile-failed', { specId: shim.id, handler: problem.name, error: problem.error, path: location.pathname });
       }
       const suppressedRuleIds = [...(claims.get(shim.id) ?? [])];
+      formsByShim.set(shim.id, shim.forms ?? {});
       const control = ShimCore.run({ spec: shim.spec, handlers, priority: shim.priority, bundleHash: deployId, suppressedRuleIds }, makeApi(shim.id));
       const rules = ruleJson(shim.spec.rules);
-      controls.set(shim.id, { control, priority: shim.priority, version: shim.version, handlers, rules, booted: new Map(rules), extras: new Set(), deploy: deployFor(shim.spec) });
+      controls.set(shim.id, { control, priority: shim.priority, version: shim.version, handlers, handlersKey: handlersKeyOf(shim), rules, booted: new Map(rules), extras: new Set(), deploy: deployFor(shim.spec) });
     } catch (err) {
       console.error('[shim] boot failed', shim.id, err);
     }
@@ -262,6 +276,7 @@ interface Runtime {
     const running = controls.get(shim.id);
     if (!running) return;
     const next = ruleJson(shim.spec.rules);
+    formsByShim.set(shim.id, shim.forms ?? {});
     running.deploy = deployFor(shim.spec);
     try {
       for (const ruleId of running.rules.keys()) if (!next.has(ruleId)) takeDown(shim.id, running, ruleId);
@@ -317,8 +332,8 @@ interface Runtime {
     if (retired) return;
     if (!answer.ok || !('shims' in answer)) return;
     const bundle = answer as BundleAnswer;
-    const stamps = new Map([...controls].map(([id, r]) => [id, { priority: r.priority, version: r.version }]));
-    const { stop: gone, start, update: moved } = reconcileShims(stamps, bundle.shims);
+    const stamps = new Map([...controls].map(([id, r]) => [id, { priority: r.priority, version: r.version, handlersKey: r.handlersKey }]));
+    const { stop: gone, start, update: moved } = reconcileShims(stamps, bundle.shims.map((shim) => ({ ...shim, handlersKey: handlersKeyOf(shim) })));
     // The holds first: a shim booting below boots suppressed.
     if (typeof bundle.holdSeq === 'number' && bundle.holdSeq >= holdSeq) {
       holdSeq = bundle.holdSeq;
@@ -342,6 +357,11 @@ interface Runtime {
   // The isolated world (declarative mode) listens for it; the user-script
   // world (full mode) has no onMessage and is nudged over the port below.
   const onMessage = (chrome.runtime as { onMessage?: typeof chrome.runtime.onMessage }).onMessage;
+  const runningVersions = (): Record<string, number> => {
+    const out: Record<string, number> = {};
+    for (const [id, r] of controls) Object.defineProperty(out, id, { value: r.version, enumerable: true, writable: true, configurable: true });
+    return out;
+  };
   const onNudge = (msg: ToRuntime): void => {
     if (retired) return;
     if (msg.type === 'retire') {
@@ -384,6 +404,15 @@ interface Runtime {
     // and its teardown may have taken stylesheets this one shares.
     if (msg.type === 'reboot') for (const id of [...controls.keys()]) stop(id);
     sync();
+    // A sync with a sequence is acked once the look is done, with what runs
+    // then: a worker handing a commit over waits for the new version here.
+    const seq = msg.type === 'sync' ? msg.seq : undefined;
+    if (seq !== undefined) {
+      void chain.then(() => {
+        const ack: FromRuntime = { type: 'ack', seq, applied: true, versions: runningVersions() };
+        try { port?.postMessage(ack); } catch { /* the worker is gone */ }
+      });
+    }
   };
   if (onMessage) {
     onMessage.addListener((msg: unknown, sender, sendResponse: (answer: { ok: true }) => void) => {

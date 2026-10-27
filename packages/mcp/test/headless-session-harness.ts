@@ -290,6 +290,8 @@ async function main(): Promise<void> {
     check('--headless', cliMode(['--headless'], {}).mode === 'headless' && !cliMode(['--headless'], {}).visible);
     check('SHIM_MCP_MODE=headless and --visible', cliMode(['--visible'], { SHIM_MCP_MODE: 'headless' }).mode === 'headless' && cliMode(['--visible'], {}).visible);
     check('a flag beats the environment', cliMode(['--attach'], { SHIM_MCP_MODE: 'headless' }).mode === 'attach');
+    check('--target pins an attach host', cliMode(['--target', 'chrome'], {}).target === 'chrome' && cliMode([], { SHIM_MCP_TARGET: 'shim' }).target === 'shim' && cliMode([], {}).target === undefined);
+    check('an unknown target is refused', (() => { try { cliMode(['--target', 'edge'], {}); return false; } catch { return true; } })());
     let both = '';
     try { cliMode(['--attach', '--headless'], {}); } catch (e) { both = e instanceof Error ? e.message : String(e); }
     check('--attach with --headless is an error', /exclusive/.test(both), both);

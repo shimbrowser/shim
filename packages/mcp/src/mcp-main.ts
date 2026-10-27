@@ -11,7 +11,12 @@
 //   --headless     headless mode only: each
 //                  session opens its own Playwright Chromium
 //   --visible      headless sessions show their window
-//   Also SHIM_MCP_MODE=auto|attach|headless and SHIM_HEADLESS_VISIBLE=1.
+//   --target shim|chrome  which attach host every open goes to (the Shim
+//                  browser, or Shim for Chrome's bridge) unless the call
+//                  names one; without it, the one reachable, or the one
+//                  that listed the tab.
+//   Also SHIM_MCP_MODE=auto|attach|headless, SHIM_MCP_TARGET=shim|chrome and
+//   SHIM_HEADLESS_VISIBLE=1.
 //
 // No entry-point guard lives here: both bundles import this module, and each
 // keeps its own `require.main === module` check.
@@ -20,7 +25,7 @@ import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createShimMcpServer } from './server';
-import { defaultEnv, discoveryFilePath, readControlInfo, socketClient, type ControlInfo, type PathEnv } from './control-client';
+import { defaultEnv, discoveryFilePath, chromeDiscoveryFilePath, readControlInfo, socketClient, type ControlInfo, type PathEnv } from './control-client';
 import { attachOrLaunch, pidAlive, launchNeedsShell, type LaunchCommand, type LaunchExit, type LaunchOutcome, type Launched } from './launch';
 import { maxOutputTokens } from './results';
 import { createHeadlessControl, type HeadlessControl } from './headless-control';
@@ -112,6 +117,21 @@ async function serveHeadless(mode: CliMode, env: Record<string, string | undefin
   await server.connect(new StdioServerTransport());
 }
 
+// Shim for Chrome's bridge: the second attach host, read from its own
+// discovery file the same way (a dead pid is no endpoint).
+function chromeDeps(mode: CliMode, pathEnv: PathEnv): Pick<Parameters<typeof createShimMcpServer>[0], 'connectChrome' | 'chromeControlFile' | 'probeChrome' | 'defaultTarget'> {
+  const chromeControlFile = chromeDiscoveryFilePath(pathEnv);
+  return {
+    chromeControlFile,
+    connectChrome: () => {
+      const info = readControlInfo(chromeControlFile);
+      return info && pidAlive(info.pid) ? socketClient(info) : null;
+    },
+    probeChrome: () => probeAttach(chromeControlFile, readControlInfo, pidAlive),
+    ...(mode.target !== undefined ? { defaultTarget: mode.target } : {}),
+  };
+}
+
 async function serveAuto(mode: CliMode, pathEnv: PathEnv): Promise<void> {
   const controlFile = discoveryFilePath(pathEnv);
   const control = headlessControl(mode);
@@ -125,6 +145,7 @@ async function serveAuto(mode: CliMode, pathEnv: PathEnv): Promise<void> {
       const info = readControlInfo(controlFile);
       return info && pidAlive(info.pid) ? socketClient(info) : null;
     },
+    ...chromeDeps(mode, pathEnv),
     headlessControl: control,
     probeAttach: () => probeAttach(controlFile, readControlInfo, pidAlive),
     headlessReadiness: () => headlessReadiness(),
@@ -157,6 +178,7 @@ export async function runMcpServer(argv: readonly string[]): Promise<void> {
       const info = readControlInfo(controlFile);
       return info ? socketClient(info) : null;
     },
+    ...chromeDeps(mode, pathEnv),
     launch: (opts) => launchShim(pathEnv, opts),
     newCommitId: randomUUID,
     maxOutputTokens: maxOutputTokens(pathEnv.env),

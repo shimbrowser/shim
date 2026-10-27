@@ -7,6 +7,7 @@
 
 import type { Spec, Rule } from './types';
 import { syntaxProbe } from './syntax-probe';
+import type { CompileProbe } from './rewrite-response';
 
 /** A spec that may carry an import-time top-level `handlers` map (module form). */
 export type SpecWithHandlers = Spec & { handlers?: Record<string, string> };
@@ -221,9 +222,9 @@ const INDIRECT_MODULE_REF_RE = /\barguments\b|\beval\b|\\u/;
  * run time (a call's result, a variable) passes here and is the browser's to
  * check.
  */
-export function handlerModuleProblem(moduleSource: string): string | null {
+export function handlerModuleProblem(moduleSource: string, probe: CompileProbe = syntaxProbe): string | null {
   if (!moduleSource.trim()) return 'is empty';
-  const syntax = syntaxProbe(`(function (module, exports) {\n${moduleSource}\n});`);
+  const syntax = probe(`(function (module, exports) {\n${moduleSource}\n});`);
   if (!syntax.ok) return `does not parse as JavaScript: ${syntax.error ?? 'syntax error'}`;
   if (!MODULE_REF_RE.test(moduleSource) && !INDIRECT_MODULE_REF_RE.test(moduleSource)) {
     return 'never assigns module.exports — a handler file is `module.exports = function (ctx) { ... };`';
