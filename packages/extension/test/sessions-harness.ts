@@ -100,6 +100,7 @@ interface FakeStore {
   shim: InstalledShim;
   revisions: number;
   gateGetShim: Promise<void> | null;
+  onGetShim: (() => void) | null;
   store: Pick<ShimStore, 'getShim' | 'reviseSpec' | 'ruleState'>;
 }
 
@@ -108,10 +109,11 @@ function fakeStore(): FakeStore {
     shim: { id: 'shim-1', name: 'S', enabled: true, installedAt: 0, rank: 1, provenance: { source: 'file' }, mode: 'full', spec: baseSpec(), handlers: {}, envelope: {} },
     revisions: 0,
     gateGetShim: null,
+    onGetShim: null,
     store: null as unknown as FakeStore['store'],
   };
   f.store = {
-    async getShim() { if (f.gateGetShim) await f.gateGetShim; return f.shim; },
+    async getShim() { f.onGetShim?.(); if (f.gateGetShim) await f.gateGetShim; return f.shim; },
     async reviseSpec(_id, next, handlers, _reason, _expected, opts) {
       f.revisions += 1;
       f.shim = { ...f.shim, spec: next, handlers, ...(opts?.envelope ? { envelope: opts.envelope } : {}) };
@@ -158,14 +160,21 @@ async function main(): Promise<void> {
     const host = fakeHost();
     const { id, revision } = await openAndPreview(sessions, host);
     // Gate getShim so the commit parks inside the write chain after its
-    // first abort check; end the session while it waits; then release.
+    // first abort check. End the session while the read is in flight, then
+    // release it so the backend continuation runs the post-read abort check
+    // inside end's settle window — not after it times out. Await both before
+    // inspecting the store, so this fails if the post-read guard is removed.
     let release: () => void = () => undefined;
+    let entered: () => void = () => undefined;
+    const enteredRead = new Promise<void>((r) => { entered = r; });
+    f.onGetShim = () => entered();
     f.gateGetShim = new Promise<void>((r) => { release = r; });
     const committing = sessions.registry.commit(id, { revision, commitId: 'c1', summary: 's' });
+    await enteredRead;
+    const ending = sessions.registry.end(id, 'ended');
     await new Promise((r) => setTimeout(r, 10));
-    await sessions.registry.end(id, 'ended');
     release();
-    const out = await committing;
+    const [out] = await Promise.all([committing, ending]);
     check('the commit answers session-ended', !out.ok && out.error === 'session-ended', JSON.stringify(out));
     check('no revision was written', f.revisions === 0, String(f.revisions));
   }
