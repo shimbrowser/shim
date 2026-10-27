@@ -32,9 +32,13 @@ Early. What works today:
   from one tab, over the Chrome DevTools Protocol through `chrome.debugger`. Previews,
   evaluate in the engine world and the page's, screenshots, trusted input, loads, runtime
   events and the engine's console lines, under the same conformance suite the Shim
-  browser and the headless host run (below). Nothing drives it yet.
+  browser and the headless host run (below).
+- Claude Code can author on a real Chrome tab: the popup's "let Claude Code author here"
+  connects the extension to `shim bridge`, a native messaging host that serves the Shim
+  browser's control endpoint over a socket, and each session the agent opens waits for
+  you on the attach card. Commits land as new versions of the installed shim (below).
 
-What is next: the native messaging bridge so Claude Code can author on a real Chrome tab.
+What is next: `api.fetch` and `api.settings`, then packaging for the Web Store.
 
 ## Modes
 
@@ -100,6 +104,58 @@ installed shim: the hold through every path above, and the session ended from ou
 Both drive the worker's host through the worker's own handle on it (`shimPageHosts`),
 one member call at a time (`test/host-proxy.ts`).
 
+## Authoring through the bridge
+
+With the popup's "let Claude Code author here" on, the service worker holds a native
+messaging port to `shim bridge` (`@shimbrowser/mcp`), which Chrome starts for it. The
+bridge listens on a Unix socket under Shim's user data directory (`bridge/chrome.sock`,
+0600 in a 0700 directory, a bearer token compared in constant time) and writes
+`control-chrome.json` beside the Shim browser's `control.json`, the same discovery
+format with `host: "chrome-extension"`. The MCP server reads both files, so
+`shim_list_tabs` lists this Chrome's tabs with `host: "chrome"` beside the Shim
+browser's, and a session opened on one of them runs here. Set it up once:
+
+```
+shim extension install-host --extension-id <the id on chrome://extensions>
+```
+
+That writes the host manifest for every Chromium found (Chrome, Chromium, Brave, Edge on
+macOS and Linux; `--user-data-dir` for one profile) and the wrapper it runs, in a private
+directory under Shim's user data. `shim extension status` reads it back and says whether a
+bridge is up. One bridge owns the endpoint at a time: a second browser's bridge exits.
+
+Every request the bridge relays reaches the worker over that one port, and every route
+the Shim browser's endpoint serves is served here (`src/control.ts`) from the same session
+registry (`@shimbrowser/core/session-registry`, over core's shim session). What differs:
+
+- **Consent.** Each open waits on the attach card (`attach.html`, a small window of the
+  extension's own): who is asking, for which shim, on which site, and that the agent will
+  run code in the page as you. Allow once, allow this site until Chrome restarts, or deny;
+  two minutes to answer. Allowing also asks Chrome for the site permission the session
+  still needs, since only a click can; a remembered site shows the card again when its
+  permission is gone. Nothing on a route answers a card.
+- **The artifact.** A session works on the installed shim: begin applies nothing, since
+  the committed rules already run (a disabled shim, or one the mode in force does not run,
+  opens too, and the agent is told its rules are not up). A removed rule is held down with
+  no preview to show. A commit replays the session's changes onto the shim as stored now,
+  so what other tabs learned meanwhile on untouched rules survives, and answers at once;
+  the page is then brought to the new version (previews off while their committed twins
+  stay held, the tab synced, the holds released), and the next answer says so. A rule the
+  rebase ladder moved since the session began is a conflict: the session is reset to the
+  shim as it is now, and the agent checks out again. A commit that needs full mode while
+  user scripts are off is refused before anything is written.
+- **A new shim** for a session is a draft the first commit settles; a session that ends
+  without one removes it, and a worker that boots and finds one sweeps it.
+- **Turning the setting off** aborts the opens in flight, ends every session, forgets every
+  remembered answer and drops the port, which ends the bridge. An uninstall or restore of a
+  shim a session holds ends that session first.
+- **Not here.** `interact_page` (its input policy is the Shim browser's), compositions,
+  the API map and the data tools answer `requires-shim-browser`.
+
+The repository's end-to-end harness runs it under Playwright: the bridge installed into
+the profile as the host, the mcp control client over its socket, a session opened on the
+card, previewed, committed as a version, and the setting turned off.
+
 ## Try it
 
 ```
@@ -124,12 +180,18 @@ Then open `chrome://extensions`, turn on developer mode, choose "Load unpacked" 
 | `src/match-patterns.ts` | `match.hosts` to Chrome match patterns. Pure. |
 | `src/registration.ts` | Which content scripts to register for which shims. Pure. |
 | `src/page-host.ts` | The `PageHost` for authoring sessions, over `chrome.debugger`. |
+| `src/sessions.ts` | The session registry here: core's shim session over the host and the store; the commit's merge and activation. |
+| `src/control.ts` | The control routes, as the bridge relays them. Pure. |
+| `src/attach-consent.ts` | The attach-consent gate. Pure. |
+| `src/bridge-port.ts` | The native messaging port to `shim bridge`. |
+| `src/attach-page.ts` | The attach card. |
 | `src/capabilities.ts` | The three capability constants (two modes, the session) and the mode. |
 | `src/sender.ts` | Who may send what to the worker: its own pages, or the runtime on a site. Pure. |
 | `src/reconcile.ts` | What an open document stops and starts when the worker's answer changes. Pure. |
 | `test/extension-smoke-harness.ts` | The built extension in a real Chromium: install, apply, strict CSP, priority, live toggles, removal, a refusal. |
 | `test/extension-conformance-harness.ts` | The shared `PageHost` conformance suite against the extension's host. |
 | `test/extension-session-harness.ts` | A session beside an installed shim: holds, reboots, a rebased rule, the session ended from outside. |
+| `test/control-harness.ts`, `test/attach-consent-harness.ts` | The routes and the consent gate over fakes. |
 | `src/popup.ts`, `src/install-page.ts` | The popup and the install page. |
 | `.claude/skills/chrome-extensions/` | Google's Chrome extension authoring skill (`GoogleChrome/modern-web-guidance`, unmodified). Nested here so an agent loads it only while working in this package. Refresh it by rerunning the installer and copying the skill folder over. |
 

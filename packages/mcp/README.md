@@ -98,6 +98,16 @@ lands on another origin opens no session and its tab is closed. Pass `mode: "hea
 open the url headless instead. A session
 keeps its mode until it ends, even if Shim starts in the meantime.
 
+**Two attach hosts.** [Shim for Chrome](../extension/README.md), the extension, serves the
+same routes through its bridge (`shim bridge`, a native messaging host this package
+provides; `shim extension install-host` sets it up), named in `<userData>/control-chrome.json`.
+The server reads both files: `shim_status` reports each host, `shim_list_tabs` lists every
+reachable host's tabs with `host: "shim"` or `host: "chrome"`, and a session goes to the
+host that listed its `tabId`. The two number their tabs separately, so a number both
+listed asks for `target: "shim"` or `"chrome"`, as does a `url` while both are reachable;
+`shim-mcp --target` (or `SHIM_MCP_TARGET`) sets the default. Every later call on a session
+goes to the host that opened it.
+
 **Headless** never reads the Shim browser's profile. Every session starts a new,
 non-persistent Chromium. The artifact is a `.shim` file. You can import it into Shim later,
 or share it.
