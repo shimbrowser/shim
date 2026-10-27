@@ -296,6 +296,8 @@ All of them act on the session's tab.
   visited routes, never a crawl. Use it after a clean preview when the target recurs across
   views ("on every post"). Report honestly: matched → verified there; your rule no-match
   → it does not apply there (likely different markup); unvisited page-types → unverified.
+  Sign-in, session, account-action and checkout pages are never replayed (the result
+  counts them in `skippedSensitive`), so a view of that kind stays unverified.
 - **`interact_page { actions }`** — your shim's own UI with trusted input (click, type,
   select, press, a small scroll); in attach it touches only your shim's own output.
   **`navigate { url }`** loads another page of the start origin. Read
