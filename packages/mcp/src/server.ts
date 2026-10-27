@@ -504,7 +504,11 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
   function pickMode(requested: SessionMode | undefined, hasTab: boolean, hasUrl: boolean, target?: AttachHost): { mode: SessionMode; why: string } {
     // A named attach host is an attach session, whatever else the call says.
     if (target !== undefined && requested === 'headless') throw new ToolFailure('invalid-request', 'target names an attach host; it cannot go with mode "headless"');
-    if (target !== undefined && requested === undefined && serverMode !== 'headless') requested = 'attach';
+    // A pinned attach host — the call's target, or the server's --target —
+    // makes this an attach session, so a pinned host that is down refuses
+    // (pickAttachHost) rather than silently falling back to headless.
+    const effectiveTarget = target ?? deps.defaultTarget;
+    if (effectiveTarget !== undefined && requested === undefined && serverMode !== 'headless') requested = 'attach';
     if (serverMode === 'headless') {
       if (requested === 'attach') {
         throw new ToolFailure('requires-shim-browser', 'this server runs headless only (--headless or SHIM_MCP_MODE=headless): there is no Shim browser to attach to');

@@ -246,10 +246,18 @@ export function createSessions(deps: SessionsDeps): Sessions {
     unsupportedNote: (ruleId, member) => `rule "${ruleId}" used api.${member}, which Shim for Chrome does not provide (${UNSUPPORTED_ERROR}) — its result is partial`,
     previewCommittedAtBegin: false,
     syntaxProbe: (code) => (committing && syntaxChecks.get(committing)?.get(moduleOfProbe(code))) ?? { ok: false, error: 'handler syntax was not checked in the page' },
-    async tombstone(handle, ruleId, held) {
+    async tombstone(handle, ruleId, held): Promise<boolean> {
       const host = handle.page.host as ExtensionPageHost;
-      if (held) await host.holdOnly(handle.source.shimId, ruleId);
-      else await host.releaseOnly(handle.source.shimId, ruleId);
+      if (!held) { await host.releaseOnly(handle.source.shimId, ruleId); return true; }
+      const outcome = await host.holdOnly(handle.source.shimId, ruleId);
+      if (outcome === 'timed-out') {
+        // The page's runtime did not confirm the hold, so the committed rule
+        // still runs in the live preview; the commit will remove it. The
+        // agent is told, and core drops the tombstone (held false).
+        note(handle.sessionId, `rule "${ruleId}" is removed in the working copy, but the page's runtime did not confirm holding its committed form down, so it still shows in this preview; committing removes it`);
+        return false;
+      }
+      return true;
     },
     writeCommit: (handle, prepared, signal) => writeCommit(handle, prepared, signal),
   });
@@ -276,7 +284,11 @@ export function createSessions(deps: SessionsDeps): Sessions {
       }
       const version = specVersion(current.spec) + 1;
       const next: Spec = { ...merged.spec, id: shimId, version, ...(typeof current.spec.bundleHash === 'string' ? { bundleHash: current.spec.bundleHash } : {}) };
-      if (!(await db.reviseSpec(shimId, next, merged.handlers, 'commit', specVersion(current.spec), { clearDraft: true }))) {
+      // The authoring exchange core appended to the file's envelope is kept
+      // on the installed shim, in the same transaction, so an export carries
+      // this session's history.
+      const envelope = { ...current.envelope, authoringHistory: prepared.history };
+      if (!(await db.reviseSpec(shimId, next, merged.handlers, 'commit', specVersion(current.spec), { clearDraft: true, envelope }))) {
         return { ok: false, error: 'commit-failed', detail: 'the shim changed while the commit was being written; try again' };
       }
       // The edited rules' reviews and captures no longer describe them.
@@ -284,7 +296,7 @@ export function createSessions(deps: SessionsDeps): Sessions {
       for (const state of await db.ruleState.listForShim(shimId)) {
         if (edited.has(state.ruleId) && (state.quarantine || state.capture)) await db.ruleState.put({ ...state, quarantine: undefined, capture: undefined });
       }
-      return { ok: true, versionId: version, next, shim: { ...current, spec: next, handlers: merged.handlers }, adopted: { spec: next, handlers: merged.handlers } };
+      return { ok: true, versionId: version, next, shim: { ...current, spec: next, handlers: merged.handlers, envelope }, adopted: { spec: next, handlers: merged.handlers } };
     });
     if (!written.ok) return written;
     // Durable from here. Activation follows, outside the write chain.

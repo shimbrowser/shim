@@ -170,9 +170,12 @@ export interface ShimSessionDeps<S extends ShimSessionSource = ShimSessionSource
    * host that installs the shim holds the committed rule down meanwhile.
    * Told on every preview that changes the set and on discard (finish, a
    * conflict reset). Not told on a successful commit: the host's
-   * writeCommit saw handle.tombstones and owns their release.
+   * writeCommit saw handle.tombstones and owns their release. A host that
+   * installs the shim returns whether the hold took (held true): on false
+   * the committed rule still runs in the live preview, so core drops the
+   * tombstone and names the rule in the evidence (`notHeld`).
    */
-  tombstone?(handle: ShimSessionHandle<S>, ruleId: string, held: boolean): void | Promise<void>;
+  tombstone?(handle: ShimSessionHandle<S>, ruleId: string, held: boolean): void | boolean | Promise<void | boolean>;
   /**
    * Witnesses kept outside the artifact (a folder's .shim-state.json rules, by
    * rule id): a preview that adds a rule the working state doesn't have gets
@@ -687,6 +690,7 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
     if (awayAfter) return refused(awayAfter);
 
     const appliedAt = now();
+    const notHeld: string[] = [];
     const emitKeys = new Map<string, Rule>();
     // Each emitted key's version (applyId): a replaced version's handler can
     // still report after this apply (a mount the engine doesn't cancel), and
@@ -712,7 +716,13 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
         // committed rule down until the removal is committed or discarded.
         if (handle.base.spec.rules?.some((r) => r.id === op.ruleId) && !handle.tombstones.has(op.ruleId)) {
           handle.tombstones.add(op.ruleId);
-          await deps.tombstone?.(handle, op.ruleId, true);
+          const held = await deps.tombstone?.(handle, op.ruleId, true);
+          // The host could not hold the committed rule down: drop the
+          // tombstone and tell the agent the live preview still shows it.
+          if (held === false) {
+            handle.tombstones.delete(op.ruleId);
+            notHeld.push(op.ruleId);
+          }
         }
       }
     }
@@ -778,6 +788,9 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
           'Until you do, a commit keeps the committed deploy baseline, so Shim can still recover the rule itself'
         : `rule "${ruleId}" is quarantined: its anchor no longer finds the element its witness describes — re-anchor it in shim.json. ` +
           'Until you do, a commit keeps the committed deploy baseline, so Shim still treats the break as a deploy and offers its repair');
+    }
+    for (const ruleId of notHeld) {
+      notes.push(`rule "${ruleId}" is removed in the working copy, but the host could not hold its committed form down, so it still runs in this preview; committing removes it`);
     }
     const consoleBlock = formatAutoBlock(handle.console.drainSinceEmit());
     const evidence: Record<string, unknown> = {

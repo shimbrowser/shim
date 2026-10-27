@@ -301,6 +301,7 @@ async function main(): Promise<void> {
     const make = (host: 'shim' | 'chrome') => scripted(host, (req) => (req.path === '/tabs' ? tabsOf(host) : endpoint('attach', host === 'shim' ? 's' : 'c')(req)));
     const shim = make('shim');
     const chrome = make('chrome');
+    const headlessScript = scripted('headless', endpoint('headless', 'h'));
     const up = { shim: true, chrome: true };
     const deps: ShimMcpDeps = {
       version: 'test', mode: 'auto', controlFile: '/u/control.json', chromeControlFile: '/u/control-chrome.json',
@@ -308,7 +309,7 @@ async function main(): Promise<void> {
       connectChrome: () => (up.chrome ? chrome.client : null),
       probeAttach: () => (up.shim ? { reachable: true, info: INFO } : { reachable: false, reason: 'no Shim browser (no discovery file at /u/control.json)' }),
       probeChrome: () => (up.chrome ? { reachable: true, info: { ...INFO, pid: 4343, host: 'chrome-extension' } } : { reachable: false, reason: 'no Shim for Chrome bridge (no discovery file at /u/control-chrome.json)' }),
-      headlessControl: scripted('headless', endpoint('headless', 'h')).client,
+      headlessControl: headlessScript.client,
       headlessReadiness: () => FOUND,
       launch: async () => ({ ok: true, how: 'attached', info: INFO, detail: 'running' }),
       newCommitId: () => 'c1', maxOutputTokens: 25_000,
@@ -349,6 +350,18 @@ async function main(): Promise<void> {
     const viaChrome2 = json(await call(chromeOnly, 'shim_open_session', { url: 'https://site.test/', intent: 'x', newShimName: 'N' }));
     check('a url with only Chrome up attaches to Chrome, never headless', viaChrome2.mode === 'attach' && viaChrome2.host === 'chrome' && chrome.sent.some((x) => x.path === '/sessions'), JSON.stringify(viaChrome2));
     await chromeOnly.close();
+
+    // A server default target that is down refuses, never falls to headless.
+    up.shim = true; up.chrome = false;
+    const pinned = await connect({ ...deps, defaultTarget: 'chrome' });
+    const downDefault = await call(pinned, 'shim_open_session', { url: 'https://site.test/', intent: 'x', newShimName: 'N' });
+    check('a url with the default target (chrome) down refuses, not headless', downDefault.isError === true && textOf(downDefault).startsWith('shim-not-running') && !headlessScript.sent.some((x) => x.path === '/sessions'), textOf(downDefault));
+    const shimDown = await connect({ ...deps, defaultTarget: 'shim' });
+    up.shim = false; up.chrome = true;
+    const downShim = await call(shimDown, 'shim_open_session', { url: 'https://site.test/', intent: 'x', newShimName: 'N' });
+    check('a url with the default target (shim) down refuses too', downShim.isError === true && textOf(downShim).startsWith('shim-not-running'), textOf(downShim));
+    await pinned.close();
+    await shimDown.close();
 
     const pick = (args: Partial<Parameters<typeof pickAttachHost>[0]>) => pickAttachHost({ reachable: { shim: true, chrome: true }, listedBy: [], url: false, composition: false, ...args });
     check('pickAttachHost: the call\'s target beats the server\'s', (() => { const c = pick({ requested: 'chrome', defaultTarget: 'shim' }); return c.ok && c.host === 'chrome'; })());
