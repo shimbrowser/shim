@@ -34,6 +34,8 @@ export const MAX_BODY_BYTES = 16 * 1024 * 1024;
 // sun_path is 104 bytes on macOS, NUL included.
 export const MAX_SOCKET_PATH_BYTES = 103;
 export const BRIDGE_DIR = 'bridge';
+// How long a response in flight gets to reach its client at close.
+const CLOSE_GRACE_MS = 250;
 export const SOCKET_NAME = 'chrome.sock';
 
 export interface BridgeResponse {
@@ -310,8 +312,11 @@ export async function startBridgeServer(opts: BridgeServerOptions): Promise<Brid
       closed = true;
       cleanupFiles();
       return new Promise<void>((resolve) => {
+        // Idle connections go now; one still carrying a response gets a
+        // moment to deliver it before it is cut.
+        server.closeIdleConnections();
         server.close(() => resolve());
-        server.closeAllConnections();
+        setTimeout(() => server.closeAllConnections(), CLOSE_GRACE_MS).unref();
       });
     },
   };

@@ -10,11 +10,14 @@
 // usage error or a file it couldn't read or write.
 
 import { parseArgs } from 'util';
+import * as fs from 'fs';
 import * as path from 'path';
 import {
   CliError, packFolder, unpackFile, lintTarget, previewFolder, formatLint, formatPreview, type PreviewDeps,
 } from './cli-commands';
 import type { LaunchOutcome } from './launch';
+import { browserDataDirs, extensionIdProblem, installHost, hostStatus, type InstallFs } from './bridge-install';
+import { readDiscoveryFile } from './bridge-server';
 import { VERSION } from './version';
 
 export const USAGE = `shim — author Shim shims from the command line
@@ -42,10 +45,24 @@ Usage:
       Attach to the running Shim browser, or start it with its control
       endpoint on.
 
-  shim mcp [--attach | --headless] [--visible]
+  shim mcp [--attach | --headless] [--visible] [--target shim|chrome]
       Start the MCP server on stdio (what the Claude Code plugin runs). By
       default a Shim tab attaches and a url opens headless while no Shim
       browser is reachable; --attach / --headless allow one mode only.
+      --target picks the attach host (the Shim browser, or Shim for Chrome)
+      when both are reachable and a call names none.
+
+  shim extension install-host --extension-id <id> [--user-data-dir <dir>] [--json]
+      Let Shim for Chrome reach Claude Code: write the native messaging host
+      manifest (and the wrapper it runs) for every Chromium found here, or
+      for one user data directory. The id is on chrome://extensions.
+
+  shim extension status [--user-data-dir <dir>] [--json]
+      What is installed for Shim for Chrome: the wrapper, each browser's
+      manifest and the id it allows, and whether a bridge is up.
+
+  shim bridge
+      The native messaging host itself. Chrome starts it; not for use by hand.
 
   shim help | --help      shim version | --version
 `;
@@ -57,8 +74,28 @@ export interface ShimCliContext {
   launch(opts: { timeoutMs?: number }): Promise<LaunchOutcome>;
   openPreviewPage: PreviewDeps['openPage'];
   runMcp(argv: string[]): Promise<void>;
+  /** `shim bridge`: run the native messaging host on this process's stdio; resolves with its exit code. */
+  runBridge(): Promise<number>;
+  /** What `shim extension` installs with: where things are, and the filesystem (a harness fakes it). */
+  extension: ExtensionInstallContext;
   /** The preview's settle window; default the session's. */
   previewSettleMs?: number;
+}
+
+export interface ExtensionInstallContext {
+  platform: string;
+  homedir: string;
+  env: Record<string, string | undefined>;
+  /** The Node that runs this process, and the `shim` bundle: what the wrapper execs. */
+  nodePath: string;
+  bundlePath: string;
+  /** `<userData>/bridge`: the wrapper's home, and the bridge's socket directory. */
+  bridgeDir: string;
+  /** The bridge's discovery file, for status. */
+  discoveryPath: string;
+  fs: InstallFs;
+  /** Whether a process is running, for the discovery file's pid. */
+  isAlive(pid: number): boolean;
 }
 
 export const EXIT_OK = 0;
@@ -198,16 +235,74 @@ async function run(argv: string[], ctx: ShimCliContext): Promise<number> {
       return outcome.ok ? EXIT_OK : EXIT_PROBLEM;
     }
 
-    case 'mcp':
-      // The server's own flags (--attach, --headless, --visible), read by cliMode.
-      for (const arg of rest) {
+    case 'mcp': {
+      // The server's own flags (--attach, --headless, --visible, --target), read by cliMode.
+      for (let i = 0; i < rest.length; i++) {
+        const arg = rest[i];
+        if (arg === '--target') {
+          const value = rest[i + 1];
+          if (value !== 'shim' && value !== 'chrome') throw new UsageError('shim mcp: --target takes shim or chrome');
+          i++;
+          continue;
+        }
         if (arg !== '--attach' && arg !== '--headless' && arg !== '--visible') {
-          throw new UsageError(`shim mcp takes --attach, --headless and --visible only (got ${arg})`);
+          throw new UsageError(`shim mcp takes --attach, --headless, --visible and --target only (got ${String(arg)})`);
         }
       }
       if (rest.includes('--attach') && rest.includes('--headless')) throw new UsageError('shim mcp: --attach and --headless are exclusive');
       await ctx.runMcp(rest);
       return EXIT_OK;
+    }
+
+    case 'bridge':
+      if (rest.length && !/^chrome-extension:\/\//.test(rest[0] ?? '')) throw new UsageError('shim bridge is started by Chrome, not by hand');
+      return ctx.runBridge();
+
+    case 'extension': {
+      const [sub, ...args] = rest;
+      if (sub === 'install-host') {
+        const { values } = parse(args, { 'extension-id': { type: 'string' }, 'user-data-dir': { type: 'string' }, json: { type: 'boolean' } }, { min: 0, max: 0, names: 'no arguments' });
+        const id = str(values, 'extension-id');
+        if (!id) throw new UsageError('shim extension install-host needs --extension-id <id> (shown on chrome://extensions)');
+        const problem = extensionIdProblem(id);
+        if (problem) throw new UsageError(problem);
+        const x = ctx.extension;
+        const browsers = browserDataDirs(x.platform, x.homedir, x.env);
+        const userDataDir = str(values, 'user-data-dir');
+        if (!userDataDir && browsers.length === 0) throw new CliError('unsupported-platform', `installing the host on ${x.platform} needs --user-data-dir (the browser's user data directory)`);
+        const out = installHost({ extensionId: id, nodePath: x.nodePath, bundlePath: x.bundlePath, bridgeDir: x.bridgeDir, browsers, ...(userDataDir ? { userDataDir: path.resolve(userDataDir) } : {}) }, x.fs);
+        if (values.json === true) {
+          ctx.out(json(out));
+        } else {
+          ctx.out(`wrapper: ${out.wrapper}`);
+          for (const m of out.manifests) ctx.out(`${m.browser}: ${m.file}`);
+          for (const sk of out.skipped) ctx.out(`${sk.browser}: not found (${sk.dir}), skipped`);
+          if (!out.manifests.length) ctx.out('no browser found: pass --user-data-dir <dir> for the one to use');
+          else ctx.out('Now turn on "let Claude Code author here" in the Shim for Chrome popup.');
+        }
+        return out.manifests.length ? EXIT_OK : EXIT_PROBLEM;
+      }
+      if (sub === 'status') {
+        const { values } = parse(args, { 'user-data-dir': { type: 'string' }, json: { type: 'boolean' } }, { min: 0, max: 0, names: 'no arguments' });
+        const x = ctx.extension;
+        const userDataDir = str(values, 'user-data-dir');
+        const status = hostStatus({ bridgeDir: x.bridgeDir, browsers: browserDataDirs(x.platform, x.homedir, x.env), ...(userDataDir ? { userDataDir: path.resolve(userDataDir) } : {}) }, x.fs);
+        const discovery = readDiscoveryFile(x.discoveryPath);
+        const bridge = discovery ? { up: x.isAlive(discovery.pid), pid: discovery.pid, socketPath: discovery.socketPath, version: discovery.appVersion } : { up: false };
+        const report = { ...status, bridge };
+        if (values.json === true) {
+          ctx.out(json(report));
+        } else {
+          ctx.out(`wrapper: ${status.wrapper.file} (${status.wrapper.present ? 'present' : 'missing'})`);
+          for (const m of status.manifests) {
+            ctx.out(`${m.browser}: ${m.present ? `${m.file} allows ${m.extensionId ?? 'no extension'}${m.pathMatches ? '' : ' (points at another wrapper)'}` : 'no manifest'}`);
+          }
+          ctx.out(bridge.up ? `bridge: up (process ${String(bridge.pid)}, ${String(bridge.socketPath)})` : 'bridge: not running (it starts when the extension\'s "let Claude Code author here" is on)');
+        }
+        return EXIT_OK;
+      }
+      throw new UsageError('shim extension takes install-host or status');
+    }
 
     default:
       throw new UsageError(`unknown command "${command}"`);
@@ -240,10 +335,31 @@ async function realContext(): Promise<ShimCliContext> {
   const { launchShim, runMcpServer } = await import('./mcp-main');
   const { defaultEnv } = await import('./control-client');
   const { openLoadedHeadlessPage } = await import('./playwright-launch');
+  const { runBridge, bridgePaths } = await import('./bridge');
+  const { processAlive } = await import('./file-lock');
+  const pathEnv = defaultEnv();
+  const paths = bridgePaths(pathEnv);
   return {
     out: (text) => process.stdout.write(`${text}\n`),
     err: (text) => process.stderr.write(`${text}\n`),
     launch: (opts) => launchShim(defaultEnv(), opts),
+    runBridge: () => runBridge(pathEnv),
+    extension: {
+      platform: pathEnv.platform,
+      homedir: pathEnv.homedir,
+      env: pathEnv.env,
+      nodePath: process.execPath,
+      bundlePath: __filename,
+      bridgeDir: path.dirname(paths.socketPath),
+      discoveryPath: paths.discoveryPath,
+      isAlive: processAlive,
+      fs: {
+        exists: (p) => fs.existsSync(p),
+        mkdir: (p) => { fs.mkdirSync(p, { recursive: true }); },
+        write: (p, text, mode) => { fs.writeFileSync(p, text, { mode }); fs.chmodSync(p, mode); },
+        read: (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return null; } },
+      },
+    },
     async openPreviewPage(url, storage, { visible }) {
       const opened = await openLoadedHeadlessPage(url, { visible, storage });
       return {
