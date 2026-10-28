@@ -13,6 +13,7 @@ import * as componentId from './component-id';
 import { isShimOwnedElement } from './own-dom';
 import { fingerprintKind } from './managed-anchor';
 import { recoverSetByIdentity } from './set-witness';
+import { anchorSelectorOf } from './anchor-selector';
 import { readSymbols, symbolsOf, withinBudget, ENRICH_BUDGET_MS } from './engine-internal';
 import type { RuntimeSpec } from './engine-internal';
 import type { RuleRuntimeState } from './rule-state';
@@ -109,7 +110,7 @@ export function makeReconciler(
       api.reportEvent('rule-quarantined', {
         specId: spec.id,
         ruleId: rule.id,
-        selector: rule.anchor?.primary?.value || '',
+        selector: anchorSelectorOf(rule.anchor?.primary),
         ...expectedFingerprint(),
         seen: rs.witnessRejection.detail || [],
         rejectedVia: rs.witnessRejection.source || null,
@@ -120,7 +121,7 @@ export function makeReconciler(
     api.reportEvent('rule-no-match', {
       specId: spec.id,
       ruleId: rule.id,
-      selector: rule.anchor?.primary?.value || '',
+      selector: anchorSelectorOf(rule.anchor?.primary),
     });
   };
   const emitRebase = (payload: Record<string, unknown>) => {
@@ -201,7 +202,7 @@ export function makeReconciler(
             api.reportEvent('rule-quarantined', {
               specId: spec.id,
               ruleId: rule.id,
-              selector: rule.anchor?.primary?.value || '',
+              selector: anchorSelectorOf(rule.anchor?.primary),
               ...expectedFingerprint(),
               seen: [`component: expected [${expectedComponent.path.join(' > ')}], saw [${seen}]`],
               rejectedVia: 'primary',
@@ -473,7 +474,7 @@ export function makeReconciler(
           api.reportEvent('rule-quarantined', {
             specId: spec.id,
             ruleId: rule.id,
-            selector: rule.anchor?.primary?.value || '',
+            selector: anchorSelectorOf(rule.anchor?.primary),
             ...expectedFingerprint(),
             seen: [],
             rejectedVia: null,

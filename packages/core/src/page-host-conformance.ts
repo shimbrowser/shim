@@ -169,6 +169,22 @@ const APPLY_BODY = `
 <div id="storage-target" class="box">storage anchor</div>
 `;
 
+// The aria page: one label on elements whose roles differ only in how they
+// are stated — a native button (implicit), an explicit role, a native button
+// whose explicit role overrides its own, an <a> with and without an href, and
+// an upper-case input type.
+const ARIA_BODY = `
+<button id="aria-native" class="box" aria-label="Get the app">native</button>
+<div id="aria-explicit" class="box" role="button" aria-label="Get the app">explicit</div>
+<button id="aria-overridden" class="box" role="tab" aria-label="Get the app">tab</button>
+<a id="aria-no-href" aria-label="Get the app">no href</a>
+<a id="aria-link" href="#x" aria-label="Get the app">link</a>
+<input id="aria-submit" type="SUBMIT" aria-label="Get the app" value="go">
+<nav id="aria-nav"><span>nav</span></nav>
+<section id="aria-unnamed" aria-label="">unnamed section</section>
+<input id="aria-listed" type="text" list="aria-missing" aria-label="Find">
+`;
+
 // The rebase page. Build 2 renames the buy button's class (its other
 // signals survive: a witness can re-find it), drops the legacy link
 // entirely (nothing to recover), and turns `.price` into a different
@@ -235,6 +251,7 @@ export function conformanceFixture(pathname: string, state: FixtureState): Fixtu
     case '/app':
     case '/app/other': return html(page('app', '<div id="app"></div>', state.deploy));
     case '/deploy': return html(page('deploy', deployBody(state.deploy), state.deploy));
+    case '/aria': return html(page('aria', ARIA_BODY, state.deploy));
     case '/fold': return html(page('fold', FOLD_BODY, state.deploy));
     case '/list': return html(page('list', LIST_BODY, state.deploy));
     case '/strict': return html(page('strict', STRICT_BODY, state.deploy), STRICT_CSP);
@@ -270,7 +287,7 @@ export const CONFORMANCE_CAPABILITIES = [
   'mount:inline', 'mount:portal', 'mount:overlay', 'mount:shadow', 'self-healing',
   'witness:capture', 'witness:verify', 'witness:set', 'rebase:refresh', 'rebase:promote', 'rebase:recover', 'rebase:quarantine',
   'api.storage', 'api.cleanup', 'handler-errors', 'console', 'spa-navigation', 'teardown', 'page-tools', 'strict-csp',
-  'no-match', 'trusted-input', 'superseded-load', 'api.onAnchorChange',
+  'no-match', 'trusted-input', 'superseded-load', 'api.onAnchorChange', 'anchor:aria',
 ] as const;
 export type ConformanceCapability = (typeof CONFORMANCE_CAPABILITIES)[number];
 
@@ -1141,6 +1158,46 @@ const cropScrollCase: ConformanceCase = {
     kit.check('view_page crop of an element below its pane\'s fold: the pane is scrolled to show it', fullyCaptured(pane) && shown('#fold-pane-target'), { shot: strip(pane), exposed });
     kit.check('…and the pane\'s scroll is put back too', (await scrollState()) === before, { before, after: await scrollState() });
 
+    // Scrolled down past it: the target sits ABOVE the viewport.
+    await kit.read(`(window.scrollTo({ left: 0, top: document.scrollingElement.scrollHeight, behavior: 'instant' }), 0)`);
+    const scrolledDown = await scrollState();
+    const aboveTop = await kit.read(`document.querySelector('#fold-target').getBoundingClientRect().bottom`);
+    kit.check('the fixture: scrolled to the bottom, #fold-target is above the viewport', typeof aboveTop === 'number' && aboveTop < 0, aboveTop);
+    exposed.length = 0;
+    const above = await viewPageOnHost(watched, { selector: '#fold-target' }, 'main');
+    kit.check('view_page crop of an element above the viewport: a capture of it, in view', fullyCaptured(above) && shown('#fold-target'), { shot: strip(above), exposed });
+    kit.check('…and the page\'s scroll is put back', (await scrollState()) === scrolledDown, { scrolledDown, after: await scrollState() });
+
+    // A page that puts its own scroll back (a scroll lock, scroll
+    // restoration) between the measurement and the capture: the image would
+    // show wherever it went back to, captioned as the target. Simulated by a
+    // host whose capture first scrolls the page back down, as such a page
+    // would: once, then the crop is taken again and shows the target; every
+    // time, then an error, never that image.
+    const scrollingBack = (times: number): { host: PageHost; shots: () => number } => {
+      let n = 0;
+      const h: PageHost = Object.assign(Object.create(watched) as PageHost, {
+        async screenshot(opts?: Parameters<PageHost['screenshot']>[0]) {
+          if (n++ < times) await kit.read(`(window.scrollTo({ left: 0, top: ${JSON.stringify(scrolledDown)}.split(',').map(Number)[1], behavior: 'instant' }), 0)`);
+          return watched.screenshot(opts);
+        },
+      });
+      return { host: h, shots: () => n };
+    };
+    exposed.length = 0;
+    const once = scrollingBack(1);
+    const retried = await viewPageOnHost(once.host, { selector: '#fold-target' }, 'main');
+    kit.check('a crop the page scrolled away from during the capture is taken again: the target, in view',
+      fullyCaptured(retried) && once.shots() === 2 && exposed.length === 2 && !(exposed[0] ?? []).includes('#fold-target') && (exposed[1] ?? []).includes('#fold-target'),
+      { shot: strip(retried), shots: once.shots(), exposed });
+    kit.check('…and the page\'s scroll is put back', (await scrollState()) === scrolledDown, { scrolledDown, after: await scrollState() });
+    const always = scrollingBack(Infinity);
+    const refused = await viewPageOnHost(always.host, { selector: '#fold-target' }, 'main');
+    kit.check('a page that keeps scrolling away answers an error, not a crop of where it went', refused.dataBase64 === undefined
+      && typeof refused.error === 'string' && /scrolled away from #fold-target/.test(refused.error) && always.shots() === 2, { shot: strip(refused), shots: always.shots() });
+    kit.check('…and leaves the scroll where it was', (await scrollState()) === scrolledDown, { scrolledDown, after: await scrollState() });
+    await kit.read(`(window.scrollTo({ left: 0, top: 7, behavior: 'instant' }), 0)`);
+
     const visible = await viewPageOnHost(kit.host, { selector: '#fold-pane' }, 'main');
     kit.check('view_page crop of a fully visible element still works', visible.error === undefined && visible.croppedTo === '#fold-pane', strip(visible));
     kit.check('…and never scrolls', (await scrollState()) === before, { before, after: await scrollState() });
@@ -1313,6 +1370,72 @@ const noMatchCase: ConformanceCase = {
       after.length > 0 && after.every((e) => e.matched === 0), after);
     kit.check('…and leaves nothing on the page', (await kit.read(`document.querySelectorAll('.conf-slow').length`)) === 0);
     kit.remove(slowKey);
+  },
+};
+
+// An aria anchor's role is the accessibility tree's: a native element with
+// that implicit role and no role attribute matches, an explicit role that
+// overrides the native one doesn't, and a dead aria anchor's evidence names
+// the selector it resolved through (never "").
+const ariaCase: ConformanceCase = {
+  id: 'aria-anchor',
+  title: 'an aria role matches native elements by their implicit role',
+  covers: ['anchor:aria'],
+  async run(kit) {
+    if (!(await kit.load('/aria'))) return;
+    const aria = (role: string | undefined, label: string | undefined): { primary: AnchorSpec } => ({
+      primary: { kind: 'aria', ...(role ? { role } : {}), ...(label ? { label } : {}) },
+    });
+    const button = { id: 'aria-button', anchor: aria('button', 'Get the app'), mutations: [{ kind: 'restyle', properties: { outlineColor: 'rgb(1, 2, 3)' } }] } satisfies Rule;
+    const link = { id: 'aria-link', anchor: aria('link', 'Get the app'), mutations: [{ kind: 'restyle', properties: { outlineColor: 'rgb(4, 5, 6)' } }] } satisfies Rule;
+    const nav = { id: 'aria-nav', anchor: aria('navigation', undefined), mutations: [{ kind: 'restyle', properties: { outlineColor: 'rgb(7, 8, 9)' } }] } satisfies Rule;
+    const region = { id: 'aria-region', anchor: aria('region', undefined), mutations: [{ kind: 'restyle', properties: { outlineColor: 'rgb(10, 11, 12)' } }] } satisfies Rule;
+    const listed = { id: 'aria-listed', anchor: aria('combobox', 'Find'), mutations: [{ kind: 'restyle', properties: { outlineColor: 'rgb(13, 14, 15)' } }] } satisfies Rule;
+    const dead = { id: 'aria-dead', anchor: aria('button', 'Nothing has this label'), mutations: [{ kind: 'hide' }] } satisfies Rule;
+    const buttonKey = kit.apply(button);
+    const linkKey = kit.apply(link);
+    const navKey = kit.apply(nav);
+    const regionKey = kit.apply(region);
+    const listedKey = kit.apply(listed);
+    const deadKey = kit.apply(dead);
+    const keys = [buttonKey, linkKey, navKey, regionKey, listedKey, deadKey];
+    const matched = (key: string): number | undefined => {
+      const all = kit.events.filter((e) => e.kind === 'rule-status' && e.specId === key);
+      const m = all.at(-1)?.matched;
+      return typeof m === 'number' ? m : undefined;
+    };
+    await kit.until(() => keys.every((k) => matched(k) !== undefined) ? true : null);
+    kit.check('role button + label matches the native button, the explicit role and the submit input', matched(buttonKey) === 3, matched(buttonKey));
+    kit.check('role link matches only the <a> with an href', matched(linkKey) === 1, matched(linkKey));
+    kit.check('role navigation matches <nav>', matched(navKey) === 1, matched(navKey));
+    kit.check('a <section> with an empty label is no region', matched(regionKey) === 0, matched(regionKey));
+    kit.check('an input whose list resolves to nothing is no combobox', matched(listedKey) === 0, matched(listedKey));
+
+    const outlines = await kit.until(async () => {
+      const o = await kit.read(`(() => {
+        const out = {};
+        for (const el of document.querySelectorAll('[id^="aria-"]')) out[el.id] = getComputedStyle(el).outlineColor;
+        return out;
+      })()`);
+      return isRecord(o) && o['aria-native'] === 'rgb(1, 2, 3)' ? o : null;
+    });
+    const o: Record<string, unknown> = outlines ?? {};
+    kit.check('the native button, explicit role and submit input are the ones styled',
+      o['aria-native'] === 'rgb(1, 2, 3)' && o['aria-explicit'] === 'rgb(1, 2, 3)' && o['aria-submit'] === 'rgb(1, 2, 3)', o);
+    kit.check('an explicit role overrides the native one', o['aria-overridden'] !== 'rgb(1, 2, 3)', o);
+    kit.check('an <a> without an href is no link', o['aria-no-href'] !== 'rgb(4, 5, 6)' && o['aria-link'] === 'rgb(4, 5, 6)', o);
+    kit.check('<nav> is navigation', o['aria-nav'] === 'rgb(7, 8, 9)', o);
+
+    await kit.sleep(PREVIEW_SETTLE_MS);
+    const deadStatus = kit.events.filter((e) => e.kind === 'rule-status' && e.specId === deadKey).at(-1) as RuleStatusEvent | undefined;
+    const noMatch = previewNoMatch([], [{ rule: dead, status: deadStatus, peakMatched: 0 }]);
+    const selector = noMatch[0]?.selector ?? '';
+    kit.check('a dead aria anchor\'s evidence names a selector', noMatch.length === 1 && selector.includes('[aria-label="Nothing has this label"]'), noMatch);
+    kit.check('…one the page can run (it finds nothing)',
+      (await kit.read(`document.querySelectorAll(${JSON.stringify(selector)}).length`)) === 0, selector);
+    const late = await kit.event((e) => e.kind === 'rule-no-match' && e.specId === deadKey, 8000);
+    kit.check('the engine\'s own no-match event names it too', typeof late?.selector === 'string' && late.selector === selector, late);
+    for (const k of keys) kit.remove(k);
   },
 };
 
@@ -1781,7 +1904,7 @@ const unattachedOutputCase: ConformanceCase = {
 };
 
 export const CONFORMANCE_CASES: readonly ConformanceCase[] = [
-  applyCase, setWitnessCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, cropScrollCase, strictCspCase, sharedModuleCase, noMatchCase,
+  applyCase, setWitnessCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, cropScrollCase, strictCspCase, sharedModuleCase, noMatchCase, ariaCase,
   inputCase, supersededLoadCase, anchorChangeCase, unattachedOutputCase,
 ];
 

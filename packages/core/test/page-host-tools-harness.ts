@@ -11,7 +11,7 @@
 
 import {
   viewPageOnHost, evaluateOnHost, queryPageByScript, inspectElementByScript, expressionProblem,
-  withTimeout, cropMeasureSource, MAX_SHOT_WIDTH, MAX_EXPRESSION, MAX_RESULT,
+  withTimeout, cropMeasureSource, cropMovedSource, MAX_SHOT_WIDTH, MAX_EXPRESSION, MAX_RESULT,
 } from '../src/page-host-tools';
 import { PAGE_HOST_API_MEMBERS } from '../src/page-host';
 import type { PageHost, PageWorld, ScreenshotOptions, ScreenshotResult } from '../src/page-host';
@@ -34,6 +34,8 @@ function scriptedHost(
     mediaType: 'image/png', dataBase64: 'cG5n', sizeBytes: 3,
     width: opts?.clip ? opts.clip.width * 2 : 1280, height: opts?.clip ? opts.clip.height * 2 : 800,
   }),
+  // The post-capture check (cropMovedSource): did the page scroll away? No, by default.
+  moved: () => unknown = () => false,
 ): ScriptedHost {
   const evals: Array<{ code: string; world: PageWorld }> = [];
   const shots: Array<ScreenshotOptions | undefined> = [];
@@ -47,6 +49,7 @@ function scriptedHost(
     isClosed: () => false,
     evaluate(code, world) {
       evals.push({ code, world });
+      if (code.includes('l.positions')) return Promise.resolve(moved());
       try { return Promise.resolve(answer(code, world)); } catch (err) { return Promise.reject(err); }
     },
     screenshot(opts) { shots.push(opts); return Promise.resolve(shot(opts)); },
@@ -124,6 +127,41 @@ async function testViewPage(): Promise<void> {
   );
   const failed = await viewPageOnHost(failingShot, { selector: '.tall' }, 'main');
   check('a failed capture still releases the lease', failed.error === 'capture broke' && order.join(',') === 'release', order.join(','));
+  // The page scrolled away from the crop during the capture (a scroll lock
+  // putting its scroll back): measured and captured again, and after a second
+  // move an error, never the image; each attempt releases its own lease.
+  order.length = 0;
+  let movedTimes = 1;
+  const movingHost = scriptedHost(
+    (code) => {
+      if (isRelease(code)) { order.push('release'); return true; }
+      order.push('measure');
+      return { x: 10, y: 300, w: 100, h: 100, vw: 1440, vh: 900, token: 't7', scrolled: true };
+    },
+    (opts) => { order.push('shot'); return { mediaType: 'image/png', dataBase64: 'cG5n', sizeBytes: 3, width: (opts?.clip?.width ?? 0) * 2, height: (opts?.clip?.height ?? 0) * 2 }; },
+    () => movedTimes-- > 0,
+  );
+  const movedOnce = await viewPageOnHost(movingHost, { selector: '.locked' }, 'main');
+  check('a crop the page scrolled away from is measured and captured again', movedOnce.error === undefined && movedOnce.croppedTo === '.locked'
+    && order.join(',') === 'measure,shot,release,measure,shot,release', `${JSON.stringify(movedOnce.error)} ${order.join(',')}`);
+  order.length = 0;
+  movedTimes = Infinity;
+  const movedAlways = await viewPageOnHost(movingHost, { selector: '.locked' }, 'main');
+  check('a page that keeps scrolling away answers an error after two attempts, never the image',
+    /scrolled away from \.locked while it was captured/.test(movedAlways.error ?? '') && movedAlways.dataBase64 === undefined
+    && order.join(',') === 'measure,shot,release,measure,shot,release', `${JSON.stringify(movedAlways.error)} ${order.join(',')}`);
+  order.length = 0;
+  movedTimes = 0;
+  const unknownHost = scriptedHost(
+    (code) => (isRelease(code) ? true : { x: 10, y: 300, w: 100, h: 100, vw: 1440, vh: 900, token: 't8', scrolled: true }),
+    undefined,
+    () => null,
+  );
+  const unknown = await viewPageOnHost(unknownHost, { selector: '.lost' }, 'main');
+  check('a check that can\'t tell (lease gone) keeps the shot', unknown.error === undefined && unknownHost.shots.length === 1, unknown.error);
+  const movedSrc = cropMovedSource('t9');
+  check('the check compares the scroll offsets the measurement held, not the target\'s box (an animated target is not a move)',
+    movedSrc.includes('l.positions') && movedSrc.includes('scrollTop') && !movedSrc.includes('getBoundingClientRect') && cropMeasureSource('.x').includes('.positions = pos'));
   order.length = 0;
   const unplaced = scriptedHost((code) => (isRelease(code) ? (order.push('release'), true) : { x: 5000, y: 5000, w: 10, h: 10, vw: 1440, vh: 900, token: 't3' }));
   const unplacedShot = await viewPageOnHost(unplaced, { selector: '.far' }, 'main');
