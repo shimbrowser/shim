@@ -1158,6 +1158,46 @@ const cropScrollCase: ConformanceCase = {
     kit.check('view_page crop of an element below its pane\'s fold: the pane is scrolled to show it', fullyCaptured(pane) && shown('#fold-pane-target'), { shot: strip(pane), exposed });
     kit.check('…and the pane\'s scroll is put back too', (await scrollState()) === before, { before, after: await scrollState() });
 
+    // Scrolled down past it: the target sits ABOVE the viewport.
+    await kit.read(`(window.scrollTo({ left: 0, top: document.scrollingElement.scrollHeight, behavior: 'instant' }), 0)`);
+    const scrolledDown = await scrollState();
+    const aboveTop = await kit.read(`document.querySelector('#fold-target').getBoundingClientRect().bottom`);
+    kit.check('the fixture: scrolled to the bottom, #fold-target is above the viewport', typeof aboveTop === 'number' && aboveTop < 0, aboveTop);
+    exposed.length = 0;
+    const above = await viewPageOnHost(watched, { selector: '#fold-target' }, 'main');
+    kit.check('view_page crop of an element above the viewport: a capture of it, in view', fullyCaptured(above) && shown('#fold-target'), { shot: strip(above), exposed });
+    kit.check('…and the page\'s scroll is put back', (await scrollState()) === scrolledDown, { scrolledDown, after: await scrollState() });
+
+    // A page that puts its own scroll back (a scroll lock, scroll
+    // restoration) between the measurement and the capture: the image would
+    // show wherever it went back to, captioned as the target. Simulated by a
+    // host whose capture first scrolls the page back down, as such a page
+    // would: once, then the crop is taken again and shows the target; every
+    // time, then an error, never that image.
+    const scrollingBack = (times: number): { host: PageHost; shots: () => number } => {
+      let n = 0;
+      const h: PageHost = Object.assign(Object.create(watched) as PageHost, {
+        async screenshot(opts?: Parameters<PageHost['screenshot']>[0]) {
+          if (n++ < times) await kit.read(`(window.scrollTo({ left: 0, top: ${JSON.stringify(scrolledDown)}.split(',').map(Number)[1], behavior: 'instant' }), 0)`);
+          return watched.screenshot(opts);
+        },
+      });
+      return { host: h, shots: () => n };
+    };
+    exposed.length = 0;
+    const once = scrollingBack(1);
+    const retried = await viewPageOnHost(once.host, { selector: '#fold-target' }, 'main');
+    kit.check('a crop the page scrolled away from during the capture is taken again: the target, in view',
+      fullyCaptured(retried) && once.shots() === 2 && exposed.length === 2 && !(exposed[0] ?? []).includes('#fold-target') && (exposed[1] ?? []).includes('#fold-target'),
+      { shot: strip(retried), shots: once.shots(), exposed });
+    kit.check('…and the page\'s scroll is put back', (await scrollState()) === scrolledDown, { scrolledDown, after: await scrollState() });
+    const always = scrollingBack(Infinity);
+    const refused = await viewPageOnHost(always.host, { selector: '#fold-target' }, 'main');
+    kit.check('a page that keeps scrolling away answers an error, not a crop of where it went', refused.dataBase64 === undefined
+      && typeof refused.error === 'string' && /scrolled away from #fold-target/.test(refused.error) && always.shots() === 2, { shot: strip(refused), shots: always.shots() });
+    kit.check('…and leaves the scroll where it was', (await scrollState()) === scrolledDown, { scrolledDown, after: await scrollState() });
+    await kit.read(`(window.scrollTo({ left: 0, top: 7, behavior: 'instant' }), 0)`);
+
     const visible = await viewPageOnHost(kit.host, { selector: '#fold-pane' }, 'main');
     kit.check('view_page crop of a fully visible element still works', visible.error === undefined && visible.croppedTo === '#fold-pane', strip(visible));
     kit.check('…and never scrolls', (await scrollState()) === before, { before, after: await scrollState() });
