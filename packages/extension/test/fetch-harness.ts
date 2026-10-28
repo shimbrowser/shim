@@ -7,6 +7,8 @@
 //   - a response maps to the Shim browser's result shape (any status), its
 //     body capped at 5 MB (truncated marked) and a declared size past 25 MB
 //     refused unread;
+//   - a request redirected onto a private address is refused, its body
+//     unread; a redirect between public hosts is followed;
 //   - a timeout, a network or cross-origin failure, and any other throw each
 //     resolve { ok: false, error }: the broker never throws.
 
@@ -91,6 +93,21 @@ async function main(): Promise<void> {
     const declared = await brokerFetch('https://example.com/huge', undefined, fakeFetch(() => new Response(huge, { status: 200, headers: { 'content-length': String(FETCH_HARD_CONTENT_LENGTH + 1) } })));
     check('a declared size past 25 MB is refused, with the status', !declared.ok && 'error' in declared && declared.error.includes('too large') && declared.status === 200);
     check('…before its body is read', !pulled);
+  }
+
+  console.log('redirects:');
+  {
+    // fetch follows a redirect itself; the landing shows in res.url.
+    let pulled = false;
+    const secret = new ReadableStream<Uint8Array>({ pull(c) { pulled = true; c.enqueue(new TextEncoder().encode('router admin')); c.close(); } }, { highWaterMark: 0 });
+    const r = await brokerFetch('https://public.example/go', undefined, fakeFetch(() => withUrl(new Response(secret, { status: 200 }), 'http://192.168.1.1/admin')));
+    check('a request redirected onto a private address is refused', !r.ok && 'error' in r && r.error.startsWith('redirected, then blocked') && r.error.includes('192.168.1.1'), JSON.stringify(r));
+    check('…before its body is read', !pulled);
+    check('so is the metadata endpoint and loopback by name',
+      !(await brokerFetch('https://public.example/a', undefined, fakeFetch(() => withUrl(new Response('x'), 'http://169.254.169.254/latest')))).ok
+      && !(await brokerFetch('https://public.example/b', undefined, fakeFetch(() => withUrl(new Response('x'), 'http://localhost:9222/json')))).ok);
+    const moved = await brokerFetch('http://public.example/old', undefined, fakeFetch(() => withUrl(new Response('here'), 'https://public.example/new')));
+    check('a redirect between public hosts is followed and reported', moved.ok && 'text' in moved && moved.text === 'here' && moved.url === 'https://public.example/new', JSON.stringify(moved));
   }
 
   console.log('failures resolve, never throw:');

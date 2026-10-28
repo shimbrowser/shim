@@ -10,11 +10,17 @@
 // else succeeds only when that site allows cross-origin reads. That is
 // stricter than the Shim browser, which skips CORS everywhere.
 //
-// Residual, accepted: an extension cannot resolve DNS, so a public name that
-// resolves into the private space is not refused here (the Shim browser
-// refuses it). Its response stays unreadable under CORS, but a request that
-// needs no preflight still goes out; a redirect to such an address too, as
-// in the Shim browser.
+// Redirects are followed by fetch itself: an MV3 worker cannot read a
+// redirect's Location to vet each hop (`redirect: 'manual'` answers an opaque
+// response). So where the request landed is checked, and a body from a
+// private address is never read or returned, even from a private host the
+// extension holds access to (where CORS would not stop the read).
+//
+// Residual, accepted: the hops' requests themselves go out. And an extension
+// cannot resolve DNS, so a public name that resolves into the private space
+// is not refused here (the Shim browser refuses it); host access is granted
+// by name, so its response stays unreadable under CORS, but a request that
+// needs no preflight still goes out.
 
 import {
   checkFetchUrl, handlerFetchInit, FETCH_MAX_BODY_BYTES, FETCH_HARD_CONTENT_LENGTH, FETCH_TIMEOUT_MS, type HandlerFetchResult,
@@ -83,6 +89,13 @@ export async function brokerFetch(url: unknown, opts: unknown, deps: FetchBroker
       redirect: 'follow',
       signal: controller.signal,
     });
+    // Where it landed after any redirects: a private address is refused
+    // before its body is read.
+    const landed = checkFetchUrl(res.url || checked.url.href);
+    if (!landed.ok) {
+      controller.abort();
+      return { ok: false, status: res.status, error: `redirected, then ${landed.error}` };
+    }
     // Refuse before reading the body when the server declares an absurd size.
     const declared = Number(res.headers.get('content-length'));
     if (Number.isFinite(declared) && declared > FETCH_HARD_CONTENT_LENGTH) {
