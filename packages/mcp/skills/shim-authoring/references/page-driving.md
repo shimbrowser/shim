@@ -63,3 +63,11 @@ route is replayed by its path alone, so a view that depends on the query string 
 the one you previewed. Sign-in, session, account-action and checkout pages are never
 replayed (the result counts them in `skippedSensitive`), so a view of that kind stays
 unverified.
+
+## Waiting for the site
+
+`evaluate_in_page`'s 3-second cap includes any waiting inside your expression, so keep an
+in-page wait well under it (about 2 seconds) or it answers `evaluateInPage timeout`. To wait
+longer for the site to change (replies to arrive before a "since your last visit" revisit,
+a feed to refresh), wait outside the page tools, e.g. a background `sleep`, then look again.
+A session ends after 10 idle minutes, so keep each wait shorter than that.
