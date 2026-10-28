@@ -557,6 +557,50 @@ const H = {
   anchor.setAttribute('data-conf-async', 'waiting');
   return new Promise((resolve) => setTimeout(() => { anchor.setAttribute('data-conf-async', 'landed'); resolve(); }, 700));
 }`,
+  // Returns a node it never inserts (the stackoverflow probe's bug): counts
+  // its mounts and its api.onAnchorChange deliveries on the anchor.
+  orphanSync: `function orphanSync({ anchor, api }) {
+  anchor.setAttribute('data-conf-mounts', String(Number(anchor.getAttribute('data-conf-mounts') || '0') + 1));
+  api.onAnchorChange(() => {
+    anchor.setAttribute('data-conf-orphan-changes', String(Number(anchor.getAttribute('data-conf-orphan-changes') || '0') + 1));
+  });
+  const d = document.createElement('div');
+  d.className = 'conf-orphan';
+  return d;
+}`,
+  orphanAsync: `function orphanAsync({ anchor }) {
+  anchor.setAttribute('data-conf-mounts', String(Number(anchor.getAttribute('data-conf-mounts') || '0') + 1));
+  return new Promise((resolve) => setTimeout(() => {
+    const d = document.createElement('div');
+    d.className = 'conf-orphan';
+    resolve(d);
+  }, 50));
+}`,
+  // Inserts its root, which is removed (on the first mount only) before the
+  // handler settles: a root that was on the page, so it must still self-heal.
+  flashAsync: `function flashAsync({ anchor }) {
+  const n = Number(anchor.getAttribute('data-conf-mounts') || '0') + 1;
+  anchor.setAttribute('data-conf-mounts', String(n));
+  const s = document.createElement('span');
+  s.className = 'conf-flash';
+  anchor.appendChild(s);
+  if (n === 1) setTimeout(() => s.remove(), 20);
+  return new Promise((resolve) => setTimeout(() => resolve(s), 150));
+}`,
+  flashSync: `function flashSync({ anchor }) {
+  anchor.setAttribute('data-conf-mounts', String(Number(anchor.getAttribute('data-conf-mounts') || '0') + 1));
+  const s = document.createElement('span');
+  s.className = 'conf-flash';
+  anchor.appendChild(s);
+  return s;
+}`,
+  countedNote: `function countedNote({ anchor }) {
+  anchor.setAttribute('data-conf-mounts', String(Number(anchor.getAttribute('data-conf-mounts') || '0') + 1));
+  const s = document.createElement('span');
+  s.className = 'conf-counted';
+  anchor.appendChild(s);
+  return s;
+}`,
   strictNote: `function strictNote({ anchor }) {
   const s = document.createElement('span');
   s.className = 'conf-strict';
@@ -1668,9 +1712,77 @@ const anchorChangeCase: ConformanceCase = {
   },
 };
 
+const unattachedOutputCase: ConformanceCase = {
+  id: 'unattached-inline-output',
+  title: 'a returned inline root the handler never inserted is reported, never re-mounted on every page change',
+  covers: ['self-healing', 'script', 'mount:inline', 'api.onAnchorChange'],
+  async run(kit) {
+    if (!(await kit.load('/apply'))) return;
+    const mounts = (sel: string) => kit.read(`document.querySelector(${JSON.stringify(sel)}).getAttribute('data-conf-mounts')`);
+    const syncKey = kit.apply({ id: 'orphan-sync', anchor: css('#lead'), mutations: [{ kind: 'script', handler: 'orphanSync' }], handlers: { orphanSync: H.orphanSync } });
+    const asyncKey = kit.apply({ id: 'orphan-async', anchor: css('#ad'), mutations: [{ kind: 'script', handler: 'orphanAsync' }], handlers: { orphanAsync: H.orphanAsync } });
+    kit.apply({ id: 'counted-note', anchor: css('#cleanup-target'), mutations: [{ kind: 'script', handler: 'countedNote' }], handlers: { countedNote: H.countedNote } });
+    const mountedOnce = await kit.until(async () => (await mounts('#lead')) === '1' && (await mounts('#ad')) === '1' && (await mounts('#cleanup-target')) === '1' ? true : null);
+    kit.check('every handler mounted once', mountedOnce === true, [await mounts('#lead'), await mounts('#ad'), await mounts('#cleanup-target')]);
+    await kit.sleep(300);
+
+    // Many page mutations, each in its own frame: the old engine re-ran the
+    // orphaning handlers on every one.
+    for (let i = 0; i < 20; i++) {
+      await kit.read(`document.querySelector('#grid').appendChild(document.createElement('span'))`);
+      await kit.sleep(40);
+    }
+    await kit.sleep(400);
+    kit.check('a sync handler\'s never-inserted root is not re-mounted across 20 page mutations', (await mounts('#lead')) === '1', await mounts('#lead'));
+    kit.check('…nor an async handler\'s', (await mounts('#ad')) === '1', await mounts('#ad'));
+    kit.check('…and the returned node stays off the page', (await kit.read(`document.querySelectorAll('.conf-orphan').length`)) === 0);
+
+    await kit.read(`document.querySelector('#lead').appendChild(document.createElement('b'))`);
+    const delivered = await kit.until(async () => (await kit.read(`document.querySelector('#lead').getAttribute('data-conf-orphan-changes')`)) === '1' ? true : null, 3000);
+    kit.check('the handler\'s api.onAnchorChange registration survives and fires', delivered === true,
+      await kit.read(`document.querySelector('#lead').getAttribute('data-conf-orphan-changes')`));
+
+    const noted = (key: string) => kit.event((e) => e.kind === 'rule-status' && e.specId === key && typeof e.note === 'string' && e.note.includes('never put on the page'));
+    const syncNote = await noted(syncKey);
+    kit.check('rule-status carries a note naming the never-inserted node', syncNote !== null && typeof syncNote.note === 'string' && syncNote.note.includes('returned 1 node(s)'),
+      kit.events.filter((e) => e.kind === 'rule-status' && e.specId === syncKey).at(-1));
+    kit.check('…for the async handler too', (await noted(asyncKey)) !== null, kit.events.filter((e) => e.kind === 'rule-status' && e.specId === asyncKey).at(-1));
+    const warned = await kit.until(() => kit.console.find((m) => m.level === 'warning' && m.message.includes('never put on the page')) ?? null, 3000);
+    kit.check('the engine warns on the console, naming the handler', warned !== null && warned.message.includes('orphanSync'), kit.console.filter((m) => m.level === 'warning').map((m) => m.message));
+
+    // A root that was on the page and was removed still self-heals, once.
+    await kit.read(`document.querySelector('#cleanup-target > .conf-counted').remove()`);
+    const healed = await kit.until(async () => (await mounts('#cleanup-target')) === '2'
+      && (await kit.read(`document.querySelectorAll('#cleanup-target > .conf-counted').length`)) === 1 ? true : null);
+    kit.check('a returned root the site removed is re-mounted', healed === true, await mounts('#cleanup-target'));
+    await kit.sleep(400);
+    kit.check('…exactly once', (await mounts('#cleanup-target')) === '2', await mounts('#cleanup-target'));
+
+    // Inserted, then removed before the handler settled: it was on the page,
+    // so it is re-mounted (not reported as never inserted).
+    const flashKey = kit.apply({ id: 'flash-async', anchor: css('#inject-target'), mutations: [{ kind: 'script', handler: 'flashAsync' }], handlers: { flashAsync: H.flashAsync } });
+    const flashHealed = await kit.until(async () => (await mounts('#inject-target')) === '2'
+      && (await kit.read(`document.querySelectorAll('#inject-target > .conf-flash').length`)) === 1 ? true : null, 4000);
+    kit.check('a root removed before its async handler settled is re-mounted', flashHealed === true, await mounts('#inject-target'));
+    // A site observer removes the first one the moment it lands (sync handler).
+    await kit.read(`(() => {
+      const t = document.querySelector('#html-target');
+      const o = new MutationObserver(() => { const f = t.querySelector('.conf-flash'); if (f) { f.remove(); o.disconnect(); } });
+      o.observe(t, { childList: true });
+    })()`);
+    const siteKey = kit.apply({ id: 'flash-sync', anchor: css('#html-target'), mutations: [{ kind: 'script', handler: 'flashSync' }], handlers: { flashSync: H.flashSync } });
+    const siteHealed = await kit.until(async () => (await mounts('#html-target')) === '2'
+      && (await kit.read(`document.querySelectorAll('#html-target > .conf-flash').length`)) === 1 ? true : null, 4000);
+    kit.check('a root a site observer removed as it landed is re-mounted', siteHealed === true, await mounts('#html-target'));
+    await kit.sleep(400);
+    const neverNoted = (key: string) => !kit.events.some((e) => e.kind === 'rule-status' && e.specId === key && typeof e.note === 'string' && e.note.includes('never put on the page'));
+    kit.check('…neither is reported as never put on the page', neverNoted(flashKey) && neverNoted(siteKey));
+  },
+};
+
 export const CONFORMANCE_CASES: readonly ConformanceCase[] = [
   applyCase, setWitnessCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, cropScrollCase, strictCspCase, sharedModuleCase, noMatchCase,
-  inputCase, supersededLoadCase, anchorChangeCase,
+  inputCase, supersededLoadCase, anchorChangeCase, unattachedOutputCase,
 ];
 
 /** Every capability some case vouches for. */

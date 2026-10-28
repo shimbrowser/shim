@@ -64,6 +64,9 @@ export interface RuleMountEntry {
   cleanups: Array<() => void>;
   // This mount's api.onAnchorChange record (anchor-change.ts).
   change?: MountRecord<Node>;
+  // Returned roots not on the page once their handler settled (mount-health.ts):
+  // left out of the stomp check until first seen connected.
+  unattached?: Set<HTMLElement>;
 }
 
 // Structural echo of anchors.ts's (unexported) RejectedSample — only the

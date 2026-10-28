@@ -20,7 +20,10 @@ can read as `matched 0` in a preview that settles first. Build and return the ro
 synchronously (a placeholder), then fill it in from an un-awaited async step that checks
 the root is still connected. Mount strategies:
 
-- `inline` (default) — your output goes where you put it. Cheapest; only for static DOM.
+- `inline` (default) — your output goes where you put it: the engine places nothing, so
+  insert what you return (`anchor.appendChild(el)`) before returning it. A returned node
+  that isn't on the page once the handler settles is never shown, gets no self-healing,
+  and is reported in the rule-status note and the console. Cheapest; only for static DOM.
 - `portal` — the engine parks your output in a floating root positioned at the anchor
   (`align: "below" | "above"`). **Use `portal` or `overlay` for anything inside a
   React/Vue/Angular-rendered region**: inline nodes there get displaced by the framework
