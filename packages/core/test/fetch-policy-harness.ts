@@ -26,6 +26,8 @@ console.log('isPrivateHost');
     '172.16.0.1', '172.31.255.255', '192.168.1.1', '169.254.169.254',
     '0.0.0.0', '[::1]', '::1', '::', 'fe80::1', 'febf::1', 'fc00::1', 'fd12:3456::1',
     '::ffff:127.0.0.1', '::ffff:7f00:1', 'fe80::1%en0', '[fe80::1%25en0]',
+    // A fully qualified name's root dot names the same host.
+    'localhost.', 'app.localhost.', 'LOCALHOST.', 'localhost..',
   ];
   const wrong = blocked.filter((h) => !isPrivateHost(h));
   check(`blocks every private spelling (${blocked.length})`, wrong.length === 0, wrong.join(', '));
@@ -51,6 +53,9 @@ console.log('checkFetchUrl');
   const priv = checkFetchUrl('http://192.168.1.1/admin');
   check('a literal private host is refused with the reason', !priv.ok && priv.error.includes('loopback/private/link-local'));
   check('so is the metadata endpoint and an IPv6 loopback', !checkFetchUrl('http://169.254.169.254/latest').ok && !checkFetchUrl('http://[::1]:8080/').ok);
+  check('a root dot does not slip loopback past it (localhost., app.localhost., 127.0.0.1.)',
+    !checkFetchUrl('http://localhost.:8080/').ok && !checkFetchUrl('http://app.localhost./x').ok && !checkFetchUrl('http://127.0.0.1./').ok);
+  check('a public name with a root dot still passes', checkFetchUrl('https://example.com./').ok);
   check('a url object is read as its string', checkFetchUrl(new URL('https://example.com/')).ok);
 }
 

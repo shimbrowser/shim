@@ -60,6 +60,7 @@ import {
   evidenceLocation, attributableLocation, NO_RULE_EVIDENCE_NOTE, MAX_NEW_MATCH_PATTERNS,
   type DocumentMark,
 } from './match-scope';
+import { settingsSchemaProblems } from './settings-schema';
 import { lintSpec } from './spec-lint';
 import {
   checkoutShim, packShim, anchorDigest, referencedHandlerNames, nameMap, ShimFolderError,
@@ -766,6 +767,10 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
     // this host lacks.
     const lint = lintSpec(next);
     if (lint.errors.length) return refused({ rejected: lint.errors.join('; ') });
+    // The settings declaration, by the reader every host uses: a malformed
+    // one is refused here, never applied and then silently read as unset.
+    const settingsProblems = settingsSchemaProblems(next);
+    if (settingsProblems.length) return refused({ rejected: `invalid settings schema: ${settingsProblems.join('; ')}` });
     // D15 preflight, atomic: nothing reaches the page.
     const pre = preflightSpec(next, handle.host.capabilities);
     if (!pre.ok) return refused(unsupportedEvidence(pre.unsupported, deps.unsupportedDetail));

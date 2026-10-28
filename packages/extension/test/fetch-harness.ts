@@ -53,6 +53,9 @@ async function main(): Promise<void> {
     check('a malformed url', !bad.ok && 'error' in bad && bad.error.includes('invalid url'));
     check('a non-http(s) scheme', !scheme.ok && 'error' in scheme && scheme.error.includes('http/https only'));
     check('a literal private host and the metadata endpoint', !priv.ok && !meta.ok && 'error' in priv && priv.error.includes('loopback/private/link-local'));
+    const dotted = await brokerFetch('http://localhost.:8080/', undefined, f);
+    const sub = await brokerFetch('http://app.localhost./x', undefined, f);
+    check('loopback spelled with a root dot (localhost., app.localhost.)', !dotted.ok && !sub.ok);
     check('none of them reached fetch', f.seen.length === 0);
   }
 
@@ -103,6 +106,7 @@ async function main(): Promise<void> {
     const r = await brokerFetch('https://public.example/go', undefined, fakeFetch(() => withUrl(new Response(secret, { status: 200 }), 'http://192.168.1.1/admin')));
     check('a request redirected onto a private address is refused', !r.ok && 'error' in r && r.error.startsWith('redirected, then blocked') && r.error.includes('192.168.1.1'), JSON.stringify(r));
     check('…before its body is read', !pulled);
+    check('so is loopback by a root-dotted name', !(await brokerFetch('https://public.example/c', undefined, fakeFetch(() => withUrl(new Response('x'), 'http://localhost.:9222/json')))).ok);
     check('so is the metadata endpoint and loopback by name',
       !(await brokerFetch('https://public.example/a', undefined, fakeFetch(() => withUrl(new Response('x'), 'http://169.254.169.254/latest')))).ok
       && !(await brokerFetch('https://public.example/b', undefined, fakeFetch(() => withUrl(new Response('x'), 'http://localhost:9222/json')))).ok);

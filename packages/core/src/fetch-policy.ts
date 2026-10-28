@@ -87,6 +87,8 @@ export function isPrivateHost(host: string): boolean {
   if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
   const pct = h.indexOf('%');
   if (pct !== -1) h = h.slice(0, pct);
+  // A fully qualified name's root dot (`localhost.`) names the same host.
+  h = h.replace(/\.+$/, '');
   if (h === 'localhost' || h.endsWith('.localhost')) return true;
   const v4 = parseIpv4(h);
   if (v4) return isPrivateIpv4(v4);
