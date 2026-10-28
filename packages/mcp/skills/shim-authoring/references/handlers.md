@@ -32,6 +32,13 @@ the root is still connected. Mount strategies:
   pointer: clicks anywhere over the anchor reach your overlay, not the site, and your own
   `pointer-events: none` on it is overridden. To annotate something the user still clicks
   (a card, a link), mount the badge `inline` or as a `portal` beside it instead.
+- **A `portal` or `overlay` draws above everything the site draws**, its own modals
+  included: the floating root sits at the end of `body` with `z-index: 2147483646`. A
+  shim button over a video can end up on top of the site's consent or terms dialog. When a
+  site layer can cover your target, check before showing (and from
+  `api.onAnchorChange` or a scroll listener as the page changes): if
+  `document.elementsFromPoint` at the target's centre finds a site element above the
+  target that isn't inside it, hide your output (or don't mount yet) until that layer goes.
 - `shadow` — your output inside a shadow root (style isolation). In an attach session
   `interact_page` can't reach into a shadow root (`shadow-unsupported`), so controls you
   need to click or type into while testing are better as `portal`/`overlay` with
