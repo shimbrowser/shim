@@ -46,7 +46,7 @@ import type { DeltaOp } from '@shimbrowser/core/spec-delta';
 import { applyDelta } from '@shimbrowser/core/spec-delta';
 import { hostMatches } from '@shimbrowser/core/host-match';
 import {
-  offMatchWarning, withOffMatch, evidenceLocation, untriedMatchNote, widenedPatterns, NO_RULE_EVIDENCE_NOTE, MAX_NEW_MATCH_PATTERNS,
+  offMatchWarning, withOffMatch, evidenceLocation, untriedMatchNote, widenedPatterns, NO_RULE_EVIDENCE_NOTE, MAX_NEW_MATCH_PATTERNS, attributableLocation, type DocumentMark,
 } from '@shimbrowser/core/match-scope';
 import { lintSpec } from '@shimbrowser/core/spec-lint';
 import {
@@ -619,12 +619,21 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
   // (applied, unchanged, a folder problem) carries the warning, and an applied
   // one's rules are capped at partial. Never an upgrade of earlier evidence.
   async function preview(handle: HeadlessHandle, input: unknown, signal: AbortSignal): Promise<BackendPreview> {
+    // Where the evidence came from: recorded only when the page kept the
+    // same location and document from the apply to the evidence, so a
+    // preview whose page navigated mid-settle records nowhere.
+    const mark = async (): Promise<DocumentMark> => ({
+      location: handle.host.isClosed() ? null : evidenceLocation(handle.host.url()),
+      token: handle.host.isClosed() ? null : await handle.host.documentToken().catch(() => null),
+    });
+    const startedOn = await mark();
     const result = await previewOnce(handle, input, signal);
     const evidence = result.evidence;
     if (!isRecord(evidence) || handle.host.isClosed()) return result;
-    if (result.applied && Array.isArray(evidence.rules) && evidence.rules.length > 0) {
-      const location = evidenceLocation(handle.host.url());
-      if (location) handle.tried.add(location);
+    const endedOn = await mark();
+    const attributable = attributableLocation(startedOn, endedOn);
+    if (result.applied && Array.isArray(evidence.rules) && evidence.rules.length > 0 && attributable !== null && !pageAway(handle)) {
+      handle.tried.add(attributable);
     }
     if (evidence.error === 'page-away' || evidence.error === 'page-closed' || evidence.error === 'session-ended') return result;
     const warning = offMatchWarning(handle.working.match?.hosts, handle.host.url());

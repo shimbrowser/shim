@@ -633,12 +633,20 @@ async function main(): Promise<void> {
     const p2 = await preview(r, id, changed);
     const banner = (isRecord(p2.evidence) && Array.isArray(p2.evidence.rules) ? p2.evidence.rules.filter(isRecord) : []).find((x) => x.ruleId === 'banner');
     check('a rule previewed on the now-covered page is full', p2.applied === true && banner?.verification === 'full', p2.evidence);
+    // A preview whose page navigates mid-settle reported on the old document:
+    // it is evidence for nowhere.
+    const moved = { ...changed, 'shim.json': json({ ...wideSpec, match: { hosts: ['other.test', 'site.test'] }, rules: [{ id: 'banner', anchor: css('.banner'), mutations: [{ kind: 'restyle', css: { opacity: '0.5' } }] }] }) };
+    const host0 = r.hosts[0];
+    r.duringSettle = () => host0?.navigate('https://other.test/elsewhere');
+    const mv = await preview(r, id, moved);
+    host0?.navigate(url);
     const bad = await preview(r, id, { ...changed, 'shim.json': json({ ...wideSpec, match: { hosts: ['other.test', 'Site.Test'] } }) });
     check('a pattern core refuses is refused headless too', bad.applied === false && isRecord(bad.evidence) && bad.evidence.error === 'malformed-shim-folder', bad);
-    const committed = await req(r, 'POST', `/sessions/${id}/commit`, { revision: p2.revision, commitId: 'w1', summary: 'runs on site.test' });
+    const committed = await req(r, 'POST', `/sessions/${id}/commit`, { revision: mv.revision, commitId: 'w1', summary: 'runs on site.test' });
     const cnotes = Array.isArray(committed.notes) ? committed.notes.map(String) : [];
     check('the commit says the new site was not approved here', committed.ok === true && cnotes.some((n) => n.includes('new sites: site.test') && n.includes('Nobody approved')), committed);
-    check('…and where it was not tried', cnotes.some((n) => n.includes('other.test (not tried)') && n.includes('https://site.test')), cnotes);
+    check('…and where it was not tried — a page reached mid-settle is not "tried"', mv.applied === true
+      && cnotes.some((n) => n.includes('other.test (not tried)') && n.includes('rule evidence only on https://site.test')), cnotes);
     const onDisk = JSON.parse(fs.readFileSync(wideFile, 'utf8')) as { spec: { match: { hosts: string[] } } };
     check('the file carries the widened match', JSON.stringify(onDisk.spec.match.hosts) === '["other.test","site.test"]', onDisk.spec.match);
     const many = Array.from({ length: 21 }, (_, i) => `h${i}.test`);

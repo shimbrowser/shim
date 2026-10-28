@@ -124,6 +124,16 @@ export function widenedPatterns(committed: readonly unknown[] | undefined, worki
   return out;
 }
 
+/**
+ * Whether a page at `hostname[:port]` that `before` covered is no longer
+ * covered by `after`: a frame a narrowing commit must tear the shim down on,
+ * since a broadcast keyed on the new match never reaches it again.
+ */
+export function leftMatchScope(before: readonly unknown[] | undefined, after: readonly unknown[] | undefined, hostname: string, port?: string): boolean {
+  const p = port || undefined;
+  return hostMatches(stringHosts(before), hostname, p) && !hostMatches(stringHosts(after), hostname, p);
+}
+
 function httpUrl(url: string): URL | null {
   try {
     const u = new URL(url);
@@ -176,6 +186,19 @@ export function withOffMatch(evidence: Record<string, unknown>, warning: string)
 export function evidenceLocation(url: string): string | null {
   const u = httpUrl(url);
   return u ? `${u.protocol}//${u.host}` : null;
+}
+
+/** A page's location and document token (PageHost.documentToken) at one moment. */
+export interface DocumentMark { location: string | null; token: string | null }
+
+/**
+ * The location a preview's rule evidence may be recorded against, or null:
+ * only when the page kept the same location and document from the apply to
+ * the evidence. A preview whose page navigated mid-settle reported on the
+ * old document, so it records nowhere.
+ */
+export function attributableLocation(start: DocumentMark, end: DocumentMark): string | null {
+  return start.location !== null && start.location === end.location && start.token === end.token ? start.location : null;
 }
 
 /** The recorded locations (evidenceLocation's form) `pattern` matches. */

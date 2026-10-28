@@ -8,7 +8,7 @@
 
 import {
   hostPatternProblem, patternCovers, widenedPatterns, offMatchWarning, withOffMatch,
-  evidenceLocation, locationsMatching, untriedMatchNote, MAX_NEW_MATCH_PATTERNS,
+  evidenceLocation, locationsMatching, untriedMatchNote, MAX_NEW_MATCH_PATTERNS, attributableLocation, leftMatchScope,
 } from '../src/match-scope';
 import { hostMatches } from '../src/host-match';
 
@@ -78,6 +78,18 @@ check('the commit note: a wildcard is tried only on its members seen, an exact h
   note !== null && note.includes('*.wikipedia.org (tried only on https://en.wikipedia.org)') && note.includes('old.reddit.com (not tried)') && !note.includes('en.wikipedia.org (not'), note);
 check('no note when every pattern is an exact host the session tried', untriedMatchNote(['example.com'], ['https://example.com']) === null);
 check('a session with no rule evidence says so', (untriedMatchNote(['example.com'], []) ?? '').startsWith('this session got no rule evidence'));
+check('evidence is attributed only to an unchanged document',
+  attributableLocation({ location: 'https://a.com', token: 't1' }, { location: 'https://a.com', token: 't1' }) === 'https://a.com'
+  && attributableLocation({ location: 'https://a.com', token: 't1' }, { location: 'https://b.com', token: 't2' }) === null
+  && attributableLocation({ location: 'https://a.com', token: 't1' }, { location: 'https://a.com', token: 't2' }) === null
+  && attributableLocation({ location: null, token: null }, { location: null, token: null }) === null);
+
+console.log('frames a narrowing leaves');
+check('a dropped host is left', leftMatchScope(['a.com', 'b.com'], ['a.com'], 'b.com'));
+check('a kept host is not', !leftMatchScope(['a.com', 'b.com'], ['a.com'], 'a.com'));
+check('narrowing a wildcard leaves its other subdomains', leftMatchScope(['*.x.com'], ['www.x.com'], 'old.x.com') && !leftMatchScope(['*.x.com'], ['www.x.com'], 'www.x.com'));
+check('narrowing to a port leaves the other ports', leftMatchScope(['x.com'], ['x.com:8080'], 'x.com', '9090') && !leftMatchScope(['x.com'], ['x.com:8080'], 'x.com', '8080'));
+check('a host never covered is not "left"', !leftMatchScope(['a.com'], [], 'z.com'));
 
 if (failures) {
   console.error(`\n${failures} failure(s)`);
