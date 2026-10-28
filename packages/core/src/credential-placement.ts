@@ -249,11 +249,19 @@ export function redactCredentialText(text: string, candidates: readonly string[]
 
 /**
  * How a grant names a placement, for trusted UI: where the value goes, said
- * plainly, with the logging risk of a query placement.
+ * plainly. A query placement also says who else can see the address: the
+ * service's logs, and — where the browser's Network Error Logging can't be
+ * turned off for these requests (Chrome's extension worker) — the report
+ * collector the service names, which can be another company. A host that
+ * suppresses those reports passes `reportsSuppressed`. A header placement
+ * carries neither warning (reports never include request headers).
  */
-export function describeCredentialUse(use: CredentialUse): string {
+export function describeCredentialUse(use: CredentialUse, opts: { reportsSuppressed?: boolean } = {}): string {
   if (use.header !== undefined) return `to ${use.origin} in the ${use.header} header`;
-  return `to ${use.origin} in the web address as "${use.query}" (services often record web addresses in their logs)`;
+  const reports = opts.reportsSuppressed
+    ? ''
+    : ', and the error-report collector the service chooses (which can be another company) may receive the address with the key in it';
+  return `to ${use.origin} in the web address as "${use.query}". Services often record web addresses in their logs${reports}`;
 }
 
 /**

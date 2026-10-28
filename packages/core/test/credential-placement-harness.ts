@@ -176,7 +176,11 @@ console.log('redactCredentialText');
 console.log('describe and bind');
 {
   check('a header placement reads plainly', describeCredentialUse(HEADER) === 'to https://api.example.com in the Authorization header');
-  check('a query placement names the logging risk', describeCredentialUse(QUERY).includes('web address as "key"') && describeCredentialUse(QUERY).includes('logs'));
+  check('a query placement names the logging risk and the report collector',
+    describeCredentialUse(QUERY).includes('web address as "key"') && describeCredentialUse(QUERY).includes('logs') && describeCredentialUse(QUERY).includes('error-report collector'));
+  check('…without the collector where the host suppresses reports',
+    describeCredentialUse(QUERY, { reportsSuppressed: true }).includes('logs') && !describeCredentialUse(QUERY, { reportsSuppressed: true }).includes('collector'));
+  check('a header placement carries neither warning', !describeCredentialUse(HEADER).includes('logs') && !describeCredentialUse(HEADER).includes('collector'));
   check('the binding changes with the origin, the kind, the spelling and the format',
     new Set([HEADER, { ...HEADER, origin: 'https://api2.example.com' }, { ...HEADER, header: 'authorization' }, { ...HEADER, format: '{}' },
       { origin: HEADER.origin, query: 'Authorization', format: 'Bearer {}' } as CredentialUse].map(credentialUseBinding)).size === 5);
