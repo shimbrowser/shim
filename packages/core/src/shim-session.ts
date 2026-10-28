@@ -78,7 +78,7 @@ import {
   QUERY_TIMEOUT_MS, INSPECT_TIMEOUT_MS, EVALUATE_TIMEOUT_MS,
 } from './page-host-tools';
 import { navigationScopeOf, runNavigate, isSameDocumentNavigation, type NavigationState, type NavigateLoad } from './navigate-scope';
-import { botWallOnHost, botWallNote, BOT_WALL_TOOLS, withBotWallEvidence, withBotWallNote, type BotWallNote } from './bot-wall';
+import { rememberedBotWall, BOT_WALL_TOOLS, withBotWallEvidence, withBotWallNote, type BotWallNote, type BotWallMemory } from './bot-wall';
 
 // How long the page gets to react after an apply before the evidence is read:
 // the Shim browser's window (APPLY_SETTLE_MS), above the engine's 1.5s
@@ -274,6 +274,8 @@ export interface ShimSessionHandle<S extends ShimSessionSource = ShimSessionSour
   docTokens: number;
   /** navigate's fixed scope (the start origin) and budget. */
   navigation: NavigationState;
+  /** The last bot wall seen, by document (bot-wall.ts rememberedBotWall). */
+  botWall: BotWallMemory;
 }
 
 // A document's mark, kept in the engine world: that world is created afresh
@@ -690,6 +692,7 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
       return; // no engine world yet: the next call looks again
     }
     if (token !== null && token === handle.docToken) return;
+    await botWallOf(handle);
     for (const p of handle.live.values()) apply(handle, p);
     await markDocument(handle);
     if (handle.live.size > 0) await settle(signal);
@@ -700,6 +703,7 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
   // (applied, unchanged, a folder problem) carries the warning, and an applied
   // one's rules are capped at partial. Never an upgrade of earlier evidence.
   async function preview(handle: ShimSessionHandle<S>, input: unknown, signal: AbortSignal): Promise<BackendPreview> {
+    await botWallOf(handle);
     const result = await previewOnce(handle, input, signal);
     const evidence = result.evidence;
     if (!isRecord(evidence) || handle.host.isClosed()) return result;
@@ -712,10 +716,11 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
   }
 
   // The note for the page's bot wall, or null (no wall, or the page is gone).
+  // Read (and remembered for the document) before anything is applied to a
+  // fresh document, too: the session's own output may cover the wall.
   async function botWallOf(handle: ShimSessionHandle<S>): Promise<BotWallNote | null> {
     if (handle.host.isClosed()) return null;
-    const wall = await botWallOnHost(handle.host);
-    return wall ? botWallNote(wall, deps.botWallAdvice ?? '') : null;
+    return rememberedBotWall(handle.host, handle.botWall, deps.botWallAdvice ?? '');
   }
 
   async function previewOnce(handle: ShimSessionHandle<S>, input: unknown, signal: AbortSignal): Promise<BackendPreview> {
@@ -974,6 +979,7 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
       // the previews were last applied to (a full load since): put them back.
       let reapplied = 0;
       if (!away && !(await onMarkedDocument(handle))) {
+        await botWallOf(handle);
         for (const p of handle.live.values()) { apply(handle, p); reapplied++; }
         await markDocument(handle);
         if (reapplied > 0) await settle(signal);
@@ -996,6 +1002,7 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
     }
     const landed = pageAway(handle);
     if (landed) return { ok: true, url: handle.host.url(), offSite: landed, reapplied: 0 };
+    await botWallOf(handle);
     let reapplied = 0;
     for (const p of handle.live.values()) {
       apply(handle, p);
@@ -1043,6 +1050,7 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
     // live set is kept for the next document on the site.
     const landed = pageAway(handle);
     if (landed) return { ...landed, url: handle.host.url() };
+    await botWallOf(handle);
     let reapplied = 0;
     for (const p of handle.live.values()) {
       apply(handle, p);
@@ -1231,6 +1239,7 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
         docToken: null,
         docTokens: 0,
         navigation: { scope: navigationScopeOf(startUrl), used: 0 },
+        botWall: { last: null },
       };
       handle.off.push(host.onRuntimeEvent((event) => {
         handle.events.push({ at: now(), event });
@@ -1256,6 +1265,8 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
       handle.off.push(host.onConsole((m) => handle.console.push({ level: m.level, message: m.message, source: m.source, ts: now(), ...(m.frame ? { frame: m.frame } : {}), ...(m.hostLike ? { hostLike: true } : {}), ...(m.engineWorld ? { engineWorld: true } : {}) })));
       // A host with no installed shim runs the committed rules as previews;
       // one that installs the shim already runs them.
+      // The page as it loaded, before the committed rules can cover a wall.
+      await botWallOf(handle);
       if (deps.previewCommittedAtBegin) for (const rule of handle.working.rules || []) apply(handle, previewFor(handle, rule));
       await markDocument(handle);
       // The host applies asynchronously: settle (as preview and reload do) so

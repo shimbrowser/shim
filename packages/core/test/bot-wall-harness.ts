@@ -13,7 +13,7 @@
 
 import {
   isCloudflareInterstitial, readBotWallSignals, classifyBotWall, detectBotWall, asBotWallSignals, describeBotWall,
-  botWallNote, withBotWallNote, withBotWallEvidence, botWallOnHost, BOT_WALL_SCRIPT, RUNNER_SELECTOR, CONTAINER_SELECTOR,
+  botWallNote, withBotWallNote, withBotWallEvidence, botWallOnHost, rememberedBotWall, type BotWallMemory, BOT_WALL_SCRIPT, RUNNER_SELECTOR, CONTAINER_SELECTOR,
   MAX_WALL_TEXT, type BotWall,
 } from '../src/bot-wall';
 
@@ -139,6 +139,9 @@ const CF_522 = `<!DOCTYPE html><html lang="en-US"><head><title>example.com | 522
 <h2>Connection timed out</h2></header><p>The initial connection between Cloudflare's network and the origin web server timed out.</p>
 <div class="cf-error-footer"><p>Cloudflare Ray ID: 8d2f1a2b3c4d5e71</p></div></div></div></body></html>`;
 
+const SUPPORT_PAGE = `<!doctype html><html><head><title>How to report an error to support</title></head><body>
+<p>If you see an Incapsula incident ID, include it in your support ticket. Request unsuccessful? Try again later.</p></body></html>`;
+
 const DATADOME_TAG_PAGE = `<!doctype html><html><head><title>News</title>
 <script>window.ddjskey = 'ABC'; window.ddoptions = {};</script><script src="https://js.datadome.co/tags.js" async></script></head>
 <body><main><h1>Headlines</h1><p>The day's stories.</p></main></body></html>`;
@@ -164,7 +167,7 @@ for (const [label, html, want] of walls) {
   const got = detectBotWall(stubDocument(html));
   check(`${label} → ${want.vendor} ${want.kind}`, got !== null && got.vendor === want.vendor && got.kind === want.kind, got);
 }
-const imperva = classifyBotWall({ ...readBotWallSignals(stubDocument('<html><body>Request unsuccessful. Incapsula incident ID: 123-456</body></html>')) });
+const imperva = classifyBotWall({ ...readBotWallSignals(stubDocument('<html><body>Request unsuccessful. Incapsula incident ID: 1234000450123456789-123456789012345</body></html>')) });
 check('an Imperva incident id alone is a block page', imperva?.vendor === 'imperva' && imperva.kind === 'block', imperva);
 const cfBlock = detectBotWall(stubDocument(CF_BLOCK));
 check('the wall carries its title', cfBlock?.title === 'Attention Required! | Cloudflare', cfBlock);
@@ -179,6 +182,7 @@ const negatives: Array<[string, string]> = [
   ['a login form with a Turnstile widget', TURNSTILE_LOGIN],
   ['a site\'s own "Access Denied" 403 page', SITE_403],
   ['a Cloudflare origin error (522): the template, but no bot refusal', CF_522],
+  ['a short help page mentioning an Incapsula incident ID', SUPPORT_PAGE],
   ['a page carrying DataDome\'s ordinary tag', DATADOME_TAG_PAGE],
   ['a site page that happens to have a #px-captcha element', PX_SITE_ELEMENT],
 ];
@@ -241,6 +245,19 @@ async function hostCases(): Promise<void> {
   check('a host whose page is the site answers null', (await botWallOnHost(host(readBotWallSignals(stubDocument(SITE_403))))) === null);
   check('the world is the caller\'s', (await botWallOnHost(host(signals), 2000, 'engine')) === null);
   check('a throwing evaluate answers null', (await botWallOnHost({ evaluate: async () => { throw new Error('gone'); } })) === null);
+  // Remembered per document: the session's own output covering the wall
+  // (a replace-root over the block page) doesn't clear it.
+  let page = readBotWallSignals(stubDocument(CF_BLOCK)) as unknown;
+  let token: string | null = 'doc-1';
+  const doc = { evaluate: async () => page, documentToken: async () => token };
+  const memory: BotWallMemory = { last: null };
+  check('a wall is read and remembered', (await rememberedBotWall(doc, memory, 'x'))?.vendor === 'cloudflare' && memory.last?.token === 'doc-1');
+  page = readBotWallSignals(stubDocument('<html><body><div id="cf-error-details"></div><main>My replacement UI</main></body></html>'));
+  check('…covered by the session\'s output, the same document is still the wall', (await rememberedBotWall(doc, memory, 'x'))?.vendor === 'cloudflare');
+  token = 'doc-2';
+  check('a new document without the signals is no wall', (await rememberedBotWall(doc, memory, 'x')) === null);
+  token = null;
+  check('an unreadable document is never matched to a remembered one', (await rememberedBotWall(doc, memory, 'x')) === null);
   const started = Date.now();
   const hung = await botWallOnHost({ evaluate: () => new Promise(() => {}) }, 50);
   check('a page that never answers counts as no wall, after the timeout', hung === null && Date.now() - started < 1000);

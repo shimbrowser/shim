@@ -191,9 +191,14 @@ export function classifyBotWall(s: BotWallSignals): BotWall | null {
   if (s.ddCaptcha && s.textLength < 1000) {
     return wall('datadome', 'challenge', 'a DataDome challenge (captcha-delivery.com) on a near-empty page');
   }
-  // Imperva / Incapsula: its incident id, or its challenge resource frame.
-  if (/incapsula incident id/i.test(text) || (s.incapsulaResource && s.textLength < 200)) {
-    return wall('imperva', s.incapsulaResource ? 'challenge' : 'block', 'Imperva\'s incident id or challenge frame');
+  // Imperva / Incapsula: its challenge resource frame on a near-empty page,
+  // or its block page, which is that one sentence and the incident's numeric
+  // id (a page that only mentions an incident id is neither).
+  if (s.incapsulaResource && s.textLength < 200) {
+    return wall('imperva', 'challenge', 'Imperva\'s challenge resource frame on a near-empty page');
+  }
+  if (s.textLength < 300 && /^request unsuccessful\.\s*incapsula incident id:\s*[\d-]{6,}/i.test(text)) {
+    return wall('imperva', 'block', 'Imperva\'s "Request unsuccessful" page with its incident id');
   }
   return null;
 }
@@ -315,4 +320,39 @@ export async function botWallOnHost(host: BotWallReader, timeoutMs: number = BOT
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+/** What a session remembers of the last wall it saw: the document it was on, and its note. */
+export interface BotWallMemory {
+  last: { token: string; note: BotWallNote } | null;
+}
+
+/** A BotWallReader that can also name the document it reads (PageHost.documentToken). */
+export interface BotWallDocumentReader extends BotWallReader {
+  documentToken(): Promise<string | null>;
+}
+
+/**
+ * The note for the host's page, remembered per document: a wall seen on a
+ * document stays that document's wall even once the session's own output
+ * (a replace-root over the block page, say) has covered the signals. So a
+ * caller reads it before it applies anything to a fresh document, and again
+ * after. Null when no wall was seen on the current document.
+ */
+export async function rememberedBotWall(
+  host: BotWallDocumentReader, memory: BotWallMemory, advice: string,
+  world: 'main' | 'engine' = 'main', timeoutMs: number = BOT_WALL_READ_TIMEOUT_MS,
+): Promise<BotWallNote | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const token = await Promise.race([
+    host.documentToken().catch(() => null),
+    new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); }),
+  ]).finally(() => { if (timer !== undefined) clearTimeout(timer); });
+  const wall = await botWallOnHost(host, timeoutMs, world);
+  if (wall) {
+    const note = botWallNote(wall, advice);
+    if (token !== null) memory.last = { token, note };
+    return note;
+  }
+  return token !== null && memory.last?.token === token ? memory.last.note : null;
 }

@@ -486,6 +486,23 @@ async function main(): Promise<void> {
     check('query_page on the wall carries botWall', isRecord(qWall.botWall), qWall);
     const vWall = await call('view_page', {});
     check('view_page on the wall carries botWall', vWall.content.some((c) => c.type === 'text' && (c.text ?? '').includes('"botWall"')), vWall.content.map((c) => c.type));
+    // The session's own output covering the wall doesn't clear it: a
+    // rule hiding the block page's wrapper, previewed, then carried onto
+    // a fresh load of the wall by navigate.
+    const cover = { id: 'cover', anchor: { primary: { kind: 'css', value: '#cf-wrapper' } }, mutations: [{ kind: 'hide' }] };
+    fs.writeFileSync(path.join(wallDir, 'shim.json'), JSON.stringify({ ...wallSpec, rules: [cover] }, null, 2));
+    const pc = json(await call('shim_preview', {}));
+    const pcEv = isRecord(pc.evidence) ? pc.evidence : {};
+    const pcRules = Array.isArray(pcEv.rules) ? pcEv.rules.filter(isRecord) : [];
+    check('a rule hiding the wall\'s wording still carries botWall, no better than partial', isRecord(pcEv.botWall)
+      && pcRules.length === 1 && pcRules[0]?.verification === 'partial', pcEv);
+    const coveredText = await evalInPage('document.body.innerText');
+    check('…though the cover really hid the wall\'s wording (the note is the remembered one)', typeof coveredText === 'string' && !coveredText.includes('Ray ID'), coveredText);
+    const navAgain = json(await call('navigate', { url: '/wall/cf-block?again=1' }));
+    check('navigate onto the wall with the cover live still carries botWall', navAgain.ok === true && isRecord(navAgain.botWall), navAgain);
+    const qCovered = json(await call('query_page', { description: 'the heading' }));
+    check('…and so does the next page tool', isRecord(qCovered.botWall), qCovered);
+    fs.writeFileSync(path.join(wallDir, 'shim.json'), JSON.stringify({ ...wallSpec, rules: [{ id: 'outline', anchor: { primary: { kind: 'css', value: 'h1' } }, mutations: [{ kind: 'restyle', properties: { outline: '2px solid red' } }] }] }, null, 2));
     const navBack = json(await call('navigate', { url: '/' }));
     check('back on the site, navigate carries no botWall', navBack.ok === true && navBack.botWall === undefined, navBack);
     const pBack = json(await call('shim_preview', {}));
