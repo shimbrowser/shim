@@ -63,7 +63,7 @@ async function buildMcp() {
     bundle: true,
     platform: 'node',
     format: 'cjs',
-    target: 'node22',
+    target: 'node26',
     conditions: ['shim-source'],
     // Playwright is an optional peer (the headless PageHost, D9): never
     // inlined, loaded at runtime only when a headless page is opened.
