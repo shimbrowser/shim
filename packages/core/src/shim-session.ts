@@ -54,6 +54,7 @@ import type { PageHost, PageLoadOutcome, PageRuntimeEvent, PreviewRule, Unsubscr
 import type { SessionBackend, BackendPreview, BackendCheckout, BackendCommit, FinishInfo } from './session-registry';
 import type { DeltaOp } from './spec-delta';
 import { applyDelta } from './spec-delta';
+import { hostMatches } from './host-match';
 import { lintSpec } from './spec-lint';
 import {
   checkoutShim, packShim, anchorDigest, referencedHandlerNames, nameMap, ShimFolderError,
@@ -302,15 +303,13 @@ function portOf(url: string): string {
 }
 
 /**
- * Whether a match.hosts pattern covers `url` — the browser registry's
- * semantics: a pattern without a port
- * matches any port, an exact host or a `*.` subdomain wildcard; a pattern
- * with a port matches only that exact host:port.
+ * Whether a match.hosts pattern covers `url`: core's hostMatches, the one
+ * rule the Shim browser's registry uses (a pattern without a port matches
+ * any port, an exact host or a `*.` subdomain wildcard; a pattern with a port
+ * matches only that exact host:port).
  */
 export function hostPatternMatches(pattern: string, url: URL): boolean {
-  if (pattern.includes(':')) return pattern === (url.port ? `${url.hostname}:${url.port}` : url.hostname);
-  if (pattern === url.hostname) return true;
-  return pattern.startsWith('*.') && url.hostname.endsWith(pattern.slice(1));
+  return hostMatches([pattern], url.hostname, url.port || undefined);
 }
 
 /** Whether `url` is an http(s) page one of the shim's declared hosts covers. */
@@ -322,7 +321,45 @@ function onDeclaredHost(spec: Spec, url: string): boolean {
     return false;
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
-  return (spec.match?.hosts ?? []).some((h) => typeof h === 'string' && h !== '' && hostPatternMatches(h, u));
+  const hosts = (spec.match?.hosts ?? []).filter((h) => typeof h === 'string' && h !== '');
+  return hostMatches(hosts, u.hostname, u.port || undefined);
+}
+
+/**
+ * The warning a preview carries while the page is one the working
+ * match.hosts doesn't cover, or null. In Shim the shim would not run on that
+ * page at all (the attach open refuses it), so nothing seen there says it
+ * behaves the same in Shim: the caller caps every rule at `partial`.
+ */
+export function offMatchWarning(spec: Spec, url: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  if (onDeclaredHost(spec, url)) return null;
+  const hosts = (spec.match?.hosts ?? []).filter((h) => typeof h === 'string' && h !== '');
+  const where = u.port ? `${u.hostname}:${u.port}` : u.hostname;
+  return `the shim's match.hosts (${hosts.join(', ') || 'none'}) doesn't cover ${where}: in Shim it would not run on this page, ` +
+    'so no rule here is verified beyond partial';
+}
+
+/**
+ * Evidence on an off-match page: every rule's verification capped at
+ * `partial` (`full` drops, `none` stays), and the warning added. Pure.
+ */
+export function withOffMatch(evidence: Record<string, unknown>, warning: string): Record<string, unknown> {
+  const warnings = Array.isArray(evidence.warnings) ? [...(evidence.warnings as unknown[])] : [];
+  warnings.push(warning);
+  const out: Record<string, unknown> = { ...evidence, warnings };
+  if (Array.isArray(evidence.rules)) {
+    out.rules = evidence.rules.map((r: unknown) => (
+      isRecord(r) && r.verification === 'full' ? { ...r, verification: 'partial' } : r
+    ));
+  }
+  return out;
 }
 
 /** A new shim's spec for a page (the browser's shims.create shape). */
@@ -645,7 +682,21 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
     if (handle.live.size > 0) await settle(signal);
   }
 
+  // A preview's reply, judged after it settled against the page it ended on:
+  // off the working match.hosts, every reply that isn't a page-away refusal
+  // (applied, unchanged, a folder problem) carries the warning, and an applied
+  // one's rules are capped at partial. Never an upgrade of earlier evidence.
   async function preview(handle: ShimSessionHandle<S>, input: unknown, signal: AbortSignal): Promise<BackendPreview> {
+    const result = await previewOnce(handle, input, signal);
+    const evidence = result.evidence;
+    if (!isRecord(evidence) || handle.host.isClosed()) return result;
+    if (evidence.error === 'page-away' || evidence.error === 'page-closed' || evidence.error === 'session-ended') return result;
+    const warning = offMatchWarning(handle.working, handle.host.url());
+    if (warning === null) return result;
+    return { ...result, evidence: withOffMatch(evidence, warning) };
+  }
+
+  async function previewOnce(handle: ShimSessionHandle<S>, input: unknown, signal: AbortSignal): Promise<BackendPreview> {
     if (!isRecord(input) || !('workingCopy' in input)) {
       return refused({ error: 'invalid-request', detail: 'a headless preview takes the working copy ({ workingCopy })' });
     }
