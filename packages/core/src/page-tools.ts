@@ -227,7 +227,7 @@ const SHIM_VIEW_PAGE: ToolDefinition = {
       selector: {
         type: 'string',
         description:
-          'Optional CSS selector to crop the screenshot to (element + context margin, native resolution). ' +
+          'Optional CSS selector to crop the screenshot to (its first visible match + context margin, native resolution). ' +
           'An element the viewport cuts off is scrolled into view for the shot and the scroll is put back after. ' +
           'Use for verifying a specific element you just changed. Omit for the full viewport.',
       },
@@ -447,7 +447,7 @@ const COMPOSITION_VIEW_PAGE: ToolDefinition = {
     properties: {
       selector: {
         type: 'string',
-        description: 'Optional CSS selector to crop the screenshot to. Omit for the full viewport.',
+        description: 'Optional CSS selector to crop the screenshot to (its first visible match). Omit for the full viewport.',
       },
     },
   },
@@ -521,7 +521,7 @@ const SESSION_VIEW_PAGE: ToolDefinition = {
       selector: {
         type: 'string',
         description:
-          'Optional CSS selector to crop the screenshot to (element + context margin, native resolution). ' +
+          'Optional CSS selector to crop the screenshot to (its first visible match + context margin, native resolution). ' +
           'An element the viewport cuts off is scrolled into view for the shot and the scroll is put back after. ' +
           'Use for verifying a specific element you just changed. Omit for the full viewport.',
       },

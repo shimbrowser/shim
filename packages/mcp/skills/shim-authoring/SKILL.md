@@ -259,8 +259,8 @@ All of them act on the session's tab.
   reading: never use it to change the page (that is what the folder is for), dispatch
   events, call `click()` or set `location` — `interact_page` and `navigate` do that — and
   remember it runs as the user. Capped at 5000 characters in, 8000 out, 3 seconds.
-- **`view_page { selector? }`** — a screenshot, as an image. With `selector`, a crop of that
-  element plus margin at native resolution (the verification shot; an element below the
+- **`view_page { selector? }`** — a screenshot, as an image. With `selector`, a crop of its first visible
+  match plus margin at native resolution (the verification shot; an element below the
   fold is scrolled into view for the shot and the scroll put back); without, the visible
   viewport downscaled to 1280px wide (a last-resort visual lookup — for icon-only buttons,
   branded wordmarks, "the one that looks like X"). After a lookup, write the anchor from a

@@ -989,6 +989,23 @@ const pageToolsCase: ConformanceCase = {
     const crop = await viewPageOnHost(kit.host, { selector: '#lead' }, 'main');
     kit.check('view_page with a selector: a crop around the element', crop.error === undefined && crop.croppedTo === '#lead'
       && isRecord(crop.elementBox) && crop.elementBox.w > 0, { ...crop, dataBase64: crop.dataBase64?.length });
+    // Hidden copies ahead of the visible one: the crop is of the visible one.
+    await kit.read(`(() => {
+      const add = (cls, css) => { const d = document.createElement('div'); d.className = cls; d.style.cssText = css; document.body.appendChild(d); };
+      add('conf-peek', 'display:none;width:300px;height:300px');
+      add('conf-peek', 'width:0;height:0;overflow:hidden');
+      add('conf-peek', 'visibility:hidden;width:200px;height:200px');
+      add('conf-peek', 'width:123px;height:45px;background:rgb(10,120,200)');
+      add('conf-ghost', 'display:none');
+      add('conf-ghost', 'width:0;height:0');
+      return 0;
+    })()`);
+    const peek = await viewPageOnHost(kit.host, { selector: '.conf-peek' }, 'main');
+    kit.check('view_page with a selector whose first matches are hidden: a crop of the first visible match', peek.error === undefined
+      && isRecord(peek.elementBox) && peek.elementBox.w === 123 && peek.elementBox.h === 45, { ...peek, dataBase64: peek.dataBase64?.length });
+    const ghost = await viewPageOnHost(kit.host, { selector: '.conf-ghost' }, 'main');
+    kit.check('view_page with a selector matching only hidden elements: an error saying so, no image', typeof ghost.error === 'string'
+      && ghost.error.includes('matched 2 elements, none visible') && ghost.dataBase64 === undefined, ghost.error);
     const missing = await viewPageOnHost(kit.host, { selector: '#no-such-element' }, 'main');
     kit.check('view_page with a dead selector: an error, not a throw', typeof missing.error === 'string' && missing.error.includes('matched nothing'), missing.error);
 
