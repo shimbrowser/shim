@@ -8,7 +8,9 @@
 // form. The session ended from outside (Chrome's bar, the tab closed) is
 // cleaned up: previews dropped, held rules back, the host closed. Full
 // mode, so the committed rules can be script rules with observers, the
-// case a twin pair makes a page hang.
+// case a twin pair makes a page hang. Last, a preview's api.settings (the
+// installed shim's values against its declaration, a default, then a stored
+// value) and api.fetch (the worker's broker, cookie-less, refusing loopback).
 //
 //   npx playwright install chromium
 //   node out/packages/extension/test/extension-session-harness.js
@@ -17,7 +19,7 @@ import fs from 'fs';
 import path from 'path';
 import type { BrowserContext, Page } from 'playwright';
 import type { PreviewRule } from '@shimbrowser/core/page-host';
-import { workDir, extensionCopy, fixtureServer, shimWriter, css, launch, workerOf, installer, configureExtension, popupOf, settle, sleep } from './smoke-helpers';
+import { workDir, extensionCopy, fixtureServer, shimWriter, css, launch, workerOf, installer, configureExtension, popupOf, settle, sleep, FIXTURE_ALIAS } from './smoke-helpers';
 import { proxyHost } from './host-proxy';
 
 let failures = 0;
@@ -69,7 +71,7 @@ async function main(): Promise<void> {
     { id: 'tag', anchor: css('#storage-target'), mutations: [{ kind: 'script', handler: 'committed2' }] },
     { id: 'stable', anchor: css('#stable'), mutations: [{ kind: 'restyle', properties: { outline: '1px solid rgb(255, 0, 0)' } }] },
     { id: 'promote', anchor: { primary: { kind: 'css', value: 'button.buy-v1' }, fallbacks: [{ kind: 'css', value: 'button[data-sku="42"]' }] }, mutations: [{ kind: 'restyle', properties: { outline: '2px solid rgb(0, 0, 255)' } }] },
-  ], {}, { committed: COMMITTED, committed2: COMMITTED2 });
+  ], { settings: [{ key: 'units', type: 'text', default: 'metric' }, { key: 'limit', type: 'number' }] }, { committed: COMMITTED, committed2: COMMITTED2 });
 
   const profile = path.join(work, 'profile');
   let ctx: BrowserContext = await launch(ext, profile);
@@ -397,6 +399,53 @@ async function main(): Promise<void> {
       check('closing it answers true', (await closeHost(id)) === true);
     }
     await page.close();
+
+    // Last: setting a value reboots the shim on its open pages, which the
+    // checks above count.
+    console.log('a preview\'s api.settings and api.fetch:');
+    {
+      const cfgPage = await ctx.newPage();
+      await cfgPage.goto(`${origin}/settings-fixture`);
+      await ctx.addCookies([{ name: 'sid', value: 'signed-in', url: `http://${FIXTURE_ALIAS}:${new URL(origin).port}` }]);
+      const cfgTab = await tabIdOf(cfgPage);
+      const id = await openHost(cfgTab);
+      const h = proxyHost(worker, id);
+      const READER = `function reader({ anchor, api }) {
+        (async () => {
+          const all = await api.settings.getAll();
+          const units = await api.settings.get('units');
+          const r = await api.fetch('http://${FIXTURE_ALIAS}:' + location.port + '/fixture-data.json');
+          const loopback = await api.fetch(location.origin + '/fixture-data.json');
+          const el = document.createElement('span');
+          el.className = 'reader';
+          el.textContent = JSON.stringify({ units, keys: Object.keys(all), status: r.status, data: r.ok ? JSON.parse(r.text) : r.error, blocked: !loopback.ok });
+          anchor.replaceChildren(el);
+        })();
+      }`;
+      const preview = (key: string): PreviewRule => ({
+        patchId: SHIM_ID, ruleKey: key, applyId: key,
+        rule: { id: 'reader', anchor: css('#cfg'), mutations: [{ kind: 'script', handler: 'reader' }], handlers: { reader: READER } },
+      });
+      const read = (): Promise<{ units: unknown; keys: string[]; status: number; data: { answer?: number; sawCookie?: boolean } | string; blocked: boolean } | null> =>
+        cfgPage.evaluate(() => { const t = document.querySelector('#cfg .reader')?.textContent; return t ? JSON.parse(t) : null; });
+      h.applyPreview(preview('preview:session:reader:1'));
+      const first = await settle(read, (v) => v !== null, 15000);
+      check('a preview reads the shim\'s settings: the declared default, every declared key (an unset one too)',
+        first?.units === 'metric' && JSON.stringify(first.keys) === '["units","limit"]', first);
+      check('a preview\'s api.fetch reaches a site through the worker, without its cookie',
+        first?.status === 200 && typeof first.data === 'object' && first.data.answer === 42 && first.data.sawCookie === false, first);
+      check('and refuses the loopback host', first?.blocked === true, first);
+      const popup = await popupOf(ctx, extId);
+      const set = await popup.evaluate((sid) => chrome.runtime.sendMessage({ type: 'settings.set', id: sid, key: 'units', value: 'imperial' }), SHIM_ID) as { ok?: boolean };
+      await popup.close();
+      check('a value set for the installed shim is accepted', set.ok === true, set);
+      h.applyPreview(preview('preview:session:reader:2'));
+      const second = await settle(read, (v) => v?.units === 'imperial', 15000);
+      check('the next preview reads the stored value', second?.units === 'imperial', second);
+      await h.stop();
+      check('the host closes', (await closeHost(id)) === true);
+      await cfgPage.close();
+    }
   } finally {
     await ctx.close();
     closeServer();

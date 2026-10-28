@@ -23,6 +23,7 @@ import type { ManagedFingerprint } from './managed-anchor';
 import { WITNESS_VERSION } from './witness';
 import { SET_WITNESS_VERSION } from './set-witness';
 import type { PageHostCapabilities, PageHostApiMember } from './page-host';
+import { secretSettingKeys } from './settings-schema';
 import { PAGE_HOST_API_MEMBERS } from './page-host';
 import { referencedHandlerNames } from './shim-folder';
 import { moduleToExpression } from './handler-source';
@@ -97,6 +98,19 @@ export function preflightSpec(spec: Spec, capabilities: PageHostCapabilities): P
       feature: field,
       message: `the shim declares "${field}", which needs ${need.what} — not available on this host`,
     });
+  }
+  // A secret field is a credential: a host that serves settings but cannot
+  // encrypt them at rest refuses it, never stores it in the clear. Named
+  // field by field, so the author knows which to drop (or author in Shim).
+  if (members.has('settings') && !capabilities.secretSettings) {
+    const secrets = secretSettingKeys(spec);
+    if (secrets.length) {
+      unsupported.push({
+        feature: 'settings',
+        message: `the shim declares secret settings (${secrets.map((k) => JSON.stringify(k)).join(', ')}), which this host cannot store encrypted — `
+          + 'drop the secret fields or author this shim in the Shim browser',
+      });
+    }
   }
   // A whole-patch stylesheet a host doesn't install would leave every rule
   // reporting a clean apply on a page that lacks the shim's styling.

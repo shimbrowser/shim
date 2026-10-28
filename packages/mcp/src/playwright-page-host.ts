@@ -55,6 +55,7 @@ export const HEADLESS_CAPABILITIES: PageHostCapabilities = Object.freeze({
   // the spec-level stylesheet, so a shim that has one is refused (D15).
   specCss: false,
   apiMembers: Object.freeze([]),
+  secretSettings: false,
   componentIdentity: false,
   engineInspection: false,
   // CDP Input.* on the host's own session: the same trusted events the Shim

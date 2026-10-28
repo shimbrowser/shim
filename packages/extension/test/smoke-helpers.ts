@@ -36,11 +36,37 @@ export function extensionCopy(work: string, hostPermissions: string[]): string {
   return ext;
 }
 
-/** The conformance fixture site: /apply (style-src allows inline), /strict (style-src 'self'), /deploy (its markup moves with `setDeploy`). */
+/**
+ * The conformance fixture site: /apply (style-src allows inline), /strict
+ * (style-src 'self'), /deploy (its markup moves with `setDeploy`). Plus two
+ * pages the settings and fetch checks use: /settings-fixture (a `#cfg`
+ * target) and /fixture-data.json (JSON that says whether a cookie came with
+ * the request, so a check can see api.fetch is cookie-less). The data allows
+ * cross-origin reads: api.fetch refuses the loopback host, so a check reaches
+ * it as FIXTURE_ALIAS (see launch), a host the extension holds no access to,
+ * where CORS decides.
+ */
 export async function fixtureServer(): Promise<{ origin: string; setDeploy(deploy: FixtureDeploy): void; close(): void }> {
   const state = { deploy: 1 as FixtureDeploy };
   const server = http.createServer((req, res) => {
-    const r = conformanceFixture(new URL(req.url ?? '/', 'http://x').pathname, state);
+    const pathname = new URL(req.url ?? '/', 'http://x').pathname;
+    if (pathname === '/fixture-data.json') {
+      res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+      res.end(JSON.stringify({ answer: 42, sawCookie: typeof req.headers.cookie === 'string' && req.headers.cookie !== '' }));
+      return;
+    }
+    if (pathname === '/fixture-private.json') {
+      // No cross-origin headers: readable only where the extension skips CORS.
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ private: true }));
+      return;
+    }
+    if (pathname === '/settings-fixture') {
+      res.writeHead(200, { 'content-type': 'text/html' });
+      res.end('<!doctype html><title>settings fixture</title><div id="cfg"></div>');
+      return;
+    }
+    const r = conformanceFixture(pathname, state);
     res.writeHead(r.status, { 'content-type': r.contentType, ...r.headers });
     res.end(r.body);
   });
@@ -65,12 +91,24 @@ export function shimWriter(work: string): ShimFileWriter {
 
 export const css = (selector: string): { primary: { kind: 'css'; value: string } } => ({ primary: { kind: 'css', value: selector } });
 
+/**
+ * A name that resolves to the fixture server inside the launched browser:
+ * a public-looking host for api.fetch to reach (it refuses loopback), and
+ * one the extension holds no access to.
+ */
+export const FIXTURE_ALIAS = 'shim-fixture.test';
+/** A shim's own site for the fetch-reach check (grant it with extensionCopy). */
+export const FIXTURE_OWN = 'shim-own.test';
+/** A site the extension holds for another shim (grant it with extensionCopy). */
+export const FIXTURE_HELD = 'shim-held.test';
+
 /** A persistent profile with the extension loaded: the toggle on chrome://extensions and the store survive a relaunch of it. */
 export function launch(ext: string, profile: string): Promise<BrowserContext> {
   return chromium.launchPersistentContext(profile, {
     headless: true,
     channel: 'chromium',
-    args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`],
+    args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`,
+      `--host-resolver-rules=${[FIXTURE_ALIAS, FIXTURE_OWN, FIXTURE_HELD].map((h) => `MAP ${h} 127.0.0.1`).join(',')}`],
   });
 }
 

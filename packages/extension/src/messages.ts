@@ -14,6 +14,7 @@ import type { PreparedInstall, InstallProvenance } from './install';
 import type { ExtensionMode } from './capabilities';
 import type { VersionRecord } from './store';
 import type { PendingConsent } from './attach-consent';
+import type { SettingsPageField } from './settings';
 
 export type StorageMethod = 'get' | 'set' | 'delete' | 'list';
 
@@ -22,6 +23,10 @@ export type ToWorker =
   | { type: 'bundle' }
   /** A handler's `api.storage` call, on the sender's origin. */
   | { type: 'storage'; method: StorageMethod; shimId: string; key?: string; value?: unknown }
+  /** A handler's `api.settings.get(key)` / `getAll()`: the shim's declared keys, resolved. */
+  | { type: 'settings'; method: 'get' | 'getAll'; shimId: string; key?: string }
+  /** A handler's `api.fetch(url, opts)`, made by the worker; answers the result as `value`. */
+  | { type: 'fetch'; shimId: string; url: unknown; opts?: unknown }
   /** An engine event the page reports (rule status, rebases, errors). */
   | { type: 'event'; shimId: string; kind: string; payload: Record<string, unknown> }
   /** The install page: the mode in force, to prepare against. */
@@ -33,6 +38,12 @@ export type ToWorker =
   | { type: 'shims.export'; id: string }
   /** The shim's restorable snapshots. */
   | { type: 'shims.versions'; id: string }
+  /** The settings page: the shim's declared fields with the values in force. */
+  | { type: 'settings.fields'; id: string }
+  /** The settings page: store a value for a declared field (checked against its type). */
+  | { type: 'settings.set'; id: string; key: string; value: unknown }
+  /** The settings page: forget a stored value, so the field reads its default again. */
+  | { type: 'settings.clear'; id: string; key: string }
   /** A restore is a forward change: the current spec is snapshotted, the chosen one becomes the next version. */
   | { type: 'shims.restore'; id: string; version: number }
   /** The install page, after the user granted the hosts: write and register. */
@@ -66,6 +77,12 @@ export interface BundledShim {
    * still that form.
    */
   forms: Record<string, string>;
+  /**
+   * A digest of the shim's settings values (settings.ts settingsKey), when it
+   * declares settings: a changed value reboots the shim, so its handlers read
+   * the new one. The values themselves stay in the worker (api.settings).
+   */
+  settingsKey?: string;
 }
 
 export interface BundleAnswer {
@@ -96,6 +113,10 @@ export interface ShimSummary {
   version: number;
   /** Rules held for review: the ladder could not re-find their target after a site change. */
   review: ReviewItem[];
+  /** Fields the shim's settings declaration has: the popup links its settings page when there are any. */
+  settingsCount: number;
+  /** A required setting has no value and no default: the shim needs setup before it does what it says. */
+  needsSetup: boolean;
 }
 
 export interface ReviewItem {
@@ -127,6 +148,7 @@ export type WorkerAnswer =
   | { ok: true; id: string }
   | { ok: true; file: string; fileName: string }
   | { ok: true; versions: VersionSummary[] }
+  | { ok: true; name: string; fields: SettingsPageField[] }
   | { ok: true }
   | { ok: false; error: string };
 

@@ -8,11 +8,14 @@
 //   rule_state  [shimId, ruleId] → quarantine and page memory
 //   baselines   [shimId, host, pathKey] → the deploy id a page kind was last seen at
 //   prefs       key → an extension setting
+//   settings    [shimId, key] → a value the user set for one of a shim's declared settings
 //
 // `user_data` has the semantics every Shim host gives `api.storage`: JSON
 // values, a missing key reads null, `set` answers the value, `delete`
 // whether a row went away, `list` the bucket as a record. What travels and
 // what does not is the install's and the export's business, not the store's.
+// `settings` holds values only, as the user typed them: the declaration they
+// answer is the shim's spec, and a value never travels with an export.
 //
 // The schema is versioned; `upgrade` runs the steps from the stored version
 // to this one, so an extension update migrates before anything is
@@ -24,7 +27,7 @@ import type { InstallProvenance, UserDataRow } from './install';
 import type { ExtensionMode } from './capabilities';
 
 export const STORE_DB_NAME = 'shim-for-chrome';
-export const STORE_SCHEMA_VERSION = 2;
+export const STORE_SCHEMA_VERSION = 3;
 
 /** Distinct page kinds kept per (shim, host); past this the least recently refreshed go. */
 export const BASELINE_CAP = 100;
@@ -71,6 +74,13 @@ interface UserDataRecord extends UserDataRow {
 interface PrefRecord {
   key: string;
   value: unknown;
+}
+
+interface SettingRecord {
+  shimId: string;
+  key: string;
+  value: unknown;
+  updatedAt: number;
 }
 
 /** A restorable snapshot of a shim as it was before a change (or as installed). */
@@ -189,6 +199,14 @@ export interface ShimStore {
     get(key: string): Promise<unknown>;
     set(key: string, value: unknown): Promise<void>;
   };
+  /** The values a user set for a shim's declared settings (settings.ts checks them before they get here). */
+  settings: {
+    /** Every stored value of one shim, by key, declared or not (a dropped field's row stays until the shim goes). */
+    get(shimId: string): Promise<Record<string, unknown>>;
+    set(shimId: string, key: string, value: unknown): Promise<void>;
+    /** Whether a row went away. */
+    delete(shimId: string, key: string): Promise<boolean>;
+  };
   close(): void;
 }
 
@@ -198,6 +216,7 @@ const USER_DATA = 'user_data';
 const RULE_STATE = 'rule_state';
 const BASELINES = 'baselines';
 const PREFS = 'prefs';
+const SETTINGS = 'settings';
 const BY_SHIM = 'byShim';
 const BY_SCOPE = 'byScope';
 const BY_RANK = 'byRank';
@@ -217,6 +236,9 @@ function upgrade(db: IDBDatabase, from: number): void {
     const baselines = db.createObjectStore(BASELINES, { keyPath: ['shimId', 'host', 'pathKey'] });
     baselines.createIndex(BY_SHIM, 'shimId');
     baselines.createIndex(BY_HOST, ['shimId', 'host']);
+  }
+  if (from < 3) {
+    db.createObjectStore(SETTINGS, { keyPath: ['shimId', 'key'] }).createIndex(BY_SHIM, 'shimId');
   }
 }
 
@@ -305,7 +327,7 @@ function bind(db: IDBDatabase): ShimStore {
       await completion(tx);
     },
     async deleteShim(id) {
-      const tx = write([SHIMS, VERSIONS, USER_DATA, RULE_STATE, BASELINES]);
+      const tx = write([SHIMS, VERSIONS, USER_DATA, RULE_STATE, BASELINES, SETTINGS]);
       const shims = tx.objectStore(SHIMS);
       const existing = await request(shims.getKey(id));
       if (existing === undefined) {
@@ -317,6 +339,7 @@ function bind(db: IDBDatabase): ShimStore {
       await deleteByIndex(tx.objectStore(USER_DATA), BY_SHIM, id);
       await deleteByIndex(tx.objectStore(RULE_STATE), BY_SHIM, id);
       await deleteByIndex(tx.objectStore(BASELINES), BY_SHIM, id);
+      await deleteByIndex(tx.objectStore(SETTINGS), BY_SHIM, id);
       await completion(tx);
       return true;
     },
@@ -475,6 +498,31 @@ function bind(db: IDBDatabase): ShimStore {
         const tx = write(PREFS);
         tx.objectStore(PREFS).put({ key, value: jsonValue(value) } satisfies PrefRecord);
         await completion(tx);
+      },
+    },
+    settings: {
+      async get(shimId) {
+        const rows = await request(read(SETTINGS).objectStore(SETTINGS).index(BY_SHIM).getAll(shimId) as IDBRequest<SettingRecord[]>);
+        const out: Record<string, unknown> = {};
+        for (const row of rows) put(out, row.key, row.value);
+        return out;
+      },
+      async set(shimId, key, value) {
+        const tx = write(SETTINGS);
+        tx.objectStore(SETTINGS).put({ shimId, key, value: jsonValue(value), updatedAt: Date.now() } satisfies SettingRecord);
+        await completion(tx);
+      },
+      async delete(shimId, key) {
+        const tx = write(SETTINGS);
+        const store = tx.objectStore(SETTINGS);
+        const existing = await request(store.getKey([shimId, key]));
+        if (existing === undefined) {
+          tx.abort();
+          return false;
+        }
+        store.delete([shimId, key]);
+        await completion(tx);
+        return true;
       },
     },
     close() {

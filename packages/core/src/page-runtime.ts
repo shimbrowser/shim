@@ -8,9 +8,10 @@
 //     `applyExtraRule` path the browser's stub engine uses, so a preview runs
 //     under its ruleKey exactly as it does in Shim;
 //   - the handler api a preview receives: the core members, `api.storage`
-//     answered by the driver over the binding, and every member the headless
-//     host lacks failing in its own shape (D15) with an `unsupported-api`
-//     event;
+//     answered by the driver over the binding, `api.settings` and `api.fetch`
+//     answered the same way when the host serves them (`serves`), and every
+//     member the host lacks failing in its own shape (D15) with an
+//     `unsupported-api` event;
 //   - the runtime error reporter (window error / unhandledrejection, attributed
 //     by the handler's sourceURL), the same filter the browser's preload uses;
 //   - the handler-fetch budget, pacing same-site fetches.
@@ -33,6 +34,15 @@ export interface PageRuntimeConfig {
   globalName: string;
   /** The `error` an unsupported never-throw member resolves with (D15). */
   unsupportedError: string;
+  /**
+   * The members beyond `api.storage` the driver answers over the binding
+   * (`settings.get` / `settings.getAll`, `fetch`). Absent or empty: both fail
+   * in their own shape, as on a host that lacks them. `settings.getAll`
+   * answers `{ keys, values }`: JSON drops a key whose value is undefined, so
+   * the declared keys travel beside the values and the record is rebuilt here
+   * with every one of them.
+   */
+  serves?: readonly ('settings' | 'fetch')[];
 }
 
 /** The control object the driver calls into, by Runtime.evaluate / callFunctionOn. */
@@ -100,6 +110,23 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
       if (found) return found;
     }
     return null;
+  };
+  // What the driver answers beyond api.storage (PageRuntimeConfig.serves).
+  const serves: readonly string[] = Array.isArray(config.serves) ? config.serves : [];
+  // settings.getAll's { keys, values }, rebuilt with every declared key
+  // (undefined where unset), own properties only.
+  const settingsRecord = (answer: unknown): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    if (typeof answer !== 'object' || answer === null) return out;
+    const { keys, values } = answer as { keys?: unknown; values?: unknown };
+    if (!Array.isArray(keys)) return out;
+    const record = typeof values === 'object' && values !== null ? values as Record<string, unknown> : {};
+    for (const key of keys as unknown[]) {
+      if (typeof key !== 'string') continue;
+      const value = Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
+      Object.defineProperty(out, key, { value, enumerable: true, writable: true, configurable: true });
+    }
+    return out;
   };
   const call = (method: string, patchId: string, args: unknown[]): Promise<unknown> => {
     const id = ++seq;
@@ -175,11 +202,21 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
         symbols: () => Promise.resolve(null),
       },
       storage,
-      settings: {
-        get: () => { unsupported('settings.get'); return Promise.resolve(undefined); },
-        getAll: () => { unsupported('settings.getAll'); return Promise.resolve({}); },
-      },
-      fetch: refusal('fetch'),
+      // Never throw, as on every host: a settings read that fails reads as
+      // unset, a fetch that fails resolves { ok: false, error }.
+      settings: serves.includes('settings')
+        ? {
+          get: (key: string) => call('settings.get', patchId, [key]).catch(() => undefined),
+          getAll: () => call('settings.getAll', patchId, []).then(settingsRecord, () => ({})),
+        }
+        : {
+          get: () => { unsupported('settings.get'); return Promise.resolve(undefined); },
+          getAll: () => { unsupported('settings.getAll'); return Promise.resolve({}); },
+        },
+      fetch: serves.includes('fetch')
+        ? (url: unknown, opts?: unknown) => call('fetch', patchId, opts === undefined ? [url] : [url, opts])
+          .catch((err: unknown) => ({ ok: false, error: err instanceof Error ? err.message : String(err) }))
+        : refusal('fetch'),
       ai: { complete: refusal('ai.complete') },
       modules: { invoke: refusal('modules.invoke') },
       reportEvent(kind: string, payload?: Record<string, unknown>) {

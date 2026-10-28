@@ -212,6 +212,13 @@ export interface PageHostCapabilities {
   specCss: boolean;
   /** Handler api members beyond the core set. */
   apiMembers: readonly PageHostApiMember[];
+  /**
+   * A settings declaration may mark fields `secret`: the host keeps their
+   * values encrypted at rest. A host that cannot (no OS-backed key store)
+   * refuses any secret field, at install and in a session, rather than store
+   * a credential in the clear. Meaningful only with `settings` in apiMembers.
+   */
+  secretSettings: boolean;
   /** Component identity in a witness is captured, verified and used for recovery. */
   componentIdentity: boolean;
   /** `inspection` is present (the engine serves query_page / inspect_element). */

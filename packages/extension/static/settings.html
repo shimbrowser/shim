@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Shim settings</title>
+  <link rel="stylesheet" href="ui.css">
+  <style>
+    body { max-width: 560px; margin: 0 auto; padding: 32px 20px 60px; }
+    .field { display: grid; gap: 4px; }
+    .field label { font-weight: 600; }
+    .field .help { color: var(--text-soft); font-size: 12px; }
+    .field input[type="text"], .field input[type="number"], .field select {
+      font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 5px 8px; width: 100%;
+    }
+    .field input:focus, .field select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+    .status { font-size: 12px; min-height: 1.45em; }
+    .status.ok { color: var(--ok); }
+  </style>
+</head>
+<body>
+  <h1 id="title">settings</h1>
+  <p class="soft">These values stay in this browser. A shim's handlers read them; exporting the shim never includes them.</p>
+  <section id="fields"></section>
+  <p id="error" class="error" hidden></p>
+  <script src="settings.js"></script>
+</body>
+</html>

@@ -31,6 +31,7 @@ import { anchorDigest, withoutManagedKeys } from '@shimbrowser/core/managed-anch
 import { referencedHandlerNames } from '@shimbrowser/core/shim-folder';
 import { ruleModules } from '@shimbrowser/core/rule-form';
 import { preflightSpec } from '@shimbrowser/core/capability-preflight';
+import { settingsSchemaProblems } from '@shimbrowser/core/settings-schema';
 import { isApiMapToolName } from '@shimbrowser/core/api-map-tools';
 import { isDataToolName } from '@shimbrowser/core/data-tools';
 import { isCompositionSessionToolName } from '@shimbrowser/core/composition-session-tools';
@@ -86,6 +87,8 @@ export interface Sessions {
   takeNotes(sessionId: string): string[];
   /** Wait for a session's activation task, if one runs. */
   settleActivation(sessionId: string): Promise<void>;
+  /** The working spec of the session holding `shimId` (its latest applied revision), or null: what a preview's api.settings declares. */
+  workingSpec(shimId: string): Spec | null;
 }
 
 interface LeaseEntry {
@@ -203,6 +206,9 @@ export function createSessions(deps: SessionsDeps): Sessions {
   const leases = exclusiveLeases();
   const notes = new Map<string, string[]>();
   const activations = new Map<string, Promise<void>>();
+  // The open session's handle per shim (one holder per shim, exclusiveLeases):
+  // a preview's api.settings reads its working declaration.
+  const live = new Map<string, ExtensionSessionHandle>();
   const note = (sessionId: string, text: string): void => {
     const list = notes.get(sessionId) ?? [];
     list.push(text);
@@ -250,7 +256,7 @@ export function createSessions(deps: SessionsDeps): Sessions {
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.sleep ? { sleep: deps.sleep } : {}),
     unsupportedError: UNSUPPORTED_ERROR,
-    unsupportedDetail: 'Shim for Chrome runs hide, restyle, reorder, reshape, remove, inject-element, inject-html, script and replace-root rules, with api.storage and api.cleanup. Nothing was applied. Remove what is listed, or author this shim in the Shim browser.',
+    unsupportedDetail: 'Shim for Chrome runs hide, restyle, reorder, reshape, remove, inject-element, inject-html, script and replace-root rules, with api.storage, api.settings (no secret fields), api.fetch and api.cleanup. Nothing was applied. Remove what is listed, or author this shim in the Shim browser.',
     unsupportedNote: (ruleId, member) => `rule "${ruleId}" used api.${member}, which Shim for Chrome does not provide (${UNSUPPORTED_ERROR}) — its result is partial`,
     // Shim for Chrome has no commit card to ask about widening where a shim
     // runs, so it does not opt into match editing (the fail-closed default): a
@@ -279,6 +285,10 @@ export function createSessions(deps: SessionsDeps): Sessions {
   async function writeCommit(handle: ExtensionSessionHandle, prepared: PreparedCommit, signal: AbortSignal): Promise<CommitWrite> {
     const shimId = handle.source.shimId;
     const db = await deps.store();
+    // The settings declaration, by the reader every Shim host uses: the
+    // settings page could show nothing of a malformed one.
+    const settingsProblems = settingsSchemaProblems(prepared.file.spec);
+    if (settingsProblems.length) return { ok: false, error: 'malformed-shim-folder', detail: settingsProblems.join('; ') };
     const pre = preflightSpec(prepared.file.spec, capabilitiesFor(deps.mode()));
     if (!pre.ok) {
       return { ok: false, error: 'unsupported-in-mode', detail: `this shim needs what Shim for Chrome does not run in ${deps.mode()} mode: ${pre.unsupported.map((u) => u.message).join('; ')}. ${HOW_TO_ENABLE}` };
@@ -363,6 +373,7 @@ export function createSessions(deps: SessionsDeps): Sessions {
         throw new TargetChangedError(`the tab moved to ${url || 'an empty page'} before the session opened; ask again`);
       }
       const handle = await backend.begin(args);
+      live.set(handle.source.shimId, handle);
       if (target.committedDown) note(sessionId, target.committedDown);
       return handle;
     },
@@ -413,6 +424,7 @@ export function createSessions(deps: SessionsDeps): Sessions {
         if (h.source.created && !info.committed) await deps.removeDraft(h.source.shimId);
       } finally {
         notes.delete(h.sessionId);
+        if (live.get(h.source.shimId) === h) live.delete(h.source.shimId);
       }
     },
   };
@@ -433,6 +445,7 @@ export function createSessions(deps: SessionsDeps): Sessions {
       return list;
     },
     settleActivation: (sessionId) => activations.get(sessionId) ?? Promise.resolve(),
+    workingSpec: (shimId) => live.get(shimId)?.working ?? null,
   };
 }
 

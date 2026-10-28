@@ -28,8 +28,12 @@ export const EXTENSION_DECLARATIVE_CAPABILITIES: PageHostCapabilities = Object.f
   iframeRules: false,
   // The whole committed spec runs through the engine, which installs its stylesheet.
   specCss: true,
-  // Declarative rules have no handler, so no member is reachable.
-  apiMembers: Object.freeze([]),
+  // Declarative rules have no handler to call a member, but a settings
+  // declaration is still served (its values are kept and the settings page
+  // shows them), so the shim installs the same in either mode.
+  apiMembers: Object.freeze(['settings'] as const),
+  // No OS-backed key store: a secret field is refused, never kept in the clear.
+  secretSettings: false,
   componentIdentity: false,
   // Page inspection and trusted input arrive with the PageHost.
   engineInspection: false,
@@ -39,16 +43,17 @@ export const EXTENSION_DECLARATIVE_CAPABILITIES: PageHostCapabilities = Object.f
 /**
  * Full mode: the user-script world, handlers compiled there. `script` and
  * `replace-root` run; `mount-route` needs the route registry the Shim
- * browser keeps in main, so it stays out. The members a handler can use
- * are the core ones plus `api.storage`, the same as declarative mode's
- * engine gives: `apiMembers` lists the host-provided extras, and this host
- * provides none yet (`fetch` and `settings` are a later phase).
+ * browser keeps in main, so it stays out. A handler gets the core members,
+ * `api.storage`, and the host extras listed here: `api.settings` (values
+ * from the settings page) and `api.fetch` (the worker's cookie-less broker).
+ * Secret settings are refused: the extension has no encrypted store.
  */
 export const EXTENSION_CAPABILITIES: PageHostCapabilities = Object.freeze({
   mutationKinds: Object.freeze([...DECLARATIVE_KINDS, 'script', 'replace-root']),
   iframeRules: false,
   specCss: true,
-  apiMembers: Object.freeze([]),
+  apiMembers: Object.freeze(['settings', 'fetch'] as const),
+  secretSettings: false,
   componentIdentity: false,
   engineInspection: false,
   trustedInput: false,
@@ -60,14 +65,17 @@ export const EXTENSION_CAPABILITIES: PageHostCapabilities = Object.freeze({
  * compiles whatever the page's CSP says and whatever the user-scripts
  * toggle says, so a session does not depend on the mode. Previews are per
  * rule, so nothing installs the spec-level stylesheet; trusted input is the
- * protocol's own. Each entry is advertised only while its conformance case
- * passes on this host.
+ * protocol's own. A preview's `api.settings` reads the installed shim's
+ * values against the working declaration, and its `api.fetch` is the same
+ * broker an installed shim uses. Each entry is advertised only while its
+ * conformance case passes on this host.
  */
 export const SESSION_CAPABILITIES: PageHostCapabilities = Object.freeze({
   mutationKinds: Object.freeze([...DECLARATIVE_KINDS, 'script', 'replace-root']),
   iframeRules: false,
   specCss: false,
-  apiMembers: Object.freeze([]),
+  apiMembers: Object.freeze(['settings', 'fetch'] as const),
+  secretSettings: false,
   componentIdentity: false,
   engineInspection: false,
   trustedInput: true,

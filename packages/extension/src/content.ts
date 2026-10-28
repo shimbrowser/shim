@@ -1,9 +1,9 @@
 // The page runtime, registered per shim after the engine (`shim-core.page.js`,
 // global ShimCore) at document_start in the isolated world. It asks the
 // worker which shims run on this host and port and runs each through the
-// engine with the handler api this host gives: the core members and
-// `api.storage` over the worker; every other member failing in its own
-// shape with an `unsupported-api` event (D15).
+// engine with the handler api this host gives: the core members, and
+// `api.storage`, `api.settings` and `api.fetch` over the worker; every other
+// member failing in its own shape with an `unsupported-api` event (D15).
 //
 // A document keeps one control per running shim and reconciles against the
 // worker's answer whenever it is asked again: the worker re-injects this
@@ -23,6 +23,7 @@
 
 import type * as Core from '@shimbrowser/core';
 import type { Rule } from '@shimbrowser/core/types';
+import { fromSettingsTransport } from './settings';
 import { isToRuntime, RUNTIME_PORT, SESSION_CLOSE_EVENT, type ToWorker, type ToRuntime, type FromRuntime, type WorkerAnswer, type BundleAnswer, type BundledShim } from './messages';
 import { reconcileShims } from './reconcile';
 import { compileHandlers, type HandlerMap } from './compile';
@@ -151,11 +152,35 @@ interface Runtime {
         symbols: () => Promise.resolve(null),
       },
       storage,
+      // Never throw, as on every host: a settings read that fails reads as
+      // unset, a fetch that fails resolves { ok: false, error }.
       settings: {
-        get: () => { unsupported('settings.get'); return Promise.resolve(undefined); },
-        getAll: () => { unsupported('settings.getAll'); return Promise.resolve({}); },
+        get: async (key: string): Promise<unknown> => {
+          try {
+            const answer = await ask({ type: 'settings', method: 'get', shimId: patchId, key });
+            return answer.ok && 'value' in answer ? answer.value : undefined;
+          } catch {
+            return undefined;
+          }
+        },
+        getAll: async (): Promise<Record<string, unknown>> => {
+          try {
+            const answer = await ask({ type: 'settings', method: 'getAll', shimId: patchId });
+            return answer.ok && 'value' in answer ? fromSettingsTransport(answer.value) : {};
+          } catch {
+            return {};
+          }
+        },
       },
-      fetch: refusal('fetch'),
+      fetch: async (url: unknown, opts?: unknown): Promise<unknown> => {
+        try {
+          const answer = await ask({ type: 'fetch', shimId: patchId, url, ...(opts !== undefined ? { opts } : {}) });
+          if (!answer.ok) return { ok: false, error: answer.error };
+          return 'value' in answer ? answer.value : { ok: false, error: 'no answer from the extension' };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      },
       ai: { complete: refusal('ai.complete') },
       modules: { invoke: refusal('modules.invoke') },
       reportEvent(kind: string, payload?: Record<string, unknown>) {
@@ -184,6 +209,8 @@ interface Runtime {
     handlers: HandlerMap;
     /** The handler modules the control compiled, as one key: a bundle with another key reboots the shim (reconcile.ts). */
     handlersKey: string;
+    /** The settings digest the shim booted with (BundledShim.settingsKey): another one reboots it, so its handlers read the new values. */
+    settingsKey?: string;
     /** Each rule as the shim has it now, by id. */
     rules: Map<string, string>;
     /** Each rule as the control booted with it: a rule whose current form differs runs as an extra. */
@@ -224,7 +251,10 @@ interface Runtime {
       formsByShim.set(shim.id, shim.forms ?? {});
       const control = ShimCore.run({ spec: shim.spec, handlers, priority: shim.priority, bundleHash: deployId, suppressedRuleIds }, makeApi(shim.id));
       const rules = ruleJson(shim.spec.rules);
-      controls.set(shim.id, { control, priority: shim.priority, version: shim.version, handlers, handlersKey: handlersKeyOf(shim), rules, booted: new Map(rules), extras: new Set(), deploy: deployFor(shim.spec) });
+      controls.set(shim.id, {
+        control, priority: shim.priority, version: shim.version, handlers, handlersKey: handlersKeyOf(shim), rules, booted: new Map(rules), extras: new Set(), deploy: deployFor(shim.spec),
+        ...(shim.settingsKey !== undefined ? { settingsKey: shim.settingsKey } : {}),
+      });
     } catch (err) {
       console.error('[shim] boot failed', shim.id, err);
     }
@@ -294,6 +324,7 @@ interface Runtime {
     }
     running.rules = next;
     running.version = shim.version;
+    running.settingsKey = shim.settingsKey;
   };
   // The whole set a session holds of one shim: newly held rules go down,
   // released ones come back, in their current form.
@@ -332,7 +363,9 @@ interface Runtime {
     if (retired) return;
     if (!answer.ok || !('shims' in answer)) return;
     const bundle = answer as BundleAnswer;
-    const stamps = new Map([...controls].map(([id, r]) => [id, { priority: r.priority, version: r.version, handlersKey: r.handlersKey }]));
+    const stamps = new Map([...controls].map(([id, r]) => [id, {
+      priority: r.priority, version: r.version, handlersKey: r.handlersKey, ...(r.settingsKey !== undefined ? { settingsKey: r.settingsKey } : {}),
+    }]));
     const { stop: gone, start, update: moved } = reconcileShims(stamps, bundle.shims.map((shim) => ({ ...shim, handlersKey: handlersKeyOf(shim) })));
     // The holds first: a shim booting below boots suppressed.
     if (typeof bundle.holdSeq === 'number' && bundle.holdSeq >= holdSeq) {

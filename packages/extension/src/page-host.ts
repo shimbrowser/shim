@@ -34,6 +34,7 @@ import { pageRuntimeSource } from '@shimbrowser/core/page-runtime';
 import { remoteObjectValue, netErrorCode, consoleLevel, formatConsoleArg, handlerSource, type RemoteValue } from '@shimbrowser/core/cdp-host';
 import { SESSION_CAPABILITIES, UNSUPPORTED_ERROR } from './capabilities';
 import { SESSION_CLOSE_EVENT, type ToRuntime } from './messages';
+import type { SettingsTransport } from './settings';
 
 /**
  * The world the host creates for the engine in a session's page: this
@@ -95,6 +96,18 @@ export interface SessionStorage {
   list(scope: SessionStorageScope): Promise<Record<string, unknown>>;
 }
 
+/**
+ * Backs previews' `api.settings` and `api.fetch`. Settings resolve the
+ * session's working declaration against the installed shim's values; fetch
+ * is the broker an installed shim's handlers use.
+ */
+export interface SessionHandlerApi {
+  /** Every declared key of the preview's shim, resolved, as getAll crosses the binding (`get` reads one of these). */
+  settings(scope: SessionStorageScope): Promise<SettingsTransport>;
+  /** A preview's `api.fetch(url, opts)`: never throws, answers `{ ok: false, error }` on failure. */
+  fetch(scope: SessionStorageScope, url: unknown, opts: unknown): Promise<unknown>;
+}
+
 export type NudgeOutcome = 'acked' | 'no-runtime' | 'timed-out';
 
 export interface PageHostOptions {
@@ -111,6 +124,8 @@ export interface PageHostDeps {
   /** The engine's page bundle source (dist/shim-core.page.js). */
   engineBundle(): Promise<string>;
   storage: SessionStorage;
+  /** Previews' `api.settings` and `api.fetch`. Absent: both fail in their own shape (the conformance runner's hosts). */
+  handlerApi?: SessionHandlerApi;
   /** A nudge to the page's committed runtime (the rules a session holds, or its end): acked by a runtime, none there, or not answered in time. */
   nudge(tabId: number, msg: Extract<ToRuntime, { seq?: number }>): Promise<NudgeOutcome>;
   /** How long a preview apply or an engine-world evaluate waits for the world. Default 5000. */
@@ -296,6 +311,11 @@ export async function openPageHost(tabId: number, deps: PageHostDeps, options: P
       else if (method === 'storage.set') value = await deps.storage.set(scope, key, args[1]);
       else if (method === 'storage.delete') value = await deps.storage.delete(scope, key);
       else if (method === 'storage.list') value = await deps.storage.list(scope);
+      else if (deps.handlerApi && method === 'settings.getAll') value = await deps.handlerApi.settings(scope);
+      else if (deps.handlerApi && method === 'settings.get') {
+        const { values } = await deps.handlerApi.settings(scope);
+        value = Object.hasOwn(values, key) ? values[key] : undefined;
+      } else if (deps.handlerApi && method === 'fetch') value = await deps.handlerApi.fetch(scope, args[0], args[1]);
       else value = undefined;
       // Crosses as a quoted JSON string parsed page-side, never as an object
       // literal: a literal would turn an own `__proto__` key into a
@@ -483,7 +503,9 @@ export async function openPageHost(tabId: number, deps: PageHostDeps, options: P
   mainFrameId = frameTree.frame.id;
   if (typeof frameTree.frame.url === 'string' && frameTree.frame.url) currentUrl = frameTree.frame.url;
   await send('Runtime.addBinding', { name: BINDING, executionContextName: worldName });
-  const worldScript = `${await deps.engineBundle()}\n${pageRuntimeSource({ binding: BINDING, globalName: RUNTIME_GLOBAL, unsupportedError: UNSUPPORTED_ERROR })}\n${worldCloseSource()}`;
+  const worldScript = `${await deps.engineBundle()}\n${pageRuntimeSource({
+    binding: BINDING, globalName: RUNTIME_GLOBAL, unsupportedError: UNSUPPORTED_ERROR, ...(deps.handlerApi ? { serves: ['settings', 'fetch'] as const } : {}),
+  })}\n${worldCloseSource()}`;
   const { identifier: scriptId } = await send<{ identifier: string }>('Page.addScriptToEvaluateOnNewDocument', { source: worldScript, worldName });
   // The document already loaded never saw the script: give it the world now.
   if (worldContextId === null) {

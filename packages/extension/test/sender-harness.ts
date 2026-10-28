@@ -45,6 +45,11 @@ for (const t of CONTENT_MESSAGES) check(`content may ${t}`, allowedFrom(t, conte
 for (const t of PAGE_MESSAGES) check(`content may not ${t}`, !allowedFrom(t, content));
 check('unknown may send nothing', [...PAGE_MESSAGES, ...CONTENT_MESSAGES].every((t) => !allowedFrom(t, unknown)));
 check('an unknown type is allowed to nobody', !allowedFrom('reset', page) && !allowedFrom('reset', content));
+// Phase 7's boundary: a site reads its shims' settings and fetches through the
+// broker, but only the extension's own settings page writes a value.
+check('content may read settings and fetch', allowedFrom('settings', content) && allowedFrom('fetch', content));
+check('content may never write or list a shim\'s settings', !allowedFrom('settings.set', content) && !allowedFrom('settings.clear', content) && !allowedFrom('settings.fields', content));
+check('the settings page may set, clear and list, never fetch as a handler', allowedFrom('settings.set', page) && allowedFrom('settings.clear', page) && allowedFrom('settings.fields', page) && !allowedFrom('fetch', page) && !allowedFrom('settings', page));
 
 console.log('');
 if (failures) { console.error(`${failures} check(s) failed`); process.exit(1); }

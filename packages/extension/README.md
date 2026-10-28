@@ -18,8 +18,21 @@ Early. What works today:
 - Declarative rules run on every matching page: `hide`, `restyle`, `reorder`, `reshape`,
   `remove`, `inject-element`, `inject-html`, plus the shim's own stylesheet.
 - With user scripts allowed (full mode, below), rules with handlers run too: `script`
-  and `replace-root`, with `api.storage` and `api.cleanup`. Handlers compile in Chrome's
-  user-script world, so a site's own CSP cannot block them.
+  and `replace-root`, with `api.storage`, `api.settings`, `api.fetch` and `api.cleanup`.
+  Handlers compile in Chrome's user-script world, so a site's own CSP cannot block them.
+- A shim that declares settings gets a settings page, opened from the popup, and its
+  handlers read the values with `api.settings`. Saving a value re-runs the shim on the
+  pages already open. Values stay in this browser and never travel with an export. A
+  `secret` field is refused at install: the extension has no encrypted store, so a shim
+  that needs a credential runs in the Shim browser.
+- `api.fetch` is brokered by the extension's worker with the Shim browser's bounds:
+  cookie-less, http(s) only, no loopback, private or link-local address, at most 5 MB
+  read and 15 s. A shim's handlers read its own sites directly, but never a site the
+  extension holds for another shim; anywhere else a site must allow cross-origin reads
+  (CORS). A request redirected onto a private address, or onto another shim's site, is
+  refused before its body is read. The extension cannot resolve DNS, so a name that
+  resolves to a private address is not refused here as it is in the Shim browser; its
+  response is readable only on the shim's own sites, which it runs on anyway.
 - Enable, disable and remove shims from the popup; changes reach the pages already open,
   no reload. Removing a shim releases the site access it asked for.
 - When a site changes, the engine's deterministic rebase ladder runs in the page and the
@@ -38,7 +51,7 @@ Early. What works today:
   browser's control endpoint over a socket, and each session the agent opens waits for
   you on the attach card. Commits land as new versions of the installed shim (below).
 
-What is next: `api.fetch` and `api.settings`, then packaging for the Web Store.
+What is next: packaging for the Web Store.
 
 ## Modes
 
@@ -74,9 +87,10 @@ debugger to the tab and creates an isolated world of its own there (`shim-core`)
 it evaluates the engine and compiles each preview's handlers: the protocol's evaluate is
 subject to neither the site's CSP nor the user-scripts toggle. The session's capabilities
 are a third constant (`SESSION_CAPABILITIES`): every mutation kind including `script` and
-`replace-root`, trusted input, no `api` members beyond `storage` and `cleanup`
-(`api.fetch`, `api.ai` and the rest answer `not-available-in-shim-for-chrome` in their
-own shape). A preview of a committed rule holds that rule for the preview's duration and
+`replace-root`, trusted input, and `api.storage`, `api.settings` (the installed shim's
+values, read against the session's working declaration, so a field just declared reads
+its default), `api.fetch` (the same broker) and `api.cleanup`; `api.ai` and the rest
+answer `not-available-in-shim-for-chrome` in their own shape. A preview of a committed rule holds that rule for the preview's duration and
 gives it back after: the host tells the page's runtime the whole set of rules it holds of
 each shim and waits for the ack before the preview goes up (a hold the page does not
 confirm in time is no hold: the preview stays down and the session is told in its

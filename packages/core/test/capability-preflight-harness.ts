@@ -4,6 +4,9 @@
 //     anchor.iframe, and the settings / permissions / storage / connections
 //     declarations — and passes a spec inside the set (empty declarations
 //     count as none);
+//   - a secret settings field is refused, once and naming each key, on a host
+//     that serves settings but cannot encrypt them (secretSettings false),
+//     and kept where it can;
 //   - the source scan flags the unsupported api members a handler mentions,
 //     in every spelling the scan claims (dot, optional chain, bracket), and
 //     not look-alikes (`myapi.fetch`, `api.fetchAll`, a supported member);
@@ -37,6 +40,7 @@ const HEADLESS: PageHostCapabilities = {
   iframeRules: false,
   specCss: false,
   apiMembers: [],
+  secretSettings: false,
   componentIdentity: false,
   engineInspection: false,
   trustedInput: true,
@@ -46,6 +50,7 @@ const BROWSER: PageHostCapabilities = {
   iframeRules: true,
   specCss: true,
   apiMembers: ['db', 'ai', 'settings', 'fetch', 'storage.pack', 'storage.global', 'shared', 'modules'],
+  secretSettings: true,
   componentIdentity: true,
   engineInspection: true,
   trustedInput: true,
@@ -97,6 +102,24 @@ console.log('preflight');
   check('every declared unsupported feature is listed once, in spec order', JSON.stringify(features) === JSON.stringify(want), features.join(' | '));
   check('each entry carries a message naming it', list.every((u) => u.message.length > 0) && (list[5]?.message.includes('mount-route') ?? false));
   check('the Shim browser\'s capabilities pass the same spec', preflightSpec(bad, BROWSER).ok);
+}
+
+console.log('secret settings');
+{
+  // Shim for Chrome's shape: settings served, no encrypted store.
+  const NO_SECRETS: PageHostCapabilities = { ...HEADLESS, apiMembers: ['settings', 'fetch'], secretSettings: false };
+  const spec = (settings: unknown[]): Spec => ({ id: 's', match: { hosts: ['a.test'] }, settings, rules: [] });
+  check('plain settings pass where the host serves settings',
+    preflightSpec(spec([{ key: 'units', type: 'select', options: ['metric'] }, { key: 'n', type: 'number' }, { key: 'note' }]), NO_SECRETS).ok);
+  const r = preflightSpec(spec([{ key: 'units' }, { key: 'token', type: 'secret' }, { key: 'pass', type: 'secret' }]), NO_SECRETS);
+  const only = r.ok ? null : r.unsupported;
+  check('secret fields are refused where the host cannot encrypt them: one entry naming each secret key, not the others',
+    only !== null && only.length === 1 && only[0]?.feature === 'settings'
+      && only[0].message.includes('"token"') && only[0].message.includes('"pass"') && !only[0].message.includes('"units"'), JSON.stringify(r));
+  check('the Shim browser keeps secrets (secretSettings)', preflightSpec(spec([{ key: 'token', type: 'secret' }]), BROWSER).ok);
+  const none = preflightSpec(spec([{ key: 'token', type: 'secret' }]), HEADLESS);
+  check('a host without settings refuses the declaration once, with no second secret entry',
+    !none.ok && none.unsupported.length === 1 && none.unsupported[0]?.message.includes('api.settings') === true, JSON.stringify(none));
 }
 
 console.log('source scan');

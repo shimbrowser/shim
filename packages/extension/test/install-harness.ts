@@ -55,6 +55,10 @@ check('the constants are frozen', Object.isFrozen(EXTENSION_CAPABILITIES) && Obj
 check('capabilitiesFor maps each mode', capabilitiesFor('full') === EXTENSION_CAPABILITIES && capabilitiesFor('declarative') === EXTENSION_DECLARATIVE_CAPABILITIES);
 check('full mode runs script and replace-root, not mount-route', EXTENSION_CAPABILITIES.mutationKinds.includes('script') && EXTENSION_CAPABILITIES.mutationKinds.includes('replace-root') && !EXTENSION_CAPABILITIES.mutationKinds.includes('mount-route'));
 check('declarative mode runs no handler kind', !HANDLER_KINDS.some((k) => EXTENSION_DECLARATIVE_CAPABILITIES.mutationKinds.includes(k)));
+check('full mode serves api.settings and api.fetch; declarative serves the settings declaration only',
+  JSON.stringify(EXTENSION_CAPABILITIES.apiMembers) === '["settings","fetch"]' && JSON.stringify(EXTENSION_DECLARATIVE_CAPABILITIES.apiMembers) === '["settings"]');
+check('neither mode keeps a secret setting (no encrypted store)', !EXTENSION_CAPABILITIES.secretSettings && !EXTENSION_DECLARATIVE_CAPABILITIES.secretSettings);
+check('neither serves api.ai, api.db or the shared code-space', [EXTENSION_CAPABILITIES, EXTENSION_DECLARATIVE_CAPABILITIES].every((c) => !c.apiMembers.some((m) => m === 'ai' || m === 'db' || m === 'shared')));
 
 check('the refusal names the toggle and says to install again', USER_SCRIPTS_REASON.includes(HOW_TO_ENABLE) && USER_SCRIPTS_REASON.includes('install the shim again') && HOW_TO_ENABLE.includes('Allow user scripts'));
 
@@ -143,6 +147,23 @@ for (const [format, word] of [['shim-pack/1', 'pack'], ['shim/global-1', 'global
   check('a userData row without a key', !out.ok && out.problems.some((p) => p.includes('userData[0]')));
 }
 
+console.log('settings:');
+{
+  const settings = [{ key: 'units', type: 'select', options: ['metric', 'imperial'], default: 'metric' }, { key: 'limit', type: 'number' }];
+  const decl = prepareInstall(file({ spec: { settings } }), EXTENSION_DECLARATIVE_CAPABILITIES, 'declarative');
+  check('a settings declaration installs in declarative mode, kept as declared', decl.ok && JSON.stringify(decl.spec.settings) === JSON.stringify(settings), JSON.stringify(decl));
+  check('and in full mode', prepareInstall(file({ spec: { settings } }), EXTENSION_CAPABILITIES, 'full').ok);
+  const secret = prepareInstall(file({ spec: { settings: [...settings, { key: 'apiKey', type: 'secret' }] } }), EXTENSION_CAPABILITIES, 'full');
+  check('a secret field is refused, by name (no encrypted store)', !secret.ok && secret.error === 'unsupported'
+    && secret.problems.some((p) => p.includes('"apiKey"') && p.includes('cannot store encrypted')) && !secret.problems.some((p) => p.includes('"units"')), JSON.stringify(secret));
+  check('…in declarative mode too', !prepareInstall(file({ spec: { settings: [{ key: 'apiKey', type: 'secret' }] } }), EXTENSION_DECLARATIVE_CAPABILITIES, 'declarative').ok);
+  const malformed = prepareInstall(file({ spec: { settings: [{ key: 'a' }, { key: 'a' }] } }), EXTENSION_CAPABILITIES, 'full');
+  check('a malformed declaration is refused with its problem', !malformed.ok && malformed.error === 'malformed-shim-folder'
+    && malformed.problems.some((p) => p.includes('duplicate key "a"')), JSON.stringify(malformed));
+  const perms = prepareInstall(file({ spec: { permissions: ['ai'] } }), EXTENSION_CAPABILITIES, 'full');
+  check('a permissions declaration (api.ai) stays refused', !perms.ok && perms.error === 'unsupported' && perms.unsupported?.some((u) => u.feature === 'permissions') === true);
+}
+
 console.log('the preflight gate (D15):');
 {
   const withScript = file({}, [HIDE, SCRIPT], { badge: BADGE_SRC });
@@ -164,8 +185,10 @@ console.log('the preflight gate (D15):');
   if (full.ok) check('with its handler module', full.handlers.badge === BADGE_SRC && full.mutationKinds.includes('script'));
 }
 {
+  // Settings are served now (phase 7), so a field of an unknown type is a
+  // malformed declaration, refused before preflight, never "unsupported".
   const out = prepareInstall(file({ spec: { settings: [{ key: 'token', type: 'string' }] } }), EXTENSION_CAPABILITIES, 'full');
-  check('a settings declaration is refused (no api.settings yet)', !out.ok && out.error === 'unsupported' && out.unsupported?.[0]?.feature === 'settings');
+  check('a field of an unknown type is a malformed declaration', !out.ok && out.error === 'malformed-shim-folder' && out.problems.some((p) => p.includes('`type` "string"')), JSON.stringify(out));
   if (!out.ok) check('without the user-scripts line', !out.problems.includes(USER_SCRIPTS_REASON));
 }
 {

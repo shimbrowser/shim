@@ -5,8 +5,10 @@
 //
 // Order: parse the envelope (core's reader: format, spec, handlers, state),
 // refuse formats and kinds of shim this host does not take, check the hosts
-// are registrable, preflight against the mode in force (D15), and only then
-// pack the canonical file (lint and the handler-module check). The preflight
+// are registrable and the settings declaration is valid, preflight against
+// the mode in force (D15: a secret setting is refused there, since this host
+// has no encrypted store), and only then pack the canonical file (lint and
+// the handler-module check). The preflight
 // comes before the module check on purpose: an extension page's CSP permits
 // no eval, so core's syntax probe cannot run here and reports every handler
 // module as unparseable; a shim the mode refuses anyway must be refused for
@@ -17,6 +19,7 @@ import {
   unpackShim, readShimFolder, packShim, matchHostsProblem, ShimFolderError, SHIM_FILE_FORMAT, type ShimFolderErrorCode,
 } from '@shimbrowser/core/shim-folder';
 import { preflightSpec, UNSUPPORTED, type UnsupportedFeature } from '@shimbrowser/core/capability-preflight';
+import { settingsSchemaProblems } from '@shimbrowser/core/settings-schema';
 import type { Spec } from '@shimbrowser/core/types';
 import type { PageHostCapabilities } from '@shimbrowser/core/page-host';
 import { matchPatternsForHosts } from './match-patterns';
@@ -154,6 +157,11 @@ export function prepareInstall(fileText: string, capabilities: PageHostCapabilit
   const { patterns, problems: hostProblems } = matchPatternsForHosts(hosts);
   if (hostProblems.length) return refuse('bad-hosts', hostProblems);
   if (patterns.length === 0) return refuse('bad-hosts', ['match.hosts names no site']);
+
+  // The settings declaration, checked by the reader every Shim host uses: a
+  // malformed one would leave the settings page nothing it can show.
+  const settingsProblems = settingsSchemaProblems(authored);
+  if (settingsProblems.length) return refuse('malformed-shim-folder', settingsProblems);
 
   const pre = preflightSpec(authored, capabilities);
   if (!pre.ok) {
