@@ -41,6 +41,7 @@ function renderShim(shim: ShimSummary, refresh: () => void): HTMLElement {
   const text = el('div', 'grow');
   text.append(el('div', 'name', shim.name));
   text.append(el('div', 'hosts', shim.hosts.join(', ')));
+  text.append(el('div', 'muted meta', `${shim.ruleCount} rule${shim.ruleCount === 1 ? '' : 's'} · v${shim.version}`));
   top.append(text);
   // A required setting with no value and no default: the shim can't do what
   // it says until one is set on its settings page.
@@ -74,11 +75,8 @@ function renderShim(shim: ShimSummary, refresh: () => void): HTMLElement {
     card.append(review);
   }
 
-  const bottom = el('div', 'row');
-  const rules = el('span', 'muted', `${shim.ruleCount} rule${shim.ruleCount === 1 ? '' : 's'} · v${shim.version}`);
-  bottom.append(rules);
-  const spacer = el('span', 'grow');
-  bottom.append(spacer);
+  // The actions on their own row, wrapping when they outgrow the popup's width.
+  const bottom = el('div', 'row actions');
   if (shim.settingsCount > 0) {
     const settings = el('button', undefined, 'settings');
     settings.title = 'the values this shim asks for, kept in this browser';
