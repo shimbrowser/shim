@@ -45,12 +45,18 @@ export interface DeltaOp {
   // `set-shared-handler` carrying the full edited source upstream
   // (the browser's handler-edits.ts), so applyDelta only ever sees `set-shared-handler`.
   source?: string;
+  // An external session's working copy only: the whole `spec.match`
+  // (`{ hosts }`), replaced wholesale by `set-match`. The working-copy
+  // differ validates it (match-scope.ts) and the Shim browser asks the
+  // person on the commit card before any newly covered host commits; an
+  // internal turn's emit never carries it (its normalizer drops it).
+  match?: unknown;
 }
 
 // Apply a spec delta: rule ops (add-rule / remove-rule / update-rule) and the
 // replace-wholesale declaration ops (set-settings / set-permissions /
-// set-intent / set-storage / set-connections), plus the shared code-space
-// upserts. Returns a new spec; the input is never mutated.
+// set-intent / set-storage / set-connections / set-match), plus the shared
+// code-space upserts. Returns a new spec; the input is never mutated.
 export function applyDelta(spec: Spec, ops: DeltaOp[] | undefined): Spec {
   const rules = [...(spec.rules || [])];
   let settings = spec.settings;
@@ -65,6 +71,8 @@ export function applyDelta(spec: Spec, ops: DeltaOp[] | undefined): Spec {
   let storageTouched = false;
   let connections = spec.connections;
   let connectionsTouched = false;
+  let match = spec.match;
+  let matchTouched = false;
   for (const op of ops || []) {
     if (op.op === 'add-rule') {
       // `rule` is only optional at the type level to tolerate a malformed
@@ -136,6 +144,19 @@ export function applyDelta(spec: Spec, ops: DeltaOp[] | undefined): Spec {
         (sharedHandlers as Record<string, string>)[op.name] = op.source;
         sharedHandlersTouched = true;
       }
+    } else if (op.op === 'set-match') {
+      // Replace where the shim runs (`spec.match`), from an external
+      // session's working copy. Only a `{ hosts: string[] }` value lands; a
+      // malformed one leaves the match as it was (the differ refuses it
+      // before an op is ever made).
+      const value = op.match;
+      if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+        const hosts = (value as { hosts?: unknown }).hosts;
+        if (Array.isArray(hosts) && hosts.every((h) => typeof h === 'string')) {
+          match = { hosts: [...(hosts as string[])] };
+          matchTouched = true;
+        }
+      }
     } else if (op.op === 'remove-shared-handler') {
       // Delete one entry from the shared code-space. The evolution contract
       // (commitGlobal) rejects removing a still-referenced function.
@@ -153,6 +174,7 @@ export function applyDelta(spec: Spec, ops: DeltaOp[] | undefined): Spec {
   if (sharedHandlersTouched) next.sharedHandlers = sharedHandlers;
   if (storageTouched) next.storage = storage;
   if (connectionsTouched) next.connections = connections;
+  if (matchTouched) next.match = match;
   return next;
 }
 

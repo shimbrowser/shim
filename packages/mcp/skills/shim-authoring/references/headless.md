@@ -43,7 +43,8 @@ The loop is the same, with three differences:
 - **A page `match.hosts` doesn't cover.** You can open an existing `.shim` on a page its
   `match.hosts` doesn't cover, but in Shim that shim would not run there at all. Every
   preview on such a page carries a warning saying so, and no rule there is reported better
-  than `partial`: don't report it as working in Shim.
+  than `partial`: don't report it as working in Shim. If the shim should run there, add the
+  host to `match.hosts` (`references/sites.md`).
 - **Bot walls.** Many sites serve headless Chromium a challenge or block page (Cloudflare,
   Akamai, DataDome, …) instead of themselves; Shim never disguises it. Opening such a page
   answers `blocked-by-bot-wall`, and a page tool or preview that lands on one carries

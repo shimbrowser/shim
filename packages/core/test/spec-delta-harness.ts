@@ -65,6 +65,14 @@ next = applyDelta(withShared, [{ op: 'remove-shared-handler', name: 'fmt' }]);
 check('remove-shared-handler deletes', next.sharedHandlers !== undefined && !('fmt' in next.sharedHandlers));
 check('the earlier spec\'s map is untouched', withShared.sharedHandlers?.fmt === 'function fmt(){}');
 
+next = applyDelta(base, [{ op: 'set-match', match: { hosts: ['a.com', '*.b.com'] } }]);
+check('set-match replaces the match', JSON.stringify(next.match) === '{"hosts":["a.com","*.b.com"]}');
+const hostsIn = next.match?.hosts;
+check('…as a copy of the op\'s list', Array.isArray(hostsIn));
+check('a malformed set-match leaves the match as it was',
+  JSON.stringify(applyDelta(base, [{ op: 'set-match', match: { hosts: 'a.com' } }]).match) === JSON.stringify(base.match)
+  && JSON.stringify(applyDelta(base, [{ op: 'set-match', match: null }]).match) === JSON.stringify(base.match));
+
 if (failures) {
   console.error(`\n${failures} failure(s)`);
   process.exit(1);

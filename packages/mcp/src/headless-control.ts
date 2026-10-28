@@ -423,7 +423,7 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
         artifactId: source.spec.id,
         shimFile,
         url: page.host.url(),
-        ...(matches ? {} : { warnings: [`the shim's match.hosts (${hosts.join(', ') || 'none'}) doesn't include ${where}: in Shim it would not run on this page`] }),
+        ...(matches ? {} : { warnings: [`the shim's match.hosts (${hosts.join(', ') || 'none'}) doesn't include ${where}: in Shim it would not run on this page; add it to match.hosts if it should`] }),
       });
     } catch (e) {
       // The caller never learns this session's id: don't leave it holding the file.

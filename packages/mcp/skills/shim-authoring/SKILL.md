@@ -163,11 +163,9 @@ Rules of the folder:
   also be portable file names: `__proto__` and the Windows device names (`con`, `prn`,
   `aux`, `nul`, `com0`–`com9`, `lpt0`–`lpt9`, in any case) are refused, and two names that
   differ only in case (`markPlayed` and `markplayed`) count as the same name.
-- **Rule ids** are short kebab-case slugs, unique within the shim (`hide-sidebar`,
-  `teal-underline-h1`).
-- **What you may change:** `rules`, and the declarations `intent`, `settings`,
-  `permissions`, `storage`, `connections`. `id` and `match` are fixed for a session; changing
-  them is refused as `not-editable`.
+- **Rule ids** are short kebab-case slugs, unique within the shim (`hide-sidebar`).
+- **What you may change:** `rules`, `match.hosts` (where allowed), and the declarations `intent`, `settings`, `permissions`,
+  `storage`, `connections`. `id` is fixed (`not-editable`).
 - **On a global shim** (`"global": true`), you may also change `sharedHandlers`: an object
   of function sources (`{ "<name>": "function <name>(…) { … }" }`, never `__proto__`) that
   every site's handlers call as `api.shared.<name>(…)`. It is the one piece of code every
@@ -490,5 +488,6 @@ a file **before** the work it covers, not after a preview goes wrong: a guessed 
 | `references/site-data.md` | using the site's own API (the API map tools), or reading what a shim saved (`inspect_storage`, `query_db`, `read_sibling_shim`) |
 | `references/compositions.md` | any composition session |
 | `references/page-driving.md` | `interact_page` (your shim's own controls, scroll) or `navigate` in a shim session: what each may touch, the refusal codes, what stops a batch |
+| `references/sites.md` | changing `match.hosts` |
 | `references/headless.md` | a headless session: `shim_status` offers only headless, an open answers `mode: "headless"`, or the user wants a standalone `.shim` file |
 | `references/hosts.md` | a `chrome` host in `shim_status`, a tab with `host`, `ambiguous-target` / `multiple-targets` |

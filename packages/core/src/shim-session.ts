@@ -55,6 +55,11 @@ import type { SessionBackend, BackendPreview, BackendCheckout, BackendCommit, Fi
 import type { DeltaOp } from './spec-delta';
 import { applyDelta } from './spec-delta';
 import { hostMatches } from './host-match';
+import {
+  offMatchWarning, withOffMatch, widenedPatterns, untriedMatchNote,
+  evidenceLocation, attributableLocation, NO_RULE_EVIDENCE_NOTE, MAX_NEW_MATCH_PATTERNS,
+  type DocumentMark,
+} from './match-scope';
 import { lintSpec } from './spec-lint';
 import {
   checkoutShim, packShim, anchorDigest, referencedHandlerNames, nameMap, ShimFolderError,
@@ -170,6 +175,18 @@ export interface ShimSessionDeps<S extends ShimSessionSource = ShimSessionSource
   previewCommittedAtBegin: boolean;
   /** interact_page. Absent: the tool answers unsupportedError (a host whose input policy is not yet built). */
   interact?(handle: ShimSessionHandle<S>, input: unknown, signal: AbortSignal): Promise<unknown>;
+  /**
+   * Whether a non-global shim's `match.hosts` may be edited from the folder in
+   * this host. A host opts in with true and must then either ask (the Shim
+   * browser's commit card) or tell (headless, via previewWidenNote /
+   * commitWidenNote). Absent or false keeps match not-editable (Shim for
+   * Chrome has no commit card for it yet). Fail-closed by default (consent).
+   */
+  matchEditable?: boolean;
+  /** A preview whose folder widened match.hosts to cover `widened`: the note saying who, if anyone, approved them here. Absent: no note. */
+  previewWidenNote?(widened: string[]): string;
+  /** A commit that widens match.hosts to cover `widened`: the note saying who, if anyone, approved them here. Absent: no note. */
+  commitWidenNote?(widened: string[]): string;
   /** The syntax check packShim runs on handler modules at commit (default: core's probe, which needs eval). A host whose context forbids eval checks elsewhere first and passes what it found. */
   syntaxProbe?: CompileProbe;
   /** Writes a commit. Runs with the session's signal: a host must check it immediately before its own durable write and never after. */
@@ -227,6 +244,12 @@ export interface ShimSessionHandle<S extends ShimSessionSource = ShimSessionSour
   base: { spec: Spec; handlers: Record<string, string> };
   /** The ops applied since the base, in order (PreparedCommit.opsSinceBase). */
   opsSinceBase: DeltaOp[];
+  /**
+   * Where this session got fresh rule evidence (match-scope evidenceLocation's
+   * form: scheme://host[:port]): an applied preview that reported rules there.
+   * The commit's untried note reads it.
+   */
+  tried: Set<string>;
   /** Rules the folder removed since the base: held by the host meanwhile (ShimSessionDeps.tombstone). */
   tombstones: Set<string>;
   /** The page's host and port ('' = the scheme's default) when the session began: the page-away guard's reference. */
@@ -335,41 +358,14 @@ function onDeclaredHost(spec: Spec, url: string): boolean {
   return hostMatches(hosts, u.hostname, u.port || undefined);
 }
 
-/**
- * The warning a preview carries while the page is one the working
- * match.hosts doesn't cover, or null. In Shim the shim would not run on that
- * page at all (the attach open refuses it), so nothing seen there says it
- * behaves the same in Shim: the caller caps every rule at `partial`.
- */
-export function offMatchWarning(spec: Spec, url: string): string | null {
-  let u: URL;
-  try {
-    u = new URL(url);
-  } catch {
-    return null;
-  }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-  if (onDeclaredHost(spec, url)) return null;
-  const hosts = (spec.match?.hosts ?? []).filter((h) => typeof h === 'string' && h !== '');
-  const where = u.port ? `${u.hostname}:${u.port}` : u.hostname;
-  return `the shim's match.hosts (${hosts.join(', ') || 'none'}) doesn't cover ${where}: in Shim it would not run on this page, ` +
-    'so no rule here is verified beyond partial';
-}
+// The off-match warning and cap, and the widening helpers, live in core's
+// match-scope (shared with the Shim browser's session); re-exported for the
+// headless wrapper and its harness.
+export { offMatchWarning, withOffMatch };
 
-/**
- * Evidence on an off-match page: every rule's verification capped at
- * `partial` (`full` drops, `none` stays), and the warning added. Pure.
- */
-export function withOffMatch(evidence: Record<string, unknown>, warning: string): Record<string, unknown> {
-  const warnings = Array.isArray(evidence.warnings) ? [...(evidence.warnings as unknown[])] : [];
-  warnings.push(warning);
-  const out: Record<string, unknown> = { ...evidence, warnings };
-  if (Array.isArray(evidence.rules)) {
-    out.rules = evidence.rules.map((r: unknown) => (
-      isRecord(r) && r.verification === 'full' ? { ...r, verification: 'partial' } : r
-    ));
-  }
-  return out;
+/** A spec's match.hosts as a plain string list (the baseline the widening cap counts against). */
+function matchHostsOf(spec: Spec | undefined): string[] {
+  return ((spec?.match?.hosts ?? []) as unknown[]).filter((h): h is string => typeof h === 'string');
 }
 
 /** A new shim's spec for a page (the browser's shims.create shape). */
@@ -704,12 +700,26 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
   // (applied, unchanged, a folder problem) carries the warning, and an applied
   // one's rules are capped at partial. Never an upgrade of earlier evidence.
   async function preview(handle: ShimSessionHandle<S>, input: unknown, signal: AbortSignal): Promise<BackendPreview> {
+    // Where the evidence came from: recorded only when the page kept the same
+    // location and document from the apply to the evidence, so a preview whose
+    // page navigated mid-settle records nowhere.
+    const mark = async (): Promise<DocumentMark> => ({
+      location: handle.host.isClosed() ? null : evidenceLocation(handle.host.url()),
+      token: handle.host.isClosed() ? null : await handle.host.documentToken().catch(() => null),
+    });
+    const startedOn = await mark();
+    // The page's bot wall, read before anything is applied to a fresh document
+    // (the session's own output may cover the wall).
     await botWallOf(handle);
     const result = await previewOnce(handle, input, signal);
     const evidence = result.evidence;
     if (!isRecord(evidence) || handle.host.isClosed()) return result;
+    const attributable = attributableLocation(startedOn, await mark());
+    if (result.applied && Array.isArray(evidence.rules) && evidence.rules.length > 0 && attributable !== null && !pageAway(handle)) {
+      handle.tried.add(attributable);
+    }
     if (evidence.error === 'page-away' || evidence.error === 'page-closed' || evidence.error === 'session-ended') return result;
-    const warning = offMatchWarning(handle.working, handle.host.url());
+    const warning = offMatchWarning(handle.working.match?.hosts, handle.host.url());
     const offMatched = warning === null ? evidence : withOffMatch(evidence, warning);
     // A bot wall in place of the site: nothing seen on it is the site.
     const walled = withBotWallEvidence(offMatched, await botWallOf(handle));
@@ -737,7 +747,7 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
     }
     let diff;
     try {
-      diff = diffWorkingCopy({ spec: handle.working, handlers: handle.storedHandlers }, folder);
+      diff = diffWorkingCopy({ spec: handle.working, handlers: handle.storedHandlers, committedMatchHosts: matchHostsOf(handle.base.spec), matchEditable: deps.matchEditable }, folder);
     } catch (e) {
       if (e instanceof ShimFolderError) return refused({ error: e.code, problems: e.problems });
       throw e;
@@ -870,6 +880,13 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
     }
     for (const ruleId of notHeld) {
       notes.push(`rule "${ruleId}" is removed in the working copy, but the host could not hold its committed form down, so it still runs in this preview; committing removes it`);
+    }
+    // Where the shim runs changed: a widened match is asked on the commit card
+    // in Shim (the host's writeCommit), said plainly where there is no card.
+    if (diff.ops.some((op) => op.op === 'set-match')) {
+      const widened = widenedPatterns(matchHostsOf(handle.base.spec), matchHostsOf(next));
+      if (widened.length && deps.previewWidenNote) notes.push(deps.previewWidenNote(widened));
+      if (!diff.ops.some((op) => op.op === 'add-rule' || op.op === 'update-rule')) notes.push(NO_RULE_EVIDENCE_NOTE);
     }
     const consoleBlock = formatAutoBlock(handle.console.drainSinceEmit());
     const evidence: Record<string, unknown> = {
@@ -1107,6 +1124,15 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
     // quarantine path, for good — so the committed baseline stands.
     const bundleHash = brokenRules(handle).length ? handle.bundleHash : (deployId ?? handle.bundleHash);
     const notes: string[] = [];
+    // Where the shim runs, as of the committed base and as the working copy
+    // leaves it: the widening the commit would newly do.
+    const committedHosts = matchHostsOf(handle.base.spec);
+    const hostsNow = matchHostsOf(handle.working);
+    const widened = widenedPatterns(committedHosts, hostsNow);
+    // The preview's widening cap, re-checked against the committed baseline.
+    if (widened.length > MAX_NEW_MATCH_PATTERNS) {
+      return { ok: false, error: 'not-editable', detail: `"match.hosts" would run the shim on ${widened.length} new host patterns; one commit can add at most ${MAX_NEW_MATCH_PATTERNS}` };
+    }
     if (!away && !reconciled) {
       notes.push('the page loaded a new document since the rules last ran on it, so this commit kept the committed deploy baseline ' +
         '(the rules were not checked against that document). Preview again, then commit, to record the page\'s deploy');
@@ -1196,6 +1222,10 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
     }
     handle.source = { ...handle.source, created: false };
     notes.push(...(written.notes ?? []));
+    if (widened.length && deps.commitWidenNote) notes.push(deps.commitWidenNote(widened));
+    const matchChanged = JSON.stringify(hostsNow) !== JSON.stringify(committedHosts);
+    const untried = matchChanged || handle.tried.size > 0 ? untriedMatchNote(hostsNow, handle.tried) : null;
+    if (untried) notes.push(untried);
     return { ok: true, versionId: written.versionId, ...(notes.length ? { notes } : {}) };
   }
 
@@ -1240,6 +1270,7 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
         docToken: null,
         docTokens: 0,
         navigation: { scope: navigationScopeOf(startUrl), used: 0 },
+        tried: new Set<string>(),
         botWall: { last: null },
       };
       handle.off.push(host.onRuntimeEvent((event) => {
