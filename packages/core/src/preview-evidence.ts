@@ -9,6 +9,7 @@
 import type { Rule } from './types';
 import { fingerprintKind, hasManagedKeys } from './managed-anchor';
 import type { CaptureNote } from './capture-event';
+import { anchorSelectorOf } from './anchor-selector';
 
 /** The part of a `rule-status` runtime event a status line reads. */
 export interface RuleStatusEvent {
@@ -225,7 +226,7 @@ export function previewNoMatch(
     const id = p.rule.id;
     if (seen.has(id) || quarantinedRuleIds.has(id) || !previewMatchedNothing(p)) continue;
     seen.add(id);
-    out.push({ ruleId: id, selector: p.rule.anchor?.primary?.value || '' });
+    out.push({ ruleId: id, selector: anchorSelectorOf(p.rule.anchor?.primary) });
   }
   return out;
 }

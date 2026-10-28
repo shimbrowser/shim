@@ -24,6 +24,7 @@ import {
 import type { PageHostCapabilities } from '../src/page-host';
 import { describeRuleStatus, previewKey, previewNoMatch, previewMatchedNothing, shimViewPageCaption } from '../src/preview-evidence';
 import type { Spec, Rule } from '../src/types';
+import { ariaSelector } from '../src/anchor-selector';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string): void {
@@ -186,8 +187,8 @@ console.log('noMatch evidence');
   ] as Rule[];
   check('routes, network / module kinds and iframe rules never infer a no-match from a 0',
     ids(previewNoMatch([], zeroIsNormal.map((rule) => ({ rule, status: { matched: 0 } })))) === '');
-  check('a selector-less anchor reads as an empty selector', JSON.stringify(previewNoMatch([], [{ rule: { id: 'n', anchor: { primary: { kind: 'aria', role: 'button' } }, mutations: [{ kind: 'hide' }] } as Rule, status: { matched: 0 } }]))
-    === JSON.stringify([{ ruleId: 'n', selector: '' }]));
+  check('an anchor with no `value` (aria) reads as the selector it resolves through, not ""', JSON.stringify(previewNoMatch([], [{ rule: { id: 'n', anchor: { primary: { kind: 'aria', role: 'button' } }, mutations: [{ kind: 'hide' }] } as Rule, status: { matched: 0 } }]))
+    === JSON.stringify([{ ruleId: 'n', selector: ariaSelector('button', undefined) }]));
 }
 
 console.log('evidence wording');

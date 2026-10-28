@@ -10,7 +10,9 @@
 //                    is preserved in the spec, and a future ladder can
 //                    weight strong-attr matches differently than a generic
 //                    CSS selector.
-//   - `aria`       — accessibility-tree match by role and/or aria-label.
+//   - `aria`       — accessibility-tree match by role and/or aria-label;
+//                    a role also matches a native element's implicit role
+//                    (anchor-selector.ts).
 //                    Often the most resilient anchor on framework-rewritten
 //                    sites, because the a11y tree is the layer the site
 //                    cares to keep stable.
@@ -24,6 +26,7 @@ import { matchSetWitness } from './set-witness';
 import { errMessage } from './error';
 import { isEngineInjected } from './inject-kinds';
 import { NON_VISIBLE_TEXT_TAGS, visibleTextOf } from './visible-text';
+import { ariaSelector, escapeAttrValue } from './anchor-selector';
 import type { Anchor, AnchorSpec, Witness } from './types';
 
 // A DOM-shaped element sufficient for anchor synthesis (suggestAnchorLadder
@@ -309,22 +312,15 @@ function resolveOne(spec: AnchorSpec, root: Document | Element): Element[] {
     }
 
     case 'aria': {
-      // Compose `[role="..."][aria-label="..."]` from whichever fields are
-      // present. At least one of role/label is required — without either,
-      // an aria anchor has no signal and would silently match every
-      // element on the page.
-      const parts: string[] = [];
-      if (typeof spec.role === 'string' && spec.role.trim()) {
-        parts.push(`[role="${escapeAttrValue(spec.role.trim())}"]`);
-      }
-      if (typeof spec.label === 'string' && spec.label.trim()) {
-        parts.push(`[aria-label="${escapeAttrValue(spec.label.trim())}"]`);
-      }
-      if (!parts.length) {
+      // Role and label ANDed; the role honors native elements' implicit
+      // roles (anchor-selector.ts). At least one of role/label is required —
+      // without either, an aria anchor has no signal and would silently match
+      // every element on the page.
+      const sel = ariaSelector(spec.role, spec.label);
+      if (!sel) {
         console.warn('[shim] aria anchor needs at least `role` or `label`');
         return [];
       }
-      const sel = parts.join('');
       try {
         return Array.from(root.querySelectorAll(sel));
       } catch (err) {
@@ -337,13 +333,6 @@ function resolveOne(spec: AnchorSpec, root: Document | Element): Element[] {
       console.warn(`[shim] unsupported anchor kind: ${(spec).kind}`);
       return [];
   }
-}
-
-// Escape a value for inclusion inside a `[attr="..."]` selector. Only `"`
-// and `\` need escaping inside double-quoted attr selectors per the CSS
-// grammar; everything else (including spaces, hyphens, unicode) is fine.
-function escapeAttrValue(v: string): string {
-  return v.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 // --- Auto-rebase support: synthesize a fresh anchor + find a drifted

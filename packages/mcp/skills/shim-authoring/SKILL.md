@@ -436,7 +436,7 @@ fingerprint, is re-applied on every preview). Leave it out for a rule meant for 
 
 - `data-attr`: a stable `data-*` attribute (`data-` prefix optional; omit `value` to match
   presence). Strongest.
-- `aria`: `role` and/or `label` (ANDed). Often the most resilient on framework sites.
+- `aria`: `role` and/or `label` (ANDed); a role also matches native tags (`<button>`, `<nav>`).
 - `text`: visible text, case-insensitive; `match` is `exact` (default) or `contains`.
   Returns the deepest matching element. Brittle to copy edits; not for sentences.
 - `css`: a raw selector, the last resort.
