@@ -63,6 +63,7 @@ import {
 import type { CompileProbe } from './rewrite-response';
 import { handlerWorlds, moduleToExpression } from './handler-source';
 import { diffWorkingCopy } from './working-copy-diff';
+import { boundQueryCandidates } from './query-bound';
 import { hasManagedKeys, withManagedFingerprint, withoutManagedKeys } from './managed-anchor';
 import { readCaptureEvent, inCaptureBinding, supersedes, fingerprintOfCapture } from './capture-event';
 import type { CaptureEvent } from './capture-event';
@@ -897,7 +898,7 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
         const away = await guardOr();
         if (away) return away;
         const r = await queryPageByScript(handle.host, str('description'), QUERY_TIMEOUT_MS, 'main');
-        return JSON.stringify('error' in r ? { error: r.detail ? `${r.error}: ${r.detail}` : r.error } : { candidates: r.candidates });
+        return JSON.stringify('error' in r ? { error: r.detail ? `${r.error}: ${r.detail}` : r.error } : boundQueryCandidates(r.candidates));
       }
       case 'inspect_element': {
         const away = await guardOr();

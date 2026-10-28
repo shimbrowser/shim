@@ -179,7 +179,8 @@ export const SUPERSEDED_LOAD_GRACE_MS = 500;
 
 /** query_page / inspect_element answers. Errors are values, never throws. */
 export interface PageToolError { error: string; detail?: string }
-export type QueryPageResult = { candidates: unknown[] } | PageToolError;
+// `truncated` is set when the candidates were bounded (query-bound.ts) and says what was cut.
+export type QueryPageResult = { candidates: unknown[]; truncated?: string } | PageToolError;
 export type InspectElementResult = { element: unknown } | PageToolError;
 
 /**
