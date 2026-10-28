@@ -5,10 +5,14 @@
 //
 // Cookie-less (`credentials: 'omit'`): a handler reads public content, never
 // the user's signed-in sessions. http(s) only; a literal loopback, private or
-// link-local address is refused. The worker skips CORS only for sites the
-// extension holds access to (the installed shims' hosts); a fetch anywhere
-// else succeeds only when that site allows cross-origin reads. That is
-// stricter than the Shim browser, which skips CORS everywhere.
+// link-local address is refused. The worker skips CORS for every site the
+// extension holds access to, so the caller decides which of those a request
+// may reach (`mayRead`): the worker allows the calling shim's own sites (it
+// runs there already) and refuses another shim's, so one shim never reads a
+// site through access granted for another, and what a fetch can read does
+// not depend on what else is installed. Anywhere else a fetch succeeds only
+// when that site allows cross-origin reads. That is stricter than the Shim
+// browser, which skips CORS everywhere.
 //
 // Redirects are followed by fetch itself: an MV3 worker cannot read a
 // redirect's Location to vet each hop (`redirect: 'manual'` answers an opaque
@@ -17,10 +21,11 @@
 // extension holds access to (where CORS would not stop the read).
 //
 // Residual, accepted: the hops' requests themselves go out. And an extension
-// cannot resolve DNS, so a public name that resolves into the private space
-// is not refused here (the Shim browser refuses it); host access is granted
-// by name, so its response stays unreadable under CORS, but a request that
-// needs no preflight still goes out.
+// cannot resolve DNS, so a name that resolves into the private space is not
+// refused here (the Shim browser refuses it). Its response is readable only
+// on the calling shim's own sites (granted by name, so no CORS), which that
+// shim runs on anyway; elsewhere it stays unreadable under CORS, but a
+// request that needs no preflight still goes out.
 
 import {
   checkFetchUrl, handlerFetchInit, FETCH_MAX_BODY_BYTES, FETCH_HARD_CONTENT_LENGTH, FETCH_TIMEOUT_MS, type HandlerFetchResult,
@@ -30,6 +35,12 @@ export interface FetchBrokerDeps {
   /** The fetch to make the request with (the worker's own by default). */
   fetch?: typeof fetch;
   timeoutMs?: number;
+  /**
+   * Whether the caller may read `url` (checked before the request and again
+   * where it landed): null to allow, else the refusal. The worker refuses a
+   * site it holds access to for another shim (see the header).
+   */
+  mayRead?(url: URL): Promise<string | null>;
 }
 
 function errName(err: unknown): string {
@@ -78,6 +89,8 @@ export async function brokerFetch(url: unknown, opts: unknown, deps: FetchBroker
   const doFetch = deps.fetch ?? globalThis.fetch.bind(globalThis);
   const timeoutMs = deps.timeoutMs ?? FETCH_TIMEOUT_MS;
   const { method, headers, body } = handlerFetchInit(opts);
+  const refusedBefore = await deps.mayRead?.(checked.url) ?? null;
+  if (refusedBefore) return { ok: false, error: refusedBefore };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -95,6 +108,13 @@ export async function brokerFetch(url: unknown, opts: unknown, deps: FetchBroker
     if (!landed.ok) {
       controller.abort();
       return { ok: false, status: res.status, error: `redirected, then ${landed.error}` };
+    }
+    if (landed.url.href !== checked.url.href) {
+      const refusedAfter = await deps.mayRead?.(landed.url) ?? null;
+      if (refusedAfter) {
+        controller.abort();
+        return { ok: false, status: res.status, error: `redirected, then ${refusedAfter}` };
+      }
     }
     // Refuse before reading the body when the server declares an absurd size.
     const declared = Number(res.headers.get('content-length'));

@@ -29,7 +29,7 @@ import path from 'path';
 import type { BrowserContext, Page, Worker } from 'playwright';
 import {
   workDir, extensionCopy, fixtureServer, shimWriter, css, launch, workerOf, installer, configureExtension, setExtensionEnabled, popupOf,
-  settle, sleep, FIXTURE_ALIAS,
+  settle, sleep, FIXTURE_ALIAS, FIXTURE_OWN, FIXTURE_HELD,
 } from './smoke-helpers';
 
 let failures = 0;
@@ -41,7 +41,7 @@ function check(label: string, cond: boolean, detail?: unknown): void {
 }
 
 interface StrictView { ad: string; badge: string | null; cleanups: number; outline: string }
-interface CfgView { greeting: unknown; limit: unknown; keys: string[]; status: number; data: { answer?: number; sawCookie?: boolean } | string; blocked: boolean }
+interface CfgView { greeting: unknown; limit: unknown; keys: string[]; status: number; data: { answer?: number; sawCookie?: boolean } | string; blocked: boolean; own: unknown; held: unknown }
 interface ApplyView { ad: string; root: number; original: string | null }
 
 const BADGE = `module.exports = async function badge({ anchor, api }) {
@@ -73,12 +73,16 @@ const CFG = `module.exports = async function cfg({ anchor, api }) {
   const r = await api.fetch('http://${FIXTURE_ALIAS}:' + location.port + '/fixture-data.json');
   const loopback = await api.fetch(location.origin + '/fixture-data.json');
   const meta = await api.fetch('http://169.254.169.254/latest/meta-data');
+  // Its own granted site (no CORS headers) reads; one held for another shim does not.
+  const ownR = await api.fetch('http://${FIXTURE_OWN}:' + location.port + '/fixture-private.json');
+  const heldR = await api.fetch('http://${FIXTURE_HELD}:' + location.port + '/fixture-private.json');
   const el = document.createElement('span');
   el.className = 'fm-cfg';
   el.textContent = JSON.stringify({
     greeting, limit: all.limit === undefined ? null : all.limit, keys: Object.keys(all),
     status: r.status, data: r.ok ? JSON.parse(r.text) : r.error,
     blocked: !loopback.ok && String(loopback.error).includes('private') && !meta.ok && String(meta.error).includes('private'),
+    own: ownR.ok ? JSON.parse(ownR.text) : ownR.error, held: heldR.ok ? 'read' : heldR.error,
   });
   anchor.appendChild(el);
   return el;
@@ -87,7 +91,8 @@ const CFG = `module.exports = async function cfg({ anchor, api }) {
 async function main(): Promise<void> {
   console.log('\n=== extension full-mode harness ===\n');
   const work = workDir('shim-extension-full-');
-  const ext = extensionCopy(work, ['*://127.0.0.1/*']);
+  // The two extra hosts stand for a shim's own second site and another shim's site (fetch reach).
+  const ext = extensionCopy(work, ['*://127.0.0.1/*', `*://${FIXTURE_OWN}/*`, `*://${FIXTURE_HELD}/*`]);
   const { origin, close: closeServer } = await fixtureServer();
   const shimFile = shimWriter(work);
 
@@ -523,7 +528,10 @@ async function main(): Promise<void> {
 
     const configured = shimFile('configured', 'Configured fixture', [
       { id: 'cfg', anchor: css('#cfg'), mutations: [{ kind: 'script', handler: 'cfg' }] },
-    ], { settings: [{ key: 'greeting', type: 'text', default: 'hello' }, { key: 'limit', type: 'number', required: true }] }, { cfg: CFG });
+    ], {
+      match: { hosts: ['127.0.0.1', FIXTURE_OWN] },
+      settings: [{ key: 'greeting', type: 'text', default: 'hello' }, { key: 'limit', type: 'number', required: true }],
+    }, { cfg: CFG });
     await inst.installAll(configured);
     // A cookie on the host api.fetch reaches: it must not be sent.
     await ctx.addCookies([{ name: 'sid', value: 'signed-in', url: `http://${FIXTURE_ALIAS}:${new URL(origin).port}` }]);
@@ -539,6 +547,9 @@ async function main(): Promise<void> {
     check('api.fetch reads a site the extension has no access to (it allows cross-origin reads), without its cookie', first?.status === 200
       && typeof first.data === 'object' && first.data.answer === 42 && first.data.sawCookie === false, first);
     check('and refuses the page\'s own loopback host and the metadata endpoint', first?.blocked === true, first);
+    check('it reads the shim\'s own site with no cross-origin headers (the extension holds it for this shim)',
+      typeof first?.own === 'object' && first.own !== null && (first.own as { private?: unknown }).private === true, first);
+    check('but not a site the extension holds for another shim', typeof first?.held === 'string' && first.held.includes('for another shim'), first);
 
     const popup = await popupOf(ctx, extId);
     const card = popup.locator('#list .card', { has: popup.locator('.name', { hasText: 'Configured fixture' }) });

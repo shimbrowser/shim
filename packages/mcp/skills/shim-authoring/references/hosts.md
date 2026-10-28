@@ -29,9 +29,10 @@ every tool works the same; what differs is where the tab lives and where a commi
   in their own shape. A `secret` settings field is refused at preview and at commit: the
   extension has no encrypted store, so author a shim that needs a credential in the Shim
   browser. `api.fetch` has the browser's bounds (cookie-less, http(s), no local-network
-  address, 5 MB, 15 s), but it reads a site the extension has no access to only when that
-  site allows cross-origin reads (CORS): prefer endpoints that send
-  `Access-Control-Allow-Origin`, or the shim's own site.
+  address, 5 MB, 15 s), but it reads directly only the shim's own sites, never a site
+  Shim for Chrome holds for another shim, and anywhere else only a site that allows
+  cross-origin reads (CORS): prefer endpoints that send `Access-Control-Allow-Origin`, or
+  the shim's own site.
 - A preview on Shim for Chrome does not get the browser's isolated preview `api`: when the
   shim is installed and runs on the page, `api.storage` reads and writes its saved data
   (a preview's write persists), and `api.settings` reads the values the user saved,

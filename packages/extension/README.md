@@ -27,11 +27,12 @@ Early. What works today:
   that needs a credential runs in the Shim browser.
 - `api.fetch` is brokered by the extension's worker with the Shim browser's bounds:
   cookie-less, http(s) only, no loopback, private or link-local address, at most 5 MB
-  read and 15 s. The worker reads a site the extension has no access to only when that
-  site allows cross-origin reads (CORS). A request redirected onto a private address is
-  refused before its body is read. The extension cannot resolve DNS, so a public name
-  that resolves to a private address is not refused here as it is in the Shim browser;
-  its response stays unreadable under CORS.
+  read and 15 s. A shim's handlers read its own sites directly, but never a site the
+  extension holds for another shim; anywhere else a site must allow cross-origin reads
+  (CORS). A request redirected onto a private address, or onto another shim's site, is
+  refused before its body is read. The extension cannot resolve DNS, so a name that
+  resolves to a private address is not refused here as it is in the Shim browser; its
+  response is readable only on the shim's own sites, which it runs on anyway.
 - Enable, disable and remove shims from the popup; changes reach the pages already open,
   no reload. Removing a shim releases the site access it asked for.
 - When a site changes, the engine's deterministic rebase ladder runs in the page and the

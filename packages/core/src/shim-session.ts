@@ -820,6 +820,21 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
         }
       }
     }
+    // A changed settings declaration changes what every handler reads: each
+    // handler rule runs again under it (its committed form held, as for any
+    // preview), so the preview shows what a commit will run, with fresh
+    // evidence. Only the declaration changed, so nothing joins opsSinceBase.
+    if (diff.ops.some((op) => op.op === 'set-settings')) {
+      const emitted = new Set([...emitKeys.values()].map((r) => r.id));
+      for (const rule of next.rules || []) {
+        if (emitted.has(rule.id)) continue;
+        if (!(rule.mutations || []).some((m) => typeof (m as { handler?: unknown }).handler === 'string')) continue;
+        const p = previewFor(handle, rule);
+        emitKeys.set(p.ruleKey, rule);
+        versions.set(p.ruleKey, p.applyId);
+        apply(handle, p);
+      }
+    }
     handle.opsSinceBase.push(...diff.ops);
 
     await settle(signal);

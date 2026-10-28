@@ -114,6 +114,20 @@ async function main(): Promise<void> {
     check('a redirect between public hosts is followed and reported', moved.ok && 'text' in moved && moved.text === 'here' && moved.url === 'https://public.example/new', JSON.stringify(moved));
   }
 
+  console.log('the caller\'s reach (mayRead):');
+  {
+    const f = fakeFetch(() => new Response('x'));
+    const mayRead = async (u: URL): Promise<string | null> => (u.hostname === 'other-shim.test' ? 'held for another shim' : null);
+    const refused = await brokerFetch('https://other-shim.test/x', undefined, { ...f, mayRead });
+    check('a host the caller may not read is refused before any request', !refused.ok && 'error' in refused && refused.error === 'held for another shim' && f.seen.length === 0, JSON.stringify(refused));
+    let pulled = false;
+    const body = new ReadableStream<Uint8Array>({ pull(c) { pulled = true; c.enqueue(new Uint8Array(1)); c.close(); } }, { highWaterMark: 0 });
+    const hop = await brokerFetch('https://public.example/go', undefined, { ...fakeFetch(() => withUrl(new Response(body), 'https://other-shim.test/landed')), mayRead });
+    check('…and where a redirect lands, before its body is read', !hop.ok && 'error' in hop && hop.error === 'redirected, then held for another shim' && !pulled, JSON.stringify(hop));
+    const ok = await brokerFetch('https://mine.test/x', undefined, { ...fakeFetch(() => new Response('mine')), mayRead });
+    check('a host it may read goes through', ok.ok && 'text' in ok && ok.text === 'mine');
+  }
+
   console.log('failures resolve, never throw:');
   {
     const hang = ((_u: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {

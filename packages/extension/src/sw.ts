@@ -634,7 +634,7 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
       const capabilities = capabilitiesForWorld(world);
       if (!shim || !(await runsOn(shim, page, capabilities))) return { ok: false, error: 'not a shim of this page' };
       if (!capabilities.apiMembers.includes('fetch')) return { ok: false, error: 'api.fetch runs only with user scripts on' };
-      return { ok: true, value: await brokerFetch(msg.url, msg.opts) };
+      return { ok: true, value: await brokerFetch(msg.url, msg.opts, { mayRead: fetchReachFor(shim.spec.match?.hosts) }) };
     }
     case 'event': {
       if (!page) return { ok: false, error: 'no page' };
@@ -914,6 +914,28 @@ async function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>
 }
 
 /**
+ * What a shim's api.fetch may read through the extension's access. The worker
+ * skips CORS on every site the extension holds, so a shim reads its own sites
+ * (it runs there already) but never another shim's: one shim never reads a
+ * site through access granted for another, and what a fetch reaches does not
+ * depend on what else is installed. A site the extension does not hold is
+ * left to CORS. A failed permission check refuses.
+ */
+function fetchReachFor(hosts: readonly unknown[] | undefined): (url: URL) => Promise<string | null> {
+  const own = (hosts ?? []).filter((h): h is string => typeof h === 'string');
+  return async (url) => {
+    if (hostMatches(own, url.hostname, url.port || undefined)) return null;
+    let held = true;
+    try {
+      held = await chrome.permissions.contains({ origins: [`${url.protocol}//${url.hostname}/*`] });
+    } catch { /* refuse below */ }
+    return held
+      ? `api.fetch may not read ${url.hostname}: Shim for Chrome holds access to it for another shim, and a shim never reads a site through another's access`
+      : null;
+  };
+}
+
+/**
  * The installed shim a preview's call is about, when that shim runs on the
  * page's origin (enabled, hosts cover it, granted), else null: a preview of a
  * shim installed for another site reads nothing of it, storage or settings.
@@ -944,7 +966,11 @@ function sessionHandlerApiFor(db: ShimStore): SessionHandlerApi {
       const declarer = sessions.workingSpec(scope.patchId) ?? shim?.spec ?? null;
       return settingsTransport(declarer, shim ? await db.settings.get(shim.id) : {});
     },
-    fetch: (_scope, url, opts) => brokerFetch(url, opts),
+    async fetch(scope, url, opts) {
+      // The preview's own sites: the working declaration's, else the installed shim's.
+      const hosts = (sessions.workingSpec(scope.patchId) ?? (await db.getShim(scope.patchId))?.spec)?.match?.hosts;
+      return brokerFetch(url, opts, { mayRead: fetchReachFor(hosts) });
+    },
   };
 }
 

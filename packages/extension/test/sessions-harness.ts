@@ -226,6 +226,49 @@ async function main(): Promise<void> {
     await sessions.registry.end(opened.sessionId, 'ended');
   }
 
+  console.log('a settings-only change re-runs the handler rules in the preview:');
+  {
+    const f = fakeStore();
+    const sessions = makeSessions(f);
+    const base = fakeHost();
+    const appliedIds: string[] = [];
+    const host: ExtensionPageHost = {
+      ...base,
+      capabilities: { ...CAPS, apiMembers: ['settings', 'fetch'], secretSettings: false } as unknown as ExtensionPageHost['capabilities'],
+      applyPreview: (p) => { appliedIds.push(p.rule.id); base.applyPreview(p); },
+    };
+    const spec: Spec = {
+      id: 'shim-1', version: 1, bundleHash: 'b1', match: { hosts: ['site.test'] },
+      rules: [
+        { id: 'a', anchor: { primary: { kind: 'css', value: '#a' } }, mutations: [{ kind: 'hide' }] },
+        { id: 'show', anchor: { primary: { kind: 'css', value: '#s' } }, mutations: [{ kind: 'script', handler: 'show' }] },
+      ],
+    };
+    const handlers = { show: 'module.exports = function show() {};' };
+    const target = { page: { host, close: async () => undefined }, source: { shimId: 'shim-1', name: 'S', spec, handlers, envelope: {}, created: false }, committedDown: null };
+    const opened = await sessions.registry.open({ kind: 'shim', artifactId: 'shim-1', target, agent: 'a', intent: 'i' });
+    if (!opened.ok) throw new Error(`open failed: ${opened.error}`);
+    const files = checkoutShim({ spec, handlers });
+    const edit = (change: (sj: { settings?: unknown; rules: Array<{ id: string; anchor: { primary: { value: string } } }> }) => void): void => {
+      const sj = JSON.parse(files['shim.json'] as string) as { settings?: unknown; rules: Array<{ id: string; anchor: { primary: { value: string } } }> };
+      change(sj);
+      files['shim.json'] = JSON.stringify(sj);
+    };
+    edit((sj) => { const a = sj.rules.find((r) => r.id === 'a'); if (a) a.anchor.primary.value = '#a2'; });
+    await sessions.registry.preview(opened.sessionId, { workingCopy: encodeWorkingCopy(files) });
+    check('a rule edit previews that rule alone', JSON.stringify(appliedIds) === '["a"]', JSON.stringify(appliedIds));
+    appliedIds.length = 0;
+    edit((sj) => { sj.settings = [{ key: 'units', type: 'text', default: 'metric' }]; });
+    const prev = await sessions.registry.preview(opened.sessionId, { workingCopy: encodeWorkingCopy(files) });
+    check('a settings-only change applies', prev.ok === true && prev.applied === true, JSON.stringify(prev));
+    check('…and runs the handler rule again under the new declaration (the declarative rule is left alone)', JSON.stringify(appliedIds) === '["show"]', JSON.stringify(appliedIds));
+    appliedIds.length = 0;
+    edit((sj) => { sj.settings = [{ key: 'units', type: 'text', default: 'imperial' }]; });
+    await sessions.registry.preview(opened.sessionId, { workingCopy: encodeWorkingCopy(files) });
+    check('a changed default alone runs it again too', JSON.stringify(appliedIds) === '["show"]', JSON.stringify(appliedIds));
+    await sessions.registry.end(opened.sessionId, 'ended');
+  }
+
   console.log('match.hosts is not editable from a Chrome session (no commit card):');
   {
     const f = fakeStore();

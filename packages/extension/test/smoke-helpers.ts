@@ -55,6 +55,12 @@ export async function fixtureServer(): Promise<{ origin: string; setDeploy(deplo
       res.end(JSON.stringify({ answer: 42, sawCookie: typeof req.headers.cookie === 'string' && req.headers.cookie !== '' }));
       return;
     }
+    if (pathname === '/fixture-private.json') {
+      // No cross-origin headers: readable only where the extension skips CORS.
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ private: true }));
+      return;
+    }
     if (pathname === '/settings-fixture') {
       res.writeHead(200, { 'content-type': 'text/html' });
       res.end('<!doctype html><title>settings fixture</title><div id="cfg"></div>');
@@ -91,13 +97,18 @@ export const css = (selector: string): { primary: { kind: 'css'; value: string }
  * one the extension holds no access to.
  */
 export const FIXTURE_ALIAS = 'shim-fixture.test';
+/** A shim's own site for the fetch-reach check (grant it with extensionCopy). */
+export const FIXTURE_OWN = 'shim-own.test';
+/** A site the extension holds for another shim (grant it with extensionCopy). */
+export const FIXTURE_HELD = 'shim-held.test';
 
 /** A persistent profile with the extension loaded: the toggle on chrome://extensions and the store survive a relaunch of it. */
 export function launch(ext: string, profile: string): Promise<BrowserContext> {
   return chromium.launchPersistentContext(profile, {
     headless: true,
     channel: 'chromium',
-    args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`, `--host-resolver-rules=MAP ${FIXTURE_ALIAS} 127.0.0.1`],
+    args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`,
+      `--host-resolver-rules=${[FIXTURE_ALIAS, FIXTURE_OWN, FIXTURE_HELD].map((h) => `MAP ${h} 127.0.0.1`).join(',')}`],
   });
 }
 
