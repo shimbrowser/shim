@@ -206,7 +206,9 @@ export function placeCredentials(
       out[use.header] = text;
     } else {
       plan.url.searchParams.append(use.query, text);
-      const encoded = new URLSearchParams([[use.query, text]]).toString().slice(use.query.length + 1);
+      // Serialized under a fixed one-letter name, so the name's own encoding
+      // (`~` becomes %7E) never shifts the slice.
+      const encoded = new URLSearchParams([['v', text]]).toString().slice(2);
       for (const s of [encoded, encodeURIComponent(text)]) {
         redact.add(s);
         redact.add(lowerEscapes(s));

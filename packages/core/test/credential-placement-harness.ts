@@ -133,6 +133,14 @@ console.log('placeCredentials');
   check('the encodings of the value are redaction candidates',
     q.ok && q.request.redact.includes(new URLSearchParams([['key', evil]]).toString().slice(4)) && q.request.redact.includes(encodeURIComponent(evil)), q.ok ? q.request.redact.join(' | ') : '');
 
+  const tp = must(planCredentialRequest({ url: 'https://maps.example.com/', headers: {}, secrets: ['t'],
+    placedUse: () => ({ origin: 'https://maps.example.com', query: 'api~key', format: '{}' }) }));
+  const tv = 'secret value/with+chars';
+  const t = placeCredentials(tp, {}, new Map([['t', tv]]));
+  check('a name that encodes (~) still yields the exact form-encoded value as a candidate',
+    t.ok && t.request.redact.includes('secret+value%2Fwith%2Bchars') && redactCredentialText('echo=secret+value%2Fwith%2Bchars', t.request.redact) === `echo=${CREDENTIAL_REDACTED}`,
+    t.ok ? t.request.redact.join(' | ') : t.error);
+
   const fp = must(planCredentialRequest({ url: 'https://maps.example.com/', headers: {}, secrets: ['m'], placedUse: () => QUERY2 }));
   const f = placeCredentials(fp, {}, new Map([['m', 'secretvalue']]));
   check('the format applies to a query value too', f.ok && new URL(f.request.dispatchUrl).searchParams.get('KEY') === 'k:secretvalue');
