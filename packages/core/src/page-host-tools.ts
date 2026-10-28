@@ -214,6 +214,14 @@ const BUSY_ERROR = 'view_page: another view_page held the page for too long — 
 // Bound on the wait for a frame after scrolling (a hidden view never paints;
 // its capture produces the frame).
 const SCROLL_PAINT_WAIT_MS = 300;
+// How far (CSS px) a scroller may sit from where it stood at the measurement
+// when the capture is checked; sub-pixel offsets are not a move.
+const CROP_MOVE_TOLERANCE_PX = 2;
+// A crop the page scrolled away from during the capture is measured and
+// captured again, this many attempts in all, before view_page gives up.
+const CROP_ATTEMPTS = 2;
+const movedError = (selector: string): string =>
+  `view_page: the page scrolled away from ${selector} while it was captured (it puts its own scroll back), so the image would not show it — scroll to it with interact_page and call view_page again, or call view_page without a selector`;
 
 // Page-side (inside an async function): waits until no live lease is held; defines `__leaseKey`.
 const WAIT_FOR_LEASE = `const __leaseKey = Symbol.for(${JSON.stringify(VIEW_LEASE_SLOT)});
@@ -293,7 +301,20 @@ export function cropMeasureSource(selector: string, waitMs: number = VIEW_WAIT_M
       const m = measure();
       const v = visibleBox();
       const cutOff = m.x < v.x0 || m.y < v.y0 || m.x + m.w > v.x1 || m.y + m.h > v.y1;
-      if (!cutOff || (m.w === 0 && m.h === 0)) return Object.assign(m, { token: __token });
+      // The lease remembers where every scroller between the target and the
+      // page stood when this measurement was taken, so the capture can be
+      // checked against the page afterwards (cropMovedSource). Scroll offsets,
+      // not the target's box: an animated target moves on its own and is not
+      // a page that scrolled away from it.
+      const held = (r) => {
+        const pos = [];
+        for (let n = el.parentElement; n; n = n.parentElement) pos.push([n, n.scrollLeft, n.scrollTop]);
+        const root = document.scrollingElement || document.documentElement;
+        if (root && !pos.some((p) => p[0] === root)) pos.push([root, root.scrollLeft, root.scrollTop]);
+        globalThis[__leaseKey].positions = pos;
+        return Object.assign(r, { token: __token });
+      };
+      if (!cutOff || (m.w === 0 && m.h === 0)) return held(m);
       const scroller = document.scrollingElement || document.documentElement;
       const before = [];
       for (let n = el.parentElement; n; n = n.parentElement) before.push([n, n.scrollLeft, n.scrollTop]);
@@ -305,12 +326,12 @@ export function cropMeasureSource(selector: string, waitMs: number = VIEW_WAIT_M
         inline: m.w + 2 * pad <= m.vw ? 'center' : 'start',
       });
       globalThis[__leaseKey].saved = before.filter((s) => s[0].scrollLeft !== s[1] || s[0].scrollTop !== s[2]);
-      if (globalThis[__leaseKey].saved.length === 0) return Object.assign(m, { token: __token });
+      if (globalThis[__leaseKey].saved.length === 0) return held(m);
       await Promise.race([
         new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
         new Promise((r) => setTimeout(r, ${SCROLL_PAINT_WAIT_MS})),
       ]);
-      return Object.assign(measure(), { token: __token, scrolled: true });
+      return Object.assign(held(measure()), { scrolled: true });
     } catch (err) {
       const l = globalThis[__leaseKey];
       if (l && l.token === __token) {
@@ -319,6 +340,21 @@ export function cropMeasureSource(selector: string, waitMs: number = VIEW_WAIT_M
       }
       throw err;
     }
+  })()`;
+}
+
+/**
+ * The script, run right after a crop's capture, that tells whether the page
+ * scrolled away from where the measurement stood (true: a scroller between
+ * the target and the page moved, or the target left the document), stayed
+ * (false), or can't say (null: the lease is no longer `token`'s).
+ */
+export function cropMovedSource(token: string): string {
+  return `(() => {
+    const l = globalThis[Symbol.for(${JSON.stringify(VIEW_LEASE_SLOT)})];
+    if (!l || l.token !== ${JSON.stringify(token)} || !Array.isArray(l.positions)) return null;
+    const tol = ${CROP_MOVE_TOLERANCE_PX};
+    return l.positions.some(([n, left, top]) => !n.isConnected || Math.abs(n.scrollLeft - left) > tol || Math.abs(n.scrollTop - top) > tol);
   })()`;
 }
 
@@ -434,13 +470,33 @@ export async function viewPageOnHost(
       await releaseViewLease(host, token, world);
     }
   }
-  const measured = await measureCropRect(host, selector, world, waitMs);
-  try {
-    if ('error' in measured) return { error: measured.error };
-    return shotResult(host, await capture(measured.token, { clip: measured.rect }), selector, measured.elementBox);
-  } finally {
-    await releaseViewLease(host, measured.token, world);
+  // The capture is checked against the page before it is answered: a page
+  // that puts its own scroll back (a scroll lock, scroll restoration) between
+  // the measurement and the capture would otherwise hand back a crop of
+  // wherever it went back to, captioned as the target. A crop the page
+  // scrolled away from is measured and captured again; one it keeps scrolling
+  // away from answers an error, never that image.
+  for (let attempt = 1; ; attempt++) {
+    const measured = await measureCropRect(host, selector, world, waitMs);
+    try {
+      if ('error' in measured) return { error: measured.error };
+      const shot = await capture(measured.token, { clip: measured.rect });
+      if ('error' in shot || !(await targetMoved(host, measured.token, world))) {
+        return shotResult(host, shot, selector, measured.elementBox);
+      }
+    } finally {
+      await releaseViewLease(host, measured.token, world);
+    }
+    if (attempt >= CROP_ATTEMPTS) return { error: movedError(selector) };
   }
+}
+
+// Whether the page scrolled away from the crop after it was measured; false
+// when that can't be told (no lease, or the check failed): the shot stands.
+async function targetMoved(host: PageHost, token: string | null, world: PageWorld): Promise<boolean> {
+  if (token === null) return false;
+  const moved = await withTimeout(host.evaluate(cropMovedSource(token), world), RELEASE_TIMEOUT_MS, 'crop check timeout').catch(() => null);
+  return moved === true;
 }
 
 function shotResult(host: PageHost, shot: ScreenshotResult, selector: string, elementBox?: { w: number; h: number }): ViewPageResult {
