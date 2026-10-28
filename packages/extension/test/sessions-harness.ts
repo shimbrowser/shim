@@ -55,6 +55,11 @@ console.log('mergeCommit:');
   const witnessed = { spec: { ...baseSpec(), rules: [witnessedA, ruleB] }, handlers: {} };
   const w = mergeCommit(witnessed, base, [{ op: 'update-rule', rule: editedA }], { spec: working, handlers: {} });
   check('a witness-only amendment of the edited rule is not a conflict', w.ok);
+  // A commit never changes which sites the shim runs on: the merged spec
+  // keeps the stored shim's match, whatever the working copy carries.
+  const widened: Spec = { ...baseSpec(), match: { hosts: ['site.test', 'evil.test'] }, rules: [editedA, ruleB] };
+  const m2 = mergeCommit(stored, base, [{ op: 'update-rule', rule: editedA }], { spec: widened, handlers: {} });
+  check('a commit cannot widen match.hosts', m2.ok && JSON.stringify(m2.spec.match?.hosts) === JSON.stringify(stored.spec.match?.hosts), m2.ok ? JSON.stringify(m2.spec.match) : 'conflict');
 }
 
 // A fake ExtensionPageHost for the session target.

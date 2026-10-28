@@ -73,6 +73,7 @@ import type {
 import { decodeWorkingCopy, encodeWorkingCopy } from '@shimbrowser/core/working-copy-wire';
 import { unpackShim, anchorDigest, SHIM_STATE_FILE, type FolderInput, type ShimState } from '@shimbrowser/core/shim-folder';
 import { fileStorage, HEADLESS_STORAGE_FORMAT } from '../src/file-storage';
+import { offMatchWarning, withOffMatch } from '../src/headless-session';
 import { createHeadlessControl, hostPatternMatches, MAX_COMMIT_ID_LENGTH, MAX_SUMMARY_LENGTH, type HeadlessControl } from '../src/headless-control';
 import { HEADLESS_CAPABILITIES, type HeadlessStorage } from '../src/playwright-page-host';
 import { cliMode } from '../src/cli';
@@ -570,6 +571,42 @@ async function main(): Promise<void> {
       && !hostPatternMatches('site.test:8080', u('http://site.test:9090/')) && !hostPatternMatches('site.test:8080', u('http://site.test/')));
     check('a wildcard matches subdomains, not the apex', hostPatternMatches('*.site.test', u('https://www.site.test/'))
       && !hostPatternMatches('*.site.test', u('https://site.test/')));
+  }
+
+  console.log('a page the shim\'s match.hosts does not cover');
+  {
+    // In Shim the shim would not run there at all: every preview says so, and
+    // no rule is reported better than partial.
+    const offFile = path.join(tmp, 'off-match.shim');
+    const offSpec = { id: 'shim-off', match: { hosts: ['other.test'] }, rules: [{ id: 'banner', anchor: css('.banner'), mutations: [{ kind: 'hide' }] }] };
+    fs.writeFileSync(offFile, json({ format: 'shim/1', name: 'Off', handlers: {}, spec: offSpec }));
+    const r = rig();
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile: offFile });
+    check('opening off-match still opens, with the open-time warning', opened.ok === true && Array.isArray(opened.warnings), opened);
+    const id = String(opened.sessionId);
+    const co = decodeWorkingCopy((await req(r, 'GET', `/sessions/${id}/checkout`)).files);
+    const files: Record<string, string> = {};
+    for (const [k, v] of Object.entries(co)) files[k] = typeof v === 'string' ? v : new TextDecoder().decode(v);
+    const offWarned = (ev: unknown): boolean => isRecord(ev) && Array.isArray(ev.warnings)
+      && ev.warnings.some((w) => String(w).includes("doesn't cover site.test") && String(w).includes('in Shim it would not run on this page'));
+    const same = await preview(r, id, files);
+    check('an unchanged preview carries the off-match warning', same.applied === false && offWarned(same.evidence), same);
+    const changed = { ...files, 'shim.json': json({ ...offSpec, rules: [{ id: 'banner', anchor: css('.banner'), mutations: [{ kind: 'restyle', css: { opacity: '0' } }] }] }) };
+    const p1 = await preview(r, id, changed);
+    const ev = isRecord(p1.evidence) ? p1.evidence : {};
+    const banner = (Array.isArray(ev.rules) ? ev.rules.filter(isRecord) : []).find((x) => x.ruleId === 'banner');
+    check('an applied preview off-match is capped at partial and warned', p1.applied === true && banner?.verification === 'partial' && offWarned(ev), ev);
+    const malformed = await preview(r, id, { ...changed, 'shim.json': '{' });
+    check('a folder problem off-match is warned too', malformed.applied === false && offWarned(malformed.evidence), malformed);
+    await r.control.closeAll();
+
+    check('on a covered page there is no warning', offMatchWarning({ id: 'x', match: { hosts: ['*.site.test'] }, rules: [] }, 'https://www.site.test/a') === null);
+    check('a non-http page is never judged', offMatchWarning({ id: 'x', match: { hosts: [] }, rules: [] }, 'about:blank') === null);
+    check('a port pattern holds to its port', offMatchWarning({ id: 'x', match: { hosts: ['site.test:8080'] }, rules: [] }, 'http://site.test:9090/') !== null);
+    const capped = withOffMatch({ rules: [{ ruleId: 'a', verification: 'full' }, { ruleId: 'b', verification: 'none' }, { ruleId: 'c', verification: 'partial' }], warnings: ['w0'] }, 'w1');
+    check('the cap drops full to partial and never upgrades none', JSON.stringify(capped.rules) === JSON.stringify([
+      { ruleId: 'a', verification: 'partial' }, { ruleId: 'b', verification: 'none' }, { ruleId: 'c', verification: 'partial' },
+    ]) && JSON.stringify(capped.warnings) === '["w0","w1"]', capped);
   }
 
   console.log('a shim declaring several hosts');

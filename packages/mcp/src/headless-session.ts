@@ -26,6 +26,7 @@ import {
 
 export {
   SESSION_SETTLE_MS as HEADLESS_SETTLE_MS, MAX_RELOADS_PER_SESSION, BROWSER_ONLY_PAGE_TOOLS, hostPatternMatches, newShimSpec, newShimId,
+  offMatchWarning, withOffMatch,
 } from '@shimbrowser/core/shim-session';
 
 /** One page a session works on, and how to let go of it. */
