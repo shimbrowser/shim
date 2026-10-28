@@ -35,10 +35,12 @@ the root is still connected. Mount strategies:
 - **A `portal` or `overlay` draws above everything the site draws**, its own modals
   included: the floating root sits at the end of `body` with `z-index: 2147483646`. A
   shim button over a video can end up on top of the site's consent or terms dialog. When a
-  site layer can cover your target, check before showing (and from
-  `api.onAnchorChange` or a scroll listener as the page changes): if
+  site layer can cover your target, keep your output mounted and re-check on a paced
+  interval (every half second or so, cleared in `api.cleanup`): if
   `document.elementsFromPoint` at the target's centre finds a site element above the
-  target that isn't inside it, hide your output (or don't mount yet) until that layer goes.
+  target that isn't inside it and isn't yours, hide your output (`display: none` on the
+  root you returned), and show it again once that layer goes. `api.onAnchorChange` and
+  scroll events don't fire when a dialog elsewhere on the page opens or closes.
 - `shadow` — your output inside a shadow root (style isolation). In an attach session
   `interact_page` can't reach into a shadow root (`shadow-unsupported`), so controls you
   need to click or type into while testing are better as `portal`/`overlay` with
