@@ -78,6 +78,7 @@ import {
   QUERY_TIMEOUT_MS, INSPECT_TIMEOUT_MS, EVALUATE_TIMEOUT_MS,
 } from './page-host-tools';
 import { navigationScopeOf, runNavigate, isSameDocumentNavigation, type NavigationState, type NavigateLoad } from './navigate-scope';
+import { botWallOnHost, botWallNote, BOT_WALL_TOOLS, withBotWallEvidence, withBotWallNote, type BotWallNote } from './bot-wall';
 
 // How long the page gets to react after an apply before the evidence is read:
 // the Shim browser's window (APPLY_SETTLE_MS), above the engine's 1.5s
@@ -158,6 +159,12 @@ export interface ShimSessionDeps<S extends ShimSessionSource = ShimSessionSource
   unsupportedDetail: string;
   /** The note for a rule that used an api member this host lacks. */
   unsupportedNote(ruleId: string, member: string): string;
+  /**
+   * The next step a bot-wall note gives on this host (how to reach the site
+   * honestly: a browser the site lets in, or the user solving the challenge).
+   * Every preview and page tool on a wall page carries the note (bot-wall.ts).
+   */
+  botWallAdvice?: string;
   /** Apply the committed rules as previews at begin: a host with no installed shim. A host that installs the shim already runs them. */
   previewCommittedAtBegin: boolean;
   /** interact_page. Absent: the tool answers unsupportedError (a host whose input policy is not yet built). */
@@ -698,8 +705,17 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
     if (!isRecord(evidence) || handle.host.isClosed()) return result;
     if (evidence.error === 'page-away' || evidence.error === 'page-closed' || evidence.error === 'session-ended') return result;
     const warning = offMatchWarning(handle.working, handle.host.url());
-    if (warning === null) return result;
-    return { ...result, evidence: withOffMatch(evidence, warning) };
+    const offMatched = warning === null ? evidence : withOffMatch(evidence, warning);
+    // A bot wall in place of the site: nothing seen on it is the site.
+    const walled = withBotWallEvidence(offMatched, await botWallOf(handle));
+    return walled === evidence ? result : { ...result, evidence: walled as Record<string, unknown> };
+  }
+
+  // The note for the page's bot wall, or null (no wall, or the page is gone).
+  async function botWallOf(handle: ShimSessionHandle<S>): Promise<BotWallNote | null> {
+    if (handle.host.isClosed()) return null;
+    const wall = await botWallOnHost(handle.host);
+    return wall ? botWallNote(wall, deps.botWallAdvice ?? '') : null;
   }
 
   async function previewOnce(handle: ShimSessionHandle<S>, input: unknown, signal: AbortSignal): Promise<BackendPreview> {
@@ -868,6 +884,14 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
   // --- page tools ------------------------------------------------------------
 
   async function call(handle: ShimSessionHandle<S>, name: string, input: unknown, signal: AbortSignal): Promise<unknown> {
+    const result = await callOnce(handle, name, input, signal);
+    // A tool that read or moved the page says when the page is a bot wall
+    // (a refusal for being off the site answers for itself).
+    if (!BOT_WALL_TOOLS.has(name) || pageAway(handle)) return result;
+    return withBotWallNote(result, await botWallOf(handle));
+  }
+
+  async function callOnce(handle: ShimSessionHandle<S>, name: string, input: unknown, signal: AbortSignal): Promise<unknown> {
     const args = isRecord(input) ? input : {};
     const str = (key: string): string => (typeof args[key] === 'string' ? args[key] : '');
     if (name in BROWSER_ONLY_PAGE_TOOLS) {

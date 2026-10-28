@@ -89,7 +89,9 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
       'Chromium, with no logins, and works on the .shim file shimFile (loaded when it exists; with newShimName, ' +
       'created by your first commit — default <dir>.shim). A url opens headless only while no Shim browser is ' +
       'reachable, or with mode "headless". The answer always ' +
-      'names the session\'s mode and why. Headless has no compositions.',
+      'names the session\'s mode and why. Headless has no compositions. A page that serves a bot wall to ' +
+      'headless (a CDN challenge or block page instead of the site) is refused with blocked-by-bot-wall: author ' +
+      'that site in the Shim browser.',
     input_schema: {
       type: 'object',
       properties: {
@@ -143,7 +145,9 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
       'reloads; the evidence is what changed, lint warnings, and console errors and warnings since the previous ' +
       'preview (a manifest adding a host asks the user in Shim first, and this call waits). Returns the new ' +
       'revision. Nothing is kept until shim_commit. A clean preview proves the work applied, not that it looks ' +
-      'right: for a visual change, pass screenshot (or call view_page) and judge it before committing.',
+      'right: for a visual change, pass screenshot (or call view_page) and judge it before committing. When the ' +
+      'page is a bot wall (a CDN challenge or block page served in place of the site), the evidence and every page ' +
+      'tool\'s answer carry botWall, and no rule is verified beyond partial: nothing there is the site.',
     input_schema: {
       type: 'object',
       properties: {
