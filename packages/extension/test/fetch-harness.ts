@@ -12,7 +12,7 @@
 //   - a timeout, a network or cross-origin failure, and any other throw each
 //     resolve { ok: false, error }: the broker never throws.
 
-import { brokerFetch } from '../src/fetch';
+import { brokerFetch, fetchReach } from '../src/fetch';
 import { FETCH_MAX_BODY_BYTES, FETCH_HARD_CONTENT_LENGTH } from '@shimbrowser/core/fetch-policy';
 
 let failures = 0;
@@ -126,6 +126,24 @@ async function main(): Promise<void> {
     check('…and where a redirect lands, before its body is read', !hop.ok && 'error' in hop && hop.error === 'redirected, then held for another shim' && !pulled, JSON.stringify(hop));
     const ok = await brokerFetch('https://mine.test/x', undefined, { ...fakeFetch(() => new Response('mine')), mayRead });
     check('a host it may read goes through', ok.ok && 'text' in ok && ok.text === 'mine');
+  }
+
+  console.log('the worker\'s reach rule (fetchReach):');
+  {
+    const asked: string[] = [];
+    const held = async (pattern: string): Promise<boolean> => { asked.push(pattern); return pattern.includes('nas.local') || pattern.includes('bank.test'); };
+    const reach = fetchReach(['mine.test', 'nas.local'], held);
+    check('the shim\'s own site is allowed, without asking', (await reach(new URL('http://mine.test/x'))) === null && asked.length === 0);
+    check('…spelled with a root dot too', (await reach(new URL('http://mine.test./x'))) === null && (await reach(new URL('http://nas.local./api'))) === null);
+    const other = fetchReach(['mine.test'], held);
+    check('a site held for another shim is refused', ((await other(new URL('http://bank.test/'))) ?? '').includes('for another shim'));
+    asked.length = 0;
+    check('…a root-dotted spelling is refused, asked about as the plain name', ((await other(new URL('http://nas.local./api'))) ?? '').includes('nas.local')
+      && JSON.stringify(asked) === '["http://nas.local/*"]', JSON.stringify(asked));
+    check('a site the extension does not hold is left to CORS', (await other(new URL('https://api.public.test/v1'))) === null);
+    const broken = fetchReach([], () => Promise.reject(new Error('no permissions api')));
+    check('a failed permission check refuses', (await broken(new URL('https://api.public.test/'))) !== null);
+    check('no own sites (a preview off its shim\'s sites): every held site is refused', ((await fetchReach([], held)(new URL('http://bank.test/'))) ?? '').includes('for another shim'));
   }
 
   console.log('failures resolve, never throw:');

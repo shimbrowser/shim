@@ -30,6 +30,30 @@
 import {
   checkFetchUrl, handlerFetchInit, FETCH_MAX_BODY_BYTES, FETCH_HARD_CONTENT_LENGTH, FETCH_TIMEOUT_MS, type HandlerFetchResult,
 } from '@shimbrowser/core/fetch-policy';
+import { hostMatches } from '@shimbrowser/core/host-match';
+
+/**
+ * The worker's reach rule for one shim (FetchBrokerDeps.mayRead): its own
+ * sites are allowed, a site the extension holds for another shim is refused,
+ * anything else is left to CORS. The hostname is compared without a root dot
+ * (`nas.local.` is nas.local), so no spelling slips past either check. `held`
+ * answers whether the extension holds a match pattern; a throw refuses.
+ */
+export function fetchReach(ownHosts: readonly unknown[] | undefined, held: (pattern: string) => Promise<boolean>): (url: URL) => Promise<string | null> {
+  const own = (ownHosts ?? []).filter((h): h is string => typeof h === 'string');
+  return async (url) => {
+    const host = url.hostname.toLowerCase().replace(/\.+$/, '');
+    if (!host) return 'api.fetch may not read a url with no host';
+    if (hostMatches(own, host, url.port || undefined)) return null;
+    let isHeld = true;
+    try {
+      isHeld = await held(`${url.protocol}//${host}/*`);
+    } catch { /* refuse below */ }
+    return isHeld
+      ? `api.fetch may not read ${host}: Shim for Chrome holds access to it for another shim, and a shim never reads a site through another's access`
+      : null;
+  };
+}
 
 export interface FetchBrokerDeps {
   /** The fetch to make the request with (the worker's own by default). */

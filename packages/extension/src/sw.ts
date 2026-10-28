@@ -45,7 +45,7 @@ import { SHIM_FILE_FORMAT } from '@shimbrowser/core/shim-folder';
 import { openPageHost, type ExtensionPageHost, type SessionStorage, type SessionStorageScope, type SessionHandlerApi, type NudgeOutcome } from './page-host';
 import { createSessions, type ExtensionSessionTarget } from './sessions';
 import { settingsPageFields, valueForHandler, settingsTransport, checkSettingValue, settingsKey, settingsFields, needsSetup } from './settings';
-import { brokerFetch } from './fetch';
+import { brokerFetch, fetchReach } from './fetch';
 import { createConsentGate, type ConsentAnswer, type PendingConsent } from './attach-consent';
 import { routeControlRequest, type ControlDeps, type TabInfo, type AttachRequest } from './control';
 import { createBridgePort, type PortLike } from './bridge-port';
@@ -914,25 +914,13 @@ async function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>
 }
 
 /**
- * What a shim's api.fetch may read through the extension's access. The worker
- * skips CORS on every site the extension holds, so a shim reads its own sites
- * (it runs there already) but never another shim's: one shim never reads a
- * site through access granted for another, and what a fetch reaches does not
- * depend on what else is installed. A site the extension does not hold is
- * left to CORS. A failed permission check refuses.
+ * What a shim's api.fetch may read through the extension's access (fetch.ts
+ * fetchReach): the worker skips CORS on every site the extension holds, so a
+ * shim reads its own sites (it runs there already) but never another shim's,
+ * and what a fetch reaches does not depend on what else is installed.
  */
 function fetchReachFor(hosts: readonly unknown[] | undefined): (url: URL) => Promise<string | null> {
-  const own = (hosts ?? []).filter((h): h is string => typeof h === 'string');
-  return async (url) => {
-    if (hostMatches(own, url.hostname, url.port || undefined)) return null;
-    let held = true;
-    try {
-      held = await chrome.permissions.contains({ origins: [`${url.protocol}//${url.hostname}/*`] });
-    } catch { /* refuse below */ }
-    return held
-      ? `api.fetch may not read ${url.hostname}: Shim for Chrome holds access to it for another shim, and a shim never reads a site through another's access`
-      : null;
-  };
+  return fetchReach(hosts, (pattern) => chrome.permissions.contains({ origins: [pattern] }));
 }
 
 /**
@@ -967,8 +955,11 @@ function sessionHandlerApiFor(db: ShimStore): SessionHandlerApi {
       return settingsTransport(declarer, shim ? await db.settings.get(shim.id) : {});
     },
     async fetch(scope, url, opts) {
-      // The preview's own sites: the working declaration's, else the installed shim's.
-      const hosts = (sessions.workingSpec(scope.patchId) ?? (await db.getShim(scope.patchId))?.spec)?.match?.hosts;
+      // The preview's own sites (the working declaration's), only while that
+      // shim runs on the preview's page, the gate storage and settings use;
+      // otherwise no site is its own, and CORS decides everywhere else.
+      const shim = await installedRunsOn(db, scope);
+      const hosts = shim ? (sessions.workingSpec(scope.patchId) ?? shim.spec).match?.hosts : [];
       return brokerFetch(url, opts, { mayRead: fetchReachFor(hosts) });
     },
   };
