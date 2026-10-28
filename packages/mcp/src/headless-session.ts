@@ -76,6 +76,14 @@ const UNSUPPORTED_DETAIL = 'headless mode supports a subset of shim features (hi
   'inject-element, inject-html, remove, replace-root; api.storage and api.cleanup). Nothing was applied. ' +
   'Remove what is listed, or author this shim in the Shim browser.';
 
+/**
+ * What headless says about a bot wall: it can't get past one, and does not
+ * try (no disguised user agent, no hidden automation flag, no solved
+ * challenge). The Shim browser is a browser the site may let in.
+ */
+export const HEADLESS_BOT_WALL_ADVICE = 'Headless Chromium says it is automated and the site refused it; Shim does not disguise it. ' +
+  'Author this shim in an attach session in the Shim browser instead.';
+
 /** The evidence for a preflight refusal. */
 export function unsupportedEvidence(unsupported: UnsupportedFeature[]): Record<string, unknown> {
   return sessionUnsupportedEvidence(unsupported, UNSUPPORTED_DETAIL);
@@ -95,6 +103,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     unsupportedError: REQUIRES_SHIM_BROWSER,
     unsupportedDetail: UNSUPPORTED_DETAIL,
     unsupportedNote: (ruleId, member) => `rule "${ruleId}" used api.${member}, which headless mode does not provide (${REQUIRES_SHIM_BROWSER}) — its result is partial`,
+    botWallAdvice: HEADLESS_BOT_WALL_ADVICE,
     // Headless has no installed shims: the committed rules run as previews.
     previewCommittedAtBegin: true,
     // match.hosts is editable here: headless has no Shim to ask, so it writes

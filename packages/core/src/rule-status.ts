@@ -7,6 +7,7 @@
 
 import { reorderNote, reshapeNote } from './layout-kinds';
 import { injectStripNotes } from './dispatch-mutation';
+import { unattachedNote } from './mount-health';
 import type { RuleRuntimeState } from './rule-state';
 import type { Rule, Spec } from './types';
 import type { CoreApi } from './api';
@@ -53,6 +54,10 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
     }
     if (rs.relativeReorderNote) notes.push(rs.relativeReorderNote);
     if (rs.anchorChangeNote) notes.push(rs.anchorChangeNote);
+    let unattached = 0;
+    for (const entry of rs.state.values()) unattached += entry.unattached?.size ?? 0;
+    const unattachedMsg = unattachedNote(unattached);
+    if (unattachedMsg) notes.push(unattachedMsg);
     const stripNote = injectStripNotes.get(`${spec.id}/${rule.id}`);
     if (stripNote) notes.push(stripNote);
     return notes.length ? notes.join('; ') : null;

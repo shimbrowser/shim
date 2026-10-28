@@ -258,6 +258,8 @@ export function createSessions(deps: SessionsDeps): Sessions {
     // reader; authoring that widens a shim happens in the Shim browser.
     matchEditable: false,
     previewCommittedAtBegin: false,
+    // The user's own Chrome: a challenge is theirs to get past (nothing here solves one).
+    botWallAdvice: 'Ask the user to get past it in the Chrome tab (a challenge may clear by itself or ask them to click), then look again.',
     syntaxProbe: (code) => (committing && syntaxChecks.get(committing)?.get(moduleOfProbe(code))) ?? { ok: false, error: 'handler syntax was not checked in the page' },
     async tombstone(handle, ruleId, held): Promise<boolean> {
       const host = handle.page.host as ExtensionPageHost;

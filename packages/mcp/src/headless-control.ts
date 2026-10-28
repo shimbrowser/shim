@@ -36,6 +36,7 @@ import type { Spec } from '@shimbrowser/core/types';
 import { isApiMapToolName } from '@shimbrowser/core/api-map-tools';
 import { isCompositionSessionToolName } from '@shimbrowser/core/composition-session-tools';
 import { isDataToolName } from '@shimbrowser/core/data-tools';
+import { botWallOnHost, describeBotWall, type BotWall } from '@shimbrowser/core/bot-wall';
 import type { ControlClient, ControlInfo, ControlReply } from './control-client';
 import type { HeadlessStorage } from './playwright-page-host';
 import { HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER } from './playwright-page-host';
@@ -44,11 +45,16 @@ import { HeadlessUnavailableError, PLAYWRIGHT_MISSING } from './playwright-launc
 import { tryLockFile, type FileLock, type FileLockOptions } from './file-lock';
 import {
   createHeadlessShimBackend, hostPatternMatches, newShimId, newShimSpec, unsupportedEvidence, BROWSER_ONLY_PAGE_TOOLS,
+  HEADLESS_BOT_WALL_ADVICE,
   type HeadlessSessionPage, type HeadlessShimSource, type HeadlessTarget, type HeadlessBackendOptions,
 } from './headless-session';
 
 /** How long opening a page may take before the session is refused. */
 export const OPEN_PAGE_TIMEOUT_MS = 30_000;
+/** How long a bot challenge on the opened page gets to clear by itself before the open is refused. */
+export const BOT_WALL_SETTLE_MS = 8000;
+/** The refusal for a page that served a bot wall to headless. */
+export const BLOCKED_BY_BOT_WALL = 'blocked-by-bot-wall';
 
 export interface HeadlessControlOptions {
   version: string;
@@ -65,6 +71,8 @@ export interface HeadlessControlOptions {
   newShimId?(): string;
   /** The cross-process file lock's process identity (tests stand in other processes). */
   fileLock?: FileLockOptions;
+  /** See BOT_WALL_SETTLE_MS. */
+  botWallSettleMs?: number;
 }
 
 /** The control client, plus ending every open session (the server shutting down). */
@@ -84,6 +92,7 @@ const STATUS_BY_ERROR: Record<string, number> = {
   'not-found': 404,
   'method-not-allowed': 405,
   'artifact-busy': 409,
+  [BLOCKED_BY_BOT_WALL]: 403,
   'commit-pending': 409,
   'stale-revision': 409,
   'nothing-to-commit': 409,
@@ -369,6 +378,22 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
       await page.close().catch(() => undefined);
       return refuse('shutting-down', SHUTTING_DOWN);
     }
+    // A bot wall in place of the site: nothing a session saw there would be
+    // the site, so the open is refused, saying so. Headless identifies itself
+    // honestly and never tries to get past one. A challenge gets a moment to
+    // clear by itself first; a block page won't.
+    const wall = await settledBotWall(page);
+    if (wall) {
+      await page.close().catch(() => undefined);
+      return refuse(BLOCKED_BY_BOT_WALL,
+        `the site served a bot wall to the headless browser (${describeBotWall(wall)}, at ${page.host.url() || parsedUrl.href}): ` +
+        `headless can't reach it. ${HEADLESS_BOT_WALL_ADVICE}`,
+        { botWall: { vendor: wall.vendor, kind: wall.kind } });
+    }
+    if (closing) {
+      await page.close().catch(() => undefined);
+      return refuse('shutting-down', SHUTTING_DOWN);
+    }
     // The page the session works on is where the url ended up, after any
     // redirect (example.com → www.example.com, a sign-in host): a new shim
     // matches that host, and the match warning checks against it.
@@ -404,6 +429,18 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
       // The caller never learns this session's id: don't leave it holding the file.
       await sessions.end(opened.sessionId, 'ended');
       throw e;
+    }
+  }
+
+  // The page's bot wall once a challenge has had BOT_WALL_SETTLE_MS to
+  // clear (a block page is final at once), or null.
+  async function settledBotWall(page: HeadlessSessionPage): Promise<BotWall | null> {
+    const deadline = Date.now() + (options.botWallSettleMs ?? BOT_WALL_SETTLE_MS);
+    for (;;) {
+      if (page.host.isClosed()) return null;
+      const wall = await botWallOnHost(page.host);
+      if (!wall || wall.kind === 'block' || closing || Date.now() >= deadline) return wall;
+      await new Promise<void>((resolve) => setTimeout(resolve, 500));
     }
   }
 

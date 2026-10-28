@@ -45,6 +45,11 @@ The loop is the same, with three differences:
   preview on such a page carries a warning saying so, and no rule there is reported better
   than `partial`: don't report it as working in Shim. If the shim should run there, add the
   host to `match.hosts` (`references/sites.md`).
+- **Bot walls.** Many sites serve headless Chromium a challenge or block page (Cloudflare,
+  Akamai, DataDome, …) instead of themselves; Shim never disguises it. Opening such a page
+  answers `blocked-by-bot-wall`, and a page tool or preview that lands on one carries
+  `botWall` (no rule better than `partial`). Nothing there is the site: don't author
+  against it or report on it. Use an attach session in the Shim browser.
 - **Requests from a handler, headless.** Since `api.fetch` is refused, a handler's plain
   `fetch` is the only way out, and it runs under the page's CORS. It reaches the page's
   own site, and a third-party API only if that API sends CORS headers for the page's

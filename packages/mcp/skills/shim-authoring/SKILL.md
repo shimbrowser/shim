@@ -163,8 +163,7 @@ Rules of the folder:
   also be portable file names: `__proto__` and the Windows device names (`con`, `prn`,
   `aux`, `nul`, `com0`–`com9`, `lpt0`–`lpt9`, in any case) are refused, and two names that
   differ only in case (`markPlayed` and `markplayed`) count as the same name.
-- **Rule ids** are short kebab-case slugs, unique within the shim (`hide-sidebar`,
-  `teal-underline-h1`).
+- **Rule ids** are short kebab-case slugs, unique within the shim (`hide-sidebar`).
 - **What you may change:** `rules`, `match.hosts` (where allowed), and the declarations `intent`, `settings`, `permissions`,
   `storage`, `connections`. `id` is fixed (`not-editable`).
 - **On a global shim** (`"global": true`), you may also change `sharedHandlers`: an object
@@ -245,7 +244,8 @@ All of them act on the session's tab.
 - **`query_page { description }`** — natural-language search for elements: by text,
   visual cue ("the pink banner"), position ("the third card"), id, class, aria-label.
   Returns ranked candidates with suggested anchors (strongest first), markup, bounding rect
-  and computed style. Use it before writing any anchor you haven't seen on the real page.
+  and computed style (bounded: `truncated` says what was cut). Use it before writing any
+  anchor you haven't seen on the real page.
   **Never invent class names.**
 - **`inspect_element { selector }`** — everything about one element: tag, stable
   attributes, computed style, bounding rect, ancestry, two levels of descendants, and how
@@ -258,8 +258,8 @@ All of them act on the session's tab.
   reading: never use it to change the page (that is what the folder is for), dispatch
   events, call `click()` or set `location` — `interact_page` and `navigate` do that — and
   remember it runs as the user. Capped at 5000 characters in, 8000 out, 3 seconds.
-- **`view_page { selector? }`** — a screenshot, as an image. With `selector`, a crop of that
-  element plus margin at native resolution (the verification shot; an element below the
+- **`view_page { selector? }`** — a screenshot, as an image. With `selector`, a crop of its first visible
+  match plus margin at native resolution (the verification shot; an element below the
   fold is scrolled into view for the shot and the scroll put back); without, the visible
   viewport downscaled to 1280px wide (a last-resort visual lookup — for icon-only buttons,
   branded wordmarks, "the one that looks like X"). After a lookup, write the anchor from a
@@ -488,6 +488,6 @@ a file **before** the work it covers, not after a preview goes wrong: a guessed 
 | `references/site-data.md` | using the site's own API (the API map tools), or reading what a shim saved (`inspect_storage`, `query_db`, `read_sibling_shim`) |
 | `references/compositions.md` | any composition session |
 | `references/page-driving.md` | `interact_page` (your shim's own controls, scroll) or `navigate` in a shim session: what each may touch, the refusal codes, what stops a batch |
-| `references/sites.md` | changing `match.hosts`: patterns, commit card, untried sites |
+| `references/sites.md` | changing `match.hosts` |
 | `references/headless.md` | a headless session: `shim_status` offers only headless, an open answers `mode: "headless"`, or the user wants a standalone `.shim` file |
 | `references/hosts.md` | a `chrome` host in `shim_status`, a tab with `host`, `ambiguous-target` / `multiple-targets` |

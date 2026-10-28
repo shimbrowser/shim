@@ -20,7 +20,10 @@ can read as `matched 0` in a preview that settles first. Build and return the ro
 synchronously (a placeholder), then fill it in from an un-awaited async step that checks
 the root is still connected. Mount strategies:
 
-- `inline` (default) — your output goes where you put it. Cheapest; only for static DOM.
+- `inline` (default) — your output goes where you put it: the engine places nothing, so
+  insert what you return (`anchor.appendChild(el)`) before returning it. A returned node
+  that isn't on the page once the handler settles is never shown, gets no self-healing,
+  and is reported in the rule-status note and the console. Cheapest; only for static DOM.
 - `portal` — the engine parks your output in a floating root positioned at the anchor
   (`align: "below" | "above"`). **Use `portal` or `overlay` for anything inside a
   React/Vue/Angular-rendered region**: inline nodes there get displaced by the framework
@@ -109,6 +112,12 @@ module.exports = function hideSponsored({ anchor, api }) {
 - If `fn` returns a promise, the next call waits until it settles. A throw is reported like a
   handler error and `fn` stays registered. A hook that keeps re-firing is throttled and the
   preview's rule status says so.
+- Don't rely on it to see other rules' output. Changes made only of shim-owned nodes (any
+  rule's or shim's mounted or injected output) are skipped, so a list controller is not told
+  when a per-item rule adds its badges. Count what other rules added when you need it.
+- A preview re-runs only the rules you changed. A rule that reads what a sibling rule put on
+  the page (a count of its badges) keeps its old result until it runs again, so derive such
+  values when you need them, or preview a change that touches both.
 
 ### A page-level script, and in-site navigation
 

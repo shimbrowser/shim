@@ -114,8 +114,9 @@ const SHIM_QUERY_PAGE: ToolDefinition = {
     'by visual cue ("the pink banner"), by position ("the third card"), or ' +
     'by a name that is not in the outline. Returns up to ~25 visible ' +
     'elements ranked by relevance, each with selectors, markup, bounding ' +
-    'rect, and computed style. You decide which candidate is the right ' +
-    'target and then emit the delta.',
+    'rect, and computed style. Long fields are cut to excerpts and a heavy ' +
+    'page returns fewer candidates; `truncated` says what was cut. You ' +
+    'decide which candidate is the right target and then emit the delta.',
   input_schema: {
     type: 'object',
     properties: {
@@ -227,7 +228,7 @@ const SHIM_VIEW_PAGE: ToolDefinition = {
       selector: {
         type: 'string',
         description:
-          'Optional CSS selector to crop the screenshot to (element + context margin, native resolution). ' +
+          'Optional CSS selector to crop the screenshot to (its first visible match + context margin, native resolution). ' +
           'An element the viewport cuts off is scrolled into view for the shot and the scroll is put back after. ' +
           'Use for verifying a specific element you just changed. Omit for the full viewport.',
       },
@@ -313,7 +314,8 @@ const COMPOSITION_QUERY_PAGE: ToolDefinition = {
     'specific card, button, or section by its text, id, class, aria-label, ' +
     'placeholder or alt text. Returns up to 25 visible elements ranked by ' +
     'how many of your words they match, each with a CSS selector, its tag, ' +
-    'its text (first 200 chars) and its bounding rect.',
+    'its text (first 200 chars) and its bounding rect. A heavy page returns ' +
+    'fewer candidates; `truncated` says what was cut.',
   input_schema: {
     type: 'object',
     properties: {
@@ -447,7 +449,7 @@ const COMPOSITION_VIEW_PAGE: ToolDefinition = {
     properties: {
       selector: {
         type: 'string',
-        description: 'Optional CSS selector to crop the screenshot to. Omit for the full viewport.',
+        description: 'Optional CSS selector to crop the screenshot to (its first visible match). Omit for the full viewport.',
       },
     },
   },
@@ -521,7 +523,7 @@ const SESSION_VIEW_PAGE: ToolDefinition = {
       selector: {
         type: 'string',
         description:
-          'Optional CSS selector to crop the screenshot to (element + context margin, native resolution). ' +
+          'Optional CSS selector to crop the screenshot to (its first visible match + context margin, native resolution). ' +
           'An element the viewport cuts off is scrolled into view for the shot and the scroll is put back after. ' +
           'Use for verifying a specific element you just changed. Omit for the full viewport.',
       },
@@ -536,8 +538,10 @@ const SESSION_QUERY_PAGE: ToolDefinition = {
     'description — by text, visual cue ("the pink banner"), position ("the ' +
     'third card"), id, class, aria-label, placeholder or alt text. Returns up ' +
     'to ~25 visible elements ranked by relevance, each with selectors and a ' +
-    'bounding rect (on a site page also markup and computed style). Pick the ' +
-    'right candidate, confirm it with inspect_element, then write the anchor.',
+    'bounding rect (on a site page also markup and computed style). Long ' +
+    'fields are cut to excerpts and a heavy page returns fewer candidates; ' +
+    '`truncated` says what was cut. Pick the right candidate, confirm it ' +
+    'with inspect_element, then write the anchor.',
   input_schema: {
     type: 'object',
     properties: {

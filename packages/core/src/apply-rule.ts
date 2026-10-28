@@ -31,6 +31,7 @@ import { makeReconciler } from './rule-reconcile';
 import type { Rule, Anchor } from './types';
 import type { CoreApi, CoreAnchoredHandlerApi, HostApiMembers } from './api';
 import { nextFrame } from './next-frame';
+import { judgeMount, makeInsertionLog } from './mount-health';
 
 // --- Own-DOM guard ----------------------------------------------------------
 //
@@ -246,10 +247,60 @@ export function applyRule(
   // the old container's children keep their stamps until rule teardown (accepted
   // — cleaned by the teardown sweep, not re-derived per-scan).
 
+  // One console warning per rule lifecycle (the rule-status note carries the
+  // live count): a multi-match rule would otherwise warn once per anchor.
+  let warnedUnattached = false;
+  function warnUnattached(handlerName: string, count: number): void {
+    if (warnedUnattached) return;
+    warnedUnattached = true;
+    console.warn(`[shim] ${spec.id}/${rule.id}: handler "${handlerName}" returned ${count} node(s) it never put on the page `
+      + '— inline output must be inserted by the handler (or use mount.strategy portal / overlay, which the engine places). '
+      + 'Those nodes are not shown and get no self-healing.');
+  }
+
+  // Insertion evidence for mountOn (mount-health.ts): one childList observer
+  // on the document per rule, live only while a mount's handlers run. A
+  // returned root off the page at settle that it never saw (nor an ancestor)
+  // was never inserted; one the site removed before the handler settled still
+  // self-heals. Only for rules whose mutations return output; teardownRule
+  // stops it, so a handler that never settles holds nothing after.
+  const returnsOutput = (rule.mutations || []).some((m) => m.kind === 'script' || m.kind === 'replace-root'
+    || m.kind === 'inject-element' || m.kind === 'inject-html');
+  const changedNodes = (records: MutationRecord[]): Node[] => {
+    const out: Node[] = [];
+    for (const r of records) {
+      for (const n of Array.from(r.addedNodes)) out.push(n);
+      for (const n of Array.from(r.removedNodes)) out.push(n);
+    }
+    return out;
+  };
+  let insertionObserver: MutationObserver | null = null;
+  const insertionLog = returnsOutput ? makeInsertionLog<Node>({
+    cap: 5000,
+    parentOf: (n) => n.parentNode,
+    connect: () => {
+      insertionObserver ??= new MutationObserver((records) => insertionLog?.record(changedNodes(records)));
+      insertionObserver.observe(document, { childList: true, subtree: true });
+    },
+    disconnect: () => { insertionObserver?.disconnect(); },
+    flush: () => (insertionObserver ? changedNodes(insertionObserver.takeRecords()) : []),
+  }) : null;
+
   async function mountOn(el: Element): Promise<void> {
+    if (!insertionLog) { await mountOnWatched(el, null); return; }
+    const start = insertionLog.begin();
+    try {
+      await mountOnWatched(el, start);
+    } finally {
+      insertionLog.end();
+    }
+  }
+
+  async function mountOnWatched(el: Element, insertionStart: number | null): Promise<void> {
     const gen = generation.get(el) ?? 0;
     const outputs: HTMLElement[] = [];
     const cleanups: Array<() => void> = [];
+    const unattached = new Set<HTMLElement>();
     const change = changeHub.createRecord(el);
     // The handler whose dispatch is running — names the hooks it registers.
     let currentHandler = '';
@@ -287,6 +338,18 @@ export function applyRule(
       const { placed, cleanup } = applyStrategy(raw as HTMLElement[], el as HTMLElement, mut);
       outputs.push(...placed);
       if (cleanup) cleanups.push(cleanup);
+      // The handler has settled and the strategy placed what it places: a
+      // returned root still off the page that the insertion log never saw
+      // on the page was never inserted (an inline handler that built a node
+      // and returned it without appending it).
+      // It is not "stomped by the site", so it stays out of self-healing
+      // (mount-health.ts) and is reported instead of re-mounted forever.
+      const missing = insertionLog && insertionStart !== null && placed.length
+        ? insertionLog.unattached(placed, insertionStart) : new Set<HTMLElement>();
+      if (missing.size) {
+        for (const n of missing) unattached.add(n);
+        warnUnattached(currentHandler || mut.kind, missing.size);
+      }
       // Its tier-1 tokens stay: a replacement under the same spec and rule id
       // stamps the same token names, so stripping here could undo its work.
       if (tornDown) {
@@ -300,7 +363,7 @@ export function applyRule(
         return;
       }
     }
-    rs.state.set(el, { outputs, cleanups, change });
+    rs.state.set(el, { outputs, cleanups, change, unattached });
     // Register with the module-level own-DOM registry (see above) so no rule's
     // anchor resolution — this rule's or any other patch's — can ever re-match
     // this mount's output and re-dispatch onto it.
@@ -439,10 +502,10 @@ export function applyRule(
       if (inFlight.has(el)) continue;
       const existing = rs.state.get(el);
       if (existing) {
-        // Opted out of self-healing (no outputs returned) — never re-mount.
-        if (existing.outputs.length === 0) continue;
-        // All outputs still attached — mounted state is healthy.
-        if (existing.outputs.every((n) => document.contains(n))) continue;
+        // Opted out of self-healing (no outputs returned, or only roots the
+        // handler never put on the page) or healthy (every root that was on
+        // the page still is) — never re-mount.
+        if (judgeMount(existing.outputs, existing.unattached) !== 'stomped') continue;
         // Something got stomped: tear down and re-mount.
         teardownEntry(existing);
         rs.state.delete(el);
@@ -456,6 +519,11 @@ export function applyRule(
         inFlight.delete(el);
         inFlightMembers.delete(el);
         if (tornDown) return;
+        // A root the site removed while the handler was still running: the
+        // removal's own scan skipped this in-flight member, and nothing may
+        // mutate again, so look once more now.
+        const landed = rs.state.get(el);
+        if (landed && judgeMount(landed.outputs, landed.unattached) === 'stomped') scheduleScan();
         // mountOn updates state.size as it inserts. Re-report so the inspector
         // sees the bump even when the surrounding scan() found no further
         // changes.
@@ -504,6 +572,7 @@ export function applyRule(
 
   return function teardownRule() {
     tornDown = true;
+    insertionLog?.stop();
     changeHub.teardown();
     capture.stop();
     observer?.disconnect();

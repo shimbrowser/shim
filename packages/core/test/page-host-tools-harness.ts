@@ -11,7 +11,7 @@
 
 import {
   viewPageOnHost, evaluateOnHost, queryPageByScript, inspectElementByScript, expressionProblem,
-  withTimeout, MAX_SHOT_WIDTH, MAX_EXPRESSION, MAX_RESULT,
+  withTimeout, cropMeasureSource, MAX_SHOT_WIDTH, MAX_EXPRESSION, MAX_RESULT,
 } from '../src/page-host-tools';
 import { PAGE_HOST_API_MEMBERS } from '../src/page-host';
 import type { PageHost, PageWorld, ScreenshotOptions, ScreenshotResult } from '../src/page-host';
@@ -61,7 +61,7 @@ function scriptedHost(
 }
 
 const MEASURE = { x: 10, y: 20, w: 120.6, h: 39.4, vw: 1440, vh: 900 };
-const isMeasure = (code: string) => code.includes('getBoundingClientRect') && code.includes('innerWidth') && !code.includes('querySelectorAll');
+const isMeasure = (code: string) => code.includes('getBoundingClientRect') && code.includes('innerWidth') && code.includes('noneVisible');
 
 async function testViewPage(): Promise<void> {
   console.log('view_page:');
@@ -89,6 +89,13 @@ async function testViewPage(): Promise<void> {
 
   const miss = await viewPageOnHost(scriptedHost(() => null), { selector: '.nope' }, 'main');
   check('a crop selector matching nothing is an actionable error', /^crop selector matched nothing: \.nope/.test(miss.error ?? ''), miss.error);
+  const hiddenHost = scriptedHost((code) => (isMeasure(code) ? { noneVisible: true, count: 3 } : null));
+  const hidden = await viewPageOnHost(hiddenHost, { selector: '.ghost' }, 'main');
+  check('a crop selector whose matches are all hidden says so, with no capture',
+    /^crop selector matched 3 elements, none visible .*: \.ghost/.test(hidden.error ?? '') && hidden.dataBase64 === undefined && hiddenHost.shots.length === 0, hidden.error);
+  const measureSrc = cropMeasureSource('.card');
+  check('the measure script crops to the first rendered match, skipping hidden ones',
+    measureSrc.includes('querySelectorAll(".card")') && measureSrc.includes("cs.display !== 'none'") && measureSrc.includes("cs.visibility !== 'hidden'") && measureSrc.includes('r.width > 0 && r.height > 0'));
   const offscreen = await viewPageOnHost(scriptedHost(() => ({ x: 5000, y: 5000, w: 10, h: 10, vw: 1440, vh: 900 })), { selector: '.far' }, 'main');
   check('a crop that scrolling could not bring into the viewport is an error, never a capture', /outside the viewport and scrolling did not bring it in/.test(offscreen.error ?? ''), offscreen.error);
 
