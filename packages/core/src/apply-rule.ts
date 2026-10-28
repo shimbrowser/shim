@@ -31,7 +31,7 @@ import { makeReconciler } from './rule-reconcile';
 import type { Rule, Anchor } from './types';
 import type { CoreApi, CoreAnchoredHandlerApi, HostApiMembers } from './api';
 import { nextFrame } from './next-frame';
-import { judgeMount, unattachedRoots } from './mount-health';
+import { judgeMount, makeInsertionLog } from './mount-health';
 
 // --- Own-DOM guard ----------------------------------------------------------
 //
@@ -258,44 +258,45 @@ export function applyRule(
       + 'Those nodes are not shown and get no self-healing.');
   }
 
-  // Insertion evidence for mountOn (mount-health.ts): every node added to or
-  // removed from the document while a mount's handlers run. A returned root
-  // off the page at settle that sits in none of them was never inserted; one
-  // the site removed before the handler settled was inside a removed node, and
-  // still self-heals. Only for rules whose mutations return output, and capped:
-  // past the cap the watch gives up (null) and nothing is judged never-inserted.
+  // Insertion evidence for mountOn (mount-health.ts): one childList observer
+  // on the document per rule, live only while a mount's handlers run. A
+  // returned root off the page at settle that it never saw (nor an ancestor)
+  // was never inserted; one the site removed before the handler settled still
+  // self-heals. Only for rules whose mutations return output; teardownRule
+  // stops it, so a handler that never settles holds nothing after.
   const returnsOutput = (rule.mutations || []).some((m) => m.kind === 'script' || m.kind === 'replace-root'
     || m.kind === 'inject-element' || m.kind === 'inject-html');
-  const INSERTION_WATCH_CAP = 5000;
-  function watchInsertions(): { take(): Node[] | null; stop(): void } {
-    const seen: Node[] = [];
-    let overflow = false;
-    const collect = (records: MutationRecord[]): void => {
-      if (overflow) return;
-      for (const r of records) {
-        for (const n of Array.from(r.addedNodes)) seen.push(n);
-        for (const n of Array.from(r.removedNodes)) seen.push(n);
-      }
-      if (seen.length > INSERTION_WATCH_CAP) { overflow = true; seen.length = 0; watch.disconnect(); }
-    };
-    const watch = new MutationObserver(collect);
-    watch.observe(document, { childList: true, subtree: true });
-    return {
-      take() { collect(watch.takeRecords()); return overflow ? null : seen; },
-      stop() { watch.disconnect(); },
-    };
-  }
+  const changedNodes = (records: MutationRecord[]): Node[] => {
+    const out: Node[] = [];
+    for (const r of records) {
+      for (const n of Array.from(r.addedNodes)) out.push(n);
+      for (const n of Array.from(r.removedNodes)) out.push(n);
+    }
+    return out;
+  };
+  let insertionObserver: MutationObserver | null = null;
+  const insertionLog = returnsOutput ? makeInsertionLog<Node>({
+    cap: 5000,
+    parentOf: (n) => n.parentNode,
+    connect: () => {
+      insertionObserver ??= new MutationObserver((records) => insertionLog?.record(changedNodes(records)));
+      insertionObserver.observe(document, { childList: true, subtree: true });
+    },
+    disconnect: () => { insertionObserver?.disconnect(); },
+    flush: () => (insertionObserver ? changedNodes(insertionObserver.takeRecords()) : []),
+  }) : null;
 
   async function mountOn(el: Element): Promise<void> {
-    const watch = returnsOutput ? watchInsertions() : null;
+    if (!insertionLog) { await mountOnWatched(el, null); return; }
+    const start = insertionLog.begin();
     try {
-      await mountOnWatched(el, watch);
+      await mountOnWatched(el, start);
     } finally {
-      watch?.stop();
+      insertionLog.end();
     }
   }
 
-  async function mountOnWatched(el: Element, watch: { take(): Node[] | null } | null): Promise<void> {
+  async function mountOnWatched(el: Element, insertionStart: number | null): Promise<void> {
     const gen = generation.get(el) ?? 0;
     const outputs: HTMLElement[] = [];
     const cleanups: Array<() => void> = [];
@@ -338,12 +339,13 @@ export function applyRule(
       outputs.push(...placed);
       if (cleanup) cleanups.push(cleanup);
       // The handler has settled and the strategy placed what it places: a
-      // returned root still off the page that the insertion watch never saw
+      // returned root still off the page that the insertion log never saw
       // on the page was never inserted (an inline handler that built a node
       // and returned it without appending it).
       // It is not "stomped by the site", so it stays out of self-healing
       // (mount-health.ts) and is reported instead of re-mounted forever.
-      const missing = watch && placed.length ? unattachedRoots<HTMLElement>(placed, watch.take()) : new Set<HTMLElement>();
+      const missing = insertionLog && insertionStart !== null && placed.length
+        ? insertionLog.unattached(placed, insertionStart) : new Set<HTMLElement>();
       if (missing.size) {
         for (const n of missing) unattached.add(n);
         warnUnattached(currentHandler || mut.kind, missing.size);
@@ -570,6 +572,7 @@ export function applyRule(
 
   return function teardownRule() {
     tornDown = true;
+    insertionLog?.stop();
     changeHub.teardown();
     capture.stop();
     observer?.disconnect();

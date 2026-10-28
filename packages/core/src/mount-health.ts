@@ -10,8 +10,7 @@
 // connected, and reading it as stomped re-ran the handler on every body
 // mutation, forever (a busy page churned with nothing reported). Roots that are
 // unconnected once the handler settles, with no sign they were ever on the page
-// while it ran (apply-rule.ts watches the document's childList for the length
-// of the dispatch), are recorded at mount as `unattached`
+// while it ran (the insertion log below), are recorded at mount as `unattached`
 // and excluded from the stomp check until they are first seen connected (a
 // handler may insert a returned root later, from a timer); from then on they
 // self-heal like any other root.
@@ -28,30 +27,94 @@ export type MountHealth =
   // No tracked root (nothing returned, or only roots never on the page): never re-mount.
   | 'untracked';
 
-/**
- * The roots of `outputs` the handler never put on the page: off the page once
- * the handler settled AND absent from every node the insertion watch saw added
- * or removed (a root the site removed before the handler settled was inside a
- * removed node, so it still self-heals). `seen` null means the watch gave up
- * (too many mutations): no root is judged never-inserted, the old behavior.
- */
-export function unattachedRoots<T extends OutputRoot>(
-  outputs: readonly T[],
-  // Nodes the insertion watch saw added or removed (only `contains` is read; a DOM Node is one).
-  seen: ReadonlyArray<{ contains(other: T): boolean }> | null,
-): Set<T> {
-  const out = new Set<T>();
-  if (seen === null) return out;
-  for (const n of outputs) {
-    if (n.isConnected) continue;
-    let inserted = false;
-    for (const s of seen) {
-      // Node.contains is inclusive: a root added or removed itself counts.
-      if (s.contains(n)) { inserted = true; break; }
+// --- insertion evidence -----------------------------------------------------
+//
+// One log per rule, shared by every mount of it in flight: a single childList
+// observer on the document runs while at least one mount's handlers are
+// running (refcounted), and each node it sees added or removed is stamped with
+// a sequence number. A mount remembers the sequence at its start; at settle a
+// returned root off the page counts as inserted when it, or any ancestor it
+// still has, was seen after that start (a root the site removed is inside the
+// removed node, or is it). One observer and one record per page change
+// however many anchors mount at once, so a 1,000-row rule costs what one does.
+// Past `cap` distinct nodes the log gives up until no mount is in flight:
+// nothing is judged never-inserted meanwhile (the old behavior).
+
+export interface InsertionLogDeps<N> {
+  cap: number;
+  parentOf(node: N): N | null;
+  /** Start observing; `flush` returns what it saw since the last call. */
+  connect(): void;
+  disconnect(): void;
+  flush(): N[];
+}
+
+export interface InsertionLog<N> {
+  /** A mount's handlers start: returns its start mark. */
+  begin(): number;
+  /** Nodes the observer delivered. */
+  record(nodes: Iterable<N>): void;
+  /** Returned roots never on the page since `start` (empty once the log gave up). */
+  unattached<T extends N & OutputRoot>(roots: readonly T[], start: number): Set<T>;
+  /** A mount's handlers are done (idempotent per mount is the caller's job). */
+  end(): void;
+  /** The rule tears down: stop observing and drop every node held. */
+  stop(): void;
+  /** Mounts in flight, and nodes held (for the harness). */
+  readonly active: number;
+  readonly held: number;
+}
+
+export function makeInsertionLog<N>(deps: InsertionLogDeps<N>): InsertionLog<N> {
+  let active = 0;
+  let seq = 0;
+  let overflow = false;
+  let stopped = false;
+  const seen = new Map<N, number>();
+  const record = (nodes: Iterable<N>): void => {
+    if (overflow || stopped || active === 0) return;
+    for (const n of nodes) {
+      seq += 1;
+      seen.set(n, seq);
     }
-    if (!inserted) out.add(n);
-  }
-  return out;
+    if (seen.size > deps.cap) { overflow = true; seen.clear(); deps.disconnect(); }
+  };
+  return {
+    begin() {
+      if (!stopped && active === 0) { seen.clear(); overflow = false; deps.connect(); }
+      active += 1;
+      return seq;
+    },
+    record,
+    unattached<T extends N & OutputRoot>(roots: readonly T[], start: number): Set<T> {
+      const out = new Set<T>();
+      if (!overflow && !stopped) record(deps.flush());
+      if (overflow) return out;
+      for (const root of roots) {
+        if (root.isConnected) continue;
+        let inserted = false;
+        for (let n: N | null = root; n; n = deps.parentOf(n)) {
+          const at = seen.get(n);
+          if (at !== undefined && at > start) { inserted = true; break; }
+        }
+        if (!inserted) out.add(root);
+      }
+      return out;
+    },
+    end() {
+      if (active === 0) return;
+      active -= 1;
+      if (active === 0) { if (!stopped && !overflow) deps.disconnect(); seen.clear(); }
+    },
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      if (active > 0 && !overflow) deps.disconnect();
+      seen.clear();
+    },
+    get active() { return active; },
+    get held() { return seen.size; },
+  };
 }
 
 /**
