@@ -7,7 +7,7 @@
 //
 //   node out/packages/core/test/shim-session-harness.js
 
-import { createShimSessionBackend, type ShimSessionHandle, type ShimSessionSource, type ShimSessionTarget, type PreparedCommit, type CommitWrite } from '../src/shim-session';
+import { createShimSessionBackend, pageAway, type ShimSessionHandle, type ShimSessionSource, type ShimSessionTarget, type PreparedCommit, type CommitWrite } from '../src/shim-session';
 import type { PageHost, PreviewRule, PageRuntimeEvent, PageConsoleMessage, PageLoadOutcome, LoadWaitOptions } from '../src/page-host';
 import { encodeWorkingCopy } from '../src/working-copy-wire';
 import { checkoutShim } from '../src/shim-folder';
@@ -202,6 +202,21 @@ async function main(): Promise<void> {
     await backend.preview(handle, { workingCopy: await folderRemoving('hide-ad') }, new AbortController().signal);
     await backend.commit(handle, { revision: 2, summary: 'two', signal: new AbortController().signal });
     check('a second commit proposes the version after the committed one', adopted[1] === 5, JSON.stringify(adopted));
+  }
+
+  console.log('the page-away guard uses the committed hosts, not the working copy:')
+  {
+    const opts = { holds: new Map<string, boolean>(), toldHeld: [] as Array<[string, boolean]>, writes: [] as PreparedCommit[] };
+    const backend = makeBackend(opts);
+    const handle = await openSession(backend);
+    // The page moved to a host the committed shim does not cover, and the
+    // agent widened the working copy's match.hosts to include it.
+    handle.host.url = () => 'https://evil.test/x';
+    handle.working = { ...handle.working, match: { hosts: ['site.test', 'evil.test'] } };
+    check('a working copy that widened match.hosts does not make the page on-site', pageAway(handle) !== null);
+    // The committed hosts still count: a page the base covers is on-site.
+    handle.host.url = () => 'https://site.test/other';
+    check('a page the committed shim covers is on-site', pageAway(handle) === null);
   }
 
   if (failures) {

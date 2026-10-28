@@ -191,7 +191,11 @@ export function mergeCommit(stored: { spec: Spec; handlers: Record<string, strin
     }
   }
   const { rules: _rules, ...rest } = working.spec;
-  const spec: Spec = { ...stored.spec, ...rest, rules };
+  // A session never changes which sites the shim runs on: match (and id) stay
+  // the stored shim's, whatever the working copy carries. match is not
+  // folder-editable, so this only ever preserves the committed hosts — a
+  // commit cannot widen them past what the user installed or approved.
+  const spec: Spec = { ...stored.spec, ...rest, id: stored.spec.id, match: stored.spec.match, rules };
   return { ok: true, spec, handlers };
 }
 

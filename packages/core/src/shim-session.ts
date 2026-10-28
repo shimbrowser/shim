@@ -390,9 +390,11 @@ function previewRule(rule: Rule, stored: Record<string, string>): Rule {
 // The page-away guard (the browser's page-guard): page tools and previews
 // refuse once the page left the session's site, so nothing is measured or
 // witnessed against the wrong document. The site is the host the session
-// started on plus every host the shim declares (match.hosts, the registry's
-// pattern semantics), as in the Shim browser: a multi-host or wildcard shim
-// can be worked on across its declared sites. The start host holds to the
+// started on plus every host the COMMITTED shim declares (base.spec's
+// match.hosts, the registry's pattern semantics), as in the Shim browser: a
+// multi-host or wildcard shim can be worked on across its declared sites. The
+// agent's working copy cannot widen this (match is not folder-editable, and a
+// commit cannot change the hosts either). The start host holds to the
 // start port (the browser's turnPort), so a session begun on localhost:5173
 // can't follow the page to another local service on localhost:9090.
 export function pageAway<S extends ShimSessionSource>(handle: ShimSessionHandle<S>): { error: string; detail: string } | null {
@@ -400,7 +402,11 @@ export function pageAway<S extends ShimSessionSource>(handle: ShimSessionHandle<
   const url = handle.host.url();
   const now = hostnameOf(url);
   if (now && now === handle.startHost && portOf(url) === handle.startPort) return null;
-  if (onDeclaredHost(handle.working, url)) return null;
+  // The shim's OTHER declared hosts come from the committed spec (the base),
+  // never the agent's working copy: an uncommitted edit to match.hosts must
+  // not widen where the session may read or act (the host was never approved
+  // or installed).
+  if (onDeclaredHost(handle.base.spec, url)) return null;
   return {
     error: 'page-away',
     detail: `the page left ${handle.startHost} (it is at ${url || 'no page'}) — call reload_page to go back to ${handle.startUrl}`,
