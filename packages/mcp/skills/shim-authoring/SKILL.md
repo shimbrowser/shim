@@ -246,7 +246,8 @@ All of them act on the session's tab.
 - **`query_page { description }`** — natural-language search for elements: by text,
   visual cue ("the pink banner"), position ("the third card"), id, class, aria-label.
   Returns ranked candidates with suggested anchors (strongest first), markup, bounding rect
-  and computed style. Use it before writing any anchor you haven't seen on the real page.
+  and computed style (bounded: `truncated` says what was cut). Use it before writing any
+  anchor you haven't seen on the real page.
   **Never invent class names.**
 - **`inspect_element { selector }`** — everything about one element: tag, stable
   attributes, computed style, bounding rect, ancestry, two levels of descendants, and how
