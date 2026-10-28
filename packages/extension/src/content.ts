@@ -324,7 +324,7 @@ interface Runtime {
     }
     running.rules = next;
     running.version = shim.version;
-    if (shim.settingsKey !== undefined) running.settingsKey = shim.settingsKey;
+    running.settingsKey = shim.settingsKey;
   };
   // The whole set a session holds of one shim: newly held rules go down,
   // released ones come back, in their current form.

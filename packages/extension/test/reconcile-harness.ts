@@ -78,8 +78,13 @@ console.log('\n=== reconcile harness ===\n');
   check('the same digest leaves it alone', same.stop.length === 0 && same.start.length === 0 && same.update.length === 0);
   const moved = reconcileShims(before, [{ ...w('a', -1, 5), settingsKey: 's1' }]);
   check('a version move with the same digest is still an in-place update', ids(moved.update) === 'a' && !moved.stop.includes('a'));
-  const unstamped = reconcileShims(new Map([['a', { priority: -1, version: 4 }]]), [{ ...w('a', -1, 4), settingsKey: 's1' }]);
-  check('a side without a digest is not compared', unstamped.stop.length === 0 && unstamped.start.length === 0);
+  // No digest means no settings declared, which is a state like any other.
+  const first = reconcileShims(new Map([['a', { priority: -1, version: 4 }]]), [{ ...w('a', -1, 5), settingsKey: 's1' }]);
+  check('declaring the first setting (rules and code unchanged) restarts, so a handler reads the new default', first.stop.join() === 'a' && ids(first.start) === 'a' && first.update.length === 0);
+  const last = reconcileShims(new Map([['a', { priority: -1, version: 4, settingsKey: 's1' }]]), [w('a', -1, 5)]);
+  check('dropping the last setting restarts too', last.stop.join() === 'a' && ids(last.start) === 'a' && last.update.length === 0);
+  const none = reconcileShims(new Map([['a', { priority: -1, version: 4 }]]), [w('a', -1, 5)]);
+  check('no settings on either side: a version move stays an in-place update', none.stop.length === 0 && ids(none.update) === 'a');
 }
 {
   const r = reconcileShims(running([['a', -1, 1]]), [w('a', -5, 2)]);

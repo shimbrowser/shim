@@ -23,7 +23,12 @@ export interface WantedShim {
   version: number;
   /** The handler modules as one comparable key (their JSON); absent on both sides: not compared. */
   handlersKey?: string;
-  /** The shim's settings values as one digest; present when it declares settings, compared like handlersKey. */
+  /**
+   * The shim's settings values as one digest, present exactly when it
+   * declares settings. Unlike handlersKey, absence is meaningful (no
+   * settings), so any difference restarts: a value changed, or the first
+   * field declared or the last one dropped.
+   */
   settingsKey?: string;
 }
 
@@ -49,7 +54,7 @@ export function reconcileShims<T extends WantedShim>(running: ReadonlyMap<string
   const stop = [...running].filter(([id, r]) => {
     const w = wantedBy.get(id);
     if (!w || w.priority !== r.priority) return true;
-    if (w.settingsKey !== undefined && r.settingsKey !== undefined && w.settingsKey !== r.settingsKey) return true;
+    if (w.settingsKey !== r.settingsKey) return true;
     return w.handlersKey !== undefined && r.handlersKey !== undefined && w.handlersKey !== r.handlersKey;
   }).map(([id]) => id);
   const stopped = new Set(stop);
