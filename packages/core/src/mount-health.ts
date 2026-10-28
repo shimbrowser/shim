@@ -9,7 +9,9 @@
 // nothing (the handler inserts its own output), so such a root was never
 // connected, and reading it as stomped re-ran the handler on every body
 // mutation, forever (a busy page churned with nothing reported). Roots that are
-// unconnected once the handler settles are recorded at mount as `unattached`
+// unconnected once the handler settles, with no sign they were ever on the page
+// while it ran (apply-rule.ts watches the document's childList for the length
+// of the dispatch), are recorded at mount as `unattached`
 // and excluded from the stomp check until they are first seen connected (a
 // handler may insert a returned root later, from a timer); from then on they
 // self-heal like any other root.
@@ -26,10 +28,29 @@ export type MountHealth =
   // No tracked root (nothing returned, or only roots never on the page): never re-mount.
   | 'untracked';
 
-/** The roots of `outputs` that are not on the page. Called once the handler settled. */
-export function unattachedRoots<T extends OutputRoot>(outputs: readonly T[]): Set<T> {
+/**
+ * The roots of `outputs` the handler never put on the page: off the page once
+ * the handler settled AND absent from every node the insertion watch saw added
+ * or removed (a root the site removed before the handler settled was inside a
+ * removed node, so it still self-heals). `seen` null means the watch gave up
+ * (too many mutations): no root is judged never-inserted, the old behavior.
+ */
+export function unattachedRoots<T extends OutputRoot>(
+  outputs: readonly T[],
+  // Nodes the insertion watch saw added or removed (only `contains` is read; a DOM Node is one).
+  seen: ReadonlyArray<{ contains(other: T): boolean }> | null,
+): Set<T> {
   const out = new Set<T>();
-  for (const n of outputs) if (!n.isConnected) out.add(n);
+  if (seen === null) return out;
+  for (const n of outputs) {
+    if (n.isConnected) continue;
+    let inserted = false;
+    for (const s of seen) {
+      // Node.contains is inclusive: a root added or removed itself counts.
+      if (s.contains(n)) { inserted = true; break; }
+    }
+    if (!inserted) out.add(n);
+  }
   return out;
 }
 

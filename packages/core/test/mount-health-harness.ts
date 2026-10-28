@@ -30,6 +30,8 @@ function check(label: string, cond: boolean, detail?: unknown): void {
 
 interface Root { isConnected: boolean; name: string }
 const root = (name: string, isConnected: boolean): Root => ({ name, isConnected });
+// A node the insertion watch saw: inclusive `contains` over the roots it holds.
+const seenNode = (...holds: Root[]) => ({ contains: (r: Root) => holds.includes(r) });
 
 console.log('judgeMount');
 {
@@ -38,16 +40,25 @@ console.log('judgeMount');
 
   // The bug: a returned root the handler never inserted.
   const orphan = root('orphan', false);
-  const orphans = unattachedRoots([orphan]);
+  const orphans = unattachedRoots([orphan], [seenNode(root('site-node', true))]);
   check('a root off the page at mount is recorded unattached', orphans.has(orphan) && orphans.size === 1);
   let remounts = 0;
   for (let i = 0; i < 200; i++) if (judgeMount([orphan], orphans) === 'stomped') remounts++;
   check('a never-attached root is never judged stomped across 200 scans', remounts === 0, remounts);
   check('…it reads as untracked', judgeMount([orphan], orphans) === 'untracked');
 
+  // Inserted, then removed by the site before the handler settled: the watch
+  // saw it (or a removed ancestor), so it is tracked and self-heals.
+  const flashed = root('flashed', false);
+  check('a root the watch saw added/removed is not unattached', unattachedRoots([flashed], [seenNode(flashed)]).size === 0);
+  const inRemovedParent = root('child', false);
+  check('…nor one inside a node the watch saw removed', unattachedRoots([inRemovedParent], [seenNode(root('x', false), inRemovedParent)]).size === 0);
+  check('…so it is judged stomped and re-mounts', judgeMount([flashed], unattachedRoots([flashed], [seenNode(flashed)])) === 'stomped');
+  check('a watch that gave up (null) judges nothing never-inserted', unattachedRoots([root('z', false)], null).size === 0);
+
   // A genuinely stomped root still self-heals.
   const placed = root('placed', true);
-  const none = unattachedRoots([placed]);
+  const none = unattachedRoots([placed], []);
   check('a root on the page at mount is tracked', none.size === 0);
   check('…healthy while connected', judgeMount([placed], none) === 'healthy');
   placed.isConnected = false;
@@ -56,7 +67,7 @@ console.log('judgeMount');
   // Mixed: one inserted, one forgotten.
   const kept = root('kept', true);
   const lost = root('lost', false);
-  const mixed = unattachedRoots([kept, lost]);
+  const mixed = unattachedRoots([kept, lost], []);
   check('mixed: only the off-page root is unattached', mixed.size === 1 && mixed.has(lost));
   check('mixed: healthy while the inserted root stays', judgeMount([kept, lost], mixed) === 'healthy');
   kept.isConnected = false;
@@ -64,7 +75,7 @@ console.log('judgeMount');
 
   // A handler that inserts its returned root later (from a timer).
   const late = root('late', false);
-  const lateSet = unattachedRoots([late]);
+  const lateSet = unattachedRoots([late], []);
   check('late insert: untracked before it lands', judgeMount([late], lateSet) === 'untracked');
   late.isConnected = true;
   check('late insert: healthy once seen connected', judgeMount([late], lateSet) === 'healthy');
@@ -109,7 +120,9 @@ console.log('apply-rule wiring');
   const src = fs.readFileSync(path.join(__dirname, '..', '..', '..', '..', 'packages', 'core', 'src', 'apply-rule.ts'), 'utf8');
   check('the scan\'s self-heal check goes through judgeMount', /judgeMount\(existing\.outputs, existing\.unattached\) !== 'stomped'/.test(src));
   check('the old document.contains stomp check is gone', !/existing\.outputs\.every\(\(n\) => document\.contains\(n\)\)/.test(src));
-  check('mountOn records unattached roots after each handler settles', /unattachedRoots\(placed\)/.test(src) && /rs\.state\.set\(el, \{ outputs, cleanups, change, unattached \}\)/.test(src));
+  check('mountOn records unattached roots after each handler settles', /unattachedRoots<HTMLElement>\(placed, watch\.take\(\)\)/.test(src) && /rs\.state\.set\(el, \{ outputs, cleanups, change, unattached \}\)/.test(src));
+  check('the insertion watch observes the document\'s childList for the dispatch', /watch\.observe\(document, \{ childList: true, subtree: true \}\)/.test(src)
+    && /finally \{\s*watch\?\.stop\(\);/.test(src));
 }
 
 if (failures) {
