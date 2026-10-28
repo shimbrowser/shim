@@ -252,6 +252,11 @@ export function createSessions(deps: SessionsDeps): Sessions {
     unsupportedError: UNSUPPORTED_ERROR,
     unsupportedDetail: 'Shim for Chrome runs hide, restyle, reorder, reshape, remove, inject-element, inject-html, script and replace-root rules, with api.storage and api.cleanup. Nothing was applied. Remove what is listed, or author this shim in the Shim browser.',
     unsupportedNote: (ruleId, member) => `rule "${ruleId}" used api.${member}, which Shim for Chrome does not provide (${UNSUPPORTED_ERROR}) — its result is partial`,
+    // Shim for Chrome has no commit card to ask about widening where a shim
+    // runs, so it does not opt into match editing (the fail-closed default): a
+    // folder that changes match.hosts is refused at preview. Explicit for the
+    // reader; authoring that widens a shim happens in the Shim browser.
+    matchEditable: false,
     previewCommittedAtBegin: false,
     syntaxProbe: (code) => (committing && syntaxChecks.get(committing)?.get(moduleOfProbe(code))) ?? { ok: false, error: 'handler syntax was not checked in the page' },
     async tombstone(handle, ruleId, held): Promise<boolean> {

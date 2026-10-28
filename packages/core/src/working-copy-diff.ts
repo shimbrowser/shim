@@ -72,6 +72,13 @@ export interface WorkingState {
    * Absent, the previous working list stands in.
    */
   committedMatchHosts?: readonly unknown[];
+  /**
+   * Whether this host allows editing a non-global shim's `match.hosts` from the
+   * folder. Editable only when true: a host that can ask (the Shim browser's
+   * commit card) or tell (headless, in notes) opts in; absent or false keeps
+   * match not-editable, as a global shim's is. Fail-closed by default.
+   */
+  matchEditable?: boolean;
 }
 
 export interface WorkingCopyDiff {
@@ -226,9 +233,14 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
   const prevRecord = prev as unknown as Record<string, unknown>;
   const declarations = new Set<string>(DECLARATION_FIELDS);
   const sharedEditable = prev.global === true;
+  // A global shim's match is impl-presence (it runs where it has a per-site
+  // implementation), so it stays not-editable. For a plain shim, match is
+  // editable only where the host opts in (previous.matchEditable === true): a
+  // host that forgets to pass it cannot widen where a shim runs with no card
+  // and no note — fail-closed on purpose, since widening is a consent decision.
+  const matchEditable = !sharedEditable && previous.matchEditable === true;
   if (sharedEditable) declarations.add('sharedHandlers');
-  // A global shim's match is impl-presence (it runs where it has a per-site implementation): there it stays not-editable.
-  if (!sharedEditable) declarations.add('match');
+  if (matchEditable) declarations.add('match');
   for (const key of new Set([...Object.keys(prevRecord), ...Object.keys(nextRecord)])) {
     if (UNCOMPARED_FIELDS.has(key) || declarations.has(key)) continue;
     if (stableStringify(comparableField(key, prevRecord[key])) !== stableStringify(comparableField(key, nextRecord[key]))) {
@@ -245,7 +257,7 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
     if (op) ops.push(op);
   }
   if (sharedEditable) ops.push(...sharedHandlerOps(prevRecord.sharedHandlers, nextRecord.sharedHandlers, problems));
-  if (!sharedEditable) {
+  if (matchEditable) {
     const op = matchOp(prevRecord.match, nextRecord.match, previous.committedMatchHosts, problems);
     if (op) ops.push(op);
   }

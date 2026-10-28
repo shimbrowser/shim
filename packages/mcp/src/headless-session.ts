@@ -97,6 +97,13 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     unsupportedNote: (ruleId, member) => `rule "${ruleId}" used api.${member}, which headless mode does not provide (${REQUIRES_SHIM_BROWSER}) — its result is partial`,
     // Headless has no installed shims: the committed rules run as previews.
     previewCommittedAtBegin: true,
+    // match.hosts is editable here: headless has no Shim to ask, so it writes
+    // the widened file and says plainly that nobody approved the new sites.
+    matchEditable: true,
+    previewWidenNote: (widened) => `match.hosts now also covers ${widened.join(', ')}. Nobody approved that here: headless has no Shim to ask. ` +
+      'Shim shows every site a .shim runs on when it is imported, and the person decides there',
+    commitWidenNote: (widened) => `this commit runs the shim on new sites: ${widened.join(', ')}. Nobody approved them here — ` +
+      'tell the user; Shim lists every site when they import the file',
     interact: (handle, input, signal) => interactPage(handle, input, signal, { now, sleep }),
     async writeCommit(handle, prepared) {
       try {

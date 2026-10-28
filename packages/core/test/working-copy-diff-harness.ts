@@ -52,7 +52,7 @@ const WORKING: Spec = {
   rules: [rule('a'), scriptRule('b', 'mountB', 'function mountB({ anchor }) { anchor.dataset.b = "1"; }'), rule('c')],
   permissions: ['ai'], intent: 'hide junk',
 };
-const state: WorkingState = { spec: WORKING };
+const state: WorkingState = { spec: WORKING, matchEditable: true };
 
 const checkout = (): FolderInput => checkoutShim(state);
 const withSpec = (mutate: (spec: Spec) => void, files: FolderInput = checkout()): FolderInput => {
@@ -181,7 +181,7 @@ console.log('edits no op can carry');
   check('…which applyDelta stores, and the same folder then diffs to nothing',
     stableStringify(applied.match) === stableStringify({ hosts: ['example.com', 'old.example.com', '*.example.org'] })
     && diffWorkingCopy({ spec: applied }, checkoutShim({ spec: applied })).ops.length === 0);
-  const narrowed = diffWorkingCopy({ spec: applied }, withSpec((spec) => { spec.match = { hosts: ['example.com'] }; }, checkoutShim({ spec: applied })));
+  const narrowed = diffWorkingCopy({ spec: applied, matchEditable: true }, withSpec((spec) => { spec.match = { hosts: ['example.com'] }; }, checkoutShim({ spec: applied })));
   check('narrowing is a set-match too', narrowed.ops.length === 1 && narrowed.ops[0]?.op === 'set-match');
 }
 rejects('a new pattern that fails admission', 'malformed-shim-folder',
@@ -197,7 +197,7 @@ rejects('a pattern listed twice', 'malformed-shim-folder',
   () => diffWorkingCopy(state, withSpec((spec) => { spec.match = { hosts: ['example.com', 'a.com', 'a.com'] }; })), 'twice');
 {
   // A legacy pattern the working list already carries is never re-validated.
-  const legacy: WorkingState = { spec: { ...WORKING, match: { hosts: ['Legacy.COM'] } } };
+  const legacy: WorkingState = { spec: { ...WORKING, match: { hosts: ['Legacy.COM'] } }, matchEditable: true };
   const kept = diffWorkingCopy(legacy, withSpec((spec) => { spec.match = { hosts: ['Legacy.COM', 'new.com'] }; }, checkoutShim(legacy)));
   check('a legacy pattern already there is kept as it is', kept.ops.length === 1 && kept.ops[0]?.op === 'set-match');
 }
@@ -209,7 +209,7 @@ rejects('a pattern listed twice', 'malformed-shim-folder',
   check('20 is allowed', diffWorkingCopy({ ...state, committedMatchHosts: ['example.com'] }, withSpec((spec) => { spec.match = { hosts: ['example.com', ...twenty] }; })).ops.length === 1);
   // The cap counts against the committed list, not the previous preview:
   // a second preview can't add another 20.
-  const previewed: WorkingState = { spec: { ...WORKING, match: { hosts: ['example.com', ...twenty] } }, committedMatchHosts: ['example.com'] };
+  const previewed: WorkingState = { spec: { ...WORKING, match: { hosts: ['example.com', ...twenty] } }, committedMatchHosts: ['example.com'], matchEditable: true };
   rejects('the cap counts against what is committed', 'not-editable',
     () => diffWorkingCopy(previewed, withSpec((spec) => { spec.match = { hosts: ['example.com', ...twenty, 'more.com'] }; }, checkoutShim(previewed))), 'at most 20');
   check('patterns a committed wildcard covers do not count', diffWorkingCopy({ ...state, committedMatchHosts: ['*.big.com'] },
@@ -341,6 +341,12 @@ rejects('a shared handler named __proto__ (applyDelta\'s plain map would drop it
 
 rejects('a global shim\'s match (impl-presence) stays not-editable', 'not-editable',
   () => diffWorkingCopy(globalState, withSpec((spec) => { spec.match = { hosts: ['other.com'] }; }, checkoutShim(globalState))), '"match"');
+
+rejects('a host with no commit card (matchEditable:false) keeps match not-editable', 'not-editable',
+  () => diffWorkingCopy({ ...state, matchEditable: false }, withSpec((spec) => { spec.match = { hosts: ['example.com', 'new.com'] }; })), '"match"');
+check('matchEditable:false leaves an unchanged match alone', diffWorkingCopy({ ...state, matchEditable: false }, withSpec(() => {})).ops.length === 0);
+rejects('match is not-editable by default (fail-closed: the host must opt in)', 'not-editable',
+  () => diffWorkingCopy({ spec: WORKING }, withSpec((spec) => { spec.match = { hosts: ['example.com', 'new.com'] }; })), '"match"');
 
 rejects('shared handlers on a non-global shim', 'not-editable',
   () => diffWorkingCopy(state, withSpec((spec) => { spec.sharedHandlers = { fmt: 'function fmt() {}' }; })),

@@ -197,6 +197,25 @@ async function main(): Promise<void> {
     await sessions.registry.end(id, 'ended');
   }
 
+  console.log('match.hosts is not editable from a Chrome session (no commit card):');
+  {
+    const f = fakeStore();
+    const sessions = makeSessions(f);
+    const host = fakeHost();
+    const target = { page: { host, close: async () => undefined }, source: { shimId: 'shim-1', name: 'S', spec: baseSpec(), handlers: {}, envelope: {}, created: false }, committedDown: null };
+    const opened = await sessions.registry.open({ kind: 'shim', artifactId: 'shim-1', target, agent: 'a', intent: 'i' });
+    if (!opened.ok) throw new Error(`open failed: ${opened.error}`);
+    const files = checkoutShim({ spec: baseSpec(), handlers: {} });
+    const sj = JSON.parse(files['shim.json'] as string) as { match: { hosts: string[] } };
+    sj.match = { hosts: [...sj.match.hosts, 'added.example.com'] };
+    files['shim.json'] = JSON.stringify(sj);
+    const prev = await sessions.registry.preview(opened.sessionId, { workingCopy: encodeWorkingCopy(files) });
+    const ev = prev.ok ? (prev.evidence as { error?: string }) : null;
+    check('a Chrome session refuses a match.hosts edit at preview (fail-closed, no commit card)',
+      prev.ok === true && prev.applied === false && ev?.error === 'not-editable', JSON.stringify(prev));
+    await sessions.registry.end(opened.sessionId, 'ended');
+  }
+
   if (failures) {
     console.error(`\nsessions: ${failures} failed, ${passes} passed`);
     process.exit(1);
