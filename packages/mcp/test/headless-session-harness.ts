@@ -598,13 +598,53 @@ async function main(): Promise<void> {
     check('a folder problem off-match is warned too', malformed.applied === false && offWarned(malformed.evidence), malformed);
     await r.control.closeAll();
 
-    check('on a covered page there is no warning', offMatchWarning({ id: 'x', match: { hosts: ['*.site.test'] }, rules: [] }, 'https://www.site.test/a') === null);
-    check('a non-http page is never judged', offMatchWarning({ id: 'x', match: { hosts: [] }, rules: [] }, 'about:blank') === null);
-    check('a port pattern holds to its port', offMatchWarning({ id: 'x', match: { hosts: ['site.test:8080'] }, rules: [] }, 'http://site.test:9090/') !== null);
+    check('on a covered page there is no warning', offMatchWarning(['*.site.test'], 'https://www.site.test/a') === null);
+    check('a non-http page is never judged', offMatchWarning([], 'about:blank') === null);
+    check('a port pattern holds to its port', offMatchWarning(['site.test:8080'], 'http://site.test:9090/') !== null);
     const capped = withOffMatch({ rules: [{ ruleId: 'a', verification: 'full' }, { ruleId: 'b', verification: 'none' }, { ruleId: 'c', verification: 'partial' }], warnings: ['w0'] }, 'w1');
     check('the cap drops full to partial and never upgrades none', JSON.stringify(capped.rules) === JSON.stringify([
       { ruleId: 'a', verification: 'partial' }, { ruleId: 'b', verification: 'none' }, { ruleId: 'c', verification: 'partial' },
     ]) && JSON.stringify(capped.warnings) === '["w0","w1"]', capped);
+  }
+
+  console.log('widening match.hosts headless');
+  {
+    // The OneTrust flow: a file for one site opened on another, the host
+    // added from the working copy, then a rule previewed there.
+    const wideFile = path.join(tmp, 'widen.shim');
+    const wideSpec = { id: 'shim-wide', match: { hosts: ['other.test'] }, rules: [{ id: 'banner', anchor: css('.banner'), mutations: [{ kind: 'hide' }] }] };
+    fs.writeFileSync(wideFile, json({ format: 'shim/1', name: 'Wide', handlers: {}, spec: wideSpec }));
+    const r = rig();
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile: wideFile });
+    const id = String(opened.sessionId);
+    check('the open warning says how to make it run here', Array.isArray(opened.warnings) && String(opened.warnings[0]).includes('add it to match.hosts'), opened);
+    const co = decodeWorkingCopy((await req(r, 'GET', `/sessions/${id}/checkout`)).files);
+    const files: Record<string, string> = {};
+    for (const [k, v] of Object.entries(co)) files[k] = typeof v === 'string' ? v : new TextDecoder().decode(v);
+    const widened = { ...files, 'shim.json': json({ ...wideSpec, match: { hosts: ['other.test', 'site.test'] } }) };
+    const p1 = await preview(r, id, widened);
+    const ev1 = isRecord(p1.evidence) ? p1.evidence : {};
+    const notes1 = Array.isArray(ev1.notes) ? ev1.notes.map(String) : [];
+    check('a match-only preview applies (a revision), runs no rule and says so', p1.applied === true && Array.isArray(ev1.rules) && ev1.rules.length === 0
+      && notes1.some((n) => n.includes('no fresh rule evidence')), ev1);
+    check('…and says plainly nobody approved the new site', notes1.some((n) => n.includes('match.hosts now also covers site.test') && n.includes('Nobody approved')), notes1);
+    check('…and the page is no longer off-match', !(Array.isArray(ev1.warnings) && ev1.warnings.some((w) => String(w).includes("doesn't cover"))), ev1);
+    const changed = { ...widened, 'shim.json': json({ ...wideSpec, match: { hosts: ['other.test', 'site.test'] }, rules: [{ id: 'banner', anchor: css('.banner'), mutations: [{ kind: 'restyle', css: { opacity: '0' } }] }] }) };
+    const p2 = await preview(r, id, changed);
+    const banner = (isRecord(p2.evidence) && Array.isArray(p2.evidence.rules) ? p2.evidence.rules.filter(isRecord) : []).find((x) => x.ruleId === 'banner');
+    check('a rule previewed on the now-covered page is full', p2.applied === true && banner?.verification === 'full', p2.evidence);
+    const bad = await preview(r, id, { ...changed, 'shim.json': json({ ...wideSpec, match: { hosts: ['other.test', 'Site.Test'] } }) });
+    check('a pattern core refuses is refused headless too', bad.applied === false && isRecord(bad.evidence) && bad.evidence.error === 'malformed-shim-folder', bad);
+    const committed = await req(r, 'POST', `/sessions/${id}/commit`, { revision: p2.revision, commitId: 'w1', summary: 'runs on site.test' });
+    const cnotes = Array.isArray(committed.notes) ? committed.notes.map(String) : [];
+    check('the commit says the new site was not approved here', committed.ok === true && cnotes.some((n) => n.includes('new sites: site.test') && n.includes('Nobody approved')), committed);
+    check('…and where it was not tried', cnotes.some((n) => n.includes('other.test (not tried)') && n.includes('https://site.test')), cnotes);
+    const onDisk = JSON.parse(fs.readFileSync(wideFile, 'utf8')) as { spec: { match: { hosts: string[] } } };
+    check('the file carries the widened match', JSON.stringify(onDisk.spec.match.hosts) === '["other.test","site.test"]', onDisk.spec.match);
+    const many = Array.from({ length: 21 }, (_, i) => `h${i}.test`);
+    const tooMany = await preview(r, id, { ...changed, 'shim.json': json({ ...wideSpec, match: { hosts: ['other.test', 'site.test', ...many] } }) });
+    check('more than 20 new patterns against the committed file is refused', tooMany.applied === false && isRecord(tooMany.evidence) && tooMany.evidence.error === 'not-editable', tooMany);
+    await r.control.closeAll();
   }
 
   console.log('a shim declaring several hosts');

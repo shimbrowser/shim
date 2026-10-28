@@ -43,7 +43,8 @@ The loop is the same, with three differences:
 - **A page `match.hosts` doesn't cover.** You can open an existing `.shim` on a page its
   `match.hosts` doesn't cover, but in Shim that shim would not run there at all. Every
   preview on such a page carries a warning saying so, and no rule there is reported better
-  than `partial`: don't report it as working in Shim.
+  than `partial`: don't report it as working in Shim. If the shim should run there, add the
+  host to `match.hosts` (`references/sites.md`).
 - **Requests from a handler, headless.** Since `api.fetch` is refused, a handler's plain
   `fetch` is the only way out, and it runs under the page's CORS. It reaches the page's
   own site, and a third-party API only if that API sends CORS headers for the page's

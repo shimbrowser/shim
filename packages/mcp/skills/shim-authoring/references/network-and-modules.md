@@ -10,8 +10,7 @@ no handler):
   "exceptPaths": ["/media", "/gallery", "/poll", "/settings", "/notifications", "/coins", "/premium", "/message", "/wiki"] }
 ```
 
-`match.hosts` must include `from` (and `match` can't change in a session, so `from` must
-already be one of its hosts); only top-level navigations are redirected; path, query and
+`match.hosts` must include `from` (add it there if it isn't: `references/sites.md`); only top-level navigations are redirected; path, query and
 hash are kept. `to` may be any site, including another domain (twitter.com → x.com): the
 boundary is consent, not domain. Each new redirect target asks the user at commit, and a
 target they haven't allowed never redirects. Not on a global shim (see `mount-route`

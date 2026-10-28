@@ -27,8 +27,20 @@
 //     is enforced at commit, as for an internal turn. On a non-global shim it
 //     stays not-editable — an internal turn never adds a shared code space
 //     there either.
-//   - any other spec field (id, match, css, …) has no op, so changing it is
-//     a ShimFolderError('not-editable') rather than a silent drop.
+//   - `match` (where the shim runs) → one replace-wholesale `set-match`, on
+//     a non-global shim only (a global shim runs where it has a per-site
+//     implementation, so there it stays not-editable). The value must be
+//     `{ hosts: [...] }`,
+//     non-empty, and every pattern the previous working list didn't carry
+//     must pass match-scope's admission check (hostPatternProblem); patterns
+//     already there are never re-validated (an imported list isn't broken by
+//     an unrelated edit). With the committed list given, at most
+//     MAX_NEW_MATCH_PATTERNS patterns may run the shim somewhere the
+//     committed list doesn't (widenedPatterns: the commit card's own list) —
+//     more is not-editable. Whether a newly covered host commits is the
+//     host's question (the Shim browser asks on its commit card).
+//   - any other spec field (id, css, …) has no op, so changing it is a
+//     ShimFolderError('not-editable') rather than a silent drop.
 //
 // Witnesses: the folder never carries them. A rule whose anchor is unchanged
 // (same anchorDigest) gets the stored witness back on its op, so re-emitting
@@ -46,12 +58,19 @@ import {
   readShimFolder, ShimFolderError, anchorDigest, referencedHandlerNames, stableStringify, handlerPath,
 } from './shim-folder';
 import type { FolderInput } from './shim-folder';
+import { hostPatternProblem, widenedPatterns, MAX_NEW_MATCH_PATTERNS } from './match-scope';
 
 /** The session's working state: the spec it would commit, and the stored handler modules. */
 export interface WorkingState {
   spec: Spec;
   /** Module-form sources (patch_files) for handlers a rule names but doesn't carry inline. */
   handlers?: Record<string, string>;
+  /**
+   * The shim's `match.hosts` as committed, when the host knows it: the
+   * baseline the widening cap counts against (MAX_NEW_MATCH_PATTERNS).
+   * Absent, the previous working list stands in.
+   */
+  committedMatchHosts?: readonly unknown[];
 }
 
 export interface WorkingCopyDiff {
@@ -143,6 +162,49 @@ function sharedHandlerOps(before: unknown, after: unknown, problems: string[]): 
   return ops;
 }
 
+function isStringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((h) => typeof h === 'string');
+}
+
+// The `set-match` op a changed `match` makes, or null when it is unchanged.
+// Shape and admission problems go to `problems` (malformed-shim-folder); a
+// widening past the cap throws not-editable.
+function matchOp(before: unknown, after: unknown, committed: readonly unknown[] | undefined, problems: string[]): DeltaOp | null {
+  if (stableStringify(before) === stableStringify(after)) return null;
+  if (!isRecord(after) || !isStringList(after.hosts)) {
+    problems.push('"match" must be { "hosts": [host patterns] }');
+    return null;
+  }
+  const extra = Object.keys(after).filter((key) => key !== 'hosts');
+  if (extra.length) {
+    problems.push(`"match" takes only "hosts" (not ${extra.map((k) => JSON.stringify(k)).join(', ')})`);
+    return null;
+  }
+  const hosts = after.hosts;
+  if (hosts.length === 0) {
+    problems.push('"match.hosts" needs at least one host pattern');
+    return null;
+  }
+  const had = new Set(isRecord(before) && isStringList(before.hosts) ? before.hosts : []);
+  const seen = new Set<string>();
+  for (const pattern of hosts) {
+    if (seen.has(pattern)) { problems.push(`"match.hosts" lists ${JSON.stringify(pattern)} twice`); continue; }
+    seen.add(pattern);
+    if (had.has(pattern)) continue;
+    const problem = hostPatternProblem(pattern);
+    if (problem) problems.push(`"match.hosts": ${problem}`);
+  }
+  if (problems.length) return null;
+  const baseline = committed ?? [...had];
+  const widened = widenedPatterns(baseline, hosts);
+  if (widened.length > MAX_NEW_MATCH_PATTERNS) {
+    throw new ShimFolderError('not-editable', [
+      `"match.hosts" would run the shim on ${widened.length} new host patterns; one commit can add at most ${MAX_NEW_MATCH_PATTERNS}`,
+    ]);
+  }
+  return { op: 'set-match', match: { hosts: [...hosts] } };
+}
+
 function declarationOp(field: DeclarationField, value: unknown, problems: string[]): DeltaOp | null {
   switch (field) {
     case 'settings':
@@ -183,6 +245,8 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
   const declarations = new Set<string>(DECLARATION_FIELDS);
   const sharedEditable = prev.global === true;
   if (sharedEditable) declarations.add('sharedHandlers');
+  // A global shim's match is impl-presence (it runs where it has a per-site implementation): there it stays not-editable.
+  if (!sharedEditable) declarations.add('match');
   for (const key of new Set([...Object.keys(prevRecord), ...Object.keys(nextRecord)])) {
     if (UNCOMPARED_FIELDS.has(key) || declarations.has(key)) continue;
     if (stableStringify(comparableField(key, prevRecord[key])) !== stableStringify(comparableField(key, nextRecord[key]))) {
@@ -199,6 +263,10 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
     if (op) ops.push(op);
   }
   if (sharedEditable) ops.push(...sharedHandlerOps(prevRecord.sharedHandlers, nextRecord.sharedHandlers, problems));
+  if (!sharedEditable) {
+    const op = matchOp(prevRecord.match, nextRecord.match, previous.committedMatchHosts, problems);
+    if (op) ops.push(op);
+  }
   if (problems.length) throw new ShimFolderError('malformed-shim-folder', problems);
 
   const prevRules = (prev.rules || []).filter((rule) => typeof rule?.id === 'string');

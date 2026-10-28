@@ -45,6 +45,9 @@ import type { SessionBackend, BackendPreview, BackendCheckout, BackendCommit, Fi
 import type { DeltaOp } from '@shimbrowser/core/spec-delta';
 import { applyDelta } from '@shimbrowser/core/spec-delta';
 import { hostMatches } from '@shimbrowser/core/host-match';
+import {
+  offMatchWarning, withOffMatch, evidenceLocation, untriedMatchNote, widenedPatterns, NO_RULE_EVIDENCE_NOTE, MAX_NEW_MATCH_PATTERNS,
+} from '@shimbrowser/core/match-scope';
 import { lintSpec } from '@shimbrowser/core/spec-lint';
 import {
   checkoutShim, packShim, anchorDigest, referencedHandlerNames, nameMap, ShimFolderError,
@@ -167,6 +170,16 @@ export interface HeadlessHandle {
   working: Spec;
   /** Module-form sources for handlers a working rule names without carrying them inline. */
   storedHandlers: Record<string, string>;
+  /**
+   * match.hosts as last committed (the file as opened, then each commit's):
+   * the widening cap's baseline and what a commit reports as newly covered.
+   */
+  committedHosts: string[];
+  /**
+   * Where this session got fresh rule evidence (match-scope
+   * evidenceLocation's form): an applied preview that reported rules there.
+   */
+  tried: Set<string>;
   /** As committed: version, bundleHash, the file's envelope. */
   version: number;
   bundleHash: string | undefined;
@@ -267,42 +280,9 @@ function onDeclaredHost(spec: Spec, url: string): boolean {
   return hostMatches(hosts, u.hostname, u.port || undefined);
 }
 
-/**
- * The warning a preview carries while the page is one the working
- * match.hosts doesn't cover, or null. In Shim the shim would not run on that
- * page at all (the attach open refuses it), so nothing seen there says it
- * behaves the same in Shim: the caller caps every rule at `partial`.
- */
-export function offMatchWarning(spec: Spec, url: string): string | null {
-  let u: URL;
-  try {
-    u = new URL(url);
-  } catch {
-    return null;
-  }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-  if (onDeclaredHost(spec, url)) return null;
-  const hosts = (spec.match?.hosts ?? []).filter((h) => typeof h === 'string' && h !== '');
-  const where = u.port ? `${u.hostname}:${u.port}` : u.hostname;
-  return `the shim's match.hosts (${hosts.join(', ') || 'none'}) doesn't cover ${where}: in Shim it would not run on this page, ` +
-    'so no rule here is verified beyond partial';
-}
-
-/**
- * Evidence on an off-match page: every rule's verification capped at
- * `partial` (`full` drops, `none` stays), and the warning added. Pure.
- */
-export function withOffMatch(evidence: Record<string, unknown>, warning: string): Record<string, unknown> {
-  const warnings = Array.isArray(evidence.warnings) ? [...(evidence.warnings as unknown[])] : [];
-  warnings.push(warning);
-  const out: Record<string, unknown> = { ...evidence, warnings };
-  if (Array.isArray(evidence.rules)) {
-    out.rules = evidence.rules.map((r: unknown) => (
-      isRecord(r) && r.verification === 'full' ? { ...r, verification: 'partial' } : r
-    ));
-  }
-  return out;
-}
+// The off-match warning and cap live in core (match-scope.ts), shared with
+// the Shim browser's session; re-exported for the harness.
+export { offMatchWarning, withOffMatch };
 
 /** A new shim's spec for a page (the browser's shims.create shape). */
 export function newShimSpec(url: string, id: string): Spec {
@@ -642,8 +622,12 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     const result = await previewOnce(handle, input, signal);
     const evidence = result.evidence;
     if (!isRecord(evidence) || handle.host.isClosed()) return result;
+    if (result.applied && Array.isArray(evidence.rules) && evidence.rules.length > 0) {
+      const location = evidenceLocation(handle.host.url());
+      if (location) handle.tried.add(location);
+    }
     if (evidence.error === 'page-away' || evidence.error === 'page-closed' || evidence.error === 'session-ended') return result;
-    const warning = offMatchWarning(handle.working, handle.host.url());
+    const warning = offMatchWarning(handle.working.match?.hosts, handle.host.url());
     if (warning === null) return result;
     return { ...result, evidence: withOffMatch(evidence, warning) };
   }
@@ -661,7 +645,7 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     }
     let diff;
     try {
-      diff = diffWorkingCopy({ spec: handle.working, handlers: handle.storedHandlers }, folder);
+      diff = diffWorkingCopy({ spec: handle.working, handlers: handle.storedHandlers, committedMatchHosts: handle.committedHosts }, folder);
     } catch (e) {
       if (e instanceof ShimFolderError) return refused({ error: e.code, problems: e.problems });
       throw e;
@@ -776,6 +760,16 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
           'Until you do, a commit keeps the committed deploy baseline, so Shim can still recover the rule itself'
         : `rule "${ruleId}" is quarantined: its anchor no longer finds the element its witness describes — re-anchor it in shim.json. ` +
           'Until you do, a commit keeps the committed deploy baseline, so Shim still treats the break as a deploy and offers its repair');
+    }
+    // Where the shim runs changed: headless has no Shim to ask, and the file
+    // is the agent's own, so it is written as it stands and said plainly.
+    if (diff.ops.some((op) => op.op === 'set-match')) {
+      const widened = widenedPatterns(handle.committedHosts, next.match?.hosts ?? []);
+      if (widened.length) {
+        notes.push(`match.hosts now also covers ${widened.join(', ')}. Nobody approved that here: headless has no Shim to ask. ` +
+          'Shim shows every site a .shim runs on when it is imported, and the person decides there');
+      }
+      if (!diff.ops.some((op) => op.op === 'add-rule' || op.op === 'update-rule')) notes.push(NO_RULE_EVIDENCE_NOTE);
     }
     const consoleBlock = formatAutoBlock(handle.console.drainSinceEmit());
     const evidence: Record<string, unknown> = {
@@ -1185,6 +1179,12 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         '(the rules were not checked against that document). Preview again, then commit, to record the page\'s deploy');
     }
     const spec = clone(handle.working) as Spec & Record<string, unknown>;
+    const hostsNow = (spec.match?.hosts ?? []).filter((h) => typeof h === 'string');
+    const widened = widenedPatterns(handle.committedHosts, hostsNow);
+    // The preview's cap, again against the committed baseline.
+    if (widened.length > MAX_NEW_MATCH_PATTERNS) {
+      return { ok: false, error: 'not-editable', detail: `"match.hosts" would run the shim on ${widened.length} new host patterns; one commit can add at most ${MAX_NEW_MATCH_PATTERNS}` };
+    }
     delete spec.version;
     delete spec.bundleHash;
     let files;
@@ -1230,6 +1230,14 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
     } catch (e) {
       return { ok: false, error: 'commit-failed', detail: `could not write ${handle.source.shimFile}: ${errMessage(e)}` };
     }
+    if (widened.length) {
+      notes.push(`this commit runs the shim on new sites: ${widened.join(', ')}. Nobody approved them here — ` +
+        'tell the user; Shim lists every site when they import the file');
+    }
+    const matchChanged = JSON.stringify(hostsNow) !== JSON.stringify(handle.committedHosts);
+    const untried = matchChanged || handle.tried.size > 0 ? untriedMatchNote(hostsNow, handle.tried) : null;
+    if (untried) notes.push(untried);
+    handle.committedHosts = hostsNow;
     handle.version = version;
     handle.bundleHash = bundleHash;
     handle.committedAnchors = committedAnchorsOf(spec.rules, false);
@@ -1259,6 +1267,8 @@ export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}):
         startPort: portOf(startUrl),
         working: clone(source.spec),
         storedHandlers: { ...source.handlers },
+        committedHosts: (source.spec.match?.hosts ?? []).filter((h) => typeof h === 'string'),
+        tried: new Set<string>(),
         version: typeof source.spec.version === 'number' ? source.spec.version : 1,
         bundleHash: typeof source.spec.bundleHash === 'string' ? source.spec.bundleHash : undefined,
         committedAnchors: committedAnchorsOf(source.spec.rules, true),
