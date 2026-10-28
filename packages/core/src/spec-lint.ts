@@ -158,11 +158,69 @@ function observerLoopWarning(handlerName: string, src: string): string | null {
   if (!OBSERVER_RE.test(src) || !DOM_WRITE_RE.test(src)) return null;
   const disconnects = (src.match(DISCONNECT_RE) || []).length;
   if (disconnects >= 2) return null;
+  if (childListObserverWithAttributeWrites(src)) return null;
   return `handler "${handlerName}" creates a MutationObserver and also writes DOM — if the observer `
     + 'watches DOM the handler mutates, it re-triggers itself in an infinite microtask loop and freezes the page. '
-    + 'Either anchor the repeated element itself (the engine dispatches the handler once per matched element and '
-    + 'auto-dispatches new ones — no observer needed), or disconnect() before mutating and re-observe() after, '
-    + 'plus register observer.disconnect via api.cleanup.';
+    + 'To react when the site changes what is inside the anchor, use api.onAnchorChange(fn) instead of an observer '
+    + '(the engine batches it per frame and never reports the callback\'s own writes back to it). '
+    + 'To catch new repeated elements, anchor the element itself (the engine dispatches the handler once per match '
+    + 'and auto-dispatches new ones). If you still need an observer, disconnect() before mutating and re-observe() '
+    + 'after, plus register observer.disconnect via api.cleanup.';
+}
+
+// The one observer shape that provably can't see its own writes, recognized
+// fail-closed: EVERY `.observe(` call passes an object literal whose keys are
+// only `childList` / `subtree` with literal booleans (no spreads, computed keys
+// or variables), AND every DOM write DOM_WRITE_RE recognizes is a
+// `setAttribute(` — an attribute write is invisible to a childList observer.
+// Inherits DOM_WRITE_RE's blind spots (it doesn't know e.g. `before(` or
+// `outerHTML =`), so a childList write it can't see stays unseen here too —
+// the same posture as the rest of this heuristic. Live-caught false positives:
+// a wikipedia table filter and a facebook sponsored-unit hider, both a
+// childList-only observer with setAttribute writes.
+const DOM_WRITE_ALL_RE = new RegExp(DOM_WRITE_RE.source, 'g');
+const OBSERVE_CALL_RE = /\.observe\s*\(/g;
+const CHILDLIST_ONLY_OPTIONS_RE = /^\{\s*(?:(?:childList|subtree)\s*:\s*(?:true|false)\s*(?:,\s*)?)*\}$/;
+
+// The top-level arguments of the call whose `(` sits just before `start`,
+// or null when the source ends first. Skips string/template literals and
+// nested brackets.
+function callArguments(src: string, start: number): string[] | null {
+  const args: string[] = [];
+  let depth = 0;
+  let current = '';
+  for (let i = start; i < src.length; i++) {
+    const ch = src.charAt(i);
+    if (ch === '"' || ch === "'" || ch === '`') {
+      let j = i + 1;
+      while (j < src.length && src.charAt(j) !== ch) j += src.charAt(j) === '\\' ? 2 : 1;
+      current += src.slice(i, j + 1);
+      i = j;
+      continue;
+    }
+    if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+    else if (ch === ']' || ch === '}') depth -= 1;
+    else if (ch === ')') {
+      if (depth === 0) { args.push(current.trim()); return args; }
+      depth -= 1;
+    } else if (ch === ',' && depth === 0) { args.push(current.trim()); current = ''; continue; }
+    current += ch;
+  }
+  return null;
+}
+
+function childListObserverWithAttributeWrites(src: string): boolean {
+  for (const m of src.matchAll(DOM_WRITE_ALL_RE)) {
+    if (m[1] !== 'setAttribute') return false;
+  }
+  let calls = 0;
+  for (const m of src.matchAll(OBSERVE_CALL_RE)) {
+    calls += 1;
+    const args = callArguments(src, (m.index ?? 0) + m[0].length);
+    const options = args?.[1];
+    if (args === null || args.length !== 2 || options === undefined || !CHILDLIST_ONLY_OPTIONS_RE.test(options)) return false;
+  }
+  return calls > 0;
 }
 
 export interface LintResult {

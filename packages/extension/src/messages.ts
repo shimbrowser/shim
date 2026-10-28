@@ -13,6 +13,7 @@ import type { Spec } from '@shimbrowser/core/types';
 import type { PreparedInstall, InstallProvenance } from './install';
 import type { ExtensionMode } from './capabilities';
 import type { VersionRecord } from './store';
+import type { PendingConsent } from './attach-consent';
 
 export type StorageMethod = 'get' | 'set' | 'delete' | 'list';
 
@@ -35,7 +36,13 @@ export type ToWorker =
   /** A restore is a forward change: the current spec is snapshotted, the chosen one becomes the next version. */
   | { type: 'shims.restore'; id: string; version: number }
   /** The install page, after the user granted the hosts: write and register. */
-  | { type: 'install.commit'; prepared: PreparedInstall; provenance: InstallProvenance };
+  | { type: 'install.commit'; prepared: PreparedInstall; provenance: InstallProvenance }
+  /** The popup: whether the bridge to Claude Code is on, and its state. */
+  | { type: 'bridge.status' }
+  | { type: 'bridge.setEnabled'; enabled: boolean }
+  /** The attach card: the requests waiting for an answer, and the answer to one. */
+  | { type: 'attach.pending' }
+  | { type: 'attach.answer'; id: string; answer: 'allow-once' | 'allow-host' | 'deny' };
 
 /**
  * One shim as the page runtime receives it: the spec with the installed id,
@@ -52,6 +59,13 @@ export interface BundledShim {
   /** The stored spec's version: a shim whose version moved (a rebase, a restore) boots again. */
   version: number;
   handlers: Record<string, string>;
+  /**
+   * Each rule's authored form (core's rule-form digest, over the stored
+   * handler modules), by rule id. The runtime echoes it on every event about
+   * the rule, so the worker keeps an outcome only while the stored rule is
+   * still that form.
+   */
+  forms: Record<string, string>;
 }
 
 export interface BundleAnswer {
@@ -93,8 +107,20 @@ export interface ReviewItem {
 /** One snapshot as the popup lists it. */
 export type VersionSummary = Pick<VersionRecord, 'version' | 'at' | 'reason'>;
 
+/** The bridge as the popup shows it. */
+export interface BridgeStatus {
+  enabled: boolean;
+  /** The native host is connected (the extension's port to it is open). */
+  connected: boolean;
+  /** Why the last connection attempt failed, when it did. */
+  error: string | null;
+  sessions: number;
+}
+
 export type WorkerAnswer =
   | BundleAnswer
+  | { ok: true; bridge: BridgeStatus }
+  | { ok: true; pending: PendingConsent[] }
   | { ok: true; value: unknown }
   | { ok: true; mode: ExtensionMode; shims: ShimSummary[] }
   | { ok: true; mode: ExtensionMode }
@@ -115,7 +141,8 @@ export type WorkerAnswer =
  * over, and to whichever of two runtimes on one page does not fit the mode.
  */
 export type ToRuntime =
-  | { type: 'sync' }
+  /** Look again at what runs here. With `seq`, acked once the look is done, with the versions then running. */
+  | { type: 'sync'; seq?: number }
   | { type: 'reboot' }
   | { type: 'retire' }
   /**
@@ -145,22 +172,29 @@ export const RUNTIME_PORT = 'shim-runtime';
  */
 export type FromRuntime =
   | { type: 'retiring'; booted: boolean }
-  /** A hold or session-closed nudge with `seq` was seen: applied, or ignored as older than what the runtime has. */
-  | { type: 'ack'; seq: number; applied: boolean };
+  /**
+   * A nudge with `seq` was seen: applied, or ignored as older than what the
+   * runtime has. A sync's ack carries the spec version of each shim running
+   * once the look was done, so a worker handing a commit over knows the
+   * page runs the new version before it lets the held rules go.
+   */
+  | { type: 'ack'; seq: number; applied: boolean; versions?: Record<string, number> };
 
 export function isFromRuntime(msg: unknown): msg is FromRuntime {
   if (typeof msg !== 'object' || msg === null) return false;
-  const m = msg as { type?: unknown; booted?: unknown; seq?: unknown; applied?: unknown };
+  const m = msg as { type?: unknown; booted?: unknown; seq?: unknown; applied?: unknown; versions?: unknown };
   if (m.type === 'retiring') return typeof m.booted === 'boolean';
-  return m.type === 'ack' && typeof m.seq === 'number' && typeof m.applied === 'boolean';
+  if (m.type !== 'ack' || typeof m.seq !== 'number' || typeof m.applied !== 'boolean') return false;
+  if (m.versions === undefined) return true;
+  return typeof m.versions === 'object' && m.versions !== null && Object.values(m.versions as Record<string, unknown>).every((v) => typeof v === 'number');
 }
 
 export function isToRuntime(msg: unknown): msg is ToRuntime {
   if (typeof msg !== 'object' || msg === null) return false;
   const m = msg as { type?: unknown; patchId?: unknown; ruleIds?: unknown; seq?: unknown };
-  if (m.type === 'sync' || m.type === 'reboot' || m.type === 'retire') return true;
+  if (m.type === 'reboot' || m.type === 'retire') return true;
   if (m.seq !== undefined && typeof m.seq !== 'number') return false;
-  if (m.type === 'session-closed') return true;
+  if (m.type === 'sync' || m.type === 'session-closed') return true;
   return m.type === 'hold' && typeof m.patchId === 'string' && Array.isArray(m.ruleIds) && m.ruleIds.every((r) => typeof r === 'string');
 }
 

@@ -1,122 +1,47 @@
-// A headless authoring session on a shim: the session backend
-// @shimbrowser/core's session registry drives when
-// there is no Shim browser — a Playwright Chromium page (any PageHost) instead
-// of a tab, a `.shim` file instead of the shim library.
+// A headless authoring session on a shim: @shimbrowser/core's shim session
+// (shim-session.ts, the page-side half every host shares) over a Playwright
+// Chromium page and a `.shim` file. What is headless here: the committed
+// rules run as previews (there is no installed shim), commits write the
+// file, a handler's syntax is checked by core's probe (Node allows eval),
+// and interact_page drives the whole page (the agent's own browser, no
+// logins, a page it named) — the one part of a session whose policy differs
+// per host, kept here with its scripts.
 //
-//   begin     open the page, apply the shim as committed (every rule, as a
-//             preview: headless has no installed shims), start listening
-//   checkout  the working state as a shim folder (D10)
-//   preview   the agent's whole folder → diff against the working state →
-//             lint → preflight (D15) → apply the changed rules to the live
-//             page → settle → evidence (D11)
-//   call      the page tools, over core's page-host-tools
-//   commit    write the working state to the `.shim` file: a new version,
-//             witnesses kept, the session's exchange in its history
-//   finish    tear every preview down and close the page
-//
-// Ordering, revisions, idempotent commit and ending are the registry's — the
-// same implementation the Shim browser runs (D14).
-//
-// Invariants:
-//   - Preflight is atomic: a working copy that declares anything outside
-//     HEADLESS_CAPABILITIES applies nothing and answers `unsupported` with
-//     the list (D15).
-//   - Every rule's evidence carries its verification level: `partial` when
-//     the witness carries component identity (headless can't check it) or an
-//     `unsupported-api` event fired for the rule since it was last applied.
-//   - Witnesses never reach the agent: the evidence carries none, checkout
-//     writes none; they live in the session and in the committed `.shim`.
-//     They are taken whenever the engine reports one for a live rule (a
-//     standing listener, not a preview's evidence window): an element that
-//     appears after the settle still gets fingerprinted.
-//   - A recovery the engine reports on a deploy (`rule-rebase`) is evidence
-//     only, never applied to the working rule. While any rule with an
-//     unchanged anchor stands broken — an unapplied recovery, or quarantined
-//     — a commit keeps the committed deploy baseline, so Shim still sees the
-//     deploy and runs its own recovery / quarantine path on the rule.
-//   - Nothing here reads the Shim browser's profile (invariant 10): the page
-//     is the caller's, `api.storage` is the caller's file.
+// Nothing here reads the Shim browser's profile (invariant 10): the page is
+// the caller's, `api.storage` is the caller's file.
 
 import * as fs from 'fs';
 import * as path from 'path';
-import type { Spec, Rule } from '@shimbrowser/core/types';
-import type { PageHost, PageLoadOutcome, PageRuntimeEvent, PreviewRule, Unsubscribe } from '@shimbrowser/core/page-host';
-import type { SessionBackend, BackendPreview, BackendCheckout, BackendCommit, FinishInfo } from '@shimbrowser/core/session-registry';
-import type { DeltaOp } from '@shimbrowser/core/spec-delta';
-import { applyDelta } from '@shimbrowser/core/spec-delta';
-import { hostMatches } from '@shimbrowser/core/host-match';
+import type { SessionBackend } from '@shimbrowser/core/session-registry';
+import type { RuleState, SetWitnessState } from '@shimbrowser/core/shim-folder';
 import {
-  offMatchWarning, withOffMatch, evidenceLocation, untriedMatchNote, widenedPatterns, NO_RULE_EVIDENCE_NOTE, MAX_NEW_MATCH_PATTERNS, attributableLocation, type DocumentMark,
-} from '@shimbrowser/core/match-scope';
-import { lintSpec } from '@shimbrowser/core/spec-lint';
-import {
-  checkoutShim, packShim, anchorDigest, referencedHandlerNames, nameMap, ShimFolderError,
-  SHIM_STATE_FILE, SHIM_STATE_FORMAT, type ShimFile, type ShimState, type RuleState, type SetWitnessState, type FolderInput,
-} from '@shimbrowser/core/shim-folder';
-import { handlerWorlds, moduleToExpression } from '@shimbrowser/core/handler-source';
-import { diffWorkingCopy } from '@shimbrowser/core/working-copy-diff';
-import { hasManagedKeys, withManagedFingerprint, withoutManagedKeys } from '@shimbrowser/core/managed-anchor';
-import { readCaptureEvent, inCaptureBinding, supersedes, fingerprintOfCapture } from '@shimbrowser/core/capture-event';
-import type { CaptureEvent } from '@shimbrowser/core/capture-event';
-import { decodeWorkingCopy, encodeWorkingCopy, WorkingCopyWireError } from '@shimbrowser/core/working-copy-wire';
-import {
-  preflightSpec, scanRuleHandlers, verificationLevel, UNSUPPORTED_API_EVENT, type UnsupportedFeature,
-} from '@shimbrowser/core/capability-preflight';
-import { describeRuleStatus, previewKey, previewNoMatch, shimViewPageCaption } from '@shimbrowser/core/preview-evidence';
-import type { StatusCapture } from '@shimbrowser/core/preview-evidence';
-import { createConsoleFeed, formatAutoBlock, formatConsoleRead, type ConsoleFeed } from '@shimbrowser/core/console-feed';
-import {
-  viewPageOnHost, queryPageByScript, inspectElementByScript, evaluateOnHost, expressionProblem,
-  QUERY_TIMEOUT_MS, INSPECT_TIMEOUT_MS, EVALUATE_TIMEOUT_MS,
-} from '@shimbrowser/core/page-host-tools';
+  createShimSessionBackend, pageAway, unsupportedEvidence as sessionUnsupportedEvidence,
+  type ShimSessionSource, type ShimSessionTarget, type ShimSessionHandle, type ShimSessionPage,
+} from '@shimbrowser/core/shim-session';
+import type { UnsupportedFeature } from '@shimbrowser/core/capability-preflight';
 import { REQUIRES_SHIM_BROWSER } from './playwright-page-host';
 import {
   runInteract, locateScript, OBSERVE_START_SCRIPT, OBSERVE_READ_SCRIPT, type InteractDeps,
 } from '@shimbrowser/core/interact';
-import { navigationScopeOf, runNavigate, isSameDocumentNavigation, type NavigationState, type NavigateLoad } from '@shimbrowser/core/navigate-scope';
 
-// How long the page gets to react after an apply before the evidence is read:
-// the Shim browser's window (APPLY_SETTLE_MS), above the engine's 1.5s
-// no-match delay so an explicit rule-no-match lands inside it.
-export const HEADLESS_SETTLE_MS = 2000;
-// reload_page is a recovery tool, not a loop primitive (the browser's bound).
-export const MAX_RELOADS_PER_SESSION = 3;
-const RELOAD_LOAD_TIMEOUT_MS = 15_000;
-// The runtime event buffer a preview's evidence reads from.
-const EVENT_CAP = 2000;
-
-/** Page tools that need a Shim browser subsystem (D2: they answer requires-shim-browser headless). */
-export const BROWSER_ONLY_PAGE_TOOLS: Readonly<Record<string, string>> = Object.freeze({
-  verify_across_pages: 'verify_across_pages loads other pages of the site in a hidden Shim tab; headless mode has one page. Move it with navigate and check each page yourself.',
-});
+export {
+  SESSION_SETTLE_MS as HEADLESS_SETTLE_MS, MAX_RELOADS_PER_SESSION, BROWSER_ONLY_PAGE_TOOLS, hostPatternMatches, newShimSpec, newShimId,
+  offMatchWarning, withOffMatch,
+} from '@shimbrowser/core/shim-session';
 
 /** One page a session works on, and how to let go of it. */
-export interface HeadlessSessionPage {
-  host: PageHost;
-  close(): Promise<void>;
-}
+export type HeadlessSessionPage = ShimSessionPage;
 
-/** What a session starts from: the shim as committed, and where commits go. */
-export interface HeadlessShimSource {
+/** What a headless session starts from: the shim as committed, and the file commits write. */
+export interface HeadlessShimSource extends ShimSessionSource {
   /** Absolute path of the `.shim` file commits write. */
   shimFile: string;
-  /** The display name. */
-  name: string;
-  /** The spec as committed (rules name their handlers; witnesses, version and bundleHash included). */
-  spec: Spec;
-  /** The handler modules (module form), by name. */
-  handlers: Record<string, string>;
-  /** The file's other envelope fields (authoringHistory, userData, …). */
-  envelope: Record<string, unknown>;
-  /** No file yet: the shim was created for this session. */
-  created: boolean;
 }
 
 /** The registry's `target` for a headless session. */
-export interface HeadlessTarget {
-  page: HeadlessSessionPage;
-  source: HeadlessShimSource;
-}
+export type HeadlessTarget = ShimSessionTarget<HeadlessShimSource>;
+
+export type HeadlessHandle = ShimSessionHandle<HeadlessShimSource>;
 
 export interface HeadlessBackendOptions {
   settleMs?: number;
@@ -124,189 +49,20 @@ export interface HeadlessBackendOptions {
   sleep?(ms: number): Promise<void>;
   /** Where commits are written (default: fs, atomically). */
   writeShimFile?(file: string, content: string): void;
-  /**
-   * Witnesses kept outside the `.shim` (a folder's .shim-state.json rules, by
-   * rule id): a preview that adds a rule the working state doesn't have gets
-   * its entry's witness back while the anchor digest still matches — as pack
-   * restores it — so `shim preview` verifies against the fingerprint the shim
-   * was committed with instead of capturing a fresh one.
-   */
+  /** See ShimSessionDeps.seedWitnesses. */
   seedWitnesses?: Record<string, RuleState>;
-  /**
-   * The committed anchor digests of rules that have no witness (a folder's
-   * .shim-state.json anchors, by rule id). With seedWitnesses, they tell a
-   * preview which added rules are unchanged since the commit, so those run
-   * behind the deploy baseline.
-   */
+  /** See ShimSessionDeps.seedAnchors. */
   seedAnchors?: Record<string, string>;
-  /**
-   * Set witnesses kept outside the `.shim` (a folder's .shim-state.json
-   * setWitnesses, by rule id), seeded the way seedWitnesses are, each into its
-   * own anchor field.
-   */
+  /** See ShimSessionDeps.seedSetWitnesses. */
   seedSetWitnesses?: Record<string, SetWitnessState>;
 }
-
-/** A rule's broken reconciliation outcome: a recovery the engine reported but nothing applied, or a quarantine. */
-type BrokenOutcome = 'recovery' | 'quarantined';
-
-interface TimedEvent {
-  at: number;
-  event: PageRuntimeEvent;
-}
-
-export interface HeadlessHandle {
-  sessionId: string;
-  agent: string;
-  intent: string;
-  source: HeadlessShimSource;
-  page: HeadlessSessionPage;
-  host: PageHost;
-  /** The page's host and port ('' = the scheme's default) when the session began: the page-away guard's reference. */
-  startUrl: string;
-  startHost: string;
-  startPort: string;
-  /** The spec as of the latest applied revision (rules carry witnesses; changed rules carry handlers inline). */
-  working: Spec;
-  /** Module-form sources for handlers a working rule names without carrying them inline. */
-  storedHandlers: Record<string, string>;
-  /**
-   * match.hosts as last committed (the file as opened, then each commit's):
-   * the widening cap's baseline and what a commit reports as newly covered.
-   */
-  committedHosts: string[];
-  /**
-   * Where this session got fresh rule evidence (match-scope
-   * evidenceLocation's form): an applied preview that reported rules there.
-   */
-  tried: Set<string>;
-  /** As committed: version, bundleHash, the file's envelope. */
-  version: number;
-  bundleHash: string | undefined;
-  /**
-   * The committed anchor of each rule, by rule id (anchorDigest, witness
-   * aside): the rules that run behind `bundleHash`. Seeded witnesses and
-   * anchors count as committed, since .shim-state.json pins them to the
-   * committed anchor.
-   */
-  committedAnchors: Map<string, string>;
-  envelope: Record<string, unknown>;
-  /** Live previews by ruleKey: what reload_page re-applies. */
-  live: Map<string, PreviewRule>;
-  /**
-   * Each live preview version's latest capture (capture-event.ts), by
-   * ruleKey: kept while the preview runs, frozen at the preview's read
-   * boundary (its settle), reset when the key is applied again.
-   */
-  captures: Map<string, { applyId: string | undefined; event: CaptureEvent | null; frozen: boolean; freezeOnFirst: boolean }>;
-  /** Preview versions minted (PreviewRule.applyId). */
-  applies: number;
-  /** Rules the engine last reported broken, by rule id: how, and the anchor digest it was reported against. A healthy report clears one. */
-  broken: Map<string, { digest: string; outcome: BrokenOutcome }>;
-  /** Broken reports not yet in a preview's evidence. */
-  unreportedBroken: Array<{ ruleId: string; outcome: BrokenOutcome; strategy?: string; to?: string }>;
-  events: TimedEvent[];
-  console: ConsoleFeed;
-  /** unsupported-api members per ruleKey since the rule was last applied. */
-  unsupported: Map<string, Set<string>>;
-  /** unsupported-api uses not yet reported in a preview's evidence. */
-  unreported: Array<{ ruleId: string; member: string }>;
-  reloads: number;
-  off: Unsubscribe[];
-  /** The token marking the document the live previews were applied to (see documentChanged). */
-  docToken: string | null;
-  docTokens: number;
-  /** navigate's fixed scope (the start origin) and budget. */
-  navigation: NavigationState;
-}
-
-// A document's mark, kept in the engine world: that world is created afresh
-// for every document, so a full navigation (a link, a form, a script's
-// location change — not only reload_page) drops the mark along with every
-// preview applied to the old document. A same-document (SPA) navigation
-// keeps both.
-const DOC_TOKEN_KEY = '__shimSessionDocument';
-const DOC_TOKEN_READ = `globalThis[${JSON.stringify(DOC_TOKEN_KEY)}] ?? null`;
-const docTokenWrite = (token: string): string => `globalThis[${JSON.stringify(DOC_TOKEN_KEY)}] = ${JSON.stringify(token)}`;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-function clone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
-
 function errMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
-}
-
-function hostnameOf(url: string): string {
-  try {
-    return new URL(url).hostname;
-  } catch {
-    return '';
-  }
-}
-
-function portOf(url: string): string {
-  try {
-    return new URL(url).port;
-  } catch {
-    return '';
-  }
-}
-
-/**
- * Whether a match.hosts pattern covers `url`: core's hostMatches, the one
- * rule the Shim browser's registry uses (a pattern without a port matches
- * any port, an exact host or a `*.` subdomain wildcard; a pattern with a port
- * matches only that exact host:port).
- */
-export function hostPatternMatches(pattern: string, url: URL): boolean {
-  return hostMatches([pattern], url.hostname, url.port || undefined);
-}
-
-/** Whether `url` is an http(s) page one of the shim's declared hosts covers. */
-function onDeclaredHost(spec: Spec, url: string): boolean {
-  let u: URL;
-  try {
-    u = new URL(url);
-  } catch {
-    return false;
-  }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
-  const hosts = (spec.match?.hosts ?? []).filter((h) => typeof h === 'string' && h !== '');
-  return hostMatches(hosts, u.hostname, u.port || undefined);
-}
-
-// The off-match warning and cap live in core (match-scope.ts), shared with
-// the Shim browser's session; re-exported for the harness.
-export { offMatchWarning, withOffMatch };
-
-/** A new shim's spec for a page (the browser's shims.create shape). */
-export function newShimSpec(url: string, id: string): Spec {
-  const u = new URL(url);
-  return { id, version: 1, match: { hosts: [u.port ? `${u.hostname}:${u.port}` : u.hostname] }, rules: [] };
-}
-
-/** A shim id in the browser's format. */
-export function newShimId(now: number = Date.now(), random: () => number = Math.random): string {
-  return `shim-${now}-${random().toString(36).slice(2, 8).padEnd(6, '0')}`;
-}
-
-/** A rule as the page needs it: its handler modules inlined as expressions. */
-function previewRule(rule: Rule, stored: Record<string, string>): Rule {
-  const names = referencedHandlerNames(rule);
-  const worlds = handlerWorlds([rule]);
-  const handlers: Record<string, string> = { ...(rule.handlers || {}) };
-  for (const name of names) {
-    const module = Object.hasOwn(stored, name) ? stored[name] : undefined;
-    // Own properties only: a handler named `constructor` or `toString` must
-    // not resolve through Object.prototype and skip its stored module.
-    if (!Object.hasOwn(handlers, name) && typeof module === 'string') handlers[name] = moduleToExpression(module, worlds.get(name) ?? 'isolated');
-  }
-  return Object.keys(handlers).length ? { ...rule, handlers } : { ...rule };
 }
 
 function writeAtomic(file: string, content: string): void {
@@ -316,1040 +72,238 @@ function writeAtomic(file: string, content: string): void {
   fs.renameSync(tmp, file);
 }
 
-// The page-away guard (the browser's page-guard): page tools and previews
-// refuse once the page left the session's site, so nothing is measured or
-// witnessed against the wrong document. The site is the host the session
-// started on plus every host the shim declares (match.hosts, the registry's
-// pattern semantics), as in the Shim browser: a multi-host or wildcard shim
-// can be worked on across its declared sites. The start host holds to the
-// start port (the browser's turnPort), so a session begun on localhost:5173
-// can't follow the page to another local service on localhost:9090.
-function pageAway(handle: HeadlessHandle): { error: string; detail: string } | null {
-  if (handle.host.isClosed()) return { error: 'page-closed', detail: 'the session\'s page closed — end the session and open a new one' };
-  const url = handle.host.url();
-  const now = hostnameOf(url);
-  if (now && now === handle.startHost && portOf(url) === handle.startPort) return null;
-  if (onDeclaredHost(handle.working, url)) return null;
-  return {
-    error: 'page-away',
-    detail: `the page left ${handle.startHost} (it is at ${url || 'no page'}) — call reload_page to go back to ${handle.startUrl}`,
-  };
-}
-
-function describeLoadOutcome(outcome: PageLoadOutcome): string {
-  switch (outcome.kind) {
-    case 'failed': return `failed: ${outcome.description || `error ${outcome.code}`}`;
-    case 'timed-out': return `timed out after ${RELOAD_LOAD_TIMEOUT_MS / 1000}s`;
-    case 'aborted': return 'aborted';
-    case 'destroyed': return 'the page went away';
-    case 'finished': return 'finished';
-  }
-}
-
-function refused(evidence: Record<string, unknown>): BackendPreview {
-  return { applied: false, evidence: { applied: false, ...evidence } };
-}
-
-// What each op did, for the agent (the browser's describeOp).
-function describeOp(op: DeltaOp): string {
-  if (op.op === 'add-rule' || op.op === 'update-rule') return `${op.op} ${op.rule?.id ?? '?'}`;
-  if (op.op === 'remove-rule') return `remove-rule ${op.ruleId ?? '?'}`;
-  return op.op ?? 'unknown-op';
-}
+const UNSUPPORTED_DETAIL = 'headless mode supports a subset of shim features (hide, restyle, reorder, reshape, script, ' +
+  'inject-element, inject-html, remove, replace-root; api.storage and api.cleanup). Nothing was applied. ' +
+  'Remove what is listed, or author this shim in the Shim browser.';
 
 /** The evidence for a preflight refusal. */
 export function unsupportedEvidence(unsupported: UnsupportedFeature[]): Record<string, unknown> {
-  return {
-    error: 'unsupported',
-    detail: 'headless mode supports a subset of shim features (hide, restyle, reorder, reshape, script, ' +
-      'inject-element, inject-html, remove, replace-root; api.storage and api.cleanup). Nothing was applied. ' +
-      'Remove what is listed, or author this shim in the Shim browser.',
-    unsupported: unsupported.map((u) => u.message),
-  };
+  return sessionUnsupportedEvidence(unsupported, UNSUPPORTED_DETAIL);
 }
 
 export function createHeadlessShimBackend(options: HeadlessBackendOptions = {}): SessionBackend<HeadlessHandle> {
-  const settleMs = options.settleMs ?? HEADLESS_SETTLE_MS;
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const writeShimFile = options.writeShimFile ?? writeAtomic;
-  const seedWitnesses = options.seedWitnesses;
-  const seedAnchors = options.seedAnchors;
-  const seedSetWitnesses = options.seedSetWitnesses;
-
-  // A rule new to the working state takes its seeded witness while its anchor
-  // is the one the witness was captured for (HeadlessBackendOptions.seedWitnesses).
-  function seedAddedRules(prev: Spec, next: Spec, ops: DeltaOp[]): void {
-    if ((!seedWitnesses && !seedSetWitnesses) || !next.rules) return;
-    const had = new Set((prev.rules || []).map((r) => r.id));
-    const added = new Set(ops.filter((op) => op.op === 'add-rule' && op.rule?.id && !had.has(op.rule.id)).map((op) => op.rule?.id));
-    next.rules = next.rules.map((rule) => {
-      if (!added.has(rule.id) || !rule.anchor || hasManagedKeys(rule.anchor)) return rule;
-      const digest = anchorDigest(rule.anchor);
-      const entry = seedWitnesses && Object.hasOwn(seedWitnesses, rule.id) ? seedWitnesses[rule.id] : undefined;
-      const setEntry = seedSetWitnesses && Object.hasOwn(seedSetWitnesses, rule.id) ? seedSetWitnesses[rule.id] : undefined;
-      // Each fingerprint to its own field, only while the anchor is the one it was captured for.
-      const fingerprint = {
-        ...(entry && entry.anchorDigest === digest ? { witness: clone(entry.witness) } : {}),
-        ...(setEntry && setEntry.anchorDigest === digest ? { setWitness: clone(setEntry.setWitness) } : {}),
-      };
-      if (!hasManagedKeys(fingerprint)) return rule;
-      return { ...rule, anchor: withManagedFingerprint(rule.anchor, fingerprint) };
-    });
-  }
-
-  // The live preview and working rule a runtime event is about, or null when
-  // the event is stale: its key no longer live, an older version of the key
-  // (applyId, where the host stamps it), a working rule whose anchor changed
-  // since, or a page that left the site.
-  function currentRuleFor(handle: HeadlessHandle, event: PageRuntimeEvent): { key: string; live: PreviewRule; rule: Rule } | null {
-    if (typeof event.specId !== 'string' || typeof event.ruleId !== 'string') return null;
-    const live = handle.live.get(event.specId);
-    if (!live || live.rule.id !== event.ruleId || !live.rule.anchor) return null;
-    if (typeof event.applyId === 'string' && event.applyId !== live.applyId) return null;
-    const rule = (handle.working.rules || []).find((r) => r.id === event.ruleId);
-    if (!rule?.anchor || anchorDigest(rule.anchor) !== anchorDigest(live.rule.anchor)) return null;
-    if (pageAway(handle)) return null;
-    return { key: event.specId, live, rule };
-  }
-
-  // Witness capture: the engine fingerprints what a live rule showed (one
-  // element → element witness, several → set witness, or none with a reason)
-  // in rule-witness events, each replacing the rule's whole fingerprint state.
-  // The latest one inside the preview's binding (its applyId, the anchor it
-  // was applied with, the newest document) wins until the preview's read
-  // boundary freezes it (freezeCaptures). Kept on the working rule for commit
-  // and on its live preview, so a replay onto a new document (reload_page,
-  // followDocument) filters by it as the committed shim will, instead of
-  // re-resolving the bare selector. The preview's deploy baseline is left as
-  // applied: a fresh witness is this deploy's, with nothing committed to
-  // rebase from.
-  function takeWitness(handle: HeadlessHandle, event: PageRuntimeEvent): void {
-    const read = readCaptureEvent(event);
-    if (!read) return;
-    const current = currentRuleFor(handle, event);
-    if (!current?.rule.anchor || !current.live.rule.anchor) return;
-    const entry = handle.captures.get(current.key);
-    if (!entry || entry.frozen || entry.applyId !== current.live.applyId) return;
-    const binding = { applyId: current.live.applyId ?? null, anchorDigest: anchorDigest(current.live.rule.anchor) };
-    if (!inCaptureBinding(read, binding) || !supersedes(read, entry.event)) return;
-    entry.event = read;
-    if (entry.freezeOnFirst) entry.frozen = true;
-    const fingerprint = fingerprintOfCapture(read);
-    current.rule.anchor = withManagedFingerprint(withoutManagedKeys(current.rule.anchor), fingerprint);
-    handle.live.set(current.key, {
-      ...current.live,
-      rule: { ...current.live.rule, anchor: withManagedFingerprint(withoutManagedKeys(current.live.rule.anchor), fingerprint) },
-    });
-  }
-
-  // The read boundary: what each of these previews captured so far is what
-  // the rule carries; later events are not this preview's evidence. A preview
-  // that captured nothing yet (its element hadn't appeared) takes the first
-  // capture that arrives, and freezes on it.
-  function freezeCaptures(handle: HeadlessHandle, keys: Iterable<string>): void {
-    for (const key of keys) {
-      const entry = handle.captures.get(key);
-      if (!entry) continue;
-      if (entry.event) entry.frozen = true;
-      else entry.freezeOnFirst = true;
-    }
-  }
-
-  // The status line's view of a preview's capture.
-  function statusCapture(handle: HeadlessHandle, key: string): StatusCapture | null {
-    const e = handle.captures.get(key)?.event;
-    if (!e) return null;
-    return { fingerprint: e.setWitness ? 'set' : e.witness ? 'element' : 'none', note: e.note };
-  }
-
-  // A live rule's latest reconciliation outcome (rule-reconcile): a recovery
-  // it reported (only reported; nothing here applies it) or a quarantine
-  // marks the rule broken; resolving through its primary again clears it.
-  function noteOutcome(handle: HeadlessHandle, event: PageRuntimeEvent): void {
-    const healthy = event.kind === 'rule-status' && typeof event.matched === 'number' && event.matched > 0 && event.matchedVia === 'primary';
-    const outcome: BrokenOutcome | null = event.kind === 'rule-rebase' ? 'recovery' : event.kind === 'rule-quarantined' ? 'quarantined' : null;
-    if (!healthy && !outcome) return;
-    const current = currentRuleFor(handle, event);
-    if (!current?.rule.anchor) return;
-    if (!outcome) {
-      handle.broken.delete(current.rule.id);
-      return;
-    }
-    handle.broken.set(current.rule.id, { digest: anchorDigest(current.rule.anchor), outcome });
-    handle.unreportedBroken.push({
-      ruleId: current.rule.id,
-      outcome,
-      ...(outcome === 'recovery' ? { strategy: typeof event.strategy === 'string' ? event.strategy : 'rebase' } : {}),
-      ...(outcome === 'recovery' && typeof event.to === 'string' && event.to ? { to: event.to } : {}),
-    });
-  }
-
-  // Rules still broken: the working rule keeps the anchor the break was
-  // reported against (a re-anchored or removed rule is no longer one).
-  function brokenRules(handle: HeadlessHandle): string[] {
-    const out: string[] = [];
-    for (const [ruleId, { digest }] of handle.broken) {
-      const rule = (handle.working.rules || []).find((r) => r.id === ruleId);
-      if (rule?.anchor && anchorDigest(rule.anchor) === digest) out.push(ruleId);
-    }
-    return out;
-  }
-
-  function apply(handle: HeadlessHandle, preview: PreviewRule): void {
-    handle.unsupported.delete(preview.ruleKey);
-    // A new version captures afresh; a replay of the same version (a new
-    // document) keeps what this version already settled.
-    if (handle.captures.get(preview.ruleKey)?.applyId !== preview.applyId) {
-      handle.captures.set(preview.ruleKey, { applyId: preview.applyId, event: null, frozen: false, freezeOnFirst: false });
-    }
-    handle.live.set(preview.ruleKey, preview);
-    handle.host.applyPreview(preview);
-  }
-
-  function remove(handle: HeadlessHandle, ruleKey: string): void {
-    handle.live.delete(ruleKey);
-    handle.captures.delete(ruleKey);
-    handle.unsupported.delete(ruleKey);
-    handle.host.removePreview(ruleKey);
-  }
-
-  // The committed anchors, by rule id: every committed rule's, then (for a
-  // rule the committed spec doesn't have) a seeded witness's or seeded
-  // anchor's — until this session commits, which rewrites what is committed.
-  function committedAnchorsOf(rules: Rule[] | undefined, seeded: boolean): Map<string, string> {
-    const out = new Map<string, string>();
-    for (const rule of rules || []) {
-      if (typeof rule?.id === 'string' && rule.anchor) out.set(rule.id, anchorDigest(rule.anchor));
-    }
-    if (!seeded) return out;
-    for (const [id, entry] of Object.entries(seedWitnesses ?? {})) {
-      if (!out.has(id)) out.set(id, entry.anchorDigest);
-    }
-    for (const [id, entry] of Object.entries(seedSetWitnesses ?? {})) {
-      if (!out.has(id)) out.set(id, entry.anchorDigest);
-    }
-    for (const [id, digest] of Object.entries(seedAnchors ?? {})) {
-      if (!out.has(id)) out.set(id, digest);
-    }
-    return out;
-  }
-
-  // A rule applies behind the committed deploy baseline only while its anchor
-  // is the one it was committed with, witness or not (a multi-match rule never
-  // captures one, and refresh and promote don't need it): a new or re-anchored
-  // rule has nothing to rebase from. The spec's autoRepair rides with the
-  // baseline, so an opted-out shim's preview never promotes or recovers an
-  // anchor the committed shim would leave alone.
-  function previewFor(handle: HeadlessHandle, rule: Rule): PreviewRule {
-    handle.applies += 1;
-    const preview: PreviewRule = {
-      patchId: handle.source.spec.id,
-      rule: previewRule(rule, handle.storedHandlers),
-      ruleKey: previewKey(handle.source.spec.id, rule.id),
-      applyId: `${handle.sessionId}:${handle.applies}`,
-    };
-    const committed = handle.committedAnchors.get(rule.id);
-    if (handle.bundleHash && rule.anchor && committed !== undefined && committed === anchorDigest(rule.anchor)) {
-      preview.bundleHash = handle.bundleHash;
-      if (handle.working.autoRepair === false) preview.autoRepair = false;
-    }
-    return preview;
-  }
-
-  async function settle(signal: AbortSignal): Promise<void> {
-    if (signal.aborted) return;
-    await Promise.race([
-      sleep(settleMs),
-      new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true })),
-    ]);
-  }
-
-  async function currentDeployId(handle: HeadlessHandle): Promise<string | null> {
-    try {
-      const id = await handle.host.evaluate('ShimCore.deployIdForDocument(document)', 'engine');
-      return typeof id === 'string' && id ? id : null;
-    } catch {
-      return null;
-    }
-  }
-
-  // Marks the current document as the one the live previews are on.
-  async function markDocument(handle: HeadlessHandle): Promise<void> {
-    handle.docTokens += 1;
-    const token = `${handle.sessionId}:${handle.docTokens}`;
-    try {
-      await handle.host.evaluate(docTokenWrite(token), 'engine');
-      handle.docToken = token;
-    } catch {
-      handle.docToken = null;
-    }
-  }
-
-  // Whether the page is still on the document the live previews were last
-  // applied to (markDocument).
-  async function onMarkedDocument(handle: HeadlessHandle): Promise<boolean> {
-    if (handle.docToken === null || handle.host.isClosed()) return false;
-    try {
-      return (await handle.host.evaluate(DOC_TOKEN_READ, 'engine')) === handle.docToken;
-    } catch {
-      return false;
-    }
-  }
-
-  // An in-scope full navigation since the last check left a fresh document
-  // with none of the live previews on it: re-apply them (as reload_page does)
-  // before anything measures, screenshots or adds to the page.
-  async function followDocument(handle: HeadlessHandle, signal: AbortSignal): Promise<void> {
-    if (handle.host.isClosed()) return;
-    let token: unknown;
-    try {
-      token = await handle.host.evaluate(DOC_TOKEN_READ, 'engine');
-    } catch {
-      return; // no engine world yet: the next call looks again
-    }
-    if (token !== null && token === handle.docToken) return;
-    for (const p of handle.live.values()) apply(handle, p);
-    await markDocument(handle);
-    if (handle.live.size > 0) await settle(signal);
-  }
-
-  // A preview's reply, judged after it settled against the page it ended on:
-  // off the working match.hosts, every reply that isn't a page-away refusal
-  // (applied, unchanged, a folder problem) carries the warning, and an applied
-  // one's rules are capped at partial. Never an upgrade of earlier evidence.
-  async function preview(handle: HeadlessHandle, input: unknown, signal: AbortSignal): Promise<BackendPreview> {
-    // Where the evidence came from: recorded only when the page kept the
-    // same location and document from the apply to the evidence, so a
-    // preview whose page navigated mid-settle records nowhere.
-    const mark = async (): Promise<DocumentMark> => ({
-      location: handle.host.isClosed() ? null : evidenceLocation(handle.host.url()),
-      token: handle.host.isClosed() ? null : await handle.host.documentToken().catch(() => null),
-    });
-    const startedOn = await mark();
-    const result = await previewOnce(handle, input, signal);
-    const evidence = result.evidence;
-    if (!isRecord(evidence) || handle.host.isClosed()) return result;
-    const endedOn = await mark();
-    const attributable = attributableLocation(startedOn, endedOn);
-    if (result.applied && Array.isArray(evidence.rules) && evidence.rules.length > 0 && attributable !== null && !pageAway(handle)) {
-      handle.tried.add(attributable);
-    }
-    if (evidence.error === 'page-away' || evidence.error === 'page-closed' || evidence.error === 'session-ended') return result;
-    const warning = offMatchWarning(handle.working.match?.hosts, handle.host.url());
-    if (warning === null) return result;
-    return { ...result, evidence: withOffMatch(evidence, warning) };
-  }
-
-  async function previewOnce(handle: HeadlessHandle, input: unknown, signal: AbortSignal): Promise<BackendPreview> {
-    if (!isRecord(input) || !('workingCopy' in input)) {
-      return refused({ error: 'invalid-request', detail: 'a headless preview takes the working copy ({ workingCopy })' });
-    }
-    let folder: FolderInput;
-    try {
-      folder = decodeWorkingCopy(input.workingCopy);
-    } catch (e) {
-      if (e instanceof WorkingCopyWireError) return refused({ error: e.code, problems: e.problems });
-      throw e;
-    }
-    let diff;
-    try {
-      diff = diffWorkingCopy({ spec: handle.working, handlers: handle.storedHandlers, committedMatchHosts: handle.committedHosts }, folder);
-    } catch (e) {
-      if (e instanceof ShimFolderError) return refused({ error: e.code, problems: e.problems });
-      throw e;
-    }
-    if (diff.ops.length === 0) {
-      return refused({
-        unchanged: true,
-        note: 'the folder matches the working state — nothing to apply',
-        ...(diff.warnings.length ? { warnings: diff.warnings } : {}),
-      });
-    }
-    const next = applyDelta(handle.working, diff.ops);
-    seedAddedRules(handle.working, next, diff.ops);
-    // The browser's commit-time check, dry-run: a lint error applies nothing.
-    // First, so an invented kind reads as the typo it is, not as a feature
-    // this host lacks.
-    const lint = lintSpec(next);
-    if (lint.errors.length) return refused({ rejected: lint.errors.join('; ') });
-    // D15 preflight, atomic: nothing reaches the page.
-    const pre = preflightSpec(next, handle.host.capabilities);
-    if (!pre.ok) return refused(unsupportedEvidence(pre.unsupported));
-    const away = pageAway(handle);
-    if (away) return refused(away);
-    await followDocument(handle, signal);
-    if (signal.aborted) return refused({ error: 'session-ended' });
-    // Again after the replay's wait: the fresh document may have sent the
-    // page off the site meanwhile (a script redirect).
-    const awayAfter = pageAway(handle);
-    if (awayAfter) return refused(awayAfter);
-
-    const appliedAt = now();
-    const emitKeys = new Map<string, Rule>();
-    // Each emitted key's version (applyId): a replaced version's handler can
-    // still report after this apply (a mount the engine doesn't cancel), and
-    // its events are not this preview's evidence.
-    const versions = new Map<string, string | undefined>();
-    const nextById = new Map((next.rules || []).map((r) => [r.id, r]));
-    // The working state first: an event the page reports for a preview below
-    // (a witness) is matched against it.
-    handle.working = next;
-    for (const op of diff.ops) {
-      if ((op.op === 'add-rule' || op.op === 'update-rule') && op.rule?.id) {
-        const rule = nextById.get(op.rule.id) ?? op.rule;
-        const p = previewFor(handle, rule);
-        emitKeys.set(p.ruleKey, rule);
-        versions.set(p.ruleKey, p.applyId);
-        apply(handle, p);
-      } else if (op.op === 'remove-rule' && op.ruleId) {
-        const key = previewKey(handle.source.spec.id, op.ruleId);
-        emitKeys.delete(key);
-        remove(handle, key);
+  return createShimSessionBackend<HeadlessShimSource>({
+    ...(options.settleMs !== undefined ? { settleMs: options.settleMs } : {}),
+    now,
+    sleep,
+    ...(options.seedWitnesses ? { seedWitnesses: options.seedWitnesses } : {}),
+    ...(options.seedAnchors ? { seedAnchors: options.seedAnchors } : {}),
+    ...(options.seedSetWitnesses ? { seedSetWitnesses: options.seedSetWitnesses } : {}),
+    unsupportedError: REQUIRES_SHIM_BROWSER,
+    unsupportedDetail: UNSUPPORTED_DETAIL,
+    unsupportedNote: (ruleId, member) => `rule "${ruleId}" used api.${member}, which headless mode does not provide (${REQUIRES_SHIM_BROWSER}) — its result is partial`,
+    // Headless has no installed shims: the committed rules run as previews.
+    previewCommittedAtBegin: true,
+    interact: (handle, input, signal) => interactPage(handle, input, signal, { now, sleep }),
+    async writeCommit(handle, prepared) {
+      try {
+        writeShimFile(handle.source.shimFile, `${JSON.stringify(prepared.file, null, 2)}\n`);
+      } catch (e) {
+        return { ok: false, error: 'commit-failed', detail: `could not write ${handle.source.shimFile}: ${errMessage(e)}` };
       }
-    }
+      return { ok: true, versionId: prepared.version };
+    },
+  });
+}
 
-    await settle(signal);
-    freezeCaptures(handle, emitKeys.keys());
+// Frame tags interact_page never sends input into (top frame only).
+const FRAME_TAGS = new Set(['iframe', 'frame', 'object', 'embed']);
+// Both follow open shadow roots down to the element that really takes the
+// input: a frame inside a web component is still a frame. (A closed shadow
+// root can't be looked into — an accepted residual.)
+const frameAtPointScript = (x: number, y: number): string => `(() => {
+  const X = ${JSON.stringify(x)}, Y = ${JSON.stringify(y)};
+  let h = document.elementFromPoint(X, Y);
+  for (let i = 0; h && h.shadowRoot && i < 32; i++) { const inner = h.shadowRoot.elementFromPoint(X, Y); if (!inner || inner === h) break; h = inner; }
+  return !!h && ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'].includes(h.tagName);
+})()`;
+// true when the remembered target is still connected, enabled and what
+// the point hits (it or a descendant); else what the point hits instead.
+const targetAtPointScript = (x: number, y: number): string => `(() => {
+  const t = globalThis.__shimHeadlessTarget;
+  if (!t || !t.isConnected) return 'nothing (the target left the page)';
+  if (t.matches(':disabled')) return 'a disabled target';
+  const h = document.elementFromPoint(${JSON.stringify(x)}, ${JSON.stringify(y)});
+  if (h && (h === t || t.contains(h))) return true;
+  return h ? h.tagName.toLowerCase() + (h.id ? '#' + h.id : '') : 'nothing hit-testable';
+})()`;
+// true when the deep focused element is the remembered target or inside it.
+const FOCUS_ON_TARGET_SCRIPT = `(() => {
+  const t = globalThis.__shimHeadlessTarget;
+  let a = document.activeElement;
+  for (let i = 0; a && a.shadowRoot && a.shadowRoot.activeElement && i < 32; i++) a = a.shadowRoot.activeElement;
+  return !!t && t.isConnected && !!a && (a === t || t.contains(a));
+})()`;
+// Sets the remembered <select> (connected, still visible) to `value` and
+// fires input + change.
+const rememberedSelectScript = (value: string): string => `(() => {
+  const el = globalThis.__shimHeadlessTarget;
+  if (!el || !el.isConnected) return { error: 'the <select> left the page before the option was set' };
+  if (el.tagName !== 'SELECT') return { error: 'the target is not a <select> — use click' };
+  const r = el.getBoundingClientRect(), cs = getComputedStyle(el);
+  if (!(r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none')) return { error: 'the <select> is no longer visible' };
+  const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+  if (!top || !(top === el || el.contains(top))) return { error: 'the <select> is covered by ' + (top ? top.tagName.toLowerCase() + (top.id ? '#' + top.id : '') : 'nothing hit-testable') + ' — nothing was set' };
+  const want = ${JSON.stringify(value)};
+  const opt = Array.from(el.options).find((o) => o.value === want || o.text.trim() === want);
+  if (!opt) return { error: 'no option ' + JSON.stringify(want) };
+  if (el.matches(':disabled') || opt.matches(':disabled')) return { error: 'option ' + JSON.stringify(want) + ' is disabled — a user could not pick it' };
+  el.value = opt.value;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  return { ok: true };
+})()`;
+const FOCUS_IN_FRAME_SCRIPT = `(() => {
+  let a = document.activeElement;
+  for (let i = 0; a && a.shadowRoot && a.shadowRoot.activeElement && i < 32; i++) a = a.shadowRoot.activeElement;
+  return !!a && ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'].includes(a.tagName);
+})()`;
 
-    const mine = handle.events.filter((t) => t.at >= appliedAt && typeof t.event.specId === 'string' && emitKeys.has(t.event.specId)
-      && (typeof t.event.applyId !== 'string' || t.event.applyId === versions.get(t.event.specId)));
-    const errors = mine
-      .filter((t) => t.event.kind === 'handler-error')
-      .map(({ event: e }) => ({ ruleId: e.ruleId, handler: e.handlerName, message: e.message, stack: e.stack }));
-    const lastStatus = new Map<string, PageRuntimeEvent>();
-    const peak = new Map<string, number>();
-    for (const { event: e } of mine) {
-      if (e.kind !== 'rule-status' || !e.specId) continue;
-      lastStatus.set(e.specId, e);
-      if (typeof e.matched === 'number') peak.set(e.specId, Math.max(peak.get(e.specId) ?? 0, e.matched));
-    }
-    const quarantined = mine
-      .filter((t) => t.event.kind === 'rule-quarantined')
-      .map(({ event: e }) => ({ ruleId: e.ruleId, ...(typeof e.selector === 'string' && e.selector ? { selector: e.selector } : {}) }));
-    const previewed = [...emitKeys].map(([key, rule]) => ({
-      key,
-      rule,
-      status: lastStatus.get(key) as Parameters<typeof describeRuleStatus>[1],
-      peakMatched: peak.get(key) ?? 0,
-    }));
-    const noMatch = previewNoMatch(
-      mine
-        .filter((t) => t.event.kind === 'rule-no-match')
-        .map(({ event: e }) => ({ ruleId: e.ruleId, selector: typeof e.selector === 'string' ? e.selector : undefined })),
-      previewed,
-      new Set(quarantined.flatMap((q) => (typeof q.ruleId === 'string' ? [q.ruleId] : []))),
-    );
-    const noMatchIds = new Set(noMatch.map((n) => n.ruleId));
-
-    const rules = previewed.map(({ key, rule, status }) => {
-      const live = (handle.working.rules || []).find((r) => r.id === rule.id);
-      return {
-        ruleId: rule.id,
-        // The working rule carries whatever this preview captured.
-        status: describeRuleStatus(rule, status, { capture: statusCapture(handle, key) }),
-        verification: verificationLevel(
-          live?.anchor, handle.host.capabilities, (handle.unsupported.get(key)?.size ?? 0) > 0, noMatchIds.has(rule.id),
-        ),
-      };
-    });
-
-    const changed = [...emitKeys.values()];
-    const scan = scanRuleHandlers(changed, handle.host.capabilities, handle.storedHandlers, REQUIRES_SHIM_BROWSER);
-    const warnings = [...diff.warnings, ...lint.warnings, ...scan.map((f) => f.message)];
-    const unsupportedApi = handle.unreported.splice(0);
-    const notes: string[] = [];
-    for (const { ruleId, member } of unsupportedApi) {
-      notes.push(`rule "${ruleId}" used api.${member}, which headless mode does not provide (${REQUIRES_SHIM_BROWSER}) — its result is partial`);
-    }
-    for (const { ruleId, outcome, strategy, to } of handle.unreportedBroken.splice(0)) {
-      notes.push(outcome === 'recovery'
-        ? `rule "${ruleId}" no longer resolves through its anchor on this deploy; the engine found its element again ` +
-          `(${strategy ?? 'rebase'}${to ? `, as ${to}` : ''}) but nothing applied that to the shim — update its anchor in shim.json. ` +
-          'Until you do, a commit keeps the committed deploy baseline, so Shim can still recover the rule itself'
-        : `rule "${ruleId}" is quarantined: its anchor no longer finds the element its witness describes — re-anchor it in shim.json. ` +
-          'Until you do, a commit keeps the committed deploy baseline, so Shim still treats the break as a deploy and offers its repair');
-    }
-    // Where the shim runs changed: headless has no Shim to ask, and the file
-    // is the agent's own, so it is written as it stands and said plainly.
-    if (diff.ops.some((op) => op.op === 'set-match')) {
-      const widened = widenedPatterns(handle.committedHosts, next.match?.hosts ?? []);
-      if (widened.length) {
-        notes.push(`match.hosts now also covers ${widened.join(', ')}. Nobody approved that here: headless has no Shim to ask. ` +
-          'Shim shows every site a .shim runs on when it is imported, and the person decides there');
-      }
-      if (!diff.ops.some((op) => op.op === 'add-rule' || op.op === 'update-rule')) notes.push(NO_RULE_EVIDENCE_NOTE);
-    }
-    const consoleBlock = formatAutoBlock(handle.console.drainSinceEmit());
-    const evidence: Record<string, unknown> = {
-      applied: true,
-      rules,
-      errors,
-      noMatch,
-      ...(quarantined.length ? { quarantined } : {}),
-      ...(warnings.length ? { warnings } : {}),
-      ...(notes.length ? { notes } : {}),
-      ...(unsupportedApi.length ? { unsupportedApi } : {}),
-      ...(consoleBlock ? { console: consoleBlock } : {}),
-      changes: diff.ops.map(describeOp),
-    };
-    return { applied: true, evidence };
-  }
-
-  // --- page tools ------------------------------------------------------------
-
-  async function call(handle: HeadlessHandle, name: string, input: unknown, signal: AbortSignal): Promise<unknown> {
-    const args = isRecord(input) ? input : {};
-    const str = (key: string): string => (typeof args[key] === 'string' ? args[key] : '');
-    if (name in BROWSER_ONLY_PAGE_TOOLS) {
-      return JSON.stringify({ error: REQUIRES_SHIM_BROWSER, detail: BROWSER_ONLY_PAGE_TOOLS[name] });
-    }
-    const guardOr = async (): Promise<string | null> => {
-      const away = pageAway(handle);
-      if (away) return JSON.stringify(away);
-      await followDocument(handle, signal);
-      // Again after the replay's wait: the page may have left the site meanwhile.
-      const awayAfter = pageAway(handle);
-      return awayAfter ? JSON.stringify(awayAfter) : null;
-    };
-    switch (name) {
-      case 'view_page': {
-        const away = await guardOr();
-        if (away) return away;
-        const selector = str('selector');
-        const view = await viewPageOnHost(handle.host, selector ? { selector } : undefined, 'main');
-        if (view.error || !view.dataBase64) return JSON.stringify(view);
-        return [
-          { type: 'text', text: shimViewPageCaption(view) },
-          { type: 'image', source: { type: 'base64', media_type: view.mediaType || 'image/png', data: view.dataBase64 } },
-        ];
-      }
-      case 'query_page': {
-        const away = await guardOr();
-        if (away) return away;
-        const r = await queryPageByScript(handle.host, str('description'), QUERY_TIMEOUT_MS, 'main');
-        return JSON.stringify('error' in r ? { error: r.detail ? `${r.error}: ${r.detail}` : r.error } : { candidates: r.candidates });
-      }
-      case 'inspect_element': {
-        const away = await guardOr();
-        if (away) return away;
-        const r = await inspectElementByScript(handle.host, str('selector'), INSPECT_TIMEOUT_MS, 'main');
-        return JSON.stringify('error' in r ? { found: false, error: r.detail ? `${r.error}: ${r.detail}` : r.error } : r.element);
-      }
-      case 'evaluate_in_page': {
-        const expression = args.expression;
-        const problem = expressionProblem(expression);
-        if (problem) return JSON.stringify({ error: problem });
-        const away = await guardOr();
-        if (away) return away;
-        return JSON.stringify(await evaluateOnHost(handle.host, String(expression), EVALUATE_TIMEOUT_MS, 'main'));
-      }
-      case 'read_console': {
-        const level = args.level === 'error' || args.level === 'warning' ? args.level : 'all';
-        const limit = typeof args.limit === 'number' && args.limit > 0 ? Math.floor(args.limit) : 50;
-        return JSON.stringify({ text: formatConsoleRead(handle.console.ring(), { level, limit }) });
-      }
-      case 'reload_page':
-        return JSON.stringify(await reloadPage(handle, signal));
-      case 'interact_page': {
-        const away = await guardOr();
-        if (away) return away;
-        return JSON.stringify(await interactPage(handle, input, signal));
-      }
-      case 'navigate':
-        return JSON.stringify(await runNavigate(input, handle.navigation, (url) => navigatePage(handle, url, signal)));
-      default:
-        return JSON.stringify({ error: `unknown tool "${name}"` });
-    }
-  }
-
-  // Frame tags interact_page never sends input into (top frame only).
-  const FRAME_TAGS = new Set(['iframe', 'frame', 'object', 'embed']);
-  // Both follow open shadow roots down to the element that really takes the
-  // input: a frame inside a web component is still a frame. (A closed shadow
-  // root can't be looked into — an accepted residual.)
-  const frameAtPointScript = (x: number, y: number): string => `(() => {
-    const X = ${JSON.stringify(x)}, Y = ${JSON.stringify(y)};
-    let h = document.elementFromPoint(X, Y);
-    for (let i = 0; h && h.shadowRoot && i < 32; i++) { const inner = h.shadowRoot.elementFromPoint(X, Y); if (!inner || inner === h) break; h = inner; }
-    return !!h && ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'].includes(h.tagName);
-  })()`;
-  // true when the remembered target is still connected, enabled and what
-  // the point hits (it or a descendant); else what the point hits instead.
-  const targetAtPointScript = (x: number, y: number): string => `(() => {
-    const t = globalThis.__shimHeadlessTarget;
-    if (!t || !t.isConnected) return 'nothing (the target left the page)';
-    if (t.matches(':disabled')) return 'a disabled target';
-    const h = document.elementFromPoint(${JSON.stringify(x)}, ${JSON.stringify(y)});
-    if (h && (h === t || t.contains(h))) return true;
-    return h ? h.tagName.toLowerCase() + (h.id ? '#' + h.id : '') : 'nothing hit-testable';
-  })()`;
-  // true when the deep focused element is the remembered target or inside it.
-  const FOCUS_ON_TARGET_SCRIPT = `(() => {
-    const t = globalThis.__shimHeadlessTarget;
-    let a = document.activeElement;
-    for (let i = 0; a && a.shadowRoot && a.shadowRoot.activeElement && i < 32; i++) a = a.shadowRoot.activeElement;
-    return !!t && t.isConnected && !!a && (a === t || t.contains(a));
-  })()`;
-  // Sets the remembered <select> (connected, still visible) to `value` and
-  // fires input + change.
-  const rememberedSelectScript = (value: string): string => `(() => {
-    const el = globalThis.__shimHeadlessTarget;
-    if (!el || !el.isConnected) return { error: 'the <select> left the page before the option was set' };
-    if (el.tagName !== 'SELECT') return { error: 'the target is not a <select> — use click' };
-    const r = el.getBoundingClientRect(), cs = getComputedStyle(el);
-    if (!(r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none')) return { error: 'the <select> is no longer visible' };
-    const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-    if (!top || !(top === el || el.contains(top))) return { error: 'the <select> is covered by ' + (top ? top.tagName.toLowerCase() + (top.id ? '#' + top.id : '') : 'nothing hit-testable') + ' — nothing was set' };
-    const want = ${JSON.stringify(value)};
-    const opt = Array.from(el.options).find((o) => o.value === want || o.text.trim() === want);
-    if (!opt) return { error: 'no option ' + JSON.stringify(want) };
-    if (el.matches(':disabled') || opt.matches(':disabled')) return { error: 'option ' + JSON.stringify(want) + ' is disabled — a user could not pick it' };
-    el.value = opt.value;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    return { ok: true };
-  })()`;
-  const FOCUS_IN_FRAME_SCRIPT = `(() => {
-    let a = document.activeElement;
-    for (let i = 0; a && a.shadowRoot && a.shadowRoot.activeElement && i < 32; i++) a = a.shadowRoot.activeElement;
-    return !!a && ['IFRAME', 'FRAME', 'OBJECT', 'EMBED'].includes(a.tagName);
-  })()`;
-
-  // interact_page, headless: the whole page (scope "page"), top frame only —
-  // the agent's own browser, no logins, a page it named. Trusted input
-  // through the host; a popup the batch causes is closed on creation and
-  // reported (a weaker guarantee than the browser's deny at creation). The
-  // page's requests are not observed, and the report says so.
-  async function interactPage(handle: HeadlessHandle, input: unknown, signal: AbortSignal): Promise<unknown> {
-    const host = handle.host;
-    const send = host.input?.bind(host);
-    if (!send) return { error: 'interaction-unavailable', detail: 'this page cannot take trusted input' };
-    let token: string | null = null;
-    let point: { x: number; y: number } | null = null;
-    const popups: string[] = [];
-    const offPopup = host.onPopup?.((url) => { popups.push(url || 'a new window'); }) ?? (() => {});
-    const engine = async (code: string): Promise<unknown> => host.evaluate(code, 'engine');
-    const deps: InteractDeps = {
-      guard: () => pageAway(handle),
-      // A new document (its token) or a same-document URL change ends the batch.
-      // The token and URL, plus the host's navigation count when it has one:
-      // a navigation that has started but not committed yet (a slow page)
-      // already moves it, and so does one away and back during a settle.
-      currentDocument: () => (token === null ? null : `${token} ${host.url()} ${host.navigationCount?.() ?? ''}`),
-      async syncDocument() { token = await host.documentToken(); },
-      policy: {
-        accepts: (doc) => doc !== null,
-        refused: { error: 'no-document', detail: 'the page has no document to drive yet — try again once it has loaded' },
-        lost: 'the page navigated',
-        stopped: 'the session ended',
-        unavailable: 'trusted input could not be sent to the page',
-      },
-      aborted: () => signal.aborted || host.isClosed(),
-      async locate(selector) {
-        point = null;
-        try {
-          // Located and remembered in one synchronous script (the press is
-          // later checked against THIS element, never a fresh match).
-          const raw = await engine(`(() => { const r = ${locateScript(selector)}; globalThis.__shimHeadlessTarget = r && r.count === 1 ? document.querySelector(${JSON.stringify(selector)}) : null; return r; })()`);
-          if (!isRecord(raw)) return { error: 'the page could not be read' };
-          const loc = raw as unknown as Awaited<ReturnType<InteractDeps['locate']>>;
-          if ('error' in loc || loc.count !== 1 || typeof loc.x !== 'number' || typeof loc.y !== 'number') return loc;
-          // Top frame only: a frame (or a frame inside the selected element,
-          // where the press would land) is refused before any input.
-          const frame = await engine(frameAtPointScript(loc.x, loc.y));
-          if (FRAME_TAGS.has(String(loc.tag)) || frame === true) {
-            return { ...loc, refused: `frame-unsupported: ${selector} is (or puts the press on) a frame; interact_page reaches only the top frame` };
-          }
-          point = { x: loc.x, y: loc.y };
-          return loc;
-        } catch (e) {
-          return { error: e instanceof Error ? e.message : 'the page could not be read' };
+// interact_page, headless: the whole page (scope "page"), top frame only —
+// the agent's own browser, no logins, a page it named. Trusted input
+// through the host; a popup the batch causes is closed on creation and
+// reported (a weaker guarantee than the browser's deny at creation). The
+// page's requests are not observed, and the report says so.
+async function interactPage(handle: HeadlessHandle, input: unknown, signal: AbortSignal, clock: { now(): number; sleep(ms: number): Promise<void> }): Promise<unknown> {
+  const host = handle.host;
+  const send = host.input?.bind(host);
+  if (!send) return { error: 'interaction-unavailable', detail: 'this page cannot take trusted input' };
+  let token: string | null = null;
+  let point: { x: number; y: number } | null = null;
+  const popups: string[] = [];
+  const offPopup = host.onPopup?.((url) => { popups.push(url || 'a new window'); }) ?? (() => {});
+  const engine = async (code: string): Promise<unknown> => host.evaluate(code, 'engine');
+  const deps: InteractDeps = {
+    guard: () => pageAway(handle),
+    // A new document (its token) or a same-document URL change ends the batch.
+    // The token and URL, plus the host's navigation count when it has one:
+    // a navigation that has started but not committed yet (a slow page)
+    // already moves it, and so does one away and back during a settle.
+    currentDocument: () => (token === null ? null : `${token} ${host.url()} ${host.navigationCount?.() ?? ''}`),
+    async syncDocument() { token = await host.documentToken(); },
+    policy: {
+      accepts: (doc) => doc !== null,
+      refused: { error: 'no-document', detail: 'the page has no document to drive yet — try again once it has loaded' },
+      lost: 'the page navigated',
+      stopped: 'the session ended',
+      unavailable: 'trusted input could not be sent to the page',
+    },
+    aborted: () => signal.aborted || host.isClosed(),
+    async locate(selector) {
+      point = null;
+      try {
+        // Located and remembered in one synchronous script (the press is
+        // later checked against THIS element, never a fresh match).
+        const raw = await engine(`(() => { const r = ${locateScript(selector)}; globalThis.__shimHeadlessTarget = r && r.count === 1 ? document.querySelector(${JSON.stringify(selector)}) : null; return r; })()`);
+        if (!isRecord(raw)) return { error: 'the page could not be read' };
+        const loc = raw as unknown as Awaited<ReturnType<InteractDeps['locate']>>;
+        if ('error' in loc || loc.count !== 1 || typeof loc.x !== 'number' || typeof loc.y !== 'number') return loc;
+        // Top frame only: a frame (or a frame inside the selected element,
+        // where the press would land) is refused before any input.
+        const frame = await engine(frameAtPointScript(loc.x, loc.y));
+        if (FRAME_TAGS.has(String(loc.tag)) || frame === true) {
+          return { ...loc, refused: `frame-unsupported: ${selector} is (or puts the press on) a frame; interact_page reaches only the top frame` };
         }
-      },
-      // Re-checked at the press, the release and every key: input never goes
-      // into a child frame (a frame that moved under the point, or a frame
-      // holding the focus).
-      async boundaryCheck(command, action) {
-        const kind = String(command.params.type ?? '');
-        // A wheel goes to whatever is under its own point: a frame there
-        // would take the scroll.
-        if (command.method === 'Input.dispatchMouseEvent' && kind === 'mouseWheel') {
-          const x = Number(command.params.x), y = Number(command.params.y);
-          if ((await engine(frameAtPointScript(x, y)).catch(() => true)) === true) {
-            return 'frame-unsupported: the scroll would land on a frame — the rest was not sent';
-          }
-          return null;
-        }
-        if (command.method === 'Input.dispatchMouseEvent' && (kind === 'mousePressed' || kind === 'mouseReleased')) {
-          if (!point) return null;
-          if ((await engine(frameAtPointScript(point.x, point.y)).catch(() => true)) === true) {
-            return 'frame-unsupported: the press would land on a frame — the rest was not sent';
-          }
-          // Still the located element under the point: a hover menu or a
-          // layout shift since locating must not take the click.
-          const hit = await engine(targetAtPointScript(point.x, point.y)).catch(() => null);
-          return hit === true ? null : `the press would land on ${typeof hit === 'string' ? hit : 'something else'}, not the target (an overlay or a layout shift moved in) — the rest was not sent`;
-        }
-        if (command.method === 'Input.dispatchKeyEvent' || command.method === 'Input.insertText') {
-          if ((await engine(FOCUS_IN_FRAME_SCRIPT).catch(() => true)) === true) {
-            return 'frame-unsupported: the focus is inside a frame — keys and text reach only the top frame';
-          }
-          // Typing (its clear and its text) goes to the located field and
-          // nowhere else: a focus handler that moved focus stops it.
-          if ('type' in action && (await engine(FOCUS_ON_TARGET_SCRIPT).catch(() => false)) !== true) {
-            return 'the focus moved off the target before the text went out — the rest was not sent';
-          }
+        point = { x: loc.x, y: loc.y };
+        return loc;
+      } catch (e) {
+        return { error: e instanceof Error ? e.message : 'the page could not be read' };
+      }
+    },
+    // Re-checked at the press, the release and every key: input never goes
+    // into a child frame (a frame that moved under the point, or a frame
+    // holding the focus).
+    async boundaryCheck(command, action) {
+      const kind = String(command.params.type ?? '');
+      // A wheel goes to whatever is under its own point: a frame there
+      // would take the scroll.
+      if (command.method === 'Input.dispatchMouseEvent' && kind === 'mouseWheel') {
+        const x = Number(command.params.x), y = Number(command.params.y);
+        if ((await engine(frameAtPointScript(x, y)).catch(() => true)) === true) {
+          return 'frame-unsupported: the scroll would land on a frame — the rest was not sent';
         }
         return null;
-      },
-      async selectValue(_selector, value) {
-        try {
-          // The element located (and checked visible, uncovered) for this
-          // action, never a fresh match; one that left the page — replaced,
-          // or gone with a reload — is refused.
-          const pinnedToken = token;
-          token = await host.documentToken();
-          if (token !== pinnedToken) return { error: 'the page changed before the option was set' };
-          const out = await engine(rememberedSelectScript(value));
-          if (isRecord(out) && out.ok === true) return { ok: true };
-          return { error: isRecord(out) && typeof out.error === 'string' ? out.error : 'the option could not be set' };
-        } catch (e) {
-          return { error: e instanceof Error ? e.message : 'the option could not be set' };
-        }
-      },
-      async dispatch(commands, pin) {
-        // The document is read afresh before every command: a reload to the
-        // same URL between two commands changes only the token, and the
-        // rest of the action must not reach the new document.
-        const result = await send(commands, async (i) => {
-          token = await host.documentToken();
-          return pin.before(i);
-        });
-        if (result.outcome === 'done') return true;
-        if (result.outcome === 'stopped') {
-          const why = pin.reason();
-          return why ? { stopped: why } : false;
-        }
-        if (result.sent === 0) throw new Error(result.error);
-        return { stopped: `interaction-unavailable: ${result.error} — the rest of the action's input was not sent` };
-      },
-      async viewport() {
-        const raw = await engine('({ width: window.innerWidth, height: window.innerHeight, scrollY: window.scrollY })').catch(() => null);
-        if (!isRecord(raw) || typeof raw.width !== 'number' || typeof raw.height !== 'number' || typeof raw.scrollY !== 'number') return null;
-        return { width: raw.width, height: raw.height, scrollY: raw.scrollY };
-      },
-      wait: (ms) => sleep(ms),
-      async startObserving() { await engine(OBSERVE_START_SCRIPT); },
-      async readObserved() {
-        const n = await engine(OBSERVE_READ_SCRIPT);
-        return typeof n === 'number' ? n : null;
-      },
-      consoleErrorsSince: (ts) => handle.console.ring()
-        .filter((e) => e.ts >= ts && e.level === 'error')
-        .map((e) => e.message.slice(0, 300)),
-      linkCursor: () => popups.length,
-      linksSince: (cursor) => popups.slice(cursor),
-      scope: 'page',
-      now: () => now(),
-      mac: process.platform === 'darwin',
-    };
-    try {
-      return await runInteract(input, deps, { scroll: true });
-    } finally {
-      offPopup();
-    }
-  }
-
-  // navigate, headless: load a page of the start origin (runNavigate checked
-  // it), then — when it landed on the session's site — re-apply the live
-  // previews on the new document, as reload_page does.
-  async function navigatePage(handle: HeadlessHandle, url: string, signal: AbortSignal): Promise<NavigateLoad> {
-    if (handle.host.isClosed()) return { ok: false, url: '', offSite: null, reapplied: 0, error: 'the session\'s page closed' };
-    // A fragment on the page already shown: no new document and no load
-    // event; the previews stay live. Wait for the URL instead.
-    if (isSameDocumentNavigation(handle.host.url(), url)) {
-      handle.host.reload(url);
-      const deadline = now() + 5000;
-      while (now() < deadline && handle.host.url() !== url && !signal.aborted && !handle.host.isClosed()) await sleep(50);
-      if (handle.host.url() !== url) return { ok: false, url: handle.host.url(), offSite: pageAway(handle), reapplied: 0, error: 'the page did not move to the fragment' };
-      const away = pageAway(handle);
-      // The document survived the fragment move, but it may not be the one
-      // the previews were last applied to (a full load since): put them back.
-      let reapplied = 0;
-      if (!away && !(await onMarkedDocument(handle))) {
-        for (const p of handle.live.values()) { apply(handle, p); reapplied++; }
-        await markDocument(handle);
-        if (reapplied > 0) await settle(signal);
-        if (signal.aborted) return { ok: false, url: handle.host.url(), offSite: null, reapplied, error: 'session ended during the navigation' };
-        if (handle.host.isClosed()) return { ok: false, url: '', offSite: null, reapplied, error: 'the page closed during the navigation' };
       }
-      // The final state decides what is reported: the page may have left the
-      // site, or loaded another document, while the restore settled.
-      const finalAway = pageAway(handle);
-      const survived = !finalAway && (reapplied === 0 || await onMarkedDocument(handle));
-      return { ok: true, url: handle.host.url(), offSite: finalAway, reapplied, sameDocument: survived };
-    }
-    const loaded = handle.host.waitForLoad({ signal, timeoutMs: RELOAD_LOAD_TIMEOUT_MS, failures: 'main-frame' });
-    handle.host.reload(url);
-    const outcome = await loaded;
-    if (signal.aborted) return { ok: false, url: handle.host.url(), offSite: null, reapplied: 0, error: 'session ended during the navigation' };
-    if (handle.host.isClosed()) return { ok: false, url: '', offSite: null, reapplied: 0, error: 'the page closed during the navigation' };
-    if (outcome.kind !== 'finished') {
-      return { ok: false, url: handle.host.url(), offSite: pageAway(handle), reapplied: 0, error: `the page did not finish loading (${describeLoadOutcome(outcome)})` };
-    }
-    const landed = pageAway(handle);
-    if (landed) return { ok: true, url: handle.host.url(), offSite: landed, reapplied: 0 };
-    let reapplied = 0;
-    for (const p of handle.live.values()) {
-      apply(handle, p);
-      reapplied++;
-    }
-    await markDocument(handle);
-    await settle(signal);
-    if (signal.aborted) return { ok: false, url: handle.host.url(), offSite: null, reapplied, error: 'session ended during the navigation' };
-    // Where the page is after the settle decides what is reported: it may
-    // have moved off the site meanwhile (the live set waits for it).
-    return { ok: true, url: handle.host.url(), offSite: pageAway(handle), reapplied };
-  }
-
-  // reload_page: in place on the session's site, or back to the session's
-  // start URL — never a destination the agent named. The reload wipes every
-  // preview; the session re-applies them all (headless has no installed shim
-  // to re-boot the committed rules).
-  async function reloadPage(handle: HeadlessHandle, signal: AbortSignal): Promise<Record<string, unknown>> {
-    if (handle.host.isClosed()) return { error: 'the session\'s page closed' };
-    if (handle.reloads >= MAX_RELOADS_PER_SESSION) {
-      return {
-        error: `reload limit (${MAX_RELOADS_PER_SESSION} per session) reached — do not keep reloading. ` +
-          'Summarize what is applied, what is broken, and what the user should check.',
-      };
-    }
-    handle.reloads += 1;
-    const away = pageAway(handle);
-    // Only the document's own load decides: a broken iframe must not end the
-    // wait while the main navigation is still arriving (it would wipe the
-    // previews re-applied below).
-    const loaded = handle.host.waitForLoad({ signal, timeoutMs: RELOAD_LOAD_TIMEOUT_MS, failures: 'main-frame' });
-    if (away) handle.host.reload(handle.startUrl);
-    else handle.host.reload();
-    const outcome = await loaded;
-    if (signal.aborted) return { error: 'session ended during reload' };
-    if (handle.host.isClosed()) return { error: 'the page closed during reload' };
-    if (outcome.kind !== 'finished') {
-      // No document to re-apply onto (or one still arriving): report it, and
-      // keep the live set so the next successful reload restores it.
-      return { error: `the reload did not finish (${describeLoadOutcome(outcome)}) — no previews were re-applied`, url: handle.host.url() };
-    }
-    // Where the load ended decides, not where it was sent: a reload, or the
-    // way back to the start URL, can redirect off the session's site (a
-    // sign-in host, another local port). Nothing of the shim runs there; the
-    // live set is kept for the next document on the site.
-    const landed = pageAway(handle);
-    if (landed) return { ...landed, url: handle.host.url() };
-    let reapplied = 0;
-    for (const p of handle.live.values()) {
-      apply(handle, p);
-      reapplied++;
-    }
-    await markDocument(handle);
-    // Settle after re-applying: the host applies asynchronously, so the
-    // agent's next view_page must not race the previews it was told are live.
-    await settle(signal);
-    if (signal.aborted) return { error: 'session ended during reload' };
-    if (handle.host.isClosed()) return { error: 'the page closed during reload' };
-    return { ok: true, url: handle.host.url(), reapplied };
-  }
-
-  // --- commit ----------------------------------------------------------------
-
-  async function commit(handle: HeadlessHandle, req: { revision: number; summary: string; signal: AbortSignal }): Promise<BackendCommit> {
-    // The deploy baseline is read from the page, so the page must still be
-    // on the session's site: another host's deploy id would stamp the .shim
-    // with a baseline its rules never match (rebase / quarantine in Shim).
-    // A closed page has no document to read: the last baseline stands.
-    const away = pageAway(handle);
-    if (away && away.error === 'page-away') return { ok: false, error: away.error, detail: away.detail };
-    // The deploy id is only worth recording from the document the rules
-    // last ran on (marked when the live set was applied there): a document
-    // loaded since — possibly another deploy — never reconciled them, so
-    // its id would vouch for anchors nobody checked against it.
-    const reconciled = !away && await onMarkedDocument(handle);
-    const deployId = reconciled ? await currentDeployId(handle) : null;
-    const version = handle.version + 1;
-    // A rule left broken on this deploy (a recovery nothing applied, or a
-    // quarantine) still has its dead anchor: stamping this deploy would hide
-    // the deploy from Shim — a transient no-match instead of its recovery /
-    // quarantine path, for good — so the committed baseline stands.
-    const bundleHash = brokenRules(handle).length ? handle.bundleHash : (deployId ?? handle.bundleHash);
-    const notes: string[] = [];
-    if (!away && !reconciled) {
-      notes.push('the page loaded a new document since the rules last ran on it, so this commit kept the committed deploy baseline ' +
-        '(the rules were not checked against that document). Preview again, then commit, to record the page\'s deploy');
-    }
-    const spec = clone(handle.working) as Spec & Record<string, unknown>;
-    const hostsNow = (spec.match?.hosts ?? []).filter((h) => typeof h === 'string');
-    const widened = widenedPatterns(handle.committedHosts, hostsNow);
-    // The preview's cap, again against the committed baseline.
-    if (widened.length > MAX_NEW_MATCH_PATTERNS) {
-      return { ok: false, error: 'not-editable', detail: `"match.hosts" would run the shim on ${widened.length} new host patterns; one commit can add at most ${MAX_NEW_MATCH_PATTERNS}` };
-    }
-    delete spec.version;
-    delete spec.bundleHash;
-    let files;
-    try {
-      files = checkoutShim({ spec, handlers: handle.storedHandlers });
-    } catch (e) {
-      if (e instanceof ShimFolderError) return { ok: false, error: e.code, detail: e.problems.join('; ') };
-      throw e;
-    }
-    const history = Array.isArray(handle.envelope.authoringHistory) ? [...(handle.envelope.authoringHistory as unknown[])] : [];
-    history.push(
-      { role: 'user', content: handle.intent.trim() || 'Work on this through an external session.', external: true, agent: handle.agent },
-      { role: 'assistant', content: req.summary.trim() || 'Committed changes from an external session.', external: true, agent: handle.agent, versionId: version },
-    );
-    const state: ShimState = {
-      format: SHIM_STATE_FORMAT,
-      name: handle.source.name,
-      version,
-      ...(bundleHash ? { bundleHash } : {}),
-      // No prototype: a rule id may be "__proto__", which a plain object's
-      // assignment would swallow (and drop that rule's witness).
-      rules: nameMap<RuleState>(),
-      file: { ...handle.envelope, authoringHistory: history },
-    };
-    const setWitnesses = nameMap<SetWitnessState>();
-    for (const rule of spec.rules || []) {
-      if (rule.anchor?.witness) state.rules[rule.id] = { anchorDigest: anchorDigest(rule.anchor), witness: rule.anchor.witness };
-      if (rule.anchor?.setWitness) setWitnesses[rule.id] = { anchorDigest: anchorDigest(rule.anchor), setWitness: rule.anchor.setWitness };
-    }
-    if (Object.keys(setWitnesses).length) state.setWitnesses = setWitnesses;
-    let file: ShimFile;
-    try {
-      file = packShim({ ...files, [SHIM_STATE_FILE]: JSON.stringify(state) });
-    } catch (e) {
-      if (e instanceof ShimFolderError) return { ok: false, error: e.code, detail: e.problems.join('; ') };
-      throw e;
-    }
-    // The last moment the session can still refuse: after this the commit
-    // happened (registry.ts SessionBackend.commit).
-    if (req.signal.aborted) return { ok: false, error: 'session-ended' };
-    try {
-      writeShimFile(handle.source.shimFile, `${JSON.stringify(file, null, 2)}\n`);
-    } catch (e) {
-      return { ok: false, error: 'commit-failed', detail: `could not write ${handle.source.shimFile}: ${errMessage(e)}` };
-    }
-    if (widened.length) {
-      notes.push(`this commit runs the shim on new sites: ${widened.join(', ')}. Nobody approved them here — ` +
-        'tell the user; Shim lists every site when they import the file');
-    }
-    const matchChanged = JSON.stringify(hostsNow) !== JSON.stringify(handle.committedHosts);
-    const untried = matchChanged || handle.tried.size > 0 ? untriedMatchNote(hostsNow, handle.tried) : null;
-    if (untried) notes.push(untried);
-    handle.committedHosts = hostsNow;
-    handle.version = version;
-    handle.bundleHash = bundleHash;
-    handle.committedAnchors = committedAnchorsOf(spec.rules, false);
-    handle.envelope = { ...handle.envelope, authoringHistory: history };
-    handle.storedHandlers = { ...file.handlers };
-    handle.source = { ...handle.source, created: false };
-    return { ok: true, versionId: version, ...(notes.length ? { notes } : {}) };
-  }
-
-  return {
-    async begin({ sessionId, target, agent, intent, signal }) {
-      if (!isRecord(target) || !isRecord(target.page) || !isRecord(target.source)) {
-        throw new Error('a headless session needs its page and its shim');
-      }
-      const { page, source } = target as unknown as HeadlessTarget;
-      const host = page.host;
-      const startUrl = host.url();
-      const handle: HeadlessHandle = {
-        sessionId,
-        agent,
-        intent,
-        source,
-        page,
-        host,
-        startUrl,
-        startHost: hostnameOf(startUrl),
-        startPort: portOf(startUrl),
-        working: clone(source.spec),
-        storedHandlers: { ...source.handlers },
-        committedHosts: (source.spec.match?.hosts ?? []).filter((h) => typeof h === 'string'),
-        tried: new Set<string>(),
-        version: typeof source.spec.version === 'number' ? source.spec.version : 1,
-        bundleHash: typeof source.spec.bundleHash === 'string' ? source.spec.bundleHash : undefined,
-        committedAnchors: committedAnchorsOf(source.spec.rules, true),
-        envelope: { ...source.envelope },
-        live: new Map(),
-        captures: new Map(),
-        applies: 0,
-        broken: new Map(),
-        unreportedBroken: [],
-        events: [],
-        console: createConsoleFeed(),
-        unsupported: new Map(),
-        unreported: [],
-        reloads: 0,
-        off: [],
-        docToken: null,
-        docTokens: 0,
-        navigation: { scope: navigationScopeOf(startUrl), used: 0 },
-      };
-      handle.off.push(host.onRuntimeEvent((event) => {
-        handle.events.push({ at: now(), event });
-        if (handle.events.length > EVENT_CAP) handle.events.splice(0, handle.events.length - EVENT_CAP);
-        if (event.kind === 'rule-witness') takeWitness(handle, event);
-        else noteOutcome(handle, event);
-        if (event.kind === UNSUPPORTED_API_EVENT && typeof event.specId === 'string' && typeof event.member === 'string') {
-          const live = handle.live.get(event.specId);
-          // Only the live version's own calls count: a replaced version's
-          // handler that resumes later (its applyId stamped on the event)
-          // must not mark the replacement partial, as the evidence's other
-          // event filters already hold.
-          if (!live || (typeof event.applyId === 'string' && event.applyId !== live.applyId)) return;
-          let members = handle.unsupported.get(event.specId);
-          if (!members) {
-            members = new Set();
-            handle.unsupported.set(event.specId, members);
-          }
-          if (!members.has(event.member) && live) handle.unreported.push({ ruleId: live.rule.id, member: event.member });
-          members.add(event.member);
+      if (command.method === 'Input.dispatchMouseEvent' && (kind === 'mousePressed' || kind === 'mouseReleased')) {
+        if (!point) return null;
+        if ((await engine(frameAtPointScript(point.x, point.y)).catch(() => true)) === true) {
+          return 'frame-unsupported: the press would land on a frame — the rest was not sent';
         }
-      }));
-      handle.off.push(host.onConsole((m) => handle.console.push({ level: m.level, message: m.message, source: m.source, ts: now(), ...(m.frame ? { frame: m.frame } : {}), ...(m.hostLike ? { hostLike: true } : {}), ...(m.engineWorld ? { engineWorld: true } : {}) })));
-      // Headless has no installed shims: the committed rules run as previews.
-      for (const rule of handle.working.rules || []) apply(handle, previewFor(handle, rule));
-      await markDocument(handle);
-      // The host applies asynchronously: settle (as preview and reload do) so
-      // the agent's first view_page sees the committed shim, not the bare page.
-      if (handle.live.size > 0) await settle(signal);
-      freezeCaptures(handle, handle.live.keys());
-      return handle;
+        // Still the located element under the point: a hover menu or a
+        // layout shift since locating must not take the click.
+        const hit = await engine(targetAtPointScript(point.x, point.y)).catch(() => null);
+        return hit === true ? null : `the press would land on ${typeof hit === 'string' ? hit : 'something else'}, not the target (an overlay or a layout shift moved in) — the rest was not sent`;
+      }
+      if (command.method === 'Input.dispatchKeyEvent' || command.method === 'Input.insertText') {
+        if ((await engine(FOCUS_IN_FRAME_SCRIPT).catch(() => true)) === true) {
+          return 'frame-unsupported: the focus is inside a frame — keys and text reach only the top frame';
+        }
+        // Typing (its clear and its text) goes to the located field and
+        // nowhere else: a focus handler that moved focus stops it.
+        if ('type' in action && (await engine(FOCUS_ON_TARGET_SCRIPT).catch(() => false)) !== true) {
+          return 'the focus moved off the target before the text went out — the rest was not sent';
+        }
+      }
+      return null;
     },
-    async checkout(handle): Promise<BackendCheckout> {
+    async selectValue(_selector, value) {
       try {
-        return { ok: true, files: encodeWorkingCopy(checkoutShim({ spec: handle.working, handlers: handle.storedHandlers })) };
+        // The element located (and checked visible, uncovered) for this
+        // action, never a fresh match; one that left the page — replaced,
+        // or gone with a reload — is refused.
+        const pinnedToken = token;
+        token = await host.documentToken();
+        if (token !== pinnedToken) return { error: 'the page changed before the option was set' };
+        const out = await engine(rememberedSelectScript(value));
+        if (isRecord(out) && out.ok === true) return { ok: true };
+        return { error: isRecord(out) && typeof out.error === 'string' ? out.error : 'the option could not be set' };
       } catch (e) {
-        if (e instanceof ShimFolderError) return { ok: false, error: e.code, detail: e.problems.join('; ') };
-        throw e;
+        return { error: e instanceof Error ? e.message : 'the option could not be set' };
       }
     },
-    preview,
-    call,
-    commit,
-    async finish(handle: HeadlessHandle, _info: FinishInfo) {
-      for (const off of handle.off) off();
-      for (const key of [...handle.live.keys()]) {
-        try { handle.host.removePreview(key); } catch { /* page gone */ }
+    async dispatch(commands, pin) {
+      // The document is read afresh before every command: a reload to the
+      // same URL between two commands changes only the token, and the
+      // rest of the action must not reach the new document.
+      const result = await send(commands, async (i) => {
+        token = await host.documentToken();
+        return pin.before(i);
+      });
+      if (result.outcome === 'done') return true;
+      if (result.outcome === 'stopped') {
+        const why = pin.reason();
+        return why ? { stopped: why } : false;
       }
-      handle.live.clear();
-      try {
-        await handle.page.close();
-      } catch {
-        /* already closed */
-      }
+      if (result.sent === 0) throw new Error(result.error);
+      return { stopped: `interaction-unavailable: ${result.error} — the rest of the action's input was not sent` };
     },
+    async viewport() {
+      const raw = await engine('({ width: window.innerWidth, height: window.innerHeight, scrollY: window.scrollY })').catch(() => null);
+      if (!isRecord(raw) || typeof raw.width !== 'number' || typeof raw.height !== 'number' || typeof raw.scrollY !== 'number') return null;
+      return { width: raw.width, height: raw.height, scrollY: raw.scrollY };
+    },
+    wait: (ms) => clock.sleep(ms),
+    async startObserving() { await engine(OBSERVE_START_SCRIPT); },
+    async readObserved() {
+      const n = await engine(OBSERVE_READ_SCRIPT);
+      return typeof n === 'number' ? n : null;
+    },
+    consoleErrorsSince: (ts) => handle.console.ring()
+      .filter((e) => e.ts >= ts && e.level === 'error')
+      .map((e) => e.message.slice(0, 300)),
+    linkCursor: () => popups.length,
+    linksSince: (cursor) => popups.slice(cursor),
+    scope: 'page',
+    now: () => clock.now(),
+    mac: process.platform === 'darwin',
   };
+  try {
+    return await runInteract(input, deps, { scroll: true });
+  } finally {
+    offPopup();
+  }
 }
+

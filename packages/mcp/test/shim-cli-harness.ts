@@ -113,6 +113,8 @@ interface Rig {
   storages: HeadlessStorage[];
   launches: Array<{ timeoutMs?: number }>;
   mcp: string[][];
+  bridges: number;
+  home: string;
   launchOutcome: LaunchOutcome;
   onApply: OnApply;
   // When set, the fake page's screenshot throws this instead of writing.
@@ -128,6 +130,8 @@ function rig(): Rig {
     storages: [],
     launches: [],
     mcp: [],
+    bridges: 0,
+    home: fs.mkdtempSync(path.join(tmp, 'home-')),
     launchOutcome: { ok: false, error: 'launch-unavailable', detail: 'no way to start Shim' },
     onApply: matchOne,
     shotError: null,
@@ -143,6 +147,23 @@ function rig(): Rig {
       return page;
     },
     async runMcp(argv) { r.mcp.push(argv); },
+    async runBridge() { r.bridges += 1; return 0; },
+    extension: {
+      platform: 'darwin',
+      homedir: r.home,
+      env: {},
+      nodePath: '/opt/node/bin/node',
+      bundlePath: '/opt/shim/dist/shim.js',
+      bridgeDir: path.join(r.home, 'ud', 'bridge'),
+      discoveryPath: path.join(r.home, 'ud', 'control-chrome.json'),
+      isAlive: () => true,
+      fs: {
+        exists: (p) => fs.existsSync(p),
+        mkdir: (p) => { fs.mkdirSync(p, { recursive: true }); },
+        write: (p, text, mode) => { fs.writeFileSync(p, text, { mode }); },
+        read: (p) => { try { return fs.readFileSync(p, 'utf8'); } catch { return null; } },
+      },
+    },
     previewSettleMs: 5,
   };
   return r;
@@ -417,6 +438,32 @@ async function main(): Promise<void> {
     check('anything else exits 2 without starting', (await cli(r, 'mcp', '--port', '1')) === EXIT_USAGE && r.mcp.length === 2);
     check('--attach passes through', (await cli(r, 'mcp', '--attach')) === EXIT_OK && JSON.stringify(r.mcp.at(-1)) === '["--attach"]');
     check('--attach with --headless exits 2 without starting', (await cli(r, 'mcp', '--attach', '--headless')) === EXIT_USAGE && r.mcp.length === 3);
+    check('--target shim|chrome passes through', (await cli(r, 'mcp', '--target', 'chrome')) === EXIT_OK && JSON.stringify(r.mcp.at(-1)) === '["--target","chrome"]');
+    check('a bad --target exits 2', (await cli(r, 'mcp', '--target', 'edge')) === EXIT_USAGE);
+  }
+
+  console.log('bridge and extension');
+  {
+    const r = rig();
+    check('bridge runs the host', (await cli(r, 'bridge', 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/')) === EXIT_OK && r.bridges === 1);
+    check('bridge with a stray argument is a usage error', (await cli(r, 'bridge', 'now')) === EXIT_USAGE && r.bridges === 1);
+    const id = 'abcdefghijklmnopabcdefghijklmnop';
+    check('install-host needs the id', (await cli(r, 'extension', 'install-host')) === EXIT_USAGE);
+    check('…a valid one', (await cli(r, 'extension', 'install-host', '--extension-id', 'nope')) === EXIT_USAGE);
+    const chrome = path.join(r.home, 'Library', 'Application Support', 'Google', 'Chrome');
+    fs.mkdirSync(chrome, { recursive: true });
+    check('install-host writes the wrapper and a manifest for the browser that is there', (await cli(r, 'extension', 'install-host', '--extension-id', id)) === EXIT_OK
+      && fs.existsSync(path.join(r.home, 'ud', 'bridge', 'shim-bridge'))
+      && fs.readFileSync(path.join(chrome, 'NativeMessagingHosts', 'com.shimbrowser.bridge.json'), 'utf8').includes(id)
+      && r.out.some((l) => /Chromium: not found/.test(l)) && r.out.some((l) => /let Claude Code author here/.test(l)), r.out.join('\n'));
+    check('the wrapper execs the Node and bundle the context named', fs.readFileSync(path.join(r.home, 'ud', 'bridge', 'shim-bridge'), 'utf8').includes(`'/opt/node/bin/node' '/opt/shim/dist/shim.js' bridge`));
+    check('--json reports the files', (await cli(r, 'extension', 'install-host', '--extension-id', id, '--json')) === EXIT_OK && (JSON.parse(r.out[0] ?? '{}') as { manifests: unknown[] }).manifests.length === 1);
+    const custom = path.join(r.home, 'profile');
+    check('--user-data-dir installs for one directory', (await cli(r, 'extension', 'install-host', '--extension-id', id, '--user-data-dir', custom)) === EXIT_OK && fs.existsSync(path.join(custom, 'NativeMessagingHosts', 'com.shimbrowser.bridge.json')));
+    check('status reports the wrapper, the manifests and no bridge', (await cli(r, 'extension', 'status')) === EXIT_OK && r.out.some((l) => /wrapper: .*present/.test(l)) && r.out.some((l) => new RegExp(`Chrome: .*allows ${id}`).test(l)) && r.out.some((l) => /bridge: not running/.test(l)), r.out.join('\n'));
+    fs.writeFileSync(path.join(r.home, 'ud', 'control-chrome.json'), JSON.stringify({ format: 'shim-control/1', host: 'chrome-extension', socketPath: '/s', token: 't', pid: 4242, appVersion: '0.7.0', startedAt: 1 }));
+    check('status sees a bridge whose discovery file names a live process', (await cli(r, 'extension', 'status', '--json')) === EXIT_OK && (JSON.parse(r.out[0] ?? '{}') as { bridge: { up: boolean; pid: number } }).bridge.pid === 4242);
+    check('an unknown subcommand is a usage error', (await cli(r, 'extension', 'frobnicate')) === EXIT_USAGE);
   }
 
   console.log('preview');

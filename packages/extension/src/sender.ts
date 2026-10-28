@@ -37,7 +37,10 @@ export function senderContext(sender: SenderLike | undefined, extensionId: strin
 }
 
 /** Message types the extension's own pages may send. */
-export const PAGE_MESSAGES: ReadonlySet<string> = new Set(['mode', 'shims.list', 'shims.setEnabled', 'shims.uninstall', 'shims.export', 'shims.versions', 'shims.restore', 'install.commit']);
+export const PAGE_MESSAGES: ReadonlySet<string> = new Set([
+  'mode', 'shims.list', 'shims.setEnabled', 'shims.uninstall', 'shims.export', 'shims.versions', 'shims.restore', 'install.commit',
+  'bridge.status', 'bridge.setEnabled', 'attach.pending', 'attach.answer',
+]);
 /** Message types the page runtime may send. */
 export const CONTENT_MESSAGES: ReadonlySet<string> = new Set(['bundle', 'storage', 'event']);
 

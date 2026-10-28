@@ -28,6 +28,14 @@
 // bookkeeping).
 const OWN_DOM_SELECTOR = '[data-shim-mounted],[data-shim="portal-root"],[data-shim="shadow-host"],[data-shim="route-host"],[data-shim-injected]';
 
+// O(1) per node: does this node ITSELF carry one of the engine's own-DOM
+// markers? (Ancestry is the caller's walk — anchor-change.ts walks to the top
+// anyway, so it checks each step with this rather than `closest`.)
+export function hasOwnDomMarker(node: unknown): boolean {
+  const el = node as { matches?: (sel: string) => boolean };
+  return typeof el.matches === 'function' && el.matches(OWN_DOM_SELECTOR);
+}
+
 // Pure predicate: true when `el` is inside DOM the engine mounted — either
 // because it (or an ancestor) carries one of the engine's own-DOM markers,
 // or because it's contained by a registered mounted-output root (the

@@ -52,6 +52,7 @@ import type { Spec, Rule } from './types';
 import type { DeltaOp } from './spec-delta';
 import { handlerWorlds, moduleForExpression, moduleToExpression } from './handler-source';
 import { canonicalModule } from './spec-lint';
+import { ruleModules, ruleFormKey } from './rule-form';
 import { normalizeIntent } from './intent';
 import { hasManagedKeys, withoutManagedKeys, withManagedFingerprint, managedFingerprintOf } from './managed-anchor';
 import {
@@ -87,29 +88,10 @@ type DeclarationField = (typeof DECLARATION_FIELDS)[number];
 // sharedHandlerOps; on any other shim it's a field no op can carry.)
 const UNCOMPARED_FIELDS = new Set(['rules', 'handlers', 'version', 'bundleHash', 'priority', '__cssPriority']);
 
-// One rule's handler modules as the previous state stored them: its own
-// inline source wins, then the stored map.
-function previousModules(rule: Rule, stored: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = Object.create(null) as Record<string, string>;
-  for (const name of referencedHandlerNames(rule)) {
-    const source = Object.prototype.hasOwnProperty.call(stored, name) ? stored[name] : undefined;
-    if (typeof source === 'string') out[name] = source;
-  }
-  for (const [name, source] of Object.entries(rule.handlers || {})) {
-    if (typeof source === 'string') out[name] = moduleForExpression(source);
-  }
-  return out;
-}
-
-// Rule identity for "did it change": everything authored, engine-managed
-// fingerprints dropped, handlers compared as canonical module source.
-function ruleFingerprint(rule: Rule, modules: Record<string, string>): string {
-  const { handlers: _handlers, ...rest } = rule;
-  const anchor = rest.anchor ? withoutManagedKeys(rest.anchor) : undefined;
-  const canonical: Record<string, string> = Object.create(null) as Record<string, string>;
-  for (const [name, source] of Object.entries(modules)) canonical[name] = canonicalModule(source);
-  return stableStringify({ ...rest, anchor, handlers: canonical });
-}
+// One rule's handler modules and its authored identity are rule-form.ts's
+// (shared with the hosts, which stamp what they apply with the same form).
+const previousModules = ruleModules;
+const ruleFingerprint = ruleFormKey;
 
 // A declaration as applyDelta would store it: set-settings / set-permissions
 // store a missing list as `[]`, set-intent trims and caps. A malformed value

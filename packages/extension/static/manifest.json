@@ -10,7 +10,7 @@
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
   },
-  "permissions": ["scripting", "userScripts", "storage", "webNavigation", "debugger"],
+  "permissions": ["scripting", "userScripts", "storage", "webNavigation", "debugger", "nativeMessaging"],
   "optional_host_permissions": ["<all_urls>"],
   "background": { "service_worker": "sw.js" },
   "action": {

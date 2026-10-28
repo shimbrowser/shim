@@ -50,7 +50,7 @@ import { isDataToolName } from '@shimbrowser/core/data-tools';
 import { isCompositionSessionToolName } from '@shimbrowser/core/composition-session-tools';
 import { COMPOSITION_WIRE_LIMITS, SHIM_WIRE_LIMITS } from '@shimbrowser/core/working-copy-wire';
 import { staticTools, isSessionToolName, SERVER_INSTRUCTIONS, HEADLESS_SERVER_INSTRUCTIONS, AUTO_SERVER_INSTRUCTIONS, type SessionToolName } from './contract';
-import type { AttachProbe, ServerMode, SessionMode } from './modes';
+import { pickAttachHost, type AttachHost, type AttachProbe, type ServerMode, type SessionMode } from './modes';
 import type { HeadlessReadiness } from './playwright-launch';
 import { ControlTransportError, type ControlClient, type ControlReply } from './control-client';
 import type { LaunchOutcome } from './launch';
@@ -77,6 +77,15 @@ export interface ShimMcpDeps {
   // (headless-control.ts). 'auto': connect() is the Shim browser and
   // headlessControl the headless one, picked per session. Default 'attach'.
   mode?: ServerMode;
+  // Shim for Chrome's bridge (control-chrome.json), or null when there is
+  // none: the second attach host. Absent: this server knows only the browser.
+  connectChrome?(): ControlClient | null;
+  chromeControlFile?: string;
+  // Whether the bridge is there (its discovery file names a live process).
+  // Default: connectChrome() is not null.
+  probeChrome?(): AttachProbe;
+  // `--target`: the attach host every open goes to unless the call names one.
+  defaultTarget?: AttachHost;
   // auto: where headless sessions go.
   headlessControl?: ControlClient;
   // auto: whether a Shim browser is there to attach to (the discovery file
@@ -135,6 +144,8 @@ export interface CallToolResult {
 
 interface SessionState {
   mode: SessionMode;
+  // attach: the host that opened the session; every later call goes there.
+  host?: AttachHost;
   dir: string | null;
   revision: number;
   // What the session is on; null when this server didn't open it (it is
@@ -172,6 +183,8 @@ const HINTS: Record<string, string> = {
   'commit-denied': 'The user declined the commit in Shim. The session is still open.',
   'commit-timeout': 'Nobody approved the commit in Shim within two minutes. The session is still open.',
   'invalid-target': 'Use a tabId from shim_list_tabs for a tab with a site loaded.',
+  'ambiguous-target': 'Both the Shim browser and Shim for Chrome are reachable; call shim_list_tabs and pass target: "shim" or "chrome" with the tabId.',
+  'multiple-targets': 'Both the Shim browser and Shim for Chrome are reachable; pass target: "shim" or "chrome" to say which opens the url.',
   'target-changed': 'The tab went to another site (or, for a url, the page landed on another origin and Shim closed the tab); check shim_list_tabs, or open the url the page actually lives at, and open the session again.',
   'unknown-artifact': 'Use a shim id or a compositionId from shim_list_tabs, or newShimName / newCompositionName to start a new one.',
   'mount-taken': 'Another composition has that address; propose a different mount (shim_list_tabs lists the ones in use), or omit it and Shim suggests a free one.',
@@ -248,19 +261,26 @@ export function agentDisplayName(clientName: string | undefined): string {
 // a session's target needs. The agent is told one id, `tabId`, and passes it
 // to shim_open_session as the target — so it must be the webContentsId. A
 // tab whose page is gone (no webContentsId) can't be targeted and is left out.
-export function agentTabs(body: Record<string, unknown>): Record<string, unknown> {
+export function agentTabs(body: Record<string, unknown>, host?: AttachHost): Record<string, unknown> {
   if (!Array.isArray(body.windows)) return body;
   const windows = (body.windows as unknown[]).map((w) => {
     if (!isRecord(w) || !Array.isArray(w.tabs)) return w;
     const tabs = (w.tabs as unknown[]).flatMap((t) => {
       if (!isRecord(t)) return [];
       const { webContentsId, tabId: _shimTabId, ...rest } = t;
-      return typeof webContentsId === 'number' ? [{ tabId: webContentsId, ...rest }] : [];
+      return typeof webContentsId === 'number' ? [{ tabId: webContentsId, ...rest, ...(host ? { host } : {}) }] : [];
     });
-    return { ...w, tabs };
+    return { ...w, ...(host ? { host } : {}), tabs };
   });
   const { ok: _ok, ...rest } = body;
   return { ...rest, windows };
+}
+
+// The tab numbers a listing carried, for the open that follows it.
+function listedTabIds(listing: Record<string, unknown>): number[] {
+  if (!Array.isArray(listing.windows)) return [];
+  return (listing.windows as unknown[]).flatMap((w) => (isRecord(w) && Array.isArray(w.tabs) ? (w.tabs as unknown[]) : []))
+    .flatMap((t) => (isRecord(t) && typeof t.tabId === 'number' ? [t.tabId] : []));
 }
 
 function replyOrThrow(reply: ControlReply): Record<string, unknown> {
@@ -282,18 +302,36 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
   const tools = staticTools().map((t) => ({ name: t.name, description: t.description, inputSchema: t.input_schema }));
   const sessions = new Map<string, SessionState>();
   let current: string | null = null;
+  // Which attach hosts listed each tab number, as of the last shim_list_tabs:
+  // the two hosts number their tabs separately, so an open on a number both
+  // listed must say which.
+  const listedBy = new Map<number, Set<AttachHost>>();
 
   function attachProbe(): AttachProbe {
     if (deps.probeAttach) return deps.probeAttach();
     const c = deps.connect();
     return c ? { reachable: true, info: c.info } : { reachable: false, reason: `no Shim control endpoint found (looked for ${deps.controlFile})` };
   }
+  function chromeProbe(): AttachProbe {
+    if (deps.probeChrome) return deps.probeChrome();
+    const c = deps.connectChrome?.() ?? null;
+    return c ? { reachable: true, info: c.info } : { reachable: false, reason: `no Shim for Chrome bridge found (looked for ${deps.chromeControlFile ?? 'its discovery file'})` };
+  }
+  const reachable = (): Record<AttachHost, boolean> => ({ shim: attachProbe().reachable, chrome: deps.connectChrome ? chromeProbe().reachable : false });
 
-  // The endpoint a session of this mode talks to.
-  function client(via: SessionMode): ControlClient {
+  // The endpoint a session talks to: its mode, and for attach its host.
+  function client(via: SessionMode, host: AttachHost = 'shim'): ControlClient {
     if (serverMode === 'auto' && via === 'headless') {
       if (!deps.headlessControl) throw new ToolFailure('internal-error', 'auto mode was started without a headless control');
       return deps.headlessControl;
+    }
+    if (host === 'chrome') {
+      const c = deps.connectChrome?.() ?? null;
+      if (!c) {
+        const probe = chromeProbe();
+        throw new ToolFailure('shim-not-running', probe.reachable ? `the Shim for Chrome bridge did not answer (${deps.chromeControlFile ?? 'its discovery file'})` : probe.reason);
+      }
+      return c;
     }
     const c = deps.connect();
     if (!c) {
@@ -306,19 +344,21 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
     return c;
   }
 
-  // The mode a session runs in: the one it opened in. A session this server
-  // didn't open goes wherever the server would open one, and that endpoint
-  // answers unknown-session.
-  function modeOf(id: string): SessionMode {
+  // The mode (and attach host) a session runs in: the one it opened in. A
+  // session this server didn't open goes wherever the server would open one,
+  // and that endpoint answers unknown-session.
+  function endpointOf(id: string): { mode: SessionMode; host: AttachHost } {
     const known = sessions.get(id);
-    if (known) return known.mode;
-    if (serverMode === 'auto') return attachProbe().reachable ? 'attach' : 'headless';
-    return serverMode;
+    if (known) return { mode: known.mode, host: known.host ?? 'shim' };
+    const host: AttachHost = deps.defaultTarget ?? (attachProbe().reachable || !deps.connectChrome ? 'shim' : chromeProbe().reachable ? 'chrome' : 'shim');
+    if (serverMode === 'auto') return { mode: attachProbe().reachable || (deps.connectChrome && chromeProbe().reachable) ? 'attach' : 'headless', host };
+    return { mode: serverMode, host };
   }
 
-  async function control(via: SessionMode, method: string, path: string, body?: unknown, timeoutMs?: number): Promise<Record<string, unknown>> {
+  async function control(via: SessionMode | { mode: SessionMode; host: AttachHost }, method: string, path: string, body?: unknown, timeoutMs?: number): Promise<Record<string, unknown>> {
+    const at = typeof via === 'string' ? { mode: via, host: 'shim' as AttachHost } : via;
     try {
-      return replyOrThrow(await client(via).request(method, path, body, timeoutMs !== undefined ? { timeoutMs } : {}));
+      return replyOrThrow(await client(at.mode, at.host).request(method, path, body, timeoutMs !== undefined ? { timeoutMs } : {}));
     } catch (e) {
       if (e instanceof ControlTransportError) throw new ToolFailure(e.code, e.message);
       throw e;
@@ -334,7 +374,8 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
   function stateOf(id: string): SessionState {
     let s = sessions.get(id);
     if (!s) {
-      s = { mode: modeOf(id), dir: null, revision: 0, kind: null };
+      const at = endpointOf(id);
+      s = { mode: at.mode, ...(at.mode === 'attach' ? { host: at.host } : {}), dir: null, revision: 0, kind: null };
       sessions.set(id, s);
     }
     return s;
@@ -350,7 +391,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
   }
 
   async function checkout(id: string, dir: string): Promise<Record<string, unknown>> {
-    const reply = await control(modeOf(id), 'GET', sessionPath(id, 'checkout'));
+    const reply = await control(endpointOf(id), 'GET', sessionPath(id, 'checkout'));
     const state = stateOf(id);
     // Decoded under the session's own limits, known before the files are:
     // a composition may carry far more than a shim (50 MiB vs 8). A session
@@ -375,7 +416,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
   async function pageTool(id: string, name: string, input: unknown): Promise<McpContent[]> {
     // sessionId picks the session here; it is not part of Shim's tool input.
     const { sessionId: _sessionId, ...toolInput } = isRecord(input) ? input : {};
-    const reply = await control(modeOf(id), 'POST', sessionPath(id, 'call'), { name, input: toolInput });
+    const reply = await control(endpointOf(id), 'POST', sessionPath(id, 'call'), { name, input: toolInput });
     return toMcpContent(reply.result);
   }
 
@@ -383,7 +424,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
   // same way); a refusal carries its hint.
   async function apiMapTool(id: string, name: string, input: unknown): Promise<McpContent[]> {
     const { sessionId: _sessionId, ...toolInput } = isRecord(input) ? input : {};
-    const reply = await control(modeOf(id), 'POST', sessionPath(id, 'call'), { name, input: toolInput });
+    const reply = await control(endpointOf(id), 'POST', sessionPath(id, 'call'), { name, input: toolInput });
     return toMcpContent(withApiMapHint(reply.result));
   }
 
@@ -436,15 +477,38 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
     return {
       mode: 'auto',
       attach,
+      ...(deps.connectChrome ? { chrome: await chromeStatus() } : {}),
       headless: headlessOut,
-      openedHere: [...sessions].map(([sessionId, s]) => ({ sessionId, mode: s.mode })),
+      openedHere: [...sessions].map(([sessionId, s]) => ({ sessionId, mode: s.mode, ...(s.host ? { host: s.host } : {}) })),
       currentSession: current,
       next,
     };
   }
 
+  // Shim for Chrome's bridge: reachable or not and why, and its status when it answers.
+  async function chromeStatus(): Promise<Record<string, unknown>> {
+    const probe = chromeProbe();
+    if (!probe.reachable) return { available: false, reason: probe.reason, ...(deps.chromeControlFile ? { controlFile: deps.chromeControlFile } : {}) };
+    const c = deps.connectChrome?.() ?? null;
+    try {
+      if (!c) throw new ToolFailure('shim-not-running', 'no Shim for Chrome bridge found');
+      const { ok: _ok, ...body } = replyOrThrow(await c.request('GET', '/status', undefined, { timeoutMs: 5_000 }));
+      return { available: true, ...body, next: 'shim_list_tabs lists its tabs with host "chrome"; shim_open_session with such a tabId (or target "chrome") opens a session there.' };
+    } catch (e) {
+      if (!(e instanceof ControlTransportError) && !(e instanceof ToolFailure)) throw e;
+      return { available: false, reason: `Shim for Chrome (process ${probe.info.pid}) has a discovery file but its bridge did not answer: ${e.message}` };
+    }
+  }
+
   // Which mode a new session runs in, and why: never a silent switch.
-  function pickMode(requested: SessionMode | undefined, hasTab: boolean, hasUrl: boolean): { mode: SessionMode; why: string } {
+  function pickMode(requested: SessionMode | undefined, hasTab: boolean, hasUrl: boolean, target?: AttachHost): { mode: SessionMode; why: string } {
+    // A named attach host is an attach session, whatever else the call says.
+    if (target !== undefined && requested === 'headless') throw new ToolFailure('invalid-request', 'target names an attach host; it cannot go with mode "headless"');
+    // A pinned attach host — the call's target, or the server's --target —
+    // makes this an attach session, so a pinned host that is down refuses
+    // (pickAttachHost) rather than silently falling back to headless.
+    const effectiveTarget = target ?? deps.defaultTarget;
+    if (effectiveTarget !== undefined && requested === undefined && serverMode !== 'headless') requested = 'attach';
     if (serverMode === 'headless') {
       if (requested === 'attach') {
         throw new ToolFailure('requires-shim-browser', 'this server runs headless only (--headless or SHIM_MCP_MODE=headless): there is no Shim browser to attach to');
@@ -456,34 +520,61 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       return { mode: 'attach', why: 'a tab in the Shim browser, with the user\'s logins; commits go to Shim\'s library' };
     }
     if (requested === 'attach' || (requested === undefined && hasTab)) {
-      return { mode: 'attach', why: 'a tab in the Shim browser, with the user\'s logins; commits go to Shim\'s library' };
+      // With two hosts the host suffix (pickAttachHost) names which; with
+      // one, name the Shim browser.
+      return { mode: 'attach', why: deps.connectChrome ? 'a tab in an attach host, with the user\'s logins; commits go to the host\'s library' : 'a tab in the Shim browser, with the user\'s logins; commits go to Shim\'s library' };
     }
     if (requested === 'headless') return { mode: 'headless', why: 'headless as asked: a fresh Chromium with no logins; commits write the .shim file' };
-    if (!hasUrl) throw new ToolFailure('invalid-request', 'pass tabId (a tab in the Shim browser, from shim_list_tabs) or url (a page to open)');
-    const probe = attachProbe();
-    if (probe.reachable) {
-      return { mode: 'attach', why: `the Shim browser is running (process ${probe.info.pid}): a new Shim tab at the url, once the user allows it, with their logins; commits go to Shim's library` };
+    if (!hasUrl) throw new ToolFailure('invalid-request', 'pass tabId (a tab from shim_list_tabs) or url (a page to open)');
+    // A url in auto mode attaches when an attach host is reachable. With no
+    // Chrome bridge configured, that is the Shim browser (the original
+    // wording). With both, the effective target (the call's, else the
+    // server's) pins which, so with only that host up attach is still chosen.
+    if (!deps.connectChrome) {
+      const probe = attachProbe();
+      if (probe.reachable) {
+        return { mode: 'attach', why: `the Shim browser is running (process ${probe.info.pid}): a new Shim tab at the url, once the user allows it, with their logins; commits go to Shim's library` };
+      }
+      return { mode: 'headless', why: `${probe.reason}, so this session runs headless: a fresh Chromium with no logins; commits write the .shim file` };
     }
-    return { mode: 'headless', why: `${probe.reason}, so this session runs headless: a fresh Chromium with no logins; commits write the .shim file` };
+    const up = reachable();
+    const pinned = target ?? deps.defaultTarget;
+    const attachUp = pinned === 'shim' ? up.shim : pinned === 'chrome' ? up.chrome : up.shim || up.chrome;
+    if (attachUp) {
+      return { mode: 'attach', why: 'an attach host is running: a new tab at the url, once the user allows it, with their logins; commits go to the host\'s library' };
+    }
+    const reason = pinned === 'chrome' ? 'Shim for Chrome is not reachable' : pinned === 'shim' ? 'the Shim browser is not reachable' : 'no attach host is reachable';
+    return { mode: 'headless', why: `${reason}, so this session runs headless: a fresh Chromium with no logins; commits write the .shim file` };
   }
 
   async function runSessionTool(name: SessionToolName, input: Record<string, unknown>): Promise<McpContent[]> {
     switch (name) {
       case 'shim_status': {
         if (serverMode === 'auto') return [text(await autoStatus())];
-        const c = deps.connect();
-        if (!c) {
-          return [text({ running: false, controlFile: deps.controlFile, hint: 'Shim is not running with its control endpoint on. Call shim_launch, or turn the endpoint on in Shim\'s Settings.' })];
-        }
-        try {
-          const body = replyOrThrow(await c.request('GET', '/status', undefined, { timeoutMs: 5_000 }));
-          return [text({ running: true, ...body, openedHere: [...sessions.keys()], currentSession: current })];
-        } catch (e) {
-          if (e instanceof ControlTransportError) {
-            return [text({ running: false, controlFile: deps.controlFile, detail: e.message, hint: 'Call shim_launch.' })];
+        // Attach mode. With the Chrome bridge host configured, report both
+        // attach hosts (the Shim browser and Shim for Chrome), so a session
+        // can use Chrome when the Shim browser is absent.
+        const shimStatus = async (): Promise<Record<string, unknown>> => {
+          const c = deps.connect();
+          if (!c) return { available: false, controlFile: deps.controlFile, hint: 'The Shim browser is not running with its control endpoint on. Call shim_launch, or turn the endpoint on in its Settings.' };
+          try {
+            const body = replyOrThrow(await c.request('GET', '/status', undefined, { timeoutMs: 5_000 }));
+            return { available: true, ...body };
+          } catch (e) {
+            if (e instanceof ControlTransportError) return { available: false, controlFile: deps.controlFile, detail: e.message, hint: 'Call shim_launch.' };
+            throw e;
           }
-          throw e;
+        };
+        if (deps.connectChrome) {
+          const shim = await shimStatus();
+          const chrome = await chromeStatus();
+          const anyUp = shim.available === true || chrome.available === true;
+          return [text({ mode: 'attach', ...(deps.defaultTarget ? { defaultTarget: deps.defaultTarget } : {}), running: anyUp, attach: shim, chrome, openedHere: [...sessions].map(([sessionId, st]) => ({ sessionId, ...(st.host ? { host: st.host } : {}) })), currentSession: current })];
         }
+        const shim = await shimStatus();
+        if (shim.available !== true) return [text({ running: false, ...shim })];
+        const { available: _a, ...body } = shim;
+        return [text({ running: true, ...body, openedHere: [...sessions.keys()], currentSession: current })];
       }
       case 'shim_launch': {
         if (serverMode === 'headless') {
@@ -494,8 +585,33 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         if (!outcome.ok) throw new ToolFailure(outcome.error, outcome.detail);
         return [text({ ok: true, how: outcome.how, detail: outcome.detail, version: outcome.info.appVersion })];
       }
-      case 'shim_list_tabs':
-        return [text(agentTabs(await control('attach', 'GET', '/tabs')))];
+      case 'shim_list_tabs': {
+        // Every attach host that is there, each tab marked with its host;
+        // a host that is not reachable is left out, not an error, unless
+        // none is.
+        const up = reachable();
+        if (!up.shim && !up.chrome) return [text(agentTabs(await control('attach', 'GET', '/tabs')))];
+        listedBy.clear();
+        const out: Record<string, unknown> = { windows: [] as unknown[] };
+        const windows: unknown[] = [];
+        const hosts: Record<string, unknown> = {};
+        for (const host of ['shim', 'chrome'] as const) {
+          if (!up[host]) continue;
+          const listing = agentTabs(await control({ mode: 'attach', host }, 'GET', '/tabs'), deps.connectChrome ? host : undefined);
+          for (const tabId of listedTabIds(listing)) {
+            const set = listedBy.get(tabId) ?? new Set<AttachHost>();
+            set.add(host);
+            listedBy.set(tabId, set);
+          }
+          const { windows: w, ...rest } = listing;
+          if (Array.isArray(w)) windows.push(...w);
+          if (deps.connectChrome) hosts[host] = rest;
+          else Object.assign(out, rest);
+        }
+        out.windows = windows;
+        if (deps.connectChrome) out.hosts = hosts;
+        return [text(out)];
+      }
       case 'shim_open_session': {
         const intent = typeof input.intent === 'string' ? input.intent : '';
         if (!intent.trim()) throw new ToolFailure('invalid-request', 'intent is required');
@@ -510,11 +626,15 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         if (requested !== undefined && requested !== 'attach' && requested !== 'headless') {
           throw new ToolFailure('invalid-request', 'mode must be "attach" or "headless" (or left out)');
         }
+        const target = input.target;
+        if (target !== undefined && target !== 'shim' && target !== 'chrome') {
+          throw new ToolFailure('invalid-request', 'target must be "shim" or "chrome" (or left out)');
+        }
         // A composition runs only in the Shim browser and needs no tab: it
         // picks attach as a tabId does (a headless pin still refuses it below).
         const wantsComposition = compositionId !== undefined || newCompositionName !== undefined;
         if (url !== undefined && input.tabId !== undefined) throw new ToolFailure('invalid-request', 'pass tabId or url, not both');
-        const pickedMode = pickMode(requested, input.tabId !== undefined || wantsComposition, url !== undefined);
+        const pickedMode = pickMode(requested, input.tabId !== undefined || wantsComposition, url !== undefined, target);
         const picked = wantsComposition && pickedMode.mode === 'attach'
           ? { mode: pickedMode.mode, why: 'the Shim browser, where compositions run (its preview opens in a Shim tab); commits go to Shim\'s library' }
           : pickedMode;
@@ -561,17 +681,37 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
                   : { create: { name: newShimName } }),
           };
         }
-        const opened = await control(picked.mode, 'POST', '/sessions', body);
+        // attach: which host. Only when there are two to choose from.
+        let host: AttachHost = 'shim';
+        let hostWhy: string | null = null;
+        if (picked.mode === 'attach' && deps.connectChrome) {
+          const tabNumber = typeof input.tabId === 'number' ? input.tabId : null;
+          const choice = pickAttachHost({
+            ...(target !== undefined ? { requested: target } : {}),
+            ...(deps.defaultTarget !== undefined ? { defaultTarget: deps.defaultTarget } : {}),
+            reachable: reachable(),
+            listedBy: tabNumber === null ? [] : [...(listedBy.get(tabNumber) ?? [])],
+            url: url !== undefined,
+            composition: wantsComposition,
+          });
+          if (!choice.ok) throw new ToolFailure(choice.error, choice.detail);
+          host = choice.host;
+          hostWhy = choice.why;
+        } else if (picked.mode === 'attach' && target === 'chrome') {
+          throw new ToolFailure('shim-not-running', 'this server knows no Shim for Chrome bridge (target "chrome")');
+        }
+        const opened = await control({ mode: picked.mode, host }, 'POST', '/sessions', body);
         const id = typeof opened.sessionId === 'string' ? opened.sessionId : null;
         if (!id) throw new ToolFailure('invalid-reply', 'Shim opened a session but returned no id');
-        sessions.set(id, { mode: picked.mode, dir: null, revision: 0, kind, ...(typeof opened.shimFile === 'string' ? { shimFile: opened.shimFile } : {}) });
+        sessions.set(id, { mode: picked.mode, ...(picked.mode === 'attach' ? { host } : {}), dir: null, revision: 0, kind, ...(typeof opened.shimFile === 'string' ? { shimFile: opened.shimFile } : {}) });
         current = id;
         const artifactId = typeof opened.artifactId === 'string' ? opened.artifactId : null;
         const out: Record<string, unknown> = {
           sessionId: id,
           kind,
           mode: picked.mode,
-          modeReason: picked.why,
+          modeReason: hostWhy ? `${picked.why}; ${hostWhy}` : picked.why,
+          ...(picked.mode === 'attach' && deps.connectChrome ? { host } : {}),
           ...(artifactId !== null ? (kind === 'composition' ? { compositionId: artifactId } : { shimId: artifactId }) : {}),
           ...(picked.mode === 'headless' ? { shimFile: opened.shimFile, url: opened.url } : {}),
           // A session on a url in Shim: the new tab it opened, and where the
@@ -615,7 +755,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         if (!dir) throw new ToolFailure('no-working-copy', 'this session has no folder yet: shim_checkout first, or pass dir');
         const kind = state.kind ?? folderKind(dir) ?? 'shim';
         const folder = kind === 'composition' ? readCompositionWorkingCopy(dir, COMPOSITION_WIRE_LIMITS) : readWorkingCopy(dir, SHIM_WIRE_LIMITS);
-        const reply = await control(state.mode, 'POST', sessionPath(id, 'preview'), { workingCopy: encodeWorkingCopy(folder) });
+        const reply = await control(endpointOf(id), 'POST', sessionPath(id, 'preview'), { workingCopy: encodeWorkingCopy(folder) });
         if (typeof reply.revision === 'number') state.revision = reply.revision;
         state.dir = dir;
         const content: McpContent[] = [text({ revision: reply.revision, applied: reply.applied, evidence: reply.evidence })];
@@ -640,12 +780,12 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         const body = { revision, commitId, summary };
         let reply: Record<string, unknown>;
         try {
-          reply = await control(state.mode, 'POST', sessionPath(id, 'commit'), body);
+          reply = await control(endpointOf(id), 'POST', sessionPath(id, 'commit'), body);
         } catch (e) {
           // The reply was lost, not refused: the same id answers whatever
           // the first attempt did, so the retry can never commit twice.
           if (!(e instanceof ToolFailure) || !['control-failed', 'control-timeout', 'shim-not-running'].includes(e.code)) throw e;
-          reply = await control(state.mode, 'POST', sessionPath(id, 'commit'), body);
+          reply = await control(endpointOf(id), 'POST', sessionPath(id, 'commit'), body);
         }
         return [text({
           committed: true,
@@ -658,7 +798,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
       }
       case 'shim_end_session': {
         const id = sessionId(input);
-        const reply = await control(modeOf(id), 'DELETE', sessionPath(id));
+        const reply = await control(endpointOf(id), 'DELETE', sessionPath(id));
         forget(id);
         return [text({ ended: true, sessionId: id, reason: reply.reason, lastVersionId: reply.versionId ?? null })];
       }
@@ -697,7 +837,7 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         message = `waiting for Shim: if its sidebar shows a "coding agent wants to connect" card, allow it there (${clockLeft(started + ATTACH_CARD_TIMEOUT_MS - now())} left)`;
       } else {
         try {
-          const reply = await client('attach').request('GET', sessionPath(target, 'cards'), undefined, { timeoutMs: 5_000 });
+          const reply = await client('attach', endpointOf(target).host).request('GET', sessionPath(target, 'cards'), undefined, { timeoutMs: 5_000 });
           if (reply.body.ok === true && Array.isArray(reply.body.cards)) message = cardWaitMessage(reply.body.cards);
         } catch {
           // An older Shim without the route, or a hiccup: report nothing.

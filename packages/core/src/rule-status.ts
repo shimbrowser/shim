@@ -52,6 +52,7 @@ export function makeStatusReporter(rule: Rule, spec: Spec, api: CoreApi, rs: Rul
       }
     }
     if (rs.relativeReorderNote) notes.push(rs.relativeReorderNote);
+    if (rs.anchorChangeNote) notes.push(rs.anchorChangeNote);
     const stripNote = injectStripNotes.get(`${spec.id}/${rule.id}`);
     if (stripNote) notes.push(stripNote);
     return notes.length ? notes.join('; ') : null;

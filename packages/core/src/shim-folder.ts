@@ -34,6 +34,7 @@ import type { Spec, Rule, Anchor, Witness, SetWitness } from './types';
 import { ENGINE_MANAGED_ANCHOR_KEYS, deleteManagedKeys, anchorDigest } from './managed-anchor';
 import { SET_WITNESS_VERSION } from './set-witness';
 import { moduleForExpression, handlerModuleProblem } from './handler-source';
+import type { CompileProbe } from './rewrite-response';
 import { lintSpec, canonicalModule, HANDLER_REF_FIELDS } from './spec-lint';
 
 export const SHIM_JSON = 'shim.json';
@@ -496,7 +497,7 @@ function checkAuthoredSpec(raw: Record<string, unknown>, handlers: Record<string
  * per file — what `packShim` refuses after spec-lint. `shim lint` reports
  * the same list.
  */
-export function scriptModuleProblems(spec: Spec, handlers: Record<string, string>): string[] {
+export function scriptModuleProblems(spec: Spec, handlers: Record<string, string>, probe?: CompileProbe): string[] {
   const problems: string[] = [];
   const checked = new Set<string>();
   for (const rule of spec.rules || []) {
@@ -508,15 +509,15 @@ export function scriptModuleProblems(spec: Spec, handlers: Record<string, string
       // readShimFolder already refused a named handler with no file.
       const source = Object.hasOwn(handlers, name) ? handlers[name] : undefined;
       if (source === undefined) continue;
-      const problem = handlerModuleProblem(source);
+      const problem = handlerModuleProblem(source, probe);
       if (problem) problems.push(`${handlerPath(name)} ${problem}`);
     }
   }
   return problems;
 }
 
-function checkScriptModules(spec: Spec, handlers: Record<string, string>): void {
-  const problems = scriptModuleProblems(spec, handlers);
+function checkScriptModules(spec: Spec, handlers: Record<string, string>, probe?: CompileProbe): void {
+  const problems = scriptModuleProblems(spec, handlers, probe);
   if (problems.length) throw new ShimFolderError('malformed-shim-folder', problems);
 }
 
@@ -608,7 +609,12 @@ export function matchHostsProblem(spec: { match?: unknown }): string | null {
  * can't export a function (handlerModuleProblem) is a
  * ShimFolderError('malformed-shim-folder').
  */
-export function packShim(input: FolderInput): ShimFile {
+export interface PackOptions {
+  /** The syntax check for handler modules (default: core's probe, which needs eval). A host whose context forbids eval checks elsewhere and passes what it found. */
+  syntax?: CompileProbe;
+}
+
+export function packShim(input: FolderInput, options?: PackOptions): ShimFile {
   const { spec: authored, handlers, state } = readShimFolder(input);
   const spec = clone(authored) as Spec & Record<string, unknown>;
   if (state?.version !== undefined) spec.version = state.version;
@@ -630,7 +636,7 @@ export function packShim(input: FolderInput): ShimFile {
   // or intercept wrap resolves its name the way it will after import.
   const { errors } = lintSpec({ ...spec, handlers });
   if (errors.length) throw new ShimFolderError('spec-lint', errors);
-  checkScriptModules(spec, handlers);
+  checkScriptModules(spec, handlers, options?.syntax);
 
   const file: ShimFile = {
     format: SHIM_FILE_FORMAT,
