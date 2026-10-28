@@ -192,6 +192,7 @@ const HINTS: Record<string, string> = {
   'requires-shim-browser': 'This needs the Shim browser: it is not available in headless mode. Run shim-mcp without --headless, with Shim running.',
   unsupported: 'Headless mode supports a subset of shim features: remove what is listed, or author this shim in the Shim browser.',
   'page-open-failed': 'Check the url (http or https, reachable from this machine) and try again.',
+  'blocked-by-bot-wall': 'Do not author or report on this site headless: nothing it showed was the site. Tell the user, and author it in the Shim browser (Shim running, then shim_open_session with the url).',
   'page-load-failed': 'The page did not load in the new tab, and Shim closed it. Check the url and try again.',
   'no-window': 'Shim has no open window. Ask the user to open one, then try again.',
   'headless-unavailable': 'Restart the server without --attach (or with SHIM_MCP_MODE unset) to open headless sessions.',
@@ -205,6 +206,7 @@ const AUTO_HINTS: Record<string, string> = {
   'shim-not-running': 'Call shim_launch to start Shim (if it is installed), or open a headless session with shim_open_session { url, … }: no Shim needed.',
   unauthorized: 'Shim restarted since this server read its control file; call shim_launch to reconnect.',
   'requires-shim-browser': 'This needs the Shim browser: open the session on a Shim tab instead (shim_launch, shim_list_tabs, then shim_open_session with tabId).',
+  'blocked-by-bot-wall': 'Do not author or report on this site headless: nothing it showed was the site. Open it in the Shim browser instead: shim_launch, then shim_open_session with the same url (mode "attach").',
 };
 
 // What to do about each API map refusal (D13). These come back as a result

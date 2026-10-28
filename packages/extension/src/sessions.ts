@@ -253,6 +253,8 @@ export function createSessions(deps: SessionsDeps): Sessions {
     unsupportedDetail: 'Shim for Chrome runs hide, restyle, reorder, reshape, remove, inject-element, inject-html, script and replace-root rules, with api.storage and api.cleanup. Nothing was applied. Remove what is listed, or author this shim in the Shim browser.',
     unsupportedNote: (ruleId, member) => `rule "${ruleId}" used api.${member}, which Shim for Chrome does not provide (${UNSUPPORTED_ERROR}) — its result is partial`,
     previewCommittedAtBegin: false,
+    // The user's own Chrome: a challenge is theirs to get past (nothing here solves one).
+    botWallAdvice: 'Ask the user to get past it in the Chrome tab (a challenge may clear by itself or ask them to click), then look again.',
     syntaxProbe: (code) => (committing && syntaxChecks.get(committing)?.get(moduleOfProbe(code))) ?? { ok: false, error: 'handler syntax was not checked in the page' },
     async tombstone(handle, ruleId, held): Promise<boolean> {
       const host = handle.page.host as ExtensionPageHost;

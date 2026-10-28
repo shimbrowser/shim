@@ -82,9 +82,51 @@ customElements.define('frame-box', class extends HTMLElement {
 <div style="height: 3000px">tall</div>
 </body></html>`;
 
+// Bot walls (served in place of the site) and a page that only talks about one.
+const WALLS: Record<string, string> = {
+  '/wall/cf-block': `<!DOCTYPE html><html lang="en-US"><head><title>Attention Required! | Cloudflare</title></head>
+<body><div id="cf-wrapper"><div id="cf-error-details" class="cf-error-details-wrapper"><div class="cf-header">
+<h1>Sorry, you have been blocked</h1><h2><span>You are unable to access</span> 127.0.0.1</h2></div>
+<p>This website is using a security service to protect itself from online attacks.</p>
+<div class="cf-error-footer"><p><span class="cf-footer-item">Cloudflare Ray ID: <strong>8d2f1a2b3c4d5e6f</strong></span>
+<span class="cf-footer-item">Performance &amp; security by Cloudflare</span></p></div></div></div></body></html>`,
+  '/wall/cf-challenge': `<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title></head><body>
+<h1>127.0.0.1</h1><div id="challenge-stage"></div><div id="challenge-running">Verifying you are human. This may take a few seconds.</div>
+<script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=8d2f"></script></body></html>`,
+  '/wall/akamai': `<HTML><HEAD>
+<TITLE>Access Denied</TITLE>
+</HEAD><BODY>
+<H1>Access Denied</H1>
+You don't have permission to access "http&#58;&#47;&#47;127&#46;0&#46;0&#46;1&#47;" on this server.<P>
+Reference&#32;&#35;18&#46;4f3c1702&#46;1730000000&#46;1a2b3c4d
+</BODY>
+</HTML>`,
+  '/wall/datadome': `<html lang="en"><head><title>127.0.0.1</title></head><body style="margin:0">
+<script type="text/plain" src="https://ct.captcha-delivery.com/c.js"></script>
+<iframe srcdoc="<p>Access is temporarily restricted</p>" src="https://geo.captcha-delivery.com/captcha/?initialCid=x" title="DataDome Device Check" width="100%" height="100%" frameborder="0"></iframe></body></html>`,
+  '/wall/article': `<!doctype html><html><head><title>Attention Required! | Cloudflare — what it means</title></head><body><article>
+<h1>Sorry, you have been blocked</h1><p>Cloudflare's block page shows a Ray ID and says you are unable to access the site.
+Akamai's says Access Denied: You don't have permission to access "/" on this server. Reference #18.4f3c1702.1730000000.1a2b3c4d.</p>
+<p>${'The article goes on about the services and how they decide. '.repeat(10)}</p></article></body></html>`,
+};
+// A challenge that clears by itself a second after it loads (the site then shows).
+const CLEARING_CHALLENGE = WALLS['/wall/cf-challenge']?.replace('</body>', `<script>setTimeout(() => { location.href = '/'; }, 1000);</script></body>`) ?? '';
+
 async function main(): Promise<void> {
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url || '/', 'http://127.0.0.1').pathname;
+    const wall = WALLS[pathname];
+    if (wall !== undefined || pathname === '/wall/cf-clears') {
+      // A wall answers with the status the services use.
+      res.writeHead(pathname === '/wall/article' ? 200 : 403, { 'Content-Type': 'text/html' });
+      res.end(wall ?? CLEARING_CHALLENGE);
+      return;
+    }
+    if (pathname.startsWith('/cdn-cgi/')) {
+      res.writeHead(200, { 'Content-Type': 'text/javascript' });
+      res.end('');
+      return;
+    }
     if (pathname === '/app.js') {
       res.writeHead(200, { 'Content-Type': 'text/javascript' });
       res.end('window.__app = 1;');
@@ -128,6 +170,8 @@ async function main(): Promise<void> {
   const control = createHeadlessControl({
     version: 'test',
     playwrightAvailable: () => true,
+    // A challenge gets this long to clear at open (the clearing fixture takes one second).
+    botWallSettleMs: 4000,
     async openPage(url, storage): Promise<HeadlessSessionPage> {
       const opened = await openHeadlessPage({ visible, storage });
       pages.push({ cookies: () => opened.page.context().cookies() });
@@ -405,6 +449,65 @@ async function main(): Promise<void> {
     check('the checkout carries no witness, version or bundleHash', !spec2.includes('witness') && !spec2.includes('bundleHash') && !spec2.includes('"version"'));
     const cookies = await pages[pages.length - 1]?.cookies();
     check('the new session starts from a fresh profile (no cookie from the last)', Array.isArray(cookies) && cookies.length === 0, cookies);
+    await call('shim_end_session', {});
+
+    // --- bot walls: refused at open, reported on every page tool --------------------
+    for (const [where, vendor] of [['/wall/cf-block', 'cloudflare'], ['/wall/cf-challenge', 'cloudflare'], ['/wall/akamai', 'akamai'], ['/wall/datadome', 'datadome']] as const) {
+      const walled = await call('shim_open_session', { url: `${origin}${where}`, intent: 'x', newShimName: 'Walled', dir: path.join(tmp, 'walled') });
+      const text = walled.content[0]?.text ?? '';
+      check(`a ${where.slice(6)} page refuses the open with blocked-by-bot-wall`, walled.isError === true && text.startsWith('blocked-by-bot-wall')
+        && text.toLowerCase().includes(vendor) && text.includes('Shim browser'), text);
+    }
+    check('…and leaves no session or file behind', ((await control.request('GET', '/status')).body.sessions as unknown[]).length === 0
+      && !fs.existsSync(path.join(tmp, 'walled.shim')));
+    const clears = json(await call('shim_open_session', { url: `${origin}/wall/cf-clears`, intent: 'x', newShimName: 'Clears', dir: path.join(tmp, 'clears') }));
+    check('a challenge that clears by itself opens on the site', typeof clears.sessionId === 'string' && String(clears.url).endsWith('/'), clears);
+    await call('shim_end_session', {});
+    const article = json(await call('shim_open_session', { url: `${origin}/wall/article`, intent: 'x', newShimName: 'Article', dir: path.join(tmp, 'article') }));
+    check('an article quoting the walls\' wording opens normally', typeof article.sessionId === 'string', article);
+    await call('shim_end_session', {});
+
+    const wallDir = path.join(tmp, 'wall-session');
+    const ws = json(await call('shim_open_session', { url: `${origin}/`, intent: 'Outline headings', newShimName: 'Headings', dir: wallDir }));
+    check('a session opens on the site', typeof ws.sessionId === 'string', ws);
+    const wallSpec = JSON.parse(fs.readFileSync(path.join(wallDir, 'shim.json'), 'utf8')) as Record<string, unknown>;
+    fs.writeFileSync(path.join(wallDir, 'shim.json'), JSON.stringify({ ...wallSpec, rules: [{ id: 'outline', anchor: { primary: { kind: 'css', value: 'h1' } }, mutations: [{ kind: 'restyle', properties: { outline: '2px solid red' } }] }] }, null, 2));
+    const navWall = json(await call('navigate', { url: '/wall/cf-block' }));
+    const navNote = isRecord(navWall.botWall) ? navWall.botWall : {};
+    check('navigate onto a block page carries botWall', navWall.ok === true && navNote.code === 'bot-wall' && navNote.vendor === 'cloudflare' && navNote.kind === 'block', navWall);
+    const pw = json(await call('shim_preview', {}));
+    const pwEv = isRecord(pw.evidence) ? pw.evidence : {};
+    const pwRules = Array.isArray(pwEv.rules) ? pwEv.rules.filter(isRecord) : [];
+    check('a preview on the wall carries botWall and a warning', isRecord(pwEv.botWall) && Array.isArray(pwEv.warnings)
+      && pwEv.warnings.some((w) => typeof w === 'string' && w.includes('Cloudflare block page')), pwEv);
+    check('…and a rule that matched the wall\'s own heading is no better than partial', pwRules.length === 1
+      && String(pwRules[0]?.status).startsWith('matched') && pwRules[0]?.verification === 'partial', pwRules);
+    const qWall = json(await call('query_page', { description: 'the heading' }));
+    check('query_page on the wall carries botWall', isRecord(qWall.botWall), qWall);
+    const vWall = await call('view_page', {});
+    check('view_page on the wall carries botWall', vWall.content.some((c) => c.type === 'text' && (c.text ?? '').includes('"botWall"')), vWall.content.map((c) => c.type));
+    // The session's own output covering the wall doesn't clear it: a
+    // rule hiding the block page's wrapper, previewed, then carried onto
+    // a fresh load of the wall by navigate.
+    const cover = { id: 'cover', anchor: { primary: { kind: 'css', value: '#cf-wrapper' } }, mutations: [{ kind: 'hide' }] };
+    fs.writeFileSync(path.join(wallDir, 'shim.json'), JSON.stringify({ ...wallSpec, rules: [cover] }, null, 2));
+    const pc = json(await call('shim_preview', {}));
+    const pcEv = isRecord(pc.evidence) ? pc.evidence : {};
+    const pcRules = Array.isArray(pcEv.rules) ? pcEv.rules.filter(isRecord) : [];
+    check('a rule hiding the wall\'s wording still carries botWall, no better than partial', isRecord(pcEv.botWall)
+      && pcRules.length === 1 && pcRules[0]?.verification === 'partial', pcEv);
+    const coveredText = await evalInPage('document.body.innerText');
+    check('…though the cover really hid the wall\'s wording (the note is the remembered one)', typeof coveredText === 'string' && !coveredText.includes('Ray ID'), coveredText);
+    const navAgain = json(await call('navigate', { url: '/wall/cf-block?again=1' }));
+    check('navigate onto the wall with the cover live still carries botWall', navAgain.ok === true && isRecord(navAgain.botWall), navAgain);
+    const qCovered = json(await call('query_page', { description: 'the heading' }));
+    check('…and so does the next page tool', isRecord(qCovered.botWall), qCovered);
+    fs.writeFileSync(path.join(wallDir, 'shim.json'), JSON.stringify({ ...wallSpec, rules: [{ id: 'outline', anchor: { primary: { kind: 'css', value: 'h1' } }, mutations: [{ kind: 'restyle', properties: { outline: '2px solid red' } }] }] }, null, 2));
+    const navBack = json(await call('navigate', { url: '/' }));
+    check('back on the site, navigate carries no botWall', navBack.ok === true && navBack.botWall === undefined, navBack);
+    const pBack = json(await call('shim_preview', {}));
+    const pBackEv = isRecord(pBack.evidence) ? pBack.evidence : {};
+    check('…nor does a preview there', pBackEv.botWall === undefined, pBackEv);
     await call('shim_end_session', {});
 
     // --- a .shim declaring an unsupported kind can't open --------------------------
