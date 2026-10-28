@@ -24,6 +24,17 @@
 // adopted, ordered among themselves by their source elements' document order —
 // the same relative order the <style> elements would have had.
 //
+// More than one engine instance can share a document (one per isolated world,
+// each with its own copy of this module and its own `mirrors`). An instance
+// can't know another's sheets by identity, so every constructed sheet ends with
+// a marker rule naming its source element — `@supports (--shim-mirror: "<key>")
+// {}`, empty and so inert — and the element carries the same key in
+// `data-shim-mirror`. A reconcile keeps the page's own sheets first, then every
+// engine's mirrors (its own and other instances') in their source elements'
+// document order, so all instances converge on one order instead of each
+// moving its own mirrors last. Another instance's sheets are only reordered,
+// never removed: their owner prunes them. Cooperative, not a security boundary.
+//
 // On a page that accepts the <style> (no strict CSP) `sheet` is non-null, so
 // this module never constructs anything and the page is byte-for-byte what it
 // was before. Nothing here may throw into the engine.
@@ -62,6 +73,8 @@ import type { CssImport } from './css-imports';
 type StyleRoot = Document | ShadowRoot;
 
 interface Mirror {
+  // The marker key shared by the element and all of its constructed sheets.
+  key: string;
   sheet: CSSStyleSheet;
   root: StyleRoot;
   // The `<link>`s standing in for the element's leading `@import`s, and the
@@ -89,6 +102,34 @@ const mirrors = new Map<HTMLStyleElement, Mirror>();
 // while leaving the page's own adopted sheets untouched.
 const ownSheets = new WeakSet<CSSStyleSheet>();
 
+// This instance's prefix for mirror keys (random per module instance) and a
+// counter for the elements it mirrors.
+const INSTANCE_KEY = Math.random().toString(36).slice(2, 10) || '0';
+let mirrorSeq = 0;
+const MIRROR_ATTR = 'data-shim-mirror';
+
+// The inert marker rule a constructed sheet ends with. Last, not first: a
+// copied sheet may open with `@namespace`, which must precede other rules. An
+// empty key marks nothing.
+function marked(cssText: string, key: string): string {
+  if (!key) return cssText;
+  return `${cssText}\n@supports (--shim-mirror: "${key}") {}\n`;
+}
+
+// The mirror key a constructed sheet's marker names, or null for a sheet
+// without one (the page's own).
+function markerOf(sheet: CSSStyleSheet): string | null {
+  try {
+    const rules = sheet.cssRules;
+    const last = rules[rules.length - 1];
+    if (!(last instanceof CSSSupportsRule)) return null;
+    const m = /--shim-mirror:\s*"([^"]+)"/.exec(last.conditionText);
+    return m?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 function canConstruct(): boolean {
   return typeof CSSStyleSheet === 'function'
     && typeof CSSStyleSheet.prototype.replaceSync === 'function';
@@ -109,9 +150,9 @@ function isRefused(style: HTMLStyleElement): boolean {
   return style.sheet === null;
 }
 
-function construct(cssText: string): CSSStyleSheet {
+function construct(cssText: string, key: string): CSSStyleSheet {
   const sheet = new CSSStyleSheet();
-  sheet.replaceSync(cssText);
+  sheet.replaceSync(marked(cssText, key));
   ownSheets.add(sheet);
   return sheet;
 }
@@ -162,14 +203,14 @@ function wrap(text: string, wrappers: string[]): string {
 // link's media (applied to every copy as the sheet's own condition). False
 // when anything can't be read (SecurityError on an opaque cross-origin sheet)
 // or expressed (an anonymous layer import that itself imports).
-function copySheet(sheet: CSSStyleSheet, baseURL: string, media: string, wrappers: string[], out: CSSStyleSheet[], depth: number): boolean {
+function copySheet(sheet: CSSStyleSheet, baseURL: string, media: string, wrappers: string[], out: CSSStyleSheet[], depth: number, key: string): boolean {
   if (depth > MAX_IMPORT_DEPTH) return false;
   const rules = Array.from(sheet.cssRules); // SecurityError: cross-origin without CORS
   let buf: string[] = [];
   const flush = (): void => {
     if (!buf.length) return;
     const copy = new CSSStyleSheet(media ? { media } : {});
-    copy.replaceSync(wrap(buf.join('\n'), wrappers));
+    copy.replaceSync(marked(wrap(buf.join('\n'), wrappers), key));
     ownSheets.add(copy);
     out.push(copy);
     buf = [];
@@ -184,7 +225,7 @@ function copySheet(sheet: CSSStyleSheet, baseURL: string, media: string, wrapper
       // separate layers, where natively they are one. Not expressible, so
       // the whole element stays on its native links (all-or-none).
       if (rule.layerName === '' && Array.from(nested.cssRules).some((r) => r instanceof CSSImportRule)) return false;
-      if (!copySheet(nested, nested.href || rule.href, media, [...wrappers, ...importWrappers(rule)], out, depth + 1)) return false;
+      if (!copySheet(nested, nested.href || rule.href, media, [...wrappers, ...importWrappers(rule)], out, depth + 1, key)) return false;
       continue;
     }
     // `@namespace` is only valid at a sheet's top level, never inside a block,
@@ -200,12 +241,12 @@ function copySheet(sheet: CSSStyleSheet, baseURL: string, media: string, wrapper
   return true;
 }
 
-function copyLoaded(link: HTMLLinkElement, media: string): ImportState {
+function copyLoaded(link: HTMLLinkElement, media: string, key: string): ImportState {
   try {
     const loaded = link.sheet;
     if (!loaded) return 'uncopyable';
     const out: CSSStyleSheet[] = [];
-    return copySheet(loaded, link.href, media, [], out, 0) ? out : 'uncopyable';
+    return copySheet(loaded, link.href, media, [], out, 0, key) ? out : 'uncopyable';
   } catch {
     return 'uncopyable';
   }
@@ -247,7 +288,7 @@ function importLink(style: HTMLStyleElement, m: Mirror, imp: CssImport, idx: num
   if (cors) link.crossOrigin = 'use-credentials';
   link.href = imp.href;
   if (imp.media) link.media = imp.media;
-  link.addEventListener('load', () => settleImport(style, m, link, idx, () => copyLoaded(link, imp.media)), { once: true });
+  link.addEventListener('load', () => settleImport(style, m, link, idx, () => copyLoaded(link, imp.media, m.key)), { once: true });
   link.addEventListener('error', () => {
     if (cors) retryWithoutCors(style, m, link, imp, idx);
     else settleImport(style, m, link, idx, () => 'failed');
@@ -277,7 +318,7 @@ function syncImportLinks(style: HTMLStyleElement, m: Mirror, cssText: string): v
   // `@layer b, a; @import "x.css";` fixes b before a even when x.css declares
   // a first. The statements stay in the mirror too, but the copies are
   // adopted before it, so they'd establish the order first without this.
-  if (imports.length && layerStatements.length) m.layerSheet = construct(layerStatements.join('\n'));
+  if (imports.length && layerStatements.length) m.layerSheet = construct(layerStatements.join('\n'), m.key);
   imports.forEach((imp, idx) => {
     const link = importLink(style, m, imp, idx, isCrossOrigin(style, imp.href));
     m.links.push(link);
@@ -287,21 +328,45 @@ function syncImportLinks(style: HTMLStyleElement, m: Mirror, cssText: string): v
   m.importKey = key;
 }
 
-function documentOrder(a: HTMLStyleElement, b: HTMLStyleElement): number {
+function documentOrder(a: Element, b: Element): number {
   return a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
 }
 
-// Rewrite `root.adoptedStyleSheets` to [page's own sheets…, our mirrors in
-// document order, each preceded by its leading `@layer` statements and its
-// import copies (slotCopies)]. Assigns only
-// when something changed, so a no-op sync never churns the page's style recalc.
+// The sheets one mirrored element contributes, in their adoption order.
+function mirrorSheets(m: Mirror): CSSStyleSheet[] {
+  return [...(m.layerSheet ? [m.layerSheet] : []), ...(slotCopies(m) ?? []), m.sheet];
+}
+
+// Rewrite `root.adoptedStyleSheets` to [page's own sheets…, every engine's
+// mirrors in their source elements' document order, each element's group being
+// its leading `@layer` statements, its import copies (slotCopies) and its
+// mirror]. Another instance's groups keep their internal order; a group whose
+// element this root no longer holds goes last (its owner prunes it). Assigns
+// only when something changed, so a no-op sync never churns the page's style
+// recalc.
 function reconcile(root: StyleRoot): void {
-  const ours = [...mirrors.entries()]
+  const groups: Array<{ el: Element; sheets: CSSStyleSheet[] }> = [...mirrors.entries()]
     .filter(([, m]) => m.root === root)
-    .sort(([a], [b]) => documentOrder(a, b))
-    .flatMap(([, m]) => [...(m.layerSheet ? [m.layerSheet] : []), ...(slotCopies(m) ?? []), m.sheet]);
+    .map(([el, m]) => ({ el, sheets: mirrorSheets(m) }));
   const current = root.adoptedStyleSheets;
-  const desired = [...current.filter((s) => !ownSheets.has(s)), ...ours];
+  const page: CSSStyleSheet[] = [];
+  const foreign = new Map<string, CSSStyleSheet[]>();
+  for (const s of current) {
+    if (ownSheets.has(s)) continue;
+    const key = markerOf(s);
+    if (key === null) { page.push(s); continue; }
+    const group = foreign.get(key);
+    if (group) group.push(s);
+    else foreign.set(key, [s]);
+  }
+  const orphans: CSSStyleSheet[] = [];
+  for (const [key, sheets] of foreign) {
+    const el = Array.from(root.querySelectorAll(`[${MIRROR_ATTR}]`)).find((e) => e.getAttribute(MIRROR_ATTR) === key);
+    if (el) groups.push({ el, sheets });
+    else orphans.push(...sheets);
+  }
+  groups.sort((a, b) => documentOrder(a.el, b.el));
+  const desired = [...page, ...groups.flatMap((g) => g.sheets), ...orphans];
   if (desired.length === current.length && desired.every((s, i) => s === current[i])) return;
   root.adoptedStyleSheets = desired;
 }
@@ -328,14 +393,16 @@ export function syncStyleMirror(style: HTMLStyleElement): void {
       const text = style.textContent || '';
       let mirror: Mirror;
       if (existing && existing.root === root) {
-        existing.sheet.replaceSync(text);
+        existing.sheet.replaceSync(marked(text, existing.key));
         mirror = existing;
       } else {
         if (existing) {
           removeLinks(existing);
           touched.add(existing.root);
         }
-        mirror = { sheet: construct(text), root, links: [], importKey: '', importCopies: [], layerSheet: null };
+        const key = `${INSTANCE_KEY}:${++mirrorSeq}`;
+        style.setAttribute(MIRROR_ATTR, key);
+        mirror = { key, sheet: construct(text, key), root, links: [], importKey: '', importCopies: [], layerSheet: null };
         mirrors.set(style, mirror);
       }
       syncImportLinks(style, mirror, text);
@@ -343,6 +410,7 @@ export function syncStyleMirror(style: HTMLStyleElement): void {
     } else if (existing) {
       removeLinks(existing);
       mirrors.delete(style);
+      style.removeAttribute(MIRROR_ATTR);
       touched.add(existing.root);
     }
     for (const r of touched) reconcile(r);
@@ -360,7 +428,8 @@ export function syncStyleOwner(parent: Node | null): void {
 }
 
 // One-shot variant for an engine-owned <style> whose text never changes and
-// whose root is engine-owned too (the route host's shadow-root base sheet):
+// whose root is engine-owned too (the route host's shadow-root base sheet;
+// unmarked, so another instance leaves it where it is):
 // once adopted on the shadow root the mirror travels with it across
 // detach / re-append, so no bookkeeping is needed. Call after the element is
 // connected — refusal is only observable then.
@@ -369,7 +438,7 @@ export function adoptIfRefused(style: HTMLStyleElement): void {
     if (!canConstruct()) return;
     const root = adoptingRoot(style);
     if (!root || !isRefused(style)) return;
-    root.adoptedStyleSheets = [...root.adoptedStyleSheets, construct(style.textContent || '')];
+    root.adoptedStyleSheets = [...root.adoptedStyleSheets, construct(style.textContent || '', '')];
   } catch {
     /* a fallback must never break the page or the engine */
   }
