@@ -8,8 +8,18 @@
 // Each field is `{ key, label?, type?, required?, help?, options?, default? }`;
 // a field with no type is text. A `secret` field holds a credential, which a
 // host stores only if it can encrypt it at rest (`secretSettings`, D15).
+//
+// A secret field may also declare `use` (D17): exactly where the host sends
+// the value, so the handler never sees it. One exact HTTPS origin, one header
+// or one query parameter, and a format with a single `{}` slot:
+//
+//   { "key": "openaiKey", "type": "secret",
+//     "use": { "origin": "https://api.openai.com", "header": "Authorization", "format": "Bearer {}" } }
+//   { "key": "mapsKey", "type": "secret",
+//     "use": { "origin": "https://maps.example.com", "query": "key", "format": "{}" } }
 
 import type { Spec } from './types';
+import { isPrivateHost } from './fetch-policy';
 
 export type SettingFieldType = 'text' | 'secret' | 'number' | 'boolean' | 'select';
 
@@ -32,9 +42,100 @@ export interface RawSettingField {
   help?: unknown;
   options?: unknown;
   default?: unknown;
+  use?: unknown;
 }
 
-/** A field as a settings surface works with it, after normalizeSchema. */
+/**
+ * Where a host places a secret field's value (D17): exactly one of `header`
+ * and `query`, on requests to exactly `origin`, as `format` with the value at
+ * its one `{}`.
+ */
+export type CredentialUse =
+  | { origin: string; header: string; query?: undefined; format: string }
+  | { origin: string; query: string; header?: undefined; format: string };
+
+/** A format string's most characters. */
+export const CREDENTIAL_FORMAT_MAX_CHARS = 256;
+
+// Request headers a credential may not be placed in: the Fetch standard's
+// forbidden request headers, hop-by-hop headers, and the ones that describe
+// the body or the transfer rather than authorize it.
+const FORBIDDEN_CREDENTIAL_HEADERS = new Set([
+  'accept-charset', 'accept-encoding', 'access-control-request-headers', 'access-control-request-method',
+  'access-control-request-private-network', 'connection', 'content-length', 'content-type',
+  'content-encoding', 'cookie', 'cookie2', 'date', 'dnt', 'expect', 'host', 'keep-alive', 'origin',
+  'referer', 'set-cookie', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'via', 'range',
+  'proxy-connection', 'http2-settings',
+]);
+
+/** Whether a header name may carry a credential (case-insensitive). */
+export function credentialHeaderAllowed(name: string): boolean {
+  const n = name.toLowerCase();
+  if (!/^[a-z0-9-]{1,64}$/.test(n)) return false;
+  if (FORBIDDEN_CREDENTIAL_HEADERS.has(n)) return false;
+  return !n.startsWith('proxy-') && !n.startsWith('sec-');
+}
+
+/** A query parameter name a credential may be placed under. */
+export function credentialQueryNameAllowed(name: string): boolean {
+  return /^[A-Za-z0-9._~-]{1,64}$/.test(name);
+}
+
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+/** Whether a string holds an unpaired UTF-16 surrogate (not well-formed Unicode). */
+export function hasLoneSurrogate(s: string): boolean {
+  return LONE_SURROGATE.test(s);
+}
+
+function isRecordValue(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Every problem with a `use` declaration, one line each; empty when valid.
+ * Strict: unknown properties refuse, and the origin must be written in its
+ * canonical form (what `new URL(origin).origin` gives back), so what the user
+ * approves is exactly what the host compares.
+ */
+export function credentialUseProblems(use: unknown): string[] {
+  if (!isRecordValue(use)) return ['`use` must be an object { origin, header | query, format }'];
+  const problems: string[] = [];
+  for (const k of Object.keys(use)) {
+    if (k !== 'origin' && k !== 'header' && k !== 'query' && k !== 'format') problems.push(`\`use\` has an unknown property "${k}"`);
+  }
+  const { origin, header, query, format } = use;
+  if (typeof origin !== 'string') {
+    problems.push('`use.origin` must be an https origin such as "https://api.example.com"');
+  } else {
+    let u: URL | null;
+    try { u = new URL(origin); } catch { u = null; }
+    if (!u || u.protocol !== 'https:') problems.push(`\`use.origin\` "${origin}" must be an https origin`);
+    else if (u.origin !== origin) problems.push(`\`use.origin\` "${origin}" must be written exactly as its origin, "${u.origin}" (no path, query, credentials or trailing slash)`);
+    else if (origin.includes('*')) problems.push('`use.origin` may not contain a wildcard');
+    else if (isPrivateHost(u.hostname)) problems.push(`\`use.origin\` "${origin}" is a loopback/private/link-local address`);
+  }
+  if ((header === undefined) === (query === undefined)) {
+    problems.push('`use` takes exactly one of `header` and `query`');
+  } else if (header !== undefined) {
+    if (typeof header !== 'string' || !credentialHeaderAllowed(header)) {
+      problems.push(`\`use.header\` "${String(header)}" is not a header a credential may be sent in (letters, digits and "-"; not a forbidden, hop-by-hop, body or proxy header)`);
+    }
+  } else if (typeof query !== 'string' || !credentialQueryNameAllowed(query)) {
+    problems.push(`\`use.query\` "${String(query)}" must be 1-64 characters of letters, digits, ".", "_", "~" or "-"`);
+  }
+  if (typeof format !== 'string') {
+    problems.push('`use.format` must be a string with one `{}` where the value goes, such as "Bearer {}" or "{}"');
+  } else {
+    if (format.split('{}').length !== 2) problems.push('`use.format` must contain exactly one `{}`');
+    if (format.length > CREDENTIAL_FORMAT_MAX_CHARS) problems.push(`\`use.format\` is longer than ${CREDENTIAL_FORMAT_MAX_CHARS} characters`);
+    if (hasLoneSurrogate(format)) problems.push('`use.format` is not well-formed Unicode');
+    if (header !== undefined && /[\r\n\0]/.test(format)) problems.push('`use.format` may not contain CR, LF or NUL');
+    if (header !== undefined && /[^\u0020-\u007e\u0080-\u00ff\t]/.test(format)) problems.push('`use.format` for a header may hold only header-safe characters');
+  }
+  return problems;
+}
+
 export interface SettingFieldSchema {
   key: string;
   label: string;
@@ -43,6 +144,8 @@ export interface SettingFieldSchema {
   help: string;
   options?: string[];
   default?: unknown;
+  /** A secret field's declared placement (D17); absent for every other field. */
+  use?: CredentialUse;
 }
 
 /** Anything carrying a settings declaration: a shim spec, or a composition manifest. */
@@ -75,6 +178,11 @@ export function settingsSchemaProblems(declarer: SettingsDeclarer | null | undef
     if (f.type === 'select' && !(Array.isArray(f.options) && f.options.length)) {
       problems.push(`${where}: a "select" field needs a non-empty \`options\` array`);
     }
+    if (f.use !== undefined) {
+      if (f.type !== 'secret') problems.push(`${where}: only a "secret" field may declare \`use\``);
+      for (const p of credentialUseProblems(f.use)) problems.push(`${where}: ${p}`);
+      if (f.default !== undefined) problems.push(`${where}: a secret field with \`use\` may not have a \`default\``);
+    }
   });
   return problems;
 }
@@ -93,7 +201,8 @@ export function validateSchema(declarer: SettingsDeclarer | null | undefined, la
   const err = new Error(!Array.isArray(declarer?.settings)
     ? problems.join('; ')
     : `invalid settings schema: ${problems.join('; ')}. Each field is `
-      + '{ key, label, type: "text"|"secret"|"number"|"boolean"|"select", required?, help?, options?, default? }.') as Error & { code?: string };
+      + '{ key, label, type: "text"|"secret"|"number"|"boolean"|"select", required?, help?, options?, default?, use? } '
+      + '(`use`, on a secret field only: { origin: "https://…", header | query, format: "…{}…" }).') as Error & { code?: string };
   err.code = 'bad_settings_schema';
   throw err;
 }
@@ -133,6 +242,8 @@ export function normalizeSchema(declarer: SettingsDeclarer | null | undefined): 
       help: typeof f.help === 'string' ? f.help : '',
       options: effectiveOptions(f.options),
       default: f.default,
+      ...(f.type === 'secret' && f.use !== undefined && credentialUseProblems(f.use).length === 0
+        ? { use: f.use as CredentialUse } : {}),
     };
   });
 }
@@ -152,6 +263,27 @@ export function secretSettingKeys(declarer: SettingsDeclarer | null | undefined)
     if (f.type === 'secret') keys.push(typeof f.key === 'string' ? f.key : '?');
   }
   return keys;
+}
+
+/**
+ * The declaration's secret fields, split by whether they declare `use`. Reads
+ * the raw declaration defensively, like secretSettingKeys; a `use` that does
+ * not validate counts as none.
+ */
+export function secretSettingPlacements(declarer: SettingsDeclarer | null | undefined): { placed: string[]; plain: string[] } {
+  const raw = declarer?.settings;
+  const placed: string[] = [];
+  const plain: string[] = [];
+  if (!Array.isArray(raw)) return { placed, plain };
+  for (const item of raw as unknown[]) {
+    if (!item || typeof item !== 'object') continue;
+    const f = item as RawSettingField;
+    if (f.type !== 'secret') continue;
+    const key = typeof f.key === 'string' ? f.key : '?';
+    if (f.use !== undefined && credentialUseProblems(f.use).length === 0) placed.push(key);
+    else plain.push(key);
+  }
+  return { placed, plain };
 }
 
 export { FIELD_TYPES };

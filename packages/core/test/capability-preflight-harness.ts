@@ -5,7 +5,7 @@
 //     declarations — and passes a spec inside the set (empty declarations
 //     count as none);
 //   - a secret settings field is refused, once and naming each key, on a host
-//     that serves settings but cannot encrypt them (secretSettings false),
+//     that serves settings but cannot encrypt them (secretSettings 'none'),
 //     and kept where it can;
 //   - the source scan flags the unsupported api members a handler mentions,
 //     in every spelling the scan claims (dot, optional chain, bracket), and
@@ -40,7 +40,7 @@ const HEADLESS: PageHostCapabilities = {
   iframeRules: false,
   specCss: false,
   apiMembers: [],
-  secretSettings: false,
+  secretSettings: 'none',
   componentIdentity: false,
   engineInspection: false,
   trustedInput: true,
@@ -50,7 +50,7 @@ const BROWSER: PageHostCapabilities = {
   iframeRules: true,
   specCss: true,
   apiMembers: ['db', 'ai', 'settings', 'fetch', 'storage.pack', 'storage.global', 'shared', 'modules'],
-  secretSettings: true,
+  secretSettings: 'plaintext',
   componentIdentity: true,
   engineInspection: true,
   trustedInput: true,
@@ -107,7 +107,7 @@ console.log('preflight');
 console.log('secret settings');
 {
   // Shim for Chrome's shape: settings served, no encrypted store.
-  const NO_SECRETS: PageHostCapabilities = { ...HEADLESS, apiMembers: ['settings', 'fetch'], secretSettings: false };
+  const NO_SECRETS: PageHostCapabilities = { ...HEADLESS, apiMembers: ['settings', 'fetch'], secretSettings: 'none' };
   const spec = (settings: unknown[]): Spec => ({ id: 's', match: { hosts: ['a.test'] }, settings, rules: [] });
   check('plain settings pass where the host serves settings',
     preflightSpec(spec([{ key: 'units', type: 'select', options: ['metric'] }, { key: 'n', type: 'number' }, { key: 'note' }]), NO_SECRETS).ok);
@@ -120,6 +120,21 @@ console.log('secret settings');
   const none = preflightSpec(spec([{ key: 'token', type: 'secret' }]), HEADLESS);
   check('a host without settings refuses the declaration once, with no second secret entry',
     !none.ok && none.unsupported.length === 1 && none.unsupported[0]?.message.includes('api.settings') === true, JSON.stringify(none));
+
+  // A host that keeps only placed secrets (D17): a field with a valid `use`
+  // passes; one without is refused by name; a broken `use` counts as none.
+  const DECLARED: PageHostCapabilities = { ...NO_SECRETS, secretSettings: 'declared' };
+  const placed = { key: 'api', type: 'secret', use: { origin: 'https://api.example.com', header: 'Authorization', format: 'Bearer {}' } };
+  const query = { key: 'maps', type: 'secret', use: { origin: 'https://maps.example.com', query: 'key', format: '{}' } };
+  check('a declared host keeps secrets that declare use (header and query)', preflightSpec(spec([placed, query]), DECLARED).ok);
+  const mixed = preflightSpec(spec([placed, { key: 'raw', type: 'secret' }]), DECLARED);
+  check('a declared host refuses a secret without use, naming only it',
+    !mixed.ok && mixed.unsupported.length === 1 && mixed.unsupported[0]?.message.includes('"raw"') === true
+      && !mixed.unsupported[0].message.includes('"api"') && mixed.unsupported[0].message.includes('use'), JSON.stringify(mixed));
+  const broken = preflightSpec(spec([{ key: 'b', type: 'secret', use: { origin: 'http://api.example.com', header: 'Authorization', format: '{}' } }]), DECLARED);
+  check('a use that does not validate counts as none', !broken.ok && broken.unsupported[0]?.message.includes('"b"') === true);
+  check('a none host refuses placed secrets too', !preflightSpec(spec([placed]), NO_SECRETS).ok);
+  check('the plaintext host keeps both forms', preflightSpec(spec([placed, query, { key: 'raw', type: 'secret' }]), BROWSER).ok);
 }
 
 console.log('source scan');

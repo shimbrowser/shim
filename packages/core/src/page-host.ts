@@ -202,6 +202,9 @@ export const PAGE_HOST_API_MEMBERS = [
 ] as const;
 export type PageHostApiMember = (typeof PAGE_HOST_API_MEMBERS)[number];
 
+/** Which secret settings fields a host keeps (`PageHostCapabilities.secretSettings`). */
+export type SecretSettingsSupport = 'none' | 'declared' | 'plaintext';
+
 /** What a host supports (D15). A session preflights a spec against it. */
 export interface PageHostCapabilities {
   /** Mutation kinds a rule may use on this host. */
@@ -213,12 +216,18 @@ export interface PageHostCapabilities {
   /** Handler api members beyond the core set. */
   apiMembers: readonly PageHostApiMember[];
   /**
-   * A settings declaration may mark fields `secret`: the host keeps their
-   * values encrypted at rest. A host that cannot (no OS-backed key store)
-   * refuses any secret field, at install and in a session, rather than store
-   * a credential in the clear. Meaningful only with `settings` in apiMembers.
+   * Which `secret` settings fields the host keeps (encrypted at rest).
+   * Meaningful only with `settings` in apiMembers.
+   *   none       no secret field at all (no encrypted store);
+   *   declared   secret fields that declare `use` (D17): the host places the
+   *              value in the declared header or query parameter, and the
+   *              handler never reads it;
+   *   plaintext  both forms: a field with `use` is placed as above, and one
+   *              without is read by the handler through api.settings.
+   * A field the host can't keep is refused at install and in a session,
+   * never stored in the clear.
    */
-  secretSettings: boolean;
+  secretSettings: SecretSettingsSupport;
   /** Component identity in a witness is captured, verified and used for recovery. */
   componentIdentity: boolean;
   /** `inspection` is present (the engine serves query_page / inspect_element). */

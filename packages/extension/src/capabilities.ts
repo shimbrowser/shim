@@ -33,7 +33,7 @@ export const EXTENSION_DECLARATIVE_CAPABILITIES: PageHostCapabilities = Object.f
   // shows them), so the shim installs the same in either mode.
   apiMembers: Object.freeze(['settings'] as const),
   // No OS-backed key store: a secret field is refused, never kept in the clear.
-  secretSettings: false,
+  secretSettings: 'none',
   componentIdentity: false,
   // Page inspection and trusted input arrive with the PageHost.
   engineInspection: false,
@@ -53,7 +53,7 @@ export const EXTENSION_CAPABILITIES: PageHostCapabilities = Object.freeze({
   iframeRules: false,
   specCss: true,
   apiMembers: Object.freeze(['settings', 'fetch'] as const),
-  secretSettings: false,
+  secretSettings: 'none',
   componentIdentity: false,
   engineInspection: false,
   trustedInput: false,
@@ -75,7 +75,7 @@ export const SESSION_CAPABILITIES: PageHostCapabilities = Object.freeze({
   iframeRules: false,
   specCss: false,
   apiMembers: Object.freeze(['settings', 'fetch'] as const),
-  secretSettings: false,
+  secretSettings: 'none',
   componentIdentity: false,
   engineInspection: false,
   trustedInput: true,

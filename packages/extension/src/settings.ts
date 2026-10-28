@@ -8,7 +8,7 @@
 // else its declared default, else undefined, as in every Shim host. A value
 // is checked against its field's type before it is stored. Secret fields
 // never reach here: the extension has no encrypted store, so the install and
-// session preflight refuse them (`secretSettings: false`), and this module
+// session preflight refuse them (`secretSettings: 'none'`), and this module
 // refuses to store one as a second line.
 
 import { normalizeSchema, settingsSchemaProblems, type SettingFieldSchema, type SettingsDeclarer } from '@shimbrowser/core/settings-schema';
