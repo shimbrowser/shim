@@ -64,6 +64,21 @@ the one you previewed. Sign-in, session, account-action and checkout pages are n
 replayed (the result counts them in `skippedSensitive`), so a view of that kind stays
 unverified.
 
+## Pages that hide what you're building on
+
+- **A paywall.** A paywalled article often renders only the paywall: no comments, no
+  recommendations, none of the page around the text. Rules for those parts can't be seen
+  there, so their previews prove nothing. Build and verify on a page the site serves in
+  full (a free post), opening the session there or using `navigate`. A site's own listing
+  may say which posts are free (Substack's archive API, `/api/v1/archive`, marks them
+  `audience: "everyone"`). Never bypass or hide a paywall to get at the content.
+- **A popup shown once per visit** (a sign-up modal, an intro popup). The site
+  usually remembers that it showed it, so it may not come back after a reload or on a
+  later visit, and the committed rule may never be seen firing. Take the evidence where it
+  does appear: the preview's match and box for the rule, and a `view_page` screenshot.
+  Then say in the commit summary and to the user that the rule was verified in the
+  preview only.
+
 ## Waiting for the site
 
 `evaluate_in_page`'s 3-second cap includes any waiting inside your expression, so keep an

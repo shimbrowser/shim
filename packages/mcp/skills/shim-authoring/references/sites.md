@@ -27,6 +27,12 @@ whether your rules were tried there, and the person approves or denies. A deny c
 nothing and leaves the session open: drop the site, or ask the user, and commit again. A
 site that's already committed is never asked about again, and narrowing never asks.
 
+**An existing shim on a site it doesn't cover.** In the Shim browser,
+`shim_open_session` for a shim on a page outside its `match.hosts` answers
+`target-not-allowed` (`this shim doesn't run on <host>`). Open the session on a page the
+shim already runs on, add the new host to `match.hosts` there, and commit (the person
+approves the new site on the commit card); then open a session on the new site.
+
 **A new site is untried.** Your session's evidence covers only the pages it previewed on:
 a wildcard is never verified by one subdomain. The commit's `notes` name every pattern
 your rules weren't tried on. To try a new site, commit first, then open a session on a

@@ -56,12 +56,12 @@ it, each read before the work it covers; section 8 lists them.
      checked out at once. Otherwise call `shim_checkout { dir }`.
    - **A page no tab shows:** `shim_open_session { url, intent, shimId | newShimName, dir }`
      in place of `tabId` (http or https, no credentials). The card always asks the user to
-     let Shim open a new tab at that exact URL, even for a site they allowed until quit,
-     so always tell them to look at Shim first. The tab opens only after they allow it. If
-     the page lands on another origin (a sign-in redirect, another port or scheme), the
-     session doesn't open, Shim closes the tab, and the answer is `target-changed` with
-     `landedHost`: tell the user (they may need to sign in first), never retry on your own.
-     The answer carries the new tab's `tabId`.
+     let Shim open a tab at that exact URL, even for a site they allowed until quit, so
+     always tell them to look at Shim first. The answer carries the new tab's `tabId`. If
+     the page lands on another origin, Shim closes the tab and answers `target-changed`
+     with `landedHost`; never retry that url. A sign-in page: the user signs in first. The
+     site's own redirect (`medium.com/@a` to `a.medium.com`): tell the user, then open a
+     url on the landed origin.
    - **Where the folder goes.** Unless the user names a folder, use your working directory
      plus the shim's name, lowercased and hyphenated: started in `~/shim-sessions`, a shim
      named "Test hide" goes in `~/shim-sessions/test-hide` (add `-2`, `-3` if that folder
@@ -487,7 +487,7 @@ a file **before** the work it covers, not after a preview goes wrong: a guessed 
 | `references/network-and-modules.md` | a `redirect`, `rewrite-response` or `intercept` rule |
 | `references/site-data.md` | using the site's own API (the API map tools), or reading what a shim saved (`inspect_storage`, `query_db`, `read_sibling_shim`) |
 | `references/compositions.md` | any composition session |
-| `references/page-driving.md` | `interact_page` (your shim's own controls, scroll) or `navigate` in a shim session: what each may touch, the refusal codes, what stops a batch |
+| `references/page-driving.md` | `interact_page` (your shim's own controls, scroll) or `navigate` in a shim session: what each may touch, refusals, what stops a batch; paywalls, one-time popups |
 | `references/sites.md` | changing `match.hosts` |
 | `references/headless.md` | a headless session: `shim_status` offers only headless, an open answers `mode: "headless"`, or the user wants a standalone `.shim` file |
 | `references/hosts.md` | a `chrome` host in `shim_status`, a tab with `host`, `ambiguous-target` / `multiple-targets` |
