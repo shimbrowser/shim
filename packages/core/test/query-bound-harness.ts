@@ -58,6 +58,12 @@ check('the note says how many were shown and that fields were cut', typeof bound
   && bounded.truncated.includes(`showing the top ${bounded.candidates.length} of 25 candidates`) && bounded.truncated.includes(`cut to ${QUERY_FIELD_MAX} characters`), bounded.truncated);
 check('the input is not mutated', (raw[0] as { outerHTML: string }).outerHTML.length === 500);
 
+const longLabel = 'Add to cart: ' + 'Sony WH-1000XM6 wireless noise cancelling headphones, '.repeat(10);
+const aria = { kind: 'aria', role: 'button', label: longLabel, strength: 'strong', matches: 1 };
+const withAria = boundQueryCandidates([{ ...heavy(0), suggestedAnchors: [aria] }]);
+const keptAria = (withAria.candidates[0] as { suggestedAnchors: unknown[] }).suggestedAnchors[0];
+check('a suggested anchor is kept whole, a long aria label included (it matches exactly)', JSON.stringify(keptAria) === JSON.stringify(aria), keptAria);
+
 console.log('small page:');
 const small = [{ selector: 'button#buy', tag: 'button', text: 'Buy', rect: { x: 1, y: 2, w: 3, h: 4 } }];
 const passed = boundQueryCandidates(small);

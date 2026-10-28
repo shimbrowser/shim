@@ -15,6 +15,9 @@ export const QUERY_TOTAL_MAX = 16_000;
 // Fields kept whole: a cut selector or anchor value would be wrong, not
 // short. They still count toward the total.
 const KEEP_WHOLE = new Set(['selector', 'value']);
+// Subtrees kept whole: a suggested anchor is executable (its value, label,
+// role, name all match exactly), and its live match count describes it as is.
+const KEEP_SUBTREE = new Set(['suggestedAnchors']);
 
 export interface BoundedQuery {
   candidates: unknown[];
@@ -44,7 +47,7 @@ function cutValue(v: unknown, max: number, counts: { fields: number }, key: stri
   if (Array.isArray(v)) return v.map((item) => cutValue(item, max, counts, null));
   if (typeof v === 'object' && v !== null) {
     const out: Record<string, unknown> = {};
-    for (const [k, item] of Object.entries(v)) out[k] = cutValue(item, max, counts, k);
+    for (const [k, item] of Object.entries(v)) out[k] = KEEP_SUBTREE.has(k) ? item : cutValue(item, max, counts, k);
     return out;
   }
   return v;
