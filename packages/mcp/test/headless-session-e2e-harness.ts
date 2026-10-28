@@ -277,9 +277,15 @@ async function main(): Promise<void> {
     const ev2 = isRecord(p2.evidence) ? p2.evidence : {};
     check('a redirect rule is refused as unsupported, nothing applied', p2.applied === false && ev2.error === 'unsupported' && p2.revision === 1
       && Array.isArray(ev2.unsupported) && String(ev2.unsupported[0]).includes('redirect'), p2);
-    write({ ...spec, settings: [{ key: 'color', type: 'string', label: 'Color' }], rules: [hidePromo, markTracks] }, { markTrack: markSrc });
+    // A valid declaration reaches preflight: headless has no settings store.
+    write({ ...spec, settings: [{ key: 'color', type: 'text', label: 'Color' }], rules: [hidePromo, markTracks] }, { markTrack: markSrc });
     const p3 = json(await call('shim_preview', {}));
     check('a settings declaration is refused as unsupported', p3.applied === false && isRecord(p3.evidence) && p3.evidence.error === 'unsupported', p3);
+    // A malformed one is refused before that, as an invalid schema.
+    write({ ...spec, settings: [{ key: 'color', type: 'string', label: 'Color' }], rules: [hidePromo, markTracks] }, { markTrack: markSrc });
+    const p3b = json(await call('shim_preview', {}));
+    check('a malformed settings declaration is refused as an invalid schema, nothing applied', p3b.applied === false && isRecord(p3b.evidence)
+      && String(p3b.evidence.rejected).startsWith('invalid settings schema') && String(p3b.evidence.rejected).includes('"string"'), p3b);
 
     // --- an unsupported member at runtime: its shape, partial, the scan ------
     const probe = { id: 'probe', anchor: { primary: { kind: 'css', value: '.tracks' } }, mutations: [{ kind: 'script', handler: 'probeFetch' }] };
