@@ -12,9 +12,22 @@ until it looks right. That live loop runs in Claude Code through
 [`@shimbrowser/mcp`](../mcp/README.md). This package is the part that runs on every page:
 it is deterministic, contains no LLM, and makes no network calls.
 
-> **Status:** pre-release (`0.7.0-dev`), not published to npm yet. It is developed as an npm
-> workspace package inside the Shim repository and will move to its own public repository
-> at launch.
+> **Beta.** Not on npm yet. Install it from a
+> [GitHub release](https://github.com/shimbrowser/shim/releases) or build it from source.
+
+## Install (beta)
+
+As a dependency of your project:
+
+```sh
+npm install https://github.com/shimbrowser/shim/releases/latest/download/shimbrowser-core.tgz
+```
+
+That records the release URL in your `package.json`; pin a version by using
+`.../releases/download/v<version>/shimbrowser-core.tgz` instead. Modules import as
+`@shimbrowser/core/<module>` (for example `@shimbrowser/core/spec-lint`), and the page bundle
+a host injects into pages is `@shimbrowser/core/page`. From source, `npm ci && npm run build`
+at the repository root writes `packages/core/dist`.
 
 ## What's in it
 

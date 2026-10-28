@@ -36,6 +36,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type { PageHost, PreviewRule, PageRuntimeEvent, PageConsoleMessage, PageLoadOutcome } from '@shimbrowser/core/page-host';
 import { runShimCli, USAGE, EXIT_OK, EXIT_PROBLEM, EXIT_USAGE, type ShimCliContext } from '../src/shim-cli';
+import { SHIM_FOR_CHROME_ID } from '../src/bridge-install';
 import { shellQuote, type PreviewPage } from '../src/cli-commands';
 import type { LaunchOutcome } from '../src/launch';
 import { HEADLESS_CAPABILITIES, type HeadlessStorage } from '../src/playwright-page-host';
@@ -448,8 +449,7 @@ async function main(): Promise<void> {
     check('bridge runs the host', (await cli(r, 'bridge', 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/')) === EXIT_OK && r.bridges === 1);
     check('bridge with a stray argument is a usage error', (await cli(r, 'bridge', 'now')) === EXIT_USAGE && r.bridges === 1);
     const id = 'abcdefghijklmnopabcdefghijklmnop';
-    check('install-host needs the id', (await cli(r, 'extension', 'install-host')) === EXIT_USAGE);
-    check('…a valid one', (await cli(r, 'extension', 'install-host', '--extension-id', 'nope')) === EXIT_USAGE);
+    check('install-host takes only a valid id', (await cli(r, 'extension', 'install-host', '--extension-id', 'nope')) === EXIT_USAGE);
     const chrome = path.join(r.home, 'Library', 'Application Support', 'Google', 'Chrome');
     fs.mkdirSync(chrome, { recursive: true });
     check('install-host writes the wrapper and a manifest for the browser that is there', (await cli(r, 'extension', 'install-host', '--extension-id', id)) === EXIT_OK
@@ -463,6 +463,9 @@ async function main(): Promise<void> {
     check('status reports the wrapper, the manifests and no bridge', (await cli(r, 'extension', 'status')) === EXIT_OK && r.out.some((l) => /wrapper: .*present/.test(l)) && r.out.some((l) => new RegExp(`Chrome: .*allows ${id}`).test(l)) && r.out.some((l) => /bridge: not running/.test(l)), r.out.join('\n'));
     fs.writeFileSync(path.join(r.home, 'ud', 'control-chrome.json'), JSON.stringify({ format: 'shim-control/1', host: 'chrome-extension', socketPath: '/s', token: 't', pid: 4242, appVersion: '0.7.0', startedAt: 1 }));
     check('status sees a bridge whose discovery file names a live process', (await cli(r, 'extension', 'status', '--json')) === EXIT_OK && (JSON.parse(r.out[0] ?? '{}') as { bridge: { up: boolean; pid: number } }).bridge.pid === 4242);
+    const pinned = path.join(r.home, 'pinned-profile');
+    check('with no --extension-id, install-host allows Shim for Chrome\'s own id', (await cli(r, 'extension', 'install-host', '--user-data-dir', pinned)) === EXIT_OK
+      && fs.readFileSync(path.join(pinned, 'NativeMessagingHosts', 'com.shimbrowser.bridge.json'), 'utf8').includes(`chrome-extension://${SHIM_FOR_CHROME_ID}/`));
     check('an unknown subcommand is a usage error', (await cli(r, 'extension', 'frobnicate')) === EXIT_USAGE);
   }
 

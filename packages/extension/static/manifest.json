@@ -3,6 +3,7 @@
   "name": "Shim for Chrome",
   "description": "Runs your shims (personal changes to any website, authored in the Shim browser or with Claude Code) in Chrome.",
   "version": "0.0.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvt69RCKz0eTQJGShHZ6s7KlNAnA/1xj7tUZoiKtR5VDHCzC5er7jl8iHe5ttlubEhqHEX6l1Sitp9MhMsc3Q7rXTn5YjhXgRFhjp2Sm15l0LXTAnUXQB3/etX3rfugXO8D/NzTqaaYVOArETXQVhCu415eWFMTASBNMxi4CHhS41cjlky9GRQXLTqWUzXIEK8f75EKcWKuUGBAHt5oCqxYn7ctQ+s0+qvldzg8/KbRFg/UvUx0hglw/JzwQivm2T8lOy3yjG4MgMOI5CFNUNZM5iH0MP7ankEpq/pXmAWc5mL7U6Oeld7WZR7mQoiSaP+RxcF9EKxHr/3vGq45Oq3wIDAQAB",
   "minimum_chrome_version": "120",
   "icons": {
     "16": "icons/icon-16.png",
@@ -10,9 +11,20 @@
     "48": "icons/icon-48.png",
     "128": "icons/icon-128.png"
   },
-  "permissions": ["scripting", "userScripts", "storage", "webNavigation", "debugger", "nativeMessaging"],
-  "optional_host_permissions": ["<all_urls>"],
-  "background": { "service_worker": "sw.js" },
+  "permissions": [
+    "scripting",
+    "userScripts",
+    "storage",
+    "webNavigation",
+    "debugger",
+    "nativeMessaging"
+  ],
+  "optional_host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "sw.js"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_title": "Shim",
@@ -23,5 +35,9 @@
       "128": "icons/icon-128.png"
     }
   },
-  "sandbox": { "pages": ["prepare.html"] }
+  "sandbox": {
+    "pages": [
+      "prepare.html"
+    ]
+  }
 }

@@ -75,9 +75,15 @@ function sim(opts: {
 
 async function main(): Promise<void> {
   console.log('discovery file:');
-  // Electron names userData after productName (before name): pin the folder to the app's.
-  const appPkg = JSON.parse(fs.readFileSync(appPackageJson(), 'utf8')) as { name?: string; productName?: string };
-  check('the userData folder is the app\'s productName', APP_DIR_NAME === (appPkg.productName ?? appPkg.name), `${APP_DIR_NAME} vs ${String(appPkg.productName)}`);
+  // Electron names userData after productName (before name): pin the folder
+  // to the app's. Only where the Shim browser's package is the repository
+  // root; in the open-source repository the root is the packages' workspace.
+  const appPkg = JSON.parse(fs.readFileSync(appPackageJson(), 'utf8')) as { name?: string; productName?: string; workspaces?: unknown };
+  if (appPkg.productName !== undefined) {
+    check('the userData folder is the app\'s productName', APP_DIR_NAME === appPkg.productName, `${APP_DIR_NAME} vs ${String(appPkg.productName)}`);
+  } else {
+    console.log('  ↷ the repository root is not the Shim browser (no productName): its userData name is pinned where the app lives');
+  }
   check('macOS userData', userDataDir({ platform: 'darwin', env: {}, homedir: '/Users/j' }) === '/Users/j/Library/Application Support/Shim');
   check('Linux userData honors XDG_CONFIG_HOME', userDataDir({ platform: 'linux', env: { XDG_CONFIG_HOME: '/x' }, homedir: '/h' }) === '/x/Shim');
   check('Linux userData default (case-sensitive: Shim)', userDataDir({ platform: 'linux', env: {}, homedir: '/h' }) === '/h/.config/Shim');

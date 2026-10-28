@@ -9,9 +9,99 @@ The extension is a runtime host, not a second authoring product: no chat, no mod
 key. It runs the same engine as the Shim browser (`@shimbrowser/core`, the page bundle,
 byte for byte) and tells you honestly what it can run.
 
+## Install (beta)
+
+Shim for Chrome isn't on the Chrome Web Store yet. Install it from a GitHub release; it needs
+Chrome 120 or later (or another Chromium-based browser: Brave, Edge, Chromium).
+
+1. **Download** [`shim-for-chrome.zip`](https://github.com/shimbrowser/shim/releases/latest/download/shim-for-chrome.zip)
+   and unzip it into a folder you will keep. Chrome runs the extension from that folder, so
+   don't delete or move it later.
+2. Open `chrome://extensions` and turn on **Developer mode** (top right).
+3. Click **Load unpacked** and choose the unzipped folder. Shim for Chrome appears with the
+   ID `cihnpejdfdhimjfkegngpndfpiecjhoe`. Every install has this same ID.
+4. Pin it: open the extensions menu (the puzzle piece in the toolbar) and pin Shim for Chrome.
+5. **Allow user scripts.** On the extension's card, click **Details** and turn on **Allow user
+   scripts** (Chrome 138 and later; on Chrome 120 to 137, Developer mode alone does this).
+   Shims with script handlers need it. Without it, the extension runs only declarative rules
+   (hide, restyle, inject and the like), refuses to install a shim that has handlers, and its
+   popup says how to turn them on.
+6. **Install a shim.** Click the toolbar icon, then **install a .shim file**, and choose one
+   (a `.shim` file is a shim exported from the Shim browser or saved by Claude Code). The page
+   lists what the shim does and the sites it runs on. Install it, and Chrome asks for access
+   to exactly those sites: allow it. The shim now runs on those sites, including in tabs
+   already open.
+
+Chrome may warn about extensions in developer mode when it starts. That warning is about
+every unpacked extension: keep Shim for Chrome enabled.
+
+### A shim's settings
+
+A shim can ask for settings (a name, a choice, a number). Its card in the popup then has a
+**settings** button, and says **needs setup** while a required one has no value. Values stay
+in this browser and are never part of an export. A shim that asks for a secret (an API key,
+a token) can't be installed here: Chrome gives extensions no encrypted storage, so such a
+shim runs only in the Shim browser for now.
+
+### Let Claude Code author on your Chrome tabs (optional)
+
+With this on, Claude Code can open a session on a tab here, preview changes on the live page
+and save them as a new version of the installed shim.
+
+1. Install the `shim` CLI and the Claude Code plugin
+   ([instructions](../mcp/README.md#install-beta)).
+2. Register the bridge once (Chrome starts it when the extension asks for it):
+
+   ```sh
+   shim extension install-host
+   ```
+
+   This writes a native messaging host manifest for every Chromium-based browser it finds,
+   allowing only Shim for Chrome's ID, and the small wrapper script it runs. `shim extension
+   status` checks it.
+3. In the extension's popup, turn on **let Claude Code author here**. It says *connected*.
+
+Each session Claude opens waits on an attach card first: who is asking, for which shim and
+site. Nothing runs on the tab until you allow it. While a session holds a tab, Chrome shows a
+bar saying that Shim for Chrome is debugging the browser (the session's previews and
+screenshots use Chrome's debugger API). The bar goes away when the session ends. Turning the
+setting off ends every session at once.
+
+### Update
+
+Download the new `shim-for-chrome.zip`, replace the folder's contents with it, and click the
+reload icon on the extension's card in `chrome://extensions`. Your shims, their settings and
+saved data stay. If you set up the bridge with `shim extension install-host`, update the CLI
+too.
+
+### Remove
+
+Remove it on `chrome://extensions`. That deletes every installed shim, its settings and
+saved data; export the shims you want to keep from the popup first. The bridge's files stay
+until you delete them (`shim extension status` shows where they are).
+
+## Permissions
+
+Shim for Chrome asks for what it uses and nothing more. Site access comes one shim at a
+time.
+
+| Permission | What it is for |
+|---|---|
+| Site access (`optional_host_permissions`) | Asked when you install a shim, for exactly the sites it names, and given back when you remove it. Never all sites at once. |
+| `userScripts` | Runs shims with script handlers in Chrome's user-script world, where a site's own security policy can't block them. Needs **Allow user scripts**. |
+| `scripting` | Runs declarative shims as content scripts, and applies a change to tabs already open. |
+| `storage` | The extension's own bookkeeping between restarts. Your shims live in the extension's database, which is removed with it. |
+| `webNavigation` | Notices page loads, to re-check whether user scripts are allowed and to wait for a tab Claude opened to finish loading. |
+| `debugger` | Only during a Claude Code session, only on that session's tab: previews, screenshots and the page tools. Chrome shows its bar while it's attached. |
+| `nativeMessaging` | Talks to Claude Code through the bridge you register, only while **let Claude Code author here** is on. |
+
+It never asks for `tabs`, cookies, history or downloads. A shim's `api.fetch` sends no
+cookies, can't reach your local network, and reads directly only the shim's own sites;
+anywhere else a site must allow cross-origin reads.
+
 ## Status
 
-Early. What works today:
+Beta. What works today:
 
 - Install a `.shim` file from the popup. Installing asks Chrome for access to exactly
   the sites the shim names, and nothing else.
@@ -51,7 +141,7 @@ Early. What works today:
   browser's control endpoint over a socket, and each session the agent opens waits for
   you on the attach card. Commits land as new versions of the installed shim (below).
 
-What is next: packaging for the Web Store.
+Not yet: the Chrome Web Store, and secret settings (they need an encrypted store first).
 
 ## Modes
 
@@ -130,12 +220,13 @@ format with `host: "chrome-extension"`. The MCP server reads both files, so
 browser's, and a session opened on one of them runs here. Set it up once:
 
 ```
-shim extension install-host --extension-id <the id on chrome://extensions>
+shim extension install-host
 ```
 
 That writes the host manifest for every Chromium found (Chrome, Chromium, Brave, Edge on
 macOS and Linux; `--user-data-dir` for one profile) and the wrapper it runs, in a private
-directory under Shim's user data. `shim extension status` reads it back and says whether a
+directory under Shim's user data. The manifest allows only Shim for Chrome's ID, which the
+extension's manifest pins with its public key (`--extension-id` for a build without it). `shim extension status` reads it back and says whether a
 bridge is up. One bridge owns the endpoint at a time: a second browser's bridge exits.
 
 Every request the bridge relays reaches the worker over that one port, and every route
@@ -170,14 +261,18 @@ The repository's end-to-end harness runs it under Playwright: the bridge install
 the profile as the host, the mcp control client over its socket, a session opened on the
 card, previewed, committed as a version, and the setting turned off.
 
-## Try it
+## Build from source
+
+From the repository root (it builds the engine first):
 
 ```
-npm run build -w @shimbrowser/extension
+npm ci
+npm run build
 ```
 
-Then open `chrome://extensions`, turn on developer mode, choose "Load unpacked" and pick
-`packages/extension/dist`.
+Then load `packages/extension/dist` as in [Install](#install-beta), steps 2 to 5. It has the
+same ID as a release, so it replaces a release install's place (remove one before loading
+the other).
 
 ## Layout
 

@@ -47,6 +47,12 @@ export function browserDataDirs(platform: string, homedir: string, env: Record<s
   return [];
 }
 
+/**
+ * Shim for Chrome's id. The extension's manifest carries a public key, so
+ * every install, unpacked from a release or built from source, has this id.
+ */
+export const SHIM_FOR_CHROME_ID = 'cihnpejdfdhimjfkegngpndfpiecjhoe';
+
 /** A Chrome extension id: 32 letters a to p. */
 export function extensionIdProblem(id: string): string | null {
   return /^[a-p]{32}$/.test(id) ? null : 'an extension id is 32 letters a–p (chrome://extensions shows it under the extension\'s name)';

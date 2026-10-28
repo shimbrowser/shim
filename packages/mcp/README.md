@@ -23,31 +23,65 @@ Shim serves at `compose://<mount>`, which read the sites' APIs with your session
 composition is a folder of its own files plus a `manifest.json` that declares the hosts it
 reads. Compositions run only in the Shim browser.
 
-> **Status:** pre-release (`0.7.0-dev`). Nothing is published to npm or a plugin
-> marketplace yet; install from a checkout of the repository as described below.
+> **Beta.** Nothing is on npm yet: the plugin installs from this repository's marketplace,
+> and the CLI from a [GitHub release](https://github.com/shimbrowser/shim/releases).
 
-## Install as a Claude Code plugin
+## Install (beta)
 
-This package is a Claude Code plugin. It includes `.claude-plugin/plugin.json`,
-`.mcp.json` (which starts the `shim` MCP server) and the `shim-authoring` skill. From a
-checkout:
+### The Claude Code plugin
 
 ```sh
-npm ci
-npm run build -w @shimbrowser/mcp     # writes dist/shim-mcp.js and dist/shim.js
-claude --plugin-dir packages/mcp
+claude plugin marketplace add shimbrowser/shim
+claude plugin install shim@shimbrowser
 ```
+
+(In a Claude Code session, the same is `/plugin marketplace add shimbrowser/shim` and
+`/plugin install shim@shimbrowser`.) If you have no SSH key on GitHub, run
+`export CLAUDE_CODE_PLUGIN_PREFER_HTTPS=1` first: Claude Code clones over SSH by default.
+
+The plugin is self-contained: the MCP server is one bundled file, so there is nothing to
+build or install with it. To update, run `claude plugin marketplace update shimbrowser`,
+which fetches the newest release's plugin (or turn on auto-update for the marketplace in
+`/plugin`).
+
+### The `shim` CLI
+
+```sh
+npm install -g https://github.com/shimbrowser/shim/releases/latest/download/shimbrowser-mcp.tgz
+shim --help
+```
+
+It installs `shim` (pack, lint, preview, and the bridge for Shim for Chrome:
+`shim extension install-host`) and `shim-mcp` (the MCP server, for an MCP client other than
+Claude Code). Run the same command again to update.
+
+### From a checkout
+
+```sh
+git clone https://github.com/shimbrowser/shim.git && cd shim
+npm ci
+npm run build                     # writes packages/mcp/dist/shim-mcp.js and dist/shim.js
+claude --plugin-dir packages/mcp  # the plugin, for this session
+```
+
+### What Claude can author on
+
+The plugin works with or without a Shim host; there is nothing to configure:
+
+- **The Shim browser** ([shimbrowser.com](https://shimbrowser.com)), with its control
+  endpoint on: Claude works in its tabs.
+- **Shim for Chrome** ([`@shimbrowser/extension`](../extension/README.md)), once you've run
+  `shim extension install-host` and turned on **let Claude Code author here** in its popup:
+  Claude works in your Chrome tabs.
+- **Neither:** Claude opens the page in a headless Chromium (below).
 
 Then ask Claude for a change, for example: *"On news.example.com, hide the cookie banner
 and make the article text wider."* The skill tells Claude how to open a session, edit the
 shim, preview it and verify the result.
 
-The plugin works with or without the Shim browser; there is nothing to configure. If Shim
-is running with its control endpoint on, Claude works in its tabs. If it isn't, Claude opens
-the page in a headless Chromium instead (below). `shim_status` tells Claude which modes are
-available and why.
+`shim_status` tells Claude which hosts are reachable and why.
 
-**Without Shim you need Playwright**, which downloads the Chromium that headless mode drives.
+**Headless needs Playwright**, which downloads the Chromium that headless mode drives.
 Shim doesn't bundle a browser. Install it once:
 
 ```sh

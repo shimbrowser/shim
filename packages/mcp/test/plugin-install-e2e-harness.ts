@@ -103,10 +103,13 @@ async function main(): Promise<void> {
     fs.mkdirSync(nodePath, { recursive: true });
     fs.symlinkSync(pwDir, path.join(nodePath, 'playwright'), 'junction');
 
-    // A clean environment: no SHIM_* or CLAUDE_* from this shell, and a
-    // discovery file path where no Shim is (never the developer's own Shim).
-    const controlFile = path.join(tmp, 'shim-user-data', 'control.json');
-    const env: Record<string, string> = { NODE_PATH: nodePath, SHIM_CONTROL_FILE: controlFile };
+    // A clean environment: no SHIM_* or CLAUDE_* from this shell, and a user
+    // data folder where no Shim is: both discovery files (the Shim browser's
+    // and Shim for Chrome's bridge) live under it, so a developer's own Shim
+    // or Shim for Chrome is never reached (a real Chrome tab once was).
+    const userData = path.join(tmp, 'shim-user-data');
+    const controlFile = path.join(userData, 'control.json');
+    const env: Record<string, string> = { NODE_PATH: nodePath, SHIM_USER_DATA: userData, SHIM_CONTROL_FILE: controlFile };
     for (const key of ['PATH', 'HOME', 'USERPROFILE', 'SystemRoot', 'TEMP', 'TMP', 'TMPDIR', 'PLAYWRIGHT_BROWSERS_PATH', 'LOCALAPPDATA', 'APPDATA', 'XDG_CACHE_HOME']) {
       const v = process.env[key];
       if (v !== undefined) env[key] = v;

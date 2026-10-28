@@ -16,7 +16,7 @@ import {
   CliError, packFolder, unpackFile, lintTarget, previewFolder, formatLint, formatPreview, type PreviewDeps,
 } from './cli-commands';
 import type { LaunchOutcome } from './launch';
-import { browserDataDirs, extensionIdProblem, installHost, hostStatus, type InstallFs } from './bridge-install';
+import { browserDataDirs, extensionIdProblem, installHost, hostStatus, SHIM_FOR_CHROME_ID, type InstallFs } from './bridge-install';
 import { readDiscoveryFile, ensurePrivateDir, BRIDGE_DIR } from './bridge-server';
 import { VERSION } from './version';
 
@@ -52,10 +52,11 @@ Usage:
       --target picks the attach host (the Shim browser, or Shim for Chrome)
       when both are reachable and a call names none.
 
-  shim extension install-host --extension-id <id> [--user-data-dir <dir>] [--json]
+  shim extension install-host [--extension-id <id>] [--user-data-dir <dir>] [--json]
       Let Shim for Chrome reach Claude Code: write the native messaging host
       manifest (and the wrapper it runs) for every Chromium found here, or
-      for one user data directory. The id is on chrome://extensions.
+      for one user data directory. The id defaults to Shim for Chrome's own
+      (${SHIM_FOR_CHROME_ID}); pass another for a build without its key.
 
   shim extension status [--user-data-dir <dir>] [--json]
       What is installed for Shim for Chrome: the wrapper, each browser's
@@ -262,8 +263,7 @@ async function run(argv: string[], ctx: ShimCliContext): Promise<number> {
       const [sub, ...args] = rest;
       if (sub === 'install-host') {
         const { values } = parse(args, { 'extension-id': { type: 'string' }, 'user-data-dir': { type: 'string' }, json: { type: 'boolean' } }, { min: 0, max: 0, names: 'no arguments' });
-        const id = str(values, 'extension-id');
-        if (!id) throw new UsageError('shim extension install-host needs --extension-id <id> (shown on chrome://extensions)');
+        const id = str(values, 'extension-id') ?? SHIM_FOR_CHROME_ID;
         const problem = extensionIdProblem(id);
         if (problem) throw new UsageError(problem);
         const x = ctx.extension;
