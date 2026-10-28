@@ -109,6 +109,12 @@ module.exports = function hideSponsored({ anchor, api }) {
 - If `fn` returns a promise, the next call waits until it settles. A throw is reported like a
   handler error and `fn` stays registered. A hook that keeps re-firing is throttled and the
   preview's rule status says so.
+- Another rule's output counts as a change. When a different rule of your shim (or another
+  shim) mounts or re-mounts its own nodes inside your anchor, `fn` runs. A controller on a
+  list can use that to recount badges a per-item rule just added.
+- A preview re-runs only the rules you changed. A rule that reads what a sibling rule put on
+  the page (a count of its badges) keeps its old result until it runs again, so derive such
+  values when you need them, or preview a change that touches both.
 
 ### A page-level script, and in-site navigation
 
