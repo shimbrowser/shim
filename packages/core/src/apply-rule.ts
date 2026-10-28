@@ -31,6 +31,7 @@ import { makeReconciler } from './rule-reconcile';
 import type { Rule, Anchor } from './types';
 import type { CoreApi, CoreAnchoredHandlerApi, HostApiMembers } from './api';
 import { nextFrame } from './next-frame';
+import { judgeMount, unattachedRoots } from './mount-health';
 
 // --- Own-DOM guard ----------------------------------------------------------
 //
@@ -246,10 +247,22 @@ export function applyRule(
   // the old container's children keep their stamps until rule teardown (accepted
   // — cleaned by the teardown sweep, not re-derived per-scan).
 
+  // One console warning per rule lifecycle (the rule-status note carries the
+  // live count): a multi-match rule would otherwise warn once per anchor.
+  let warnedUnattached = false;
+  function warnUnattached(handlerName: string, count: number): void {
+    if (warnedUnattached) return;
+    warnedUnattached = true;
+    console.warn(`[shim] ${spec.id}/${rule.id}: handler "${handlerName}" returned ${count} node(s) it never put on the page `
+      + '— inline output must be inserted by the handler (or use mount.strategy portal / overlay, which the engine places). '
+      + 'Those nodes are not shown and get no self-healing.');
+  }
+
   async function mountOn(el: Element): Promise<void> {
     const gen = generation.get(el) ?? 0;
     const outputs: HTMLElement[] = [];
     const cleanups: Array<() => void> = [];
+    const unattached = new Set<HTMLElement>();
     const change = changeHub.createRecord(el);
     // The handler whose dispatch is running — names the hooks it registers.
     let currentHandler = '';
@@ -287,6 +300,16 @@ export function applyRule(
       const { placed, cleanup } = applyStrategy(raw as HTMLElement[], el as HTMLElement, mut);
       outputs.push(...placed);
       if (cleanup) cleanups.push(cleanup);
+      // The handler has settled and the strategy placed what it places: a
+      // returned root still off the page was never inserted (an inline
+      // handler that built a node and returned it without appending it).
+      // It is not "stomped by the site", so it stays out of self-healing
+      // (mount-health.ts) and is reported instead of re-mounted forever.
+      const missing = unattachedRoots(placed);
+      if (missing.size) {
+        for (const n of missing) unattached.add(n);
+        warnUnattached(currentHandler || mut.kind, missing.size);
+      }
       // Its tier-1 tokens stay: a replacement under the same spec and rule id
       // stamps the same token names, so stripping here could undo its work.
       if (tornDown) {
@@ -300,7 +323,7 @@ export function applyRule(
         return;
       }
     }
-    rs.state.set(el, { outputs, cleanups, change });
+    rs.state.set(el, { outputs, cleanups, change, unattached });
     // Register with the module-level own-DOM registry (see above) so no rule's
     // anchor resolution — this rule's or any other patch's — can ever re-match
     // this mount's output and re-dispatch onto it.
@@ -439,10 +462,10 @@ export function applyRule(
       if (inFlight.has(el)) continue;
       const existing = rs.state.get(el);
       if (existing) {
-        // Opted out of self-healing (no outputs returned) — never re-mount.
-        if (existing.outputs.length === 0) continue;
-        // All outputs still attached — mounted state is healthy.
-        if (existing.outputs.every((n) => document.contains(n))) continue;
+        // Opted out of self-healing (no outputs returned, or only roots the
+        // handler never put on the page) or healthy (every root that was on
+        // the page still is) — never re-mount.
+        if (judgeMount(existing.outputs, existing.unattached) !== 'stomped') continue;
         // Something got stomped: tear down and re-mount.
         teardownEntry(existing);
         rs.state.delete(el);
