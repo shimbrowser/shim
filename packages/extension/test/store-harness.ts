@@ -161,16 +161,37 @@ async function main(): Promise<void> {
     check('at most the cap of page kinds per host, the least recently refreshed gone', Object.keys(capped).length === 100 && capped['/kind104'] === 'h104' && capped['/kind0'] === undefined, String(Object.keys(capped).length));
   }
 
+  console.log('settings values:');
+  {
+    check('a shim with no values reads an empty record', Object.keys(await store.settings.get('b')).length === 0);
+    await store.settings.set('b', 'units', 'metric');
+    await store.settings.set('b', 'limit', 25);
+    await store.settings.set('b', 'on', false);
+    await store.settings.set('c', 'units', 'imperial');
+    const b = await store.settings.get('b');
+    check('values read back as set, typed', b.units === 'metric' && b.limit === 25 && b.on === false && Object.keys(b).length === 3, JSON.stringify(b));
+    check('each shim keeps its own', (await store.settings.get('c')).units === 'imperial');
+    await store.settings.set('b', 'units', 'imperial');
+    check('setting a key again replaces it', (await store.settings.get('b')).units === 'imperial');
+    await store.settings.set('b', '__proto__', 'x');
+    const proto = await store.settings.get('b');
+    check('a "__proto__" key is data, not a prototype', Object.hasOwn(proto, '__proto__') && Object.getPrototypeOf(proto) === Object.prototype);
+    check('delete answers whether a row went away', (await store.settings.delete('b', 'limit')) === true && (await store.settings.delete('b', 'limit')) === false);
+    check('the deleted key is gone, the rest stay', !('limit' in (await store.settings.get('b'))) && (await store.settings.get('b')).on === false);
+  }
+
   console.log('delete cascades the new stores:');
   {
     check('deleteShim', (await store.deleteShim('b')) === true);
     check('its versions, rule state and baselines went with it',
       (await store.versions.listForShim('b')).length === 0 && (await store.ruleState.listForShim('b')).length === 0 && Object.keys(await store.baselines.forHost('b', 'example.com')).length === 0);
+    check('its settings values went with it', Object.keys(await store.settings.get('b')).length === 0);
     check('another shim\'s baselines stay', Object.keys(await store.baselines.forHost('c', 'cap.test')).length === 100);
+    check('another shim\'s settings stay', (await store.settings.get('c')).units === 'imperial');
   }
 
   console.log('schema:');
-  check('version 2', STORE_SCHEMA_VERSION === 2);
+  check('version 3', STORE_SCHEMA_VERSION === 3);
   store.close();
 
   console.log('upgrade from version 1:');
@@ -203,6 +224,8 @@ async function main(): Promise<void> {
     check('the shim from version 1 is still there', (await upgraded.getShim('kept')) !== null);
     await upgraded.baselines.record('kept', 'example.com', '/', 'h');
     check('and the new store works', (await upgraded.baselines.forHost('kept', 'example.com'))['/'] === 'h');
+    await upgraded.settings.set('kept', 'units', 'metric');
+    check('and the settings store (version 3) works', (await upgraded.settings.get('kept')).units === 'metric');
     upgraded.close();
   }
 

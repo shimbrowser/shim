@@ -39,10 +39,10 @@ export function senderContext(sender: SenderLike | undefined, extensionId: strin
 /** Message types the extension's own pages may send. */
 export const PAGE_MESSAGES: ReadonlySet<string> = new Set([
   'mode', 'shims.list', 'shims.setEnabled', 'shims.uninstall', 'shims.export', 'shims.versions', 'shims.restore', 'install.commit',
-  'bridge.status', 'bridge.setEnabled', 'attach.pending', 'attach.answer',
+  'bridge.status', 'bridge.setEnabled', 'attach.pending', 'attach.answer', 'settings.fields', 'settings.set', 'settings.clear',
 ]);
 /** Message types the page runtime may send. */
-export const CONTENT_MESSAGES: ReadonlySet<string> = new Set(['bundle', 'storage', 'event']);
+export const CONTENT_MESSAGES: ReadonlySet<string> = new Set(['bundle', 'storage', 'settings', 'fetch', 'event']);
 
 export function allowedFrom(type: string, context: SenderContext): boolean {
   if (context.kind === 'page') return PAGE_MESSAGES.has(type);

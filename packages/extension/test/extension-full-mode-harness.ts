@@ -15,7 +15,11 @@
 // that does not parse refused at install (the sandboxed check), and the
 // toggle flipped off and on again with shims installed: the one that needs
 // full mode stops and says so, the declarative one keeps running, and both
-// return with the toggle.
+// return with the toggle. Then settings and fetch from a handler: a secret
+// setting refused at install, a handler reading its defaults, api.fetch
+// through the worker without the site's cookie and refusing a private
+// address, the popup's "needs setup" and settings page, a value set there
+// reaching the open page (the shim reboots), and a reset to the default.
 //
 //   npx playwright install chromium   (full Chromium: extensions need it)
 //   node out/packages/extension/test/extension-full-mode-harness.js
@@ -25,7 +29,7 @@ import path from 'path';
 import type { BrowserContext, Page, Worker } from 'playwright';
 import {
   workDir, extensionCopy, fixtureServer, shimWriter, css, launch, workerOf, installer, configureExtension, setExtensionEnabled, popupOf,
-  settle, sleep,
+  settle, sleep, FIXTURE_ALIAS,
 } from './smoke-helpers';
 
 let failures = 0;
@@ -37,6 +41,7 @@ function check(label: string, cond: boolean, detail?: unknown): void {
 }
 
 interface StrictView { ad: string; badge: string | null; cleanups: number; outline: string }
+interface CfgView { greeting: unknown; limit: unknown; keys: string[]; status: number; data: { answer?: number; sawCookie?: boolean } | string; blocked: boolean }
 interface ApplyView { ad: string; root: number; original: string | null }
 
 const BADGE = `module.exports = async function badge({ anchor, api }) {
@@ -60,6 +65,24 @@ const ROOT = `module.exports = function root({ anchor }) {
   return el;
 };`;
 const BROKEN = 'module.exports = function ( { return 1; };';
+// api.fetch reaches the fixture by a public-looking name (it refuses the
+// page's own loopback host, which is the refusal checked here).
+const CFG = `module.exports = async function cfg({ anchor, api }) {
+  const all = await api.settings.getAll();
+  const greeting = await api.settings.get('greeting');
+  const r = await api.fetch('http://${FIXTURE_ALIAS}:' + location.port + '/fixture-data.json');
+  const loopback = await api.fetch(location.origin + '/fixture-data.json');
+  const meta = await api.fetch('http://169.254.169.254/latest/meta-data');
+  const el = document.createElement('span');
+  el.className = 'fm-cfg';
+  el.textContent = JSON.stringify({
+    greeting, limit: all.limit === undefined ? null : all.limit, keys: Object.keys(all),
+    status: r.status, data: r.ok ? JSON.parse(r.text) : r.error,
+    blocked: !loopback.ok && String(loopback.error).includes('private') && !meta.ok && String(meta.error).includes('private'),
+  });
+  anchor.appendChild(el);
+  return el;
+};`;
 
 async function main(): Promise<void> {
   console.log('\n=== extension full-mode harness ===\n');
@@ -484,6 +507,66 @@ async function main(): Promise<void> {
     const v2 = await settle(() => applyView(page2), (v) => v.ad === 'none' && v.root === 1);
     check('and both run', v2.ad === 'none' && v2.root === 1, v2);
     await page2.close();
+  }
+
+  console.log('settings and fetch from a handler:');
+  {
+    const inst = installer(ctx, extId);
+    const secretive = shimFile('secretive', 'Secret fixture', [
+      { id: 'hide-ad', anchor: css('#ad'), mutations: [{ kind: 'hide' }] },
+    ], { settings: [{ key: 'token', type: 'secret' }] });
+    const refused = await inst.install(secretive);
+    const problems = await refused.page.$$eval('#review ul.problems li', (li) => li.map((x) => x.textContent ?? ''));
+    check('a shim with a secret setting is refused at install, naming the field', refused.heading.startsWith('cannot install')
+      && problems.some((p) => p.includes('"token"') && p.includes('cannot store encrypted')), { heading: refused.heading, problems });
+    await refused.page.close();
+
+    const configured = shimFile('configured', 'Configured fixture', [
+      { id: 'cfg', anchor: css('#cfg'), mutations: [{ kind: 'script', handler: 'cfg' }] },
+    ], { settings: [{ key: 'greeting', type: 'text', default: 'hello' }, { key: 'limit', type: 'number', required: true }] }, { cfg: CFG });
+    await inst.installAll(configured);
+    // A cookie on the host api.fetch reaches: it must not be sent.
+    await ctx.addCookies([{ name: 'sid', value: 'signed-in', url: `http://${FIXTURE_ALIAS}:${new URL(origin).port}` }]);
+    const page = await ctx.newPage();
+    await page.goto(`${origin}/settings-fixture`);
+    const read = (): Promise<CfgView | null> => page.evaluate(() => {
+      const t = document.querySelector('.fm-cfg')?.textContent;
+      return t ? JSON.parse(t) as CfgView : null;
+    });
+    const first = await settle(read, (v) => v !== null, 15000);
+    check('a handler reads its settings: the default, and undefined for an unset field', first?.greeting === 'hello' && first.limit === null
+      && JSON.stringify(first.keys) === '["greeting","limit"]', first);
+    check('api.fetch reads a site the extension has no access to (it allows cross-origin reads), without its cookie', first?.status === 200
+      && typeof first.data === 'object' && first.data.answer === 42 && first.data.sawCookie === false, first);
+    check('and refuses the page\'s own loopback host and the metadata endpoint', first?.blocked === true, first);
+
+    const popup = await popupOf(ctx, extId);
+    const card = popup.locator('#list .card', { has: popup.locator('.name', { hasText: 'Configured fixture' }) });
+    check('the popup says the shim needs setup (a required setting has no value)', (await card.locator('.pill.warn').textContent()) === 'needs setup');
+    const [settingsPage] = await Promise.all([ctx.waitForEvent('page'), card.locator('button', { hasText: 'settings' }).click()]);
+    await settingsPage.waitForSelector('#field-limit');
+    check('the settings page names the shim', ((await settingsPage.textContent('#title')) ?? '').startsWith('Configured fixture'));
+    await settingsPage.fill('#field-limit', '7');
+    await settingsPage.locator('#field-limit').dispatchEvent('change');
+    await settingsPage.fill('#field-greeting', 'hi there');
+    await settingsPage.locator('#field-greeting').dispatchEvent('change');
+    const saved = await settle(() => settingsPage.$$eval('.status.ok', (s) => s.length), (n) => n === 2);
+    check('each value is saved as it changes', saved === 2, saved);
+    const after = await settle(read, (v) => v?.greeting === 'hi there' && v.limit === 7, 15000);
+    check('the open page picks them up: the shim reboots and its handler reads the new values', after?.greeting === 'hi there' && after.limit === 7, after);
+    await page.reload();
+    const reloaded = await settle(read, (v) => v?.limit === 7, 15000);
+    check('and they persist across a reload', reloaded?.greeting === 'hi there' && reloaded.limit === 7, reloaded);
+    await popup.reload();
+    await popup.waitForSelector('#mode:not(:empty)');
+    const pillAfter = await popup.locator('#list .card', { has: popup.locator('.name', { hasText: 'Configured fixture' }) }).locator('.pill.warn').count();
+    check('with the required value set, "needs setup" is gone', pillAfter === 0, pillAfter);
+    await settingsPage.locator('.field', { has: settingsPage.locator('#field-greeting') }).locator('button', { hasText: 'reset to default' }).click();
+    const reset = await settle(read, (v) => v?.greeting === 'hello', 15000);
+    check('reset to default: the field reads its default again on the open page', reset?.greeting === 'hello' && reset.limit === 7, reset);
+    await settingsPage.close();
+    await popup.close();
+    await page.close();
   }
 
   check('no page errors in the extension', errors.length === 0, errors);

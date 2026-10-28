@@ -24,3 +24,15 @@ every tool works the same; what differs is where the tab lives and where a commi
   host is never tried in its place.
 - Shim for Chrome serves no compositions, no API map and no `interact_page` in this
   version; those answer `requires-shim-browser`.
+- On Shim for Chrome a handler gets `api.storage`, `api.settings` and `api.fetch`;
+  `api.ai`, `api.db` and the shared code-space answer `not-available-in-shim-for-chrome`
+  in their own shape. A `secret` settings field is refused at preview and at commit: the
+  extension has no encrypted store, so author a shim that needs a credential in the Shim
+  browser. `api.fetch` has the browser's bounds (cookie-less, http(s), no local-network
+  address, 5 MB, 15 s), but it reads a site the extension has no access to only when that
+  site allows cross-origin reads (CORS): prefer endpoints that send
+  `Access-Control-Allow-Origin`, or the shim's own site.
+- A preview on Shim for Chrome does not get the browser's isolated preview `api`: when the
+  shim is installed and runs on the page, `api.storage` reads and writes its saved data
+  (a preview's write persists), and `api.settings` reads the values the user saved,
+  against the working declaration (a field you just declared reads its default).

@@ -42,8 +42,10 @@ import {
   type ReviewItem,
 } from './messages';
 import { SHIM_FILE_FORMAT } from '@shimbrowser/core/shim-folder';
-import { openPageHost, type ExtensionPageHost, type SessionStorage, type SessionStorageScope, type NudgeOutcome } from './page-host';
+import { openPageHost, type ExtensionPageHost, type SessionStorage, type SessionStorageScope, type SessionHandlerApi, type NudgeOutcome } from './page-host';
 import { createSessions, type ExtensionSessionTarget } from './sessions';
+import { settingsPageFields, valueForHandler, settingsTransport, checkSettingValue, settingsKey, settingsFields, needsSetup } from './settings';
+import { brokerFetch } from './fetch';
 import { createConsentGate, type ConsentAnswer, type PendingConsent } from './attach-consent';
 import { routeControlRequest, type ControlDeps, type TabInfo, type AttachRequest } from './control';
 import { createBridgePort, type PortLike } from './bridge-port';
@@ -443,6 +445,8 @@ async function summary(db: ShimStore, shim: InstalledShim): Promise<ShimSummary>
     needsFullMode: !fitsMode(shim),
     version: specVersion(shim.spec),
     review,
+    settingsCount: settingsFields(shim.spec).length,
+    needsSetup: needsSetup(shim.spec, await db.settings.get(shim.id)),
   };
 }
 
@@ -572,7 +576,12 @@ async function bundleFor(page: { hostname: string; port: string; pathname: strin
     // a clean resolve records one.
     const baseline = baselineForPath(await db.baselines.forHost(shim.id, page.hostname), page.pathname);
     const spec = { ...shim.spec, bundleHash: baseline ?? undefined };
-    out.push({ id: shim.id, spec, priority: priorityForRank(shim.rank), version: specVersion(shim.spec), handlers, forms: ruleForms(shim.spec, shim.handlers) });
+    // Read the values only for a shim that declares settings: every page load runs this.
+    const settings = settingsFields(shim.spec).length ? settingsKey(shim.spec, await db.settings.get(shim.id)) : undefined;
+    out.push({
+      id: shim.id, spec, priority: priorityForRank(shim.rank), version: specVersion(shim.spec), handlers, forms: ruleForms(shim.spec, shim.handlers),
+      ...(settings !== undefined ? { settingsKey: settings } : {}),
+    });
   }
   return out;
 }
@@ -607,6 +616,25 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
         case 'list': return { ok: true, value: await db.userData.list(scope) };
         default: return { ok: false, error: 'unknown storage method' };
       }
+    }
+    case 'settings': {
+      // The shim's declared keys only, resolved against what the user set;
+      // like storage, only for a shim that runs on the sender's page.
+      if (!page) return { ok: false, error: 'no page' };
+      const shim = await db.getShim(msg.shimId);
+      if (!shim || !(await runsOn(shim, page, capabilitiesForWorld(world)))) return { ok: false, error: 'not a shim of this page' };
+      const stored = await db.settings.get(shim.id);
+      return { ok: true, value: msg.method === 'getAll' ? settingsTransport(shim.spec, stored) : valueForHandler(shim.spec, stored, msg.key) };
+    }
+    case 'fetch': {
+      // The broker answers a handler of a shim that runs here, in a world
+      // where handlers run (fetch is a full-mode member).
+      if (!page) return { ok: false, error: 'no page' };
+      const shim = await db.getShim(msg.shimId);
+      const capabilities = capabilitiesForWorld(world);
+      if (!shim || !(await runsOn(shim, page, capabilities))) return { ok: false, error: 'not a shim of this page' };
+      if (!capabilities.apiMembers.includes('fetch')) return { ok: false, error: 'api.fetch runs only with user scripts on' };
+      return { ok: true, value: await brokerFetch(msg.url, msg.opts) };
     }
     case 'event': {
       if (!page) return { ok: false, error: 'no page' };
@@ -676,6 +704,27 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld): 
         await refreshOpenTabs(patternsFor(shim));
         return { ok: true };
       });
+    case 'settings.fields': {
+      const shim = await db.getShim(msg.id);
+      if (!shim) return { ok: false, error: 'no such shim' };
+      return { ok: true, name: shim.name, fields: settingsPageFields(shim.spec, await db.settings.get(shim.id)) };
+    }
+    case 'settings.set':
+    case 'settings.clear': {
+      const shim = await db.getShim(msg.id);
+      if (!shim) return { ok: false, error: 'no such shim' };
+      if (msg.type === 'settings.set') {
+        const checked = checkSettingValue(shim.spec, msg.key, msg.value);
+        if (!checked.ok) return { ok: false, error: checked.error };
+        await db.settings.set(shim.id, msg.key, checked.value);
+      } else {
+        await db.settings.delete(shim.id, msg.key);
+      }
+      // A handler reads a setting when it runs: the open pages reboot the
+      // shim (its settings digest moved), as the Shim browser re-applies it.
+      await refreshOpenTabs(patternsFor(shim));
+      return { ok: true };
+    }
     case 'shims.setEnabled': {
       const shim = await db.getShim(msg.id);
       if (!shim) return { ok: false, error: 'no such shim' };
@@ -864,6 +913,41 @@ async function nudgeTab(tabId: number, msg: Extract<ToRuntime, { seq?: number }>
   });
 }
 
+/**
+ * The installed shim a preview's call is about, when that shim runs on the
+ * page's origin (enabled, hosts cover it, granted), else null: a preview of a
+ * shim installed for another site reads nothing of it, storage or settings.
+ */
+async function installedRunsOn(db: ShimStore, scope: SessionStorageScope): Promise<InstalledShim | null> {
+  if (scope.patchId === '' || scope.patchId.includes(':')) return null;
+  const shim = await db.getShim(scope.patchId);
+  if (!shim) return null;
+  let page: { hostname: string; port: string };
+  try {
+    const u = new URL(scope.origin);
+    page = { hostname: u.hostname, port: u.port };
+  } catch {
+    return null;
+  }
+  return (await runsOn(shim, page, SESSION_CAPABILITIES)) ? shim : null;
+}
+
+/**
+ * Previews' api.settings and api.fetch. Settings resolve the session's
+ * working declaration (a field just declared reads its default) against the
+ * installed shim's values; fetch is the broker installed shims use.
+ */
+function sessionHandlerApiFor(db: ShimStore): SessionHandlerApi {
+  return {
+    async settings(scope) {
+      const shim = await installedRunsOn(db, scope);
+      const declarer = sessions.workingSpec(scope.patchId) ?? shim?.spec ?? null;
+      return settingsTransport(declarer, shim ? await db.settings.get(shim.id) : {});
+    },
+    fetch: (_scope, url, opts) => brokerFetch(url, opts),
+  };
+}
+
 function sessionStorageFor(db: ShimStore, bucket: Map<string, Map<string, unknown>>): SessionStorage {
   const own = (scope: SessionStorageScope): Map<string, unknown> => {
     const id = `${scope.origin}\n${scope.patchId}`;
@@ -874,22 +958,7 @@ function sessionStorageFor(db: ShimStore, bucket: Map<string, Map<string, unknow
     }
     return b;
   };
-  // The installed shim's rows only when that shim runs on the page's origin
-  // (enabled, hosts cover it, granted): a preview of a shim installed for
-  // another site reads nothing of it.
-  const installed = async (scope: SessionStorageScope): Promise<boolean> => {
-    if (scope.patchId === '' || scope.patchId.includes(':')) return false;
-    const shim = await db.getShim(scope.patchId);
-    if (!shim) return false;
-    let page: { hostname: string; port: string };
-    try {
-      const u = new URL(scope.origin);
-      page = { hostname: u.hostname, port: u.port };
-    } catch {
-      return false;
-    }
-    return runsOn(shim, page, SESSION_CAPABILITIES);
-  };
+  const installed = async (scope: SessionStorageScope): Promise<boolean> => (await installedRunsOn(db, scope)) !== null;
   const asScope = (scope: SessionStorageScope) => ({ shimId: scope.patchId, origin: scope.origin });
   return {
     async get(scope, key) {
@@ -941,7 +1010,7 @@ function hostOnTab(tabId: number): ExtensionPageHost | undefined {
 async function openHost(tabId: number): Promise<string> {
   if (hostOnTab(tabId)) throw new Error('a session already holds this tab');
   const db = await store();
-  const host = await openPageHost(tabId, { engineBundle, storage: sessionStorageFor(db, new Map()), nudge: nudgeTab });
+  const host = await openPageHost(tabId, { engineBundle, storage: sessionStorageFor(db, new Map()), handlerApi: sessionHandlerApiFor(db), nudge: nudgeTab });
   const id = `host-${++hostSeq}`;
   const entry: OpenHost = { host, events: [], console: [], popups: [], offs: [] };
   entry.offs.push(host.onRuntimeEvent((e) => { entry.events.push(e); }));
@@ -1300,7 +1369,7 @@ const controlDeps: ControlDeps = {
     if (!shim) return { ok: false, error: 'unknown-artifact', detail: `no shim "${artifactId}"` };
     if (hostOnTab(tab.tabId)) return { ok: false, error: 'artifact-busy', detail: 'a session already holds this tab' };
     const worldId = crypto.randomUUID();
-    const host = await openPageHost(tab.tabId, { engineBundle, storage: sessionStorageFor(db, new Map()), nudge: nudgeTab }, { worldId });
+    const host = await openPageHost(tab.tabId, { engineBundle, storage: sessionStorageFor(db, new Map()), handlerApi: sessionHandlerApiFor(db), nudge: nudgeTab }, { worldId });
     const id = `host-${++hostSeq}`;
     const entry: OpenHost = { host, events: [], console: [], popups: [], offs: [] };
     openHosts.set(id, entry);

@@ -68,6 +68,20 @@ console.log('\n=== reconcile harness ===\n');
   check('a side without a key is not compared', unknown.stop.length === 0 && ids(unknown.update) === 'a');
 }
 {
+  // A setting changed on the settings page: same version, same code, a new
+  // digest. The shim reboots so its handlers read the new value; the other
+  // shims on the page are left alone.
+  const before = new Map([['a', { priority: -1, version: 4, settingsKey: 's1' }], ['b', { priority: -2, version: 1, settingsKey: 'x' }]]);
+  const r = reconcileShims(before, [{ ...w('a', -1, 4), settingsKey: 's2' }, { ...w('b', -2, 1), settingsKey: 'x' }]);
+  check('a changed settings digest restarts that shim only', r.stop.join() === 'a' && ids(r.start) === 'a' && r.update.length === 0);
+  const same = reconcileShims(before, [{ ...w('a', -1, 4), settingsKey: 's1' }, { ...w('b', -2, 1), settingsKey: 'x' }]);
+  check('the same digest leaves it alone', same.stop.length === 0 && same.start.length === 0 && same.update.length === 0);
+  const moved = reconcileShims(before, [{ ...w('a', -1, 5), settingsKey: 's1' }]);
+  check('a version move with the same digest is still an in-place update', ids(moved.update) === 'a' && !moved.stop.includes('a'));
+  const unstamped = reconcileShims(new Map([['a', { priority: -1, version: 4 }]]), [{ ...w('a', -1, 4), settingsKey: 's1' }]);
+  check('a side without a digest is not compared', unstamped.stop.length === 0 && unstamped.start.length === 0);
+}
+{
   const r = reconcileShims(running([['a', -1, 1]]), [w('a', -5, 2)]);
   check('a moved priority and version together: restart, not update', r.stop.join() === 'a' && ids(r.start) === 'a' && r.update.length === 0);
 }

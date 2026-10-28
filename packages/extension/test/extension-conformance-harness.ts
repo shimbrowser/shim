@@ -32,7 +32,9 @@ function check(label: string, ok: boolean, detail?: unknown): void {
 
 const PROBE_UNSUPPORTED = `async function probeUnsupported({ anchor, api }) {
   const out = {};
-  out.fetch = await api.fetch('https://example.com/');
+  // Served since phase 7: the page's own loopback origin, which the broker
+  // refuses, answers deterministically with no network.
+  out.fetch = await api.fetch(location.origin + '/x');
   out.ai = await api.ai.complete({ prompt: 'hi' });
   out.modules = await api.modules.invoke('m', 'p', []);
   out.settingsGet = await api.settings.get('enabled');
@@ -97,7 +99,8 @@ async function main(): Promise<void> {
       offConsole();
     }
 
-    // D15: unsupported members fail in their own shape.
+    // D15: unsupported members fail in their own shape; api.settings and
+    // api.fetch are served (phase 7) and record no event.
     const events: PageRuntimeEvent[] = [];
     const off = host.onRuntimeEvent((e) => { events.push(e); });
     {
@@ -116,14 +119,18 @@ async function main(): Promise<void> {
       const out: unknown = raw ? JSON.parse(raw) : null;
       const o: Record<string, unknown> = isRecord(out) ? out : {};
       const refusal = JSON.stringify({ ok: false, error: UNSUPPORTED_ERROR });
-      check('api.fetch resolves { ok: false, error: not-available-in-shim-for-chrome }', JSON.stringify(o.fetch) === refusal, o.fetch);
+      const fetched = isRecord(o.fetch) ? o.fetch : {};
+      check('api.fetch is served: the worker\'s broker answers (here refusing the loopback host), not the unsupported refusal',
+        fetched.ok === false && typeof fetched.error === 'string' && fetched.error.includes('loopback/private/link-local') && JSON.stringify(o.fetch) !== refusal, o.fetch);
       check('api.ai.complete and api.modules.invoke resolve the same refusal', JSON.stringify(o.ai) === refusal && JSON.stringify(o.modules) === refusal, { ai: o.ai, modules: o.modules });
-      check('api.settings reads as unconfigured', !('settingsGet' in o) && JSON.stringify(o.settingsGetAll) === '{}', o);
+      check('api.settings of a shim that declares none reads as unconfigured', !('settingsGet' in o) && JSON.stringify(o.settingsGetAll) === '{}', o);
       check('api.db, storage.pack, storage.global and shared read as absent', o.db === 'absent' && o.pack === 'absent' && o.global === 'absent' && o.shared === 'absent', o);
-      const want = ['fetch', 'ai.complete', 'modules.invoke', 'settings.get', 'settings.getAll', 'db', 'storage.pack', 'storage.global', 'shared'];
+      const want = ['ai.complete', 'modules.invoke', 'db', 'storage.pack', 'storage.global', 'shared'];
       const seen = new Set(events.filter((e) => e.kind === 'unsupported-api' && e.specId === ruleKey).map((e) => String(e.member)));
       const missing = want.filter((m) => !seen.has(m));
       check('every unsupported member recorded an unsupported-api event naming the preview', missing.length === 0, { missing, seen: [...seen] });
+      const served = ['fetch', 'settings.get', 'settings.getAll'].filter((m) => seen.has(m));
+      check('the served members (fetch, settings) recorded none', served.length === 0, served);
       host.removePreview(ruleKey);
     }
     off();

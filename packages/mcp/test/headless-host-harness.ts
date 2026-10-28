@@ -105,10 +105,12 @@ const tick = (ms = 20): Promise<void> => new Promise((r) => setTimeout(r, ms));
 // the api a preview gets captured from run(). `send` is the binding.
 interface PreviewApi {
   storage: { set(k: string, v: unknown): Promise<unknown>; get(k: string): Promise<unknown> };
+  settings: { get(k: string): Promise<unknown>; getAll(): Promise<unknown> };
+  fetch(url: string, opts?: unknown): Promise<unknown>;
   reportEvent(kind: string, payload?: Record<string, unknown>): void;
   db?: unknown;
 }
-function bootRuntime(send: (payload: string) => void): { control: PageRuntimeControl | undefined; captured: { api: PreviewApi | null } } {
+function bootRuntime(send: (payload: string) => void, serves?: readonly ('settings' | 'fetch')[]): { control: PageRuntimeControl | undefined; captured: { api: PreviewApi | null } } {
   const captured: { api: PreviewApi | null } = { api: null };
   const sandbox: Record<string, unknown> = {
     location: { origin: 'https://x.test', pathname: '/', hostname: 'x.test', href: 'https://x.test/' },
@@ -130,7 +132,7 @@ function bootRuntime(send: (payload: string) => void): { control: PageRuntimeCon
   sandbox.window = sandbox;
   sandbox.top = sandbox;
   sandbox.globalThis = sandbox;
-  vm.runInNewContext(pageRuntimeSource({ binding: 'b', globalName: 'g', unsupportedError: REQUIRES_SHIM_BROWSER }), sandbox);
+  vm.runInNewContext(pageRuntimeSource({ binding: 'b', globalName: 'g', unsupportedError: REQUIRES_SHIM_BROWSER, ...(serves ? { serves } : {}) }), sandbox);
   return { control: sandbox.g as PageRuntimeControl | undefined, captured };
 }
 
@@ -195,6 +197,59 @@ async function main(): Promise<void> {
     check('delete answers true for a row', (await s.delete(a, 'k')) === true);
     check('delete answers false when nothing was there', (await s.delete(a, 'k')) === false);
     check('undefined stores as null', (await s.set(a, 'u', undefined)) === undefined && (await s.get(a, 'u')) === null);
+  }
+
+  console.log('page runtime: settings and fetch, served or not');
+  {
+    const rule = { id: 'r', anchor: { primary: { kind: 'css' as const, value: 'x' } }, mutations: [{ kind: 'hide' }] };
+    // Not served (headless): both fail in their own shape, with an event.
+    const plain: Array<Record<string, unknown>> = [];
+    const off = bootRuntime((p) => { plain.push(JSON.parse(p) as Record<string, unknown>); });
+    off.control?.apply('shim-a', rule, 'rk', null);
+    const offApi = off.captured.api;
+    check('unserved settings.get reads undefined', offApi !== null && (await offApi.settings.get('k')) === undefined);
+    const offFetch = await offApi?.fetch('https://a.test/');
+    check('unserved fetch resolves the host\'s refusal', JSON.stringify(offFetch) === JSON.stringify({ ok: false, error: REQUIRES_SHIM_BROWSER }), JSON.stringify(offFetch));
+    check('…each records an unsupported-api event, and no call reaches the driver',
+      plain.some((m) => m.type === 'event' && m.kind === 'unsupported-api' && (m.payload as { member?: unknown }).member === 'settings.get')
+      && plain.some((m) => m.type === 'event' && m.kind === 'unsupported-api' && (m.payload as { member?: unknown }).member === 'fetch')
+      && !plain.some((m) => m.type === 'call'));
+
+    // Served (Shim for Chrome's sessions): over the binding, never throwing.
+    const posted: Array<Record<string, unknown>> = [];
+    const on = bootRuntime((p) => { posted.push(JSON.parse(p) as Record<string, unknown>); }, ['settings', 'fetch']);
+    on.control?.apply('shim-a', rule, 'rk', null);
+    const api = on.captured.api;
+    const control = on.control;
+    if (api && control) {
+      const callOf = (method: string): Record<string, unknown> | undefined => [...posted].reverse().find((m) => m.type === 'call' && m.method === method);
+      const one = api.settings.get('units');
+      const getCall = callOf('settings.get');
+      check('settings.get posts a call with the key, for the preview\'s shim', getCall?.patchId === 'shim-a' && JSON.stringify(getCall.args) === '["units"]', JSON.stringify(getCall));
+      control.resolve(Number(getCall?.id), 'metric');
+      check('…and resolves the value the driver answers', (await one) === 'metric');
+      const failed = api.settings.get('units');
+      control.reject(Number(callOf('settings.get')?.id), 'settings.get failed: gone');
+      check('a settings read the driver rejects reads undefined, never throws', (await failed) === undefined);
+      const all = api.settings.getAll();
+      control.resolve(Number(callOf('settings.getAll')?.id), { keys: ['units', 'limit'], values: { units: 'metric' } });
+      const allBack = await all as Record<string, unknown>;
+      check('getAll rebuilds { keys, values } with every declared key, an unset one as undefined',
+        JSON.stringify(Object.keys(allBack)) === '["units","limit"]' && allBack.units === 'metric' && Object.prototype.hasOwnProperty.call(allBack, 'limit') && allBack.limit === undefined, JSON.stringify(Object.keys(allBack)));
+      const gone = api.settings.getAll();
+      control.reject(Number(callOf('settings.getAll')?.id), 'settings.getAll failed: gone');
+      check('a getAll the driver rejects reads an empty record', JSON.stringify(await gone) === '{}');
+      const f = api.fetch('https://a.test/x', { method: 'POST', body: 'b' });
+      const fetchCall = callOf('fetch');
+      check('fetch posts a call with the url and opts', JSON.stringify(fetchCall?.args) === JSON.stringify(['https://a.test/x', { method: 'POST', body: 'b' }]), JSON.stringify(fetchCall));
+      control.resolve(Number(fetchCall?.id), { ok: true, status: 200, text: 'hi' });
+      check('…and resolves the broker\'s result', JSON.stringify(await f) === JSON.stringify({ ok: true, status: 200, text: 'hi' }));
+      const lost = api.fetch('https://a.test/y');
+      control.reject(Number(callOf('fetch')?.id), 'fetch failed: the session ended');
+      const lostResult = await lost;
+      check('a fetch the driver rejects resolves { ok: false, error }', JSON.stringify(lostResult) === JSON.stringify({ ok: false, error: 'fetch failed: the session ended' }), JSON.stringify(lostResult));
+      check('a served member records no unsupported-api event', !posted.some((m) => m.type === 'event' && m.kind === 'unsupported-api'));
+    }
   }
 
   console.log('page runtime api calls');

@@ -1,5 +1,5 @@
-// The popup: the installed shims, each with enable / disable and remove, and
-// the way to the install page. Everything it shows is data from the worker,
+// The popup: the installed shims, each with enable / disable, its settings
+// page when it declares settings, and remove, and the way to the install page. Everything it shows is data from the worker,
 // rendered as text, never as markup.
 
 import type { ToWorker, WorkerAnswer, ShimSummary, VersionSummary } from './messages';
@@ -42,6 +42,9 @@ function renderShim(shim: ShimSummary, refresh: () => void): HTMLElement {
   text.append(el('div', 'name', shim.name));
   text.append(el('div', 'hosts', shim.hosts.join(', ')));
   top.append(text);
+  // A required setting with no value and no default: the shim can't do what
+  // it says until one is set on its settings page.
+  if (shim.needsSetup) top.append(el('span', 'pill warn', 'needs setup'));
 
   if (shim.needsFullMode) {
     top.append(el('span', 'pill off', 'needs user scripts'));
@@ -76,6 +79,14 @@ function renderShim(shim: ShimSummary, refresh: () => void): HTMLElement {
   bottom.append(rules);
   const spacer = el('span', 'grow');
   bottom.append(spacer);
+  if (shim.settingsCount > 0) {
+    const settings = el('button', undefined, 'settings');
+    settings.title = 'the values this shim asks for, kept in this browser';
+    settings.addEventListener('click', () => {
+      void chrome.tabs.create({ url: chrome.runtime.getURL(`settings.html?shim=${encodeURIComponent(shim.id)}`) });
+    });
+    bottom.append(settings);
+  }
   const exportButton = el('button', undefined, 'export');
   exportButton.title = 'save this shim as a .shim file, as it is now, with its saved data';
   exportButton.addEventListener('click', async () => {
