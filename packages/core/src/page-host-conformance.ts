@@ -181,6 +181,8 @@ const ARIA_BODY = `
 <a id="aria-link" href="#x" aria-label="Get the app">link</a>
 <input id="aria-submit" type="SUBMIT" aria-label="Get the app" value="go">
 <nav id="aria-nav"><span>nav</span></nav>
+<section id="aria-unnamed" aria-label="">unnamed section</section>
+<input id="aria-listed" type="text" list="aria-missing" aria-label="Find">
 `;
 
 // The rebase page. Build 2 renames the buy button's class (its other
@@ -1347,12 +1349,16 @@ const ariaCase: ConformanceCase = {
     const button = { id: 'aria-button', anchor: aria('button', 'Get the app'), mutations: [{ kind: 'restyle', properties: { outlineColor: 'rgb(1, 2, 3)' } }] } satisfies Rule;
     const link = { id: 'aria-link', anchor: aria('link', 'Get the app'), mutations: [{ kind: 'restyle', properties: { outlineColor: 'rgb(4, 5, 6)' } }] } satisfies Rule;
     const nav = { id: 'aria-nav', anchor: aria('navigation', undefined), mutations: [{ kind: 'restyle', properties: { outlineColor: 'rgb(7, 8, 9)' } }] } satisfies Rule;
+    const region = { id: 'aria-region', anchor: aria('region', undefined), mutations: [{ kind: 'restyle', properties: { outlineColor: 'rgb(10, 11, 12)' } }] } satisfies Rule;
+    const listed = { id: 'aria-listed', anchor: aria('combobox', 'Find'), mutations: [{ kind: 'restyle', properties: { outlineColor: 'rgb(13, 14, 15)' } }] } satisfies Rule;
     const dead = { id: 'aria-dead', anchor: aria('button', 'Nothing has this label'), mutations: [{ kind: 'hide' }] } satisfies Rule;
     const buttonKey = kit.apply(button);
     const linkKey = kit.apply(link);
     const navKey = kit.apply(nav);
+    const regionKey = kit.apply(region);
+    const listedKey = kit.apply(listed);
     const deadKey = kit.apply(dead);
-    const keys = [buttonKey, linkKey, navKey, deadKey];
+    const keys = [buttonKey, linkKey, navKey, regionKey, listedKey, deadKey];
     const matched = (key: string): number | undefined => {
       const all = kit.events.filter((e) => e.kind === 'rule-status' && e.specId === key);
       const m = all.at(-1)?.matched;
@@ -1362,6 +1368,8 @@ const ariaCase: ConformanceCase = {
     kit.check('role button + label matches the native button, the explicit role and the submit input', matched(buttonKey) === 3, matched(buttonKey));
     kit.check('role link matches only the <a> with an href', matched(linkKey) === 1, matched(linkKey));
     kit.check('role navigation matches <nav>', matched(navKey) === 1, matched(navKey));
+    kit.check('a <section> with an empty label is no region', matched(regionKey) === 0, matched(regionKey));
+    kit.check('an input whose list resolves to nothing is no combobox', matched(listedKey) === 0, matched(listedKey));
 
     const outlines = await kit.until(async () => {
       const o = await kit.read(`(() => {

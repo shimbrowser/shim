@@ -53,12 +53,11 @@ console.log('implicit-role table:');
 check('link needs an href', implicitRoleSelectors('link').join() === 'a[href],area[href]', implicitRoleSelectors('link'));
 check('heading covers h1–h6', implicitRoleSelectors('heading').length === 6);
 check('img excludes alt="" (that is presentation)', implicitRoleSelectors('img').join() === 'img:not([alt=""])');
-check('form and region are landmarks only when named',
-  implicitRoleSelectors('form').every((s) => /\[(aria-label|aria-labelledby|title)\]$/.test(s))
-  && implicitRoleSelectors('region').every((s) => /\[(aria-label|aria-labelledby|title)\]$/.test(s)));
-check('a text input with a list is a combobox, not a textbox',
-  implicitRoleSelectors('textbox').every((s) => s === 'textarea' || s.endsWith(':not([list])'))
-  && implicitRoleSelectors('combobox').some((s) => s.endsWith('[list]')));
+check('name-dependent landmarks are left out (an empty or dangling label names nothing)',
+  implicitRoleSelectors('form').length === 0 && implicitRoleSelectors('region').length === 0);
+check('a listed input is neither textbox, searchbox nor combobox (its role depends on the datalist resolving)',
+  [...implicitRoleSelectors('textbox'), ...implicitRoleSelectors('searchbox')].every((s) => s === 'textarea' || s.endsWith(':not([list])'))
+  && implicitRoleSelectors('combobox').join() === 'select:not([multiple]):not([size])', implicitRoleSelectors('combobox'));
 check('context-dependent roles are left out',
   ['banner', 'contentinfo', 'complementary', 'columnheader', 'rowheader'].every((r) => !(r in IMPLICIT_ROLE_SELECTORS)));
 

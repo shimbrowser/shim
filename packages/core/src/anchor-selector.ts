@@ -10,10 +10,12 @@
 // `<button role="tab">` is a tab, never a button).
 //
 // The table is deliberately conservative: only mappings that hold without
-// computing anything the selector can't see. Context-dependent roles
+// computing anything the selector can't see. Roles that depend on context
 // (banner/contentinfo on header/footer, complementary on aside, th's
-// row/column header, select's size-dependent listbox) are left out, so a
-// role-only anchor on one of those still needs an explicit `role`.
+// row/column header, select's size-dependent listbox), on an accessible name
+// (form, region: an empty or dangling label gives none) or on an association
+// (an input's `list` → combobox) are left out, so an anchor on one of those
+// still needs an explicit `role`.
 //
 // Pure: no DOM, no dependencies. The output is one selector list, so a
 // resolve runs one native querySelectorAll and the same string is what the
@@ -30,15 +32,12 @@ export const IMPLICIT_ROLE_SELECTORS: Readonly<Record<string, readonly string[]>
   article: ['article'],
   button: ['button', ...['button', 'submit', 'reset', 'image'].map((t) => `input[type="${t}" i]`)],
   checkbox: ['input[type="checkbox" i]'],
-  combobox: [
-    'select:not([multiple]):not([size])',
-    'input:not([type])[list]',
-    ...[...TEXT_INPUT_TYPES, 'search'].map((t) => `input[type="${t}" i][list]`),
-  ],
+  // An input's combobox role depends on its `list` resolving to a datalist,
+  // which a selector can't check: listed inputs need an explicit role (and
+  // are left out of textbox / searchbox below, so they never mis-attach).
+  combobox: ['select:not([multiple]):not([size])'],
   dialog: ['dialog'],
   figure: ['figure'],
-  // A form is a landmark only once it has an accessible name.
-  form: ['form[aria-label]', 'form[aria-labelledby]', 'form[title]'],
   group: ['fieldset', 'details', 'optgroup'],
   heading: ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'],
   img: ['img:not([alt=""])'],
@@ -51,7 +50,6 @@ export const IMPLICIT_ROLE_SELECTORS: Readonly<Record<string, readonly string[]>
   option: ['select option', 'datalist option'],
   progressbar: ['progress'],
   radio: ['input[type="radio" i]'],
-  region: ['section[aria-label]', 'section[aria-labelledby]', 'section[title]'],
   row: ['tr'],
   searchbox: ['input[type="search" i]:not([list])'],
   separator: ['hr'],
