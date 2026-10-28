@@ -40,7 +40,7 @@ import crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import type { AddressInfo } from 'net';
 import type { BrowserContext, Page, Worker } from 'playwright';
-import { workDir, launch, workerOf, configureExtension, settle } from './smoke-helpers';
+import { workDir, launch, workerOf, configureExtension, settle, sleep } from './smoke-helpers';
 
 let failures = 0;
 let passes = 0;
@@ -80,6 +80,8 @@ const NEL_HOST = 'shim-nel.test';
 const WORKER_FETCH_NEL = true;
 /** Whether a NEL policy installed by a page load on the origin also covers the worker's fetches there (no: policies are partitioned). */
 const NEL_PAGE_POLICY_COVERS_WORKER = false;
+/** How long a NEL observation lasts (reports are queued within 100ms under --short-reporting-delay). */
+const NEL_WINDOW_MS = 6000;
 
 const MANIFEST = {
   manifest_version: 3,
@@ -134,6 +136,11 @@ self.tabOf = async (url) => (await chrome.tabs.query({})).find((t) => t.url === 
 // One injection into an open document: the world's answer, or the error.
 self.inject = async (tabId, w) => {
   const [r] = await chrome.userScripts.execute({ target: { tabId }, ...(w ? { worldId: w } : {}), js: [{ code: self.mark(w || 'default') }] });
+  return r && 'result' in r ? r.result : { error: String(r && r.error) };
+};
+// Arbitrary code in one world of an open document (no mark): its answer.
+self.injectCode = async (tabId, w, code) => {
+  const [r] = await chrome.userScripts.execute({ target: { tabId }, worldId: w, js: [{ code }] });
   return r && 'result' in r ? r.result : { error: String(r && r.error) };
 };
 // A content script (the isolated world, not a user-script world) reading both storage areas.
@@ -308,12 +315,16 @@ async function main(): Promise<void> {
       const answers: unknown[] = [];
       for (const w of first) answers.push(await call('inject', tabId, w));
       check(`${WORLD_CAP - 1} named worlds injected one by one are each isolated`, first.every((w, i) => alone(w, answers[i])), answers);
+      const sentinelWorld = first[3] ?? 'l3';
+      await call('injectCode', tabId, sentinelWorld, `globalThis.shim_sentinel = 'kept-${sentinelWorld}'; true`);
       await page.evaluate(() => history.pushState(null, '', '/lifetime/elsewhere'));
       const late = await call<unknown>('inject', tabId, 'late');
       check('after a same-document navigation, one more world is not isolated (the count is per document lifetime)', !alone('late', late), late);
       check('it runs in the default world', Array.isArray(late) && late.includes('own_default'), late);
-      const again = await call<unknown>('inject', tabId, first[3]);
-      check('re-entering a used world reuses its realm (its globals are still there)', Array.isArray(again) && again.includes(`own_${first[3]}`) && !again.includes('own_default'), again);
+      const reused = first[3] ?? 'l3';
+      const again = await call<unknown>('injectCode', tabId, reused, `[globalThis.shim_sentinel ?? null, Object.keys(globalThis).filter((k) => k.startsWith('own_')).sort()]`);
+      check('re-entering a used world reuses its realm (a value planted before is still there, read without planting)',
+        JSON.stringify(again) === JSON.stringify(['kept-' + reused, [`own_${reused}`]]), again);
 
       await page.goto(`${origin}/lifetime/new-document`);
       const fresh = await settle(() => call<number | undefined>('tabOf', page.url()), (id) => id === tabId);
@@ -348,23 +359,32 @@ async function main(): Promise<void> {
       check('control: a page load on the NEL site is reported (NEL works in this browser)', control.includes('/control'), nel.reports);
       await page.close();
 
-      // A policy installed by the page above, then one installed by the worker's own request.
+      // Only the page's policy exists: a worker fetch to /reset (which sends no
+      // headers of its own), then a fixed window, not ended early by anything.
+      const pageOnly = await call('workerFetch', `${nelOrigin}/reset?key=SECRET-PAGE-POLICY`);
+      check('the worker reaches the NEL site (a dropped connection)', pageOnly === 'network-error', pageOnly);
+      await sleep(NEL_WINDOW_MS);
+      const pageCovered = nel.reports.join('\n').includes('SECRET-PAGE-POLICY');
+
+      // Then a policy installed by the worker's own request, and requests under it.
       const statuses = [
-        // /reset sends no headers: only the page's policy could cover it.
-        await call('workerFetch', `${nelOrigin}/reset?key=SECRET-PAGE-POLICY`),
         await call('workerFetch', `${nelOrigin}/install`),
         await call('workerFetch', `${nelOrigin}/api?key=SECRET-OK`),
         await call('workerFetch', `${nelOrigin}/fail?key=SECRET-HTTP-ERROR`),
         await call('workerFetch', `${nelOrigin}/reset?key=SECRET-NETWORK-ERROR`),
       ];
-      check('the worker reaches the NEL site (a network error, 200, 200, 500, a network error)', JSON.stringify(statuses) === JSON.stringify(['network-error', 200, 200, 500, 'network-error']), statuses);
-      const all = await settle(async () => nel.reports.join('\n'), (r) => r.includes('SECRET'), 8000);
-      const leaked = ['SECRET-PAGE-POLICY', 'SECRET-OK', 'SECRET-HTTP-ERROR', 'SECRET-NETWORK-ERROR'].filter((k) => all.includes(k));
-      console.log(`    worker fetches reported with their query: ${leaked.length ? leaked.join(', ') : 'none'}`);
+      check('and answers under the worker\'s policy (200, 200, 500, a dropped connection)', JSON.stringify(statuses) === JSON.stringify([200, 200, 500, 'network-error']), statuses);
+      const own = ['SECRET-OK', 'SECRET-HTTP-ERROR', 'SECRET-NETWORK-ERROR'];
+      const want = WORKER_FETCH_NEL ? (r: string): boolean => own.every((k) => r.includes(k)) : (): boolean => false;
+      // Positive evidence ends the wait; expecting none, the whole window passes.
+      const all = await settle(async () => nel.reports.join('\n'), want, NEL_WINDOW_MS);
+      const leaked = own.filter((k) => all.includes(k));
+      console.log(`    worker fetches reported with their query: ${leaked.length ? leaked.join(', ') : 'none'}${pageCovered ? ' (and SECRET-PAGE-POLICY)' : ''}`);
       if (process.env.SHIM_FACTS_DUMP) console.log(all);
-      const byOwnPolicy = leaked.some((k) => k !== 'SECRET-PAGE-POLICY');
-      check(`a worker-initiated fetch ${WORKER_FETCH_NEL ? 'is' : 'is not'} reported by NEL with its full URL, query included (pinned: WORKER_FETCH_NEL)`, byOwnPolicy === WORKER_FETCH_NEL, leaked);
-      check(`a policy a page installed ${NEL_PAGE_POLICY_COVERS_WORKER ? 'covers' : 'does not cover'} the worker's fetches (pinned: NEL_PAGE_POLICY_COVERS_WORKER)`, leaked.includes('SECRET-PAGE-POLICY') === NEL_PAGE_POLICY_COVERS_WORKER, leaked);
+      check(`a worker-initiated fetch ${WORKER_FETCH_NEL ? 'is' : 'is not'} reported by NEL with its full URL, query included, success, HTTP error and network error alike (pinned: WORKER_FETCH_NEL)`,
+        WORKER_FETCH_NEL ? leaked.length === own.length : leaked.length === 0, leaked);
+      check(`a policy a page installed ${NEL_PAGE_POLICY_COVERS_WORKER ? 'covers' : 'does not cover'} the worker's fetches (pinned: NEL_PAGE_POLICY_COVERS_WORKER)`,
+        (pageCovered || nel.reports.join('\n').includes('SECRET-PAGE-POLICY')) === NEL_PAGE_POLICY_COVERS_WORKER, nel.reports);
     }
   } finally {
     await ctx.close();
