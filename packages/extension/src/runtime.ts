@@ -479,7 +479,12 @@ export function startRuntime(vault: VaultBoot | null): void {
       });
     }
   };
-  if (onMessage) {
+  // A vault world takes nudges only on its authenticated port: a world with
+  // its own worldId and messaging also receives chrome.tabs.sendMessage, and
+  // the worker's refresh tells every tab without a default runtime port to
+  // retire (in full mode), which would tear the vault shim down on a worker
+  // wake. Only the default runtime answers tab messages.
+  if (onMessage && !vault) {
     onMessage.addListener((msg: unknown, sender, sendResponse: (answer: { ok: true }) => void) => {
       if (sender.id !== chrome.runtime.id || !isToRuntime(msg)) return false;
       // A retired runtime is not a runtime: unanswered, the worker treats

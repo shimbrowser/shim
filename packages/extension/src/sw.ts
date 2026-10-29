@@ -27,7 +27,7 @@ import {
   registrationsFor, userScriptRegistrationsFor, shimIdFor, patternsFor, originsToRelease, RUNTIME_FILES,
   USER_SCRIPT_WORLD_CSP,
 } from './registration';
-import { capabilitiesFor, detectMode, SESSION_CAPABILITIES, type ExtensionMode } from './capabilities';
+import { capabilitiesFor, detectMode, SESSION_CAPABILITIES, VAULT_ENABLED, type ExtensionMode } from './capabilities';
 import { arbitrate, type RuntimeWorld as ArbitratedWorld } from './arbitrate';
 import { baselineForPath, pagePathKey } from '@shimbrowser/core/deploy-id';
 import {
@@ -36,27 +36,88 @@ import {
 } from './rebase';
 import { mintShimId } from './install';
 import { matchPatternsForHosts } from './match-patterns';
-import { senderContext, allowedFrom, type SenderContext } from './sender';
+import { senderContext, allowedFrom, VAULT_MESSAGES, type SenderContext } from './sender';
 import {
-  isToWorker, isFromRuntime, splitAuth, RUNTIME_PORT, STALE_TOKEN, type ToWorker, type ToRuntime, type FromRuntime, type WorkerAnswer, type BundledShim,
-  type ShimSummary, type ReviewItem,
+  isToWorker, isFromRuntime, splitAuth, vaultMessageProblem, RUNTIME_PORT, STALE_TOKEN, type ToWorker, type ToRuntime, type FromRuntime, type WorkerAnswer, type BundledShim,
+  type ShimSummary, type ReviewItem, type VaultView,
 } from './messages';
 import { declaresSecret, VAULT_SCRIPT_PREFIX, type VaultCandidate, type VaultUserScriptRegistration } from './vault';
 import { reconcileVault, principalForToken, emptyVaultState, VAULT_STATE_KEY, type VaultState } from './vault-sync';
 import { SHIM_FILE_FORMAT } from '@shimbrowser/core/shim-folder';
 import { openPageHost, type ExtensionPageHost, type SessionStorage, type SessionStorageScope, type SessionHandlerApi, type NudgeOutcome } from './page-host';
 import { createSessions, type ExtensionSessionTarget } from './sessions';
-import { settingsPageFields, valueForHandler, settingsTransport, checkSettingValue, settingsKey, settingsFields, needsSetup } from './settings';
+import { settingsPageFields, valueForHandler, settingsTransport, checkSettingValue, settingsKey, settingsFields, needsSetup, type SecretPresence } from './settings';
+import { VaultKeeper, LOCK_AFTER_KEY, VAULT_SESSION_KEY, type SecretRow } from './vault-keeper';
+import { openVaultStore, type VaultStore } from './vault-store';
+import { CredentialLeases, LEASE_KEY } from './credential-lease';
+import { runCredentialFetch, CredentialBudget, SECRETS_NOT_AVAILABLE_IN_SESSION, type CredentialFetchDeps } from './credential-fetch';
+import { placedFields, placedUse, grantViews, grantState, checkApproval, rebindDigest, manifestDigest } from './credential-grants';
+import { credentialUseBinding, describeCredentialUse, CREDENTIAL_MAX_VALUE_BYTES } from '@shimbrowser/core/credential-placement';
+import { hasLoneSurrogate } from '@shimbrowser/core/settings-schema';
 import { brokerFetch, fetchReach } from './fetch';
 import { createConsentGate, type ConsentAnswer, type PendingConsent } from './attach-consent';
 import { routeControlRequest, type ControlDeps, type TabInfo, type AttachRequest } from './control';
 import { createBridgePort, type PortLike } from './bridge-port';
 import type { PageRuntimeEvent, PageConsoleMessage, PreviewRule, ScreenshotOptions, LoadWaitOptions, PageInputCommand, PageWorld } from '@shimbrowser/core/page-host';
 
+/**
+ * Moves on every write that can change whether a secret may be sent: a
+ * shim's spec, handlers or enabled state, a grant, a secret, the vault. The
+ * credential broker reads before it awaits and compares synchronously right
+ * before it dispatches (credential-fetch.ts).
+ */
+let credentialEpoch = 0;
+
+/** `fn` with the epoch moved before it starts and again once it settles. */
+function bracket<A extends unknown[], R>(fn: (...args: A) => Promise<R>): (...args: A) => Promise<R> {
+  return async (...args: A): Promise<R> => {
+    credentialEpoch++;
+    try {
+      return await fn(...args);
+    } finally {
+      credentialEpoch++;
+    }
+  };
+}
+
+/** The shim store with every write that changes a shim bracketed by an epoch move. */
+function withEpoch(db: ShimStore): ShimStore {
+  return {
+    ...db,
+    addShim: bracket(db.addShim.bind(db)),
+    putShim: bracket(db.putShim.bind(db)),
+    deleteShim: bracket(async (id: string) => {
+      const gone = await db.deleteShim(id);
+      // A shim's secrets and grants go with it (swept at boot if this fails).
+      if (gone) await (await vaultStore()).deleteShim(id).catch(() => undefined);
+      return gone;
+    }),
+    setEnabled: bracket(db.setEnabled.bind(db)),
+    reviseSpec: bracket(db.reviseSpec.bind(db)),
+    amendSpec: bracket(db.amendSpec.bind(db)),
+  };
+}
+
 let storePromise: Promise<ShimStore> | null = null;
 function store(): Promise<ShimStore> {
-  storePromise ??= openShimStore();
+  storePromise ??= openShimStore().then(withEpoch);
   return storePromise;
+}
+
+/** The vault's own database (vault-store.ts), its writes bracketed by epoch moves like the shim store's. */
+let vaultStorePromise: Promise<VaultStore> | null = null;
+function vaultStore(): Promise<VaultStore> {
+  vaultStorePromise ??= openVaultStore().then((v) => ({
+    ...v,
+    saveRecord: bracket(v.saveRecord.bind(v)),
+    reset: bracket(v.reset.bind(v)),
+    replace: bracket(v.replace.bind(v)),
+    deleteShim: bracket(v.deleteShim.bind(v)),
+    sweep: bracket(v.sweep.bind(v)),
+    secrets: { ...v.secrets, put: bracket(v.secrets.put), delete: bracket(v.secrets.delete) },
+    grants: { ...v.grants, put: bracket(v.grants.put), delete: bracket(v.grants.delete), rebind: bracket(v.grants.rebind) },
+  }));
+  return vaultStorePromise;
 }
 
 // --- vault shims ------------------------------------------------------------------
@@ -83,6 +144,19 @@ let vaultOwnRun = false;
 /** Shims given a world of their own for the harnesses (pageHosts.setVaultTestWorlds), with no secret declared. */
 let vaultTestWorlds = new Set<string>();
 const VAULT_TEST_KEY = 'vault.testWorlds';
+/** The harnesses' switch for the vault in this worker (pageHosts.setVaultForTests); a shipped build turns it on with VAULT_ENABLED. */
+let vaultForTests = false;
+const VAULT_ON_TEST_KEY = 'vault.testOn';
+
+/** Is the vault on: secret settings with `use` install, and the broker places them? */
+function vaultOn(): boolean {
+  return VAULT_ENABLED || vaultForTests;
+}
+
+/** The capabilities of `mode` with the vault as it is in this worker. */
+function caps(mode: ExtensionMode): PageHostCapabilities {
+  return capabilitiesFor(mode, vaultOn());
+}
 
 function isVaultStateShape(v: unknown): v is VaultState {
   if (typeof v !== 'object' || v === null) return false;
@@ -107,6 +181,7 @@ async function loadVault(): Promise<void> {
   vaultOwnRun = false;
   const test = await db.prefs.get(VAULT_TEST_KEY);
   vaultTestWorlds = new Set(Array.isArray(test) ? test.filter((x): x is string => typeof x === 'string') : []);
+  vaultForTests = (await db.prefs.get(VAULT_ON_TEST_KEY)) === true;
 }
 const vaultReady: Promise<void> = loadVault().catch((err: unknown) => {
   console.error('[shim] could not read the vault state', err);
@@ -146,6 +221,209 @@ function requestVaultRotation(ids: 'all' | readonly string[]): void {
   else for (const id of ids) vaultRotation.add(id);
 }
 
+// --- the vault, its secrets, grants and the session lease ----------------------------
+//
+// The vault (vault-keeper.ts) seals each secret value; the broker
+// (credential-fetch.ts) places one on a request a shim's own world makes,
+// for a current grant (credential-grants.ts), outside every session lease
+// (credential-lease.ts), under the vault's current generation. Only the
+// extension's settings page and popup may set up, unlock, enter a value or
+// approve a grant (sender.ts VAULT_MESSAGES).
+
+const VAULT_ALARM = 'vault-expiry';
+const vault = new VaultKeeper({
+  loadRecord: async () => (await vaultStore()).record(),
+  saveRecord: async (record) => (await vaultStore()).saveRecord(record),
+  resetAll: async (record) => (await vaultStore()).reset(record),
+  replaceAll: async (record, rows) => (await vaultStore()).replace(record, rows),
+  listRows: async () => (await vaultStore()).secrets.list(),
+  getRow: async (shimId, key) => (await vaultStore()).secrets.get(shimId, key),
+  putRow: async (row) => (await vaultStore()).secrets.put(row),
+  deleteRow: async (shimId, key) => (await vaultStore()).secrets.delete(shimId, key),
+  session: {
+    get: async () => (await chrome.storage.session.get(VAULT_SESSION_KEY))[VAULT_SESSION_KEY],
+    set: (value) => chrome.storage.session.set({ [VAULT_SESSION_KEY]: value }),
+    remove: () => chrome.storage.session.remove(VAULT_SESSION_KEY),
+  },
+  lockAfterMs: async () => (await store()).prefs.get(LOCK_AFTER_KEY),
+  setLockAfterMs: async (ms) => (await store()).prefs.set(LOCK_AFTER_KEY, ms),
+  now: () => Date.now(),
+  schedule: (at) => {
+    if (at === null) void chrome.alarms.clear(VAULT_ALARM).catch(() => undefined);
+    else void chrome.alarms.create(VAULT_ALARM, { when: Math.max(at, Date.now() + 1000) }).catch(() => undefined);
+  },
+});
+// The unlocked key and the leases are for the extension's own contexts only
+// (the default already; said here so no later change widens it).
+void chrome.storage.session.setAccessLevel?.({ accessLevel: 'TRUSTED_CONTEXTS' }).catch(() => undefined);
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === VAULT_ALARM) void vault.expireIfDue();
+});
+// Every wake checks the deadline.
+void vault.expireIfDue().catch(() => undefined);
+
+const leases = new CredentialLeases({
+  load: async () => (await chrome.storage.session.get(LEASE_KEY))[LEASE_KEY],
+  save: (state) => chrome.storage.session.set({ [LEASE_KEY]: state }),
+});
+chrome.webNavigation.onCommitted.addListener((details) => {
+  if (details.frameId === 0) leases.committed(details.tabId, (details as { documentId?: string }).documentId);
+});
+chrome.tabs.onRemoved.addListener((tabId) => leases.closed(tabId));
+
+/** The tab's top-frame document now, as Chrome names it. */
+async function topDocumentId(tabId: number): Promise<string | undefined> {
+  try {
+    const frame = await chrome.webNavigation.getFrame({ tabId, frameId: 0 }) as { documentId?: string } | null;
+    return frame?.documentId;
+  } catch {
+    return undefined;
+  }
+}
+
+const credentialBudget = new CredentialBudget();
+
+/**
+ * The secret fields of `shim` with a value stored for their declared
+ * placement, each with its revision: presence only. Empty for a shim with no
+ * placed secret (no read).
+ */
+async function secretPresenceFor(shim: InstalledShim): Promise<SecretPresence> {
+  const fields = placedFields(shim.spec);
+  const out = new Map<string, number>();
+  if (!fields.length) return out;
+  const rows = new Map((await (await vaultStore()).secrets.listForShim(shim.id)).map((r) => [r.key, r] as const));
+  for (const f of fields) {
+    const row = rows.get(f.key);
+    if (row && row.placement === credentialUseBinding(f.use)) out.set(f.key, row.updatedAt);
+  }
+  return out;
+}
+
+const credentialDeps: CredentialFetchDeps = {
+  async shim(shimId) {
+    const shim = await (await store()).getShim(shimId);
+    return shim && shim.enabled && isVaultShim(shim) && fitsMode(shim) ? shim : null;
+  },
+  grant: async (shimId, key) => (await vaultStore()).grants.get(shimId, key),
+  reveal: (shimId, key, placement) => vault.reveal(shimId, key, placement),
+  vaultCurrent: (gen) => vault.isCurrent(gen),
+  leaseReady: leases.ready,
+  leaseAllows: (tabId, documentId) => leases.allows(tabId, documentId),
+  epoch: () => credentialEpoch,
+};
+
+/** A grant changed for these shims: their tokens rotate, so a document booted on the old one reloads. */
+async function afterGrantChange(shimIds: readonly string[] | 'all'): Promise<void> {
+  requestVaultRotation(shimIds);
+  await syncRegistrations();
+  const db = await store();
+  const shims = (await db.listShims()).filter((s) => isVaultShim(s) && (shimIds === 'all' || shimIds.includes(s.id)));
+  await refreshOpenTabs(shims.flatMap((s) => patternsFor(s)));
+}
+
+/** What unlocking enables: every current grant, for the unlock screen. */
+async function currentGrants(): Promise<VaultView['grants']> {
+  const db = await store();
+  const vdb = await vaultStore();
+  const out: VaultView['grants'] = [];
+  for (const shim of await db.listShims()) {
+    const fields = placedFields(shim.spec);
+    if (!fields.length) continue;
+    const digest = manifestDigest(shim.spec, shim.handlers);
+    for (const f of fields) {
+      if (grantState(await vdb.grants.get(shim.id, f.key), f.use, digest) !== 'granted') continue;
+      out.push({ shimId: shim.id, shimName: shim.name, label: f.label, description: describeCredentialUse(f.use) });
+    }
+  }
+  return out;
+}
+
+/** A value for a placed secret, checked before it is sealed: what placeCredentials would refuse at dispatch is refused at entry. */
+function secretValueProblem(value: string, use: { header?: string; format: string }): string | null {
+  if (value === '') return 'enter a value';
+  if (new TextEncoder().encode(value).length > CREDENTIAL_MAX_VALUE_BYTES) return `at most ${CREDENTIAL_MAX_VALUE_BYTES} bytes`;
+  if (hasLoneSurrogate(value)) return 'that value is not well-formed text';
+  const at = use.format.indexOf('{}');
+  const formatted = use.format.slice(0, at) + value + use.format.slice(at + 2);
+  if (use.header !== undefined && /[^ -~\u0080-ÿ\t]/.test(formatted)) return 'that value holds characters a header cannot carry';
+  return null;
+}
+
+/** The vault's messages, from the settings page and the popup only (allowedFrom checked it); each shape is checked here. */
+async function handleVault(msg: ToWorker & { type: string }): Promise<WorkerAnswer> {
+  const problem = vaultMessageProblem(msg as unknown as Record<string, unknown>);
+  if (problem) return { ok: false, error: problem };
+  // The user's own activity in the extension's pages renews the idle window; a status read does not.
+  if (msg.type !== 'vault.status') await vault.touch();
+  const db = await store();
+  switch (msg.type) {
+    case 'vault.status': {
+      const status = await vault.status();
+      const view: VaultView = { state: status.state, expiresAt: status.expiresAt, lockAfterMs: status.lockAfterMs, grants: status.state === 'corrupt' ? [] : await currentGrants(), enabled: vaultOn() };
+      return { ok: true, vault: view };
+    }
+    case 'vault.setup': return vault.setup(msg.passphrase);
+    case 'vault.unlock': return vault.unlock(msg.passphrase);
+    case 'vault.lock': await vault.lock(); return { ok: true };
+    case 'vault.reset': {
+      const done = await vault.reset(msg.passphrase);
+      // Every grant went with the old vault: every vault shim's token rotates.
+      if (done.ok) await afterGrantChange('all');
+      return done;
+    }
+    case 'vault.changePassphrase': return vault.changePassphrase(msg.current, msg.next);
+    case 'vault.rotateKey': {
+      const done = await vault.rotateDataKey(msg.passphrase);
+      return done.ok ? { ok: true } : done;
+    }
+    case 'vault.setLockAfter': return vault.setLockAfter(msg.ms);
+    case 'secrets.set':
+    case 'secrets.clear': {
+      const shim = await db.getShim(msg.id);
+      if (!shim) return { ok: false, error: 'no such shim' };
+      const use = placedUse(shim.spec, msg.key);
+      if (!use) return { ok: false, error: `"${msg.key}" is not one of this shim's secret settings with a declared destination` };
+      if (msg.type === 'secrets.set') {
+        const bad = secretValueProblem(msg.value, use);
+        if (bad) return { ok: false, error: bad };
+        const done = await vault.setSecret(shim.id, msg.key, credentialUseBinding(use), msg.value);
+        if (!done.ok) return done;
+      } else {
+        await vault.clearSecret(shim.id, msg.key);
+      }
+      // A handler reads whether it is set when it runs: the shim reboots on the open pages.
+      await refreshOpenTabs(patternsFor(shim));
+      return { ok: true };
+    }
+    case 'grants.list': {
+      const shim = await db.getShim(msg.id);
+      if (!shim) return { ok: false, error: 'no such shim' };
+      const vdb = await vaultStore();
+      const rows = new Map((await vdb.grants.listForShim(shim.id)).map((r) => [r.key, r] as const));
+      const set = new Map((await vdb.secrets.listForShim(shim.id)).map((r: SecretRow) => [r.key, r.placement] as const));
+      return { ok: true, name: shim.name, grants: grantViews(shim, rows, set) };
+    }
+    case 'grants.approve': {
+      const shim = await db.getShim(msg.id);
+      if (!shim) return { ok: false, error: 'no such shim' };
+      const checked = checkApproval(shim, msg.key, msg.review);
+      if (!checked.ok) return { ok: false, error: checked.error };
+      await (await vaultStore()).grants.put({ ...checked.row, grantedAt: Date.now() });
+      await afterGrantChange([shim.id]);
+      return { ok: true };
+    }
+    case 'grants.revoke': {
+      const shim = await db.getShim(msg.id);
+      if (!shim) return { ok: false, error: 'no such shim' };
+      if (await (await vaultStore()).grants.delete(shim.id, msg.key)) await afterGrantChange([shim.id]);
+      return { ok: true };
+    }
+    default:
+      return { ok: false, error: 'unknown message' };
+  }
+}
+
 // --- the mode ----------------------------------------------------------------------
 
 /** The world a message came from: the isolated world (a content script) or the user-script world. */
@@ -167,7 +445,7 @@ function fitsCapabilities(shim: InstalledShim, capabilities: PageHostCapabilitie
 
 /** Does this shim fit the mode in force? One installed under full mode stays, disabled, while the browser runs declarative. */
 function fitsMode(shim: InstalledShim): boolean {
-  return fitsCapabilities(shim, capabilitiesFor(modeNow));
+  return fitsCapabilities(shim, caps(modeNow));
 }
 
 /**
@@ -178,7 +456,7 @@ function fitsMode(shim: InstalledShim): boolean {
  * before drops its handler shims on its next sync.
  */
 function capabilitiesForWorld(world: RuntimeWorld): PageHostCapabilities {
-  return capabilitiesFor(world === 'user-script' && modeNow === 'full' ? 'full' : 'declarative');
+  return caps(world === 'user-script' && modeNow === 'full' ? 'full' : 'declarative');
 }
 
 // --- registration -----------------------------------------------------------------
@@ -606,16 +884,36 @@ async function sweepDrafts(): Promise<void> {
 async function bootRefresh(): Promise<void> {
   const { booted } = await chrome.storage.session.get('booted');
   await sweepDrafts();
+  // Secrets and grants of shims that are gone (a removal that died midway).
+  try {
+    await (await vaultStore()).sweep(new Set((await (await store()).listShims()).map((x) => x.id)));
+  } catch (err) {
+    console.error('[shim] could not sweep the vault store', err instanceof Error ? err.message : String(err));
+  }
   await syncRegistrations();
   if (booted === true) return;
   await chrome.storage.session.set({ booted: true });
   await refreshOpenTabs(await activePatterns());
 }
 
-// Install and update clear user scripts, and a browser start brings back the
-// registrations (and tokens) of the last session: every vault token rotates.
-chrome.runtime.onInstalled.addListener(() => { requestVaultRotation('all'); void syncRegistrations(); });
-chrome.runtime.onStartup.addListener(() => { requestVaultRotation('all'); void syncRegistrations(); });
+// Install and update clear user scripts: every vault token rotates, and the
+// vault locks (its session record goes with the old instance anyway). A
+// browser start rotates nothing: the registrations and
+// tokens of the last session come back with it, so the tabs it restores keep
+// their vault worlds; the vault itself starts locked (chrome.storage.session
+// is gone).
+// A Chrome update fires onInstalled too ('chrome_update'), and clears nothing:
+// it rotates nothing either.
+const installEvents: string[] = [];
+chrome.runtime.onInstalled.addListener((details) => {
+  installEvents.push(details.reason);
+  if (details.reason === 'install' || details.reason === 'update') {
+    requestVaultRotation('all');
+    void vault.lock();
+  }
+  void syncRegistrations();
+});
+chrome.runtime.onStartup.addListener(() => { void syncRegistrations(); });
 // Site access revoked (chrome://extensions) stops the scripts that needed it
 // and tears the shims down on the pages already open; access granted again
 // (or granted for a shim whose install never got it) brings them back.
@@ -658,7 +956,7 @@ async function summary(db: ShimStore, shim: InstalledShim): Promise<ShimSummary>
     version: specVersion(shim.spec),
     review,
     settingsCount: settingsFields(shim.spec).length,
-    needsSetup: needsSetup(shim.spec, await db.settings.get(shim.id)),
+    needsSetup: needsSetup(shim.spec, await db.settings.get(shim.id), await secretPresenceFor(shim)),
     ...(isVaultShim(shim) ? { vault: { overlapping: vaultState?.refused[shim.id] ?? null } } : {}),
   };
 }
@@ -702,7 +1000,12 @@ async function ingestEvent(db: ShimStore, shim: InstalledShim, page: { hostname:
       await recordBaseline(db, shim.id, page.hostname, payload);
       const out = rebasedSpec(shim.spec, ruleId, payload.anchor, payload.bundleHash);
       if (!out) return false;
+      // The engine's own rebase, reported by a world this shim runs in (the
+      // caller checked the principal), re-binds its grants only when nothing
+      // but anchors moved; anything else leaves them suspended.
+      const rebind = placedFields(shim.spec).length ? rebindDigest(shim.spec, out.spec, shim.handlers) : null;
       if (!(await db.reviseSpec(shim.id, out.spec, shim.handlers, 'rebase', specVersion(shim.spec)))) return false;
+      if (rebind && rebind.from !== rebind.to) await (await vaultStore()).grants.rebind(shim.id, rebind.from, rebind.to);
       // Healed: whatever review it was held for no longer applies, and its
       // fingerprint is the rebase's now, committed, never captured over.
       const state = await ruleStateFor(db, shim.id, ruleId);
@@ -775,7 +1078,7 @@ export function priorityForRank(rank: number): number {
 
 async function bundleFor(page: { hostname: string; port: string; pathname: string }, world: RuntimeWorld, principal: Principal): Promise<BundledShim[]> {
   const capabilities = capabilitiesForWorld(world);
-  const withHandlers = capabilities === capabilitiesFor('full');
+  const withHandlers = capabilities === caps('full');
   const db = await store();
   const shims = await db.listShims();
   const out: BundledShim[] = [];
@@ -792,7 +1095,7 @@ async function bundleFor(page: { hostname: string; port: string; pathname: strin
     const baseline = baselineForPath(await db.baselines.forHost(shim.id, page.hostname), page.pathname);
     const spec = { ...shim.spec, bundleHash: baseline ?? undefined };
     // Read the values only for a shim that declares settings: every page load runs this.
-    const settings = settingsFields(shim.spec).length ? settingsKey(shim.spec, await db.settings.get(shim.id)) : undefined;
+    const settings = settingsFields(shim.spec).length ? settingsKey(shim.spec, await db.settings.get(shim.id), await secretPresenceFor(shim)) : undefined;
     out.push({
       id: shim.id, spec, priority: priorityForRank(shim.rank), version: specVersion(shim.spec), handlers, forms: ruleForms(shim.spec, shim.handlers),
       ...(settings !== undefined ? { settingsKey: settings } : {}),
@@ -808,6 +1111,7 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld, p
   await vaultReady;
   // Every message is a moment the mode may have flipped since the last look.
   await reconcileMode();
+  if (VAULT_MESSAGES.has(msg.type)) return handleVault(msg);
   const db = await store();
   // A content message is about the sender's own page and one of the shims
   // that run there; the page named in a message body would be the page's word.
@@ -842,7 +1146,8 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld, p
       const shim = await db.getShim(msg.shimId);
       if (!shim || !mayActFor(shim, principal) || !(await runsOn(shim, page, capabilitiesForWorld(world)))) return { ok: false, error: 'not a shim of this page' };
       const stored = await db.settings.get(shim.id);
-      return { ok: true, value: msg.method === 'getAll' ? settingsTransport(shim.spec, stored) : valueForHandler(shim.spec, stored, msg.key) };
+      const secrets = await secretPresenceFor(shim);
+      return { ok: true, value: msg.method === 'getAll' ? settingsTransport(shim.spec, stored, secrets) : valueForHandler(shim.spec, stored, msg.key, secrets) };
     }
     case 'fetch': {
       // The broker answers a handler of a shim that runs here, in a world
@@ -852,6 +1157,15 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld, p
       const capabilities = capabilitiesForWorld(world);
       if (!shim || !mayActFor(shim, principal) || !(await runsOn(shim, page, capabilities))) return { ok: false, error: 'not a shim of this page' };
       if (!capabilities.apiMembers.includes('fetch')) return { ok: false, error: 'api.fetch runs only with user scripts on' };
+      const secrets = typeof msg.opts === 'object' && msg.opts !== null ? (msg.opts as { secrets?: unknown }).secrets : undefined;
+      if (secrets !== undefined) {
+        // A secret goes only from the shim's own world, with the vault on.
+        if (!vaultOn() || capabilities.secretSettings !== 'declared' || principal.kind !== 'vault' || principal.shimId !== shim.id) {
+          return { ok: true, value: { ok: false, error: 'secret settings are not available here' } };
+        }
+        const value = await runCredentialFetch({ shimId: shim.id, tabId: page.tabId, documentId: page.documentId, url: msg.url, opts: msg.opts }, credentialDeps, credentialBudget);
+        return { ok: true, value };
+      }
       return { ok: true, value: await brokerFetch(msg.url, msg.opts, { mayRead: fetchReachFor(shim.spec.match?.hosts) }) };
     }
     case 'event': {
@@ -877,7 +1191,7 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld, p
       });
     }
     case 'mode':
-      return { ok: true, mode: modeNow };
+      return { ok: true, mode: modeNow, vault: vaultOn() };
     case 'shims.list': {
       const shims = await db.listShims();
       const summaries: ShimSummary[] = [];
@@ -925,7 +1239,7 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld, p
     case 'settings.fields': {
       const shim = await db.getShim(msg.id);
       if (!shim) return { ok: false, error: 'no such shim' };
-      return { ok: true, name: shim.name, fields: settingsPageFields(shim.spec, await db.settings.get(shim.id)) };
+      return { ok: true, name: shim.name, fields: settingsPageFields(shim.spec, await db.settings.get(shim.id), await secretPresenceFor(shim)) };
     }
     case 'settings.set':
     case 'settings.clear': {
@@ -974,7 +1288,7 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld, p
       const { patterns, problems } = matchPatternsForHosts(prepared.spec.match?.hosts ?? []);
       if (problems.length || patterns.length === 0) return { ok: false, error: `the shim's hosts cannot be registered: ${problems.join('; ') || 'none named'}` };
       const mode = modeNow;
-      const pre = preflightSpec(prepared.spec, capabilitiesFor(mode));
+      const pre = preflightSpec(prepared.spec, caps(mode));
       if (!pre.ok) return { ok: false, error: `the shim needs what this browser cannot run: ${pre.unsupported.map((u) => u.message).join('; ')}` };
       const id = mintShimId(crypto.randomUUID());
       const shim: Omit<InstalledShim, 'rank'> = {
@@ -1107,7 +1421,7 @@ async function runtimeExpected(tabId: number, wanted: (record: RuntimeRecord) =>
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
   const page = { hostname: url.hostname, port: url.port };
-  const capabilities = capabilitiesFor(modeNow);
+  const capabilities = caps(modeNow);
   for (const shim of await (await store()).listShims()) {
     if (!(await runsOn(shim, page, capabilities))) continue;
     // The shim's runtime is the one wanted: its own world for a vault shim, the default world otherwise.
@@ -1230,6 +1544,10 @@ function sessionHandlerApiFor(db: ShimStore): SessionHandlerApi {
       return settingsTransport(declarer, values);
     },
     async fetch(scope, url, opts) {
+      // A preview never sends a secret.
+      if (typeof opts === 'object' && opts !== null && (opts as { secrets?: unknown }).secrets !== undefined) {
+        return { ok: false, error: SECRETS_NOT_AVAILABLE_IN_SESSION };
+      }
       // The preview's own sites (the working declaration's), only while that
       // shim runs on the preview's page, the gate storage and settings use;
       // otherwise no site is its own, and CORS decides everywhere else.
@@ -1299,10 +1617,35 @@ function hostOnTab(tabId: number): ExtensionPageHost | undefined {
 }
 
 /** Opens a PageHost on `tabId`; answers its handle. */
+/**
+ * Opens a PageHost on the tab under a session lease (credential-lease.ts):
+ * persisted before the host attaches, released when it closes, the
+ * documents it could touch refused a secret for good.
+ */
+async function leasedPageHost(tabId: number, opts?: { worldId: string }): Promise<ExtensionPageHost> {
+  let owner: number;
+  try {
+    owner = await leases.hold(tabId, () => topDocumentId(tabId));
+  } catch (err) {
+    const failed = (err as { owner?: unknown }).owner;
+    if (typeof failed === 'number') await leases.release(tabId, failed);
+    throw new Error('could not record the session on this tab; try again', { cause: err });
+  }
+  try {
+    const db = await store();
+    const host = await openPageHost(tabId, { engineBundle, storage: sessionStorageFor(db, new Map()), handlerApi: sessionHandlerApiFor(db), nudge: nudgeTab }, opts);
+    host.onClosed(() => { void leases.release(tabId, owner); });
+    return host;
+  } catch (err) {
+    // Only this acquisition's own hold goes: a rival that attached first keeps the tab held.
+    await leases.release(tabId, owner);
+    throw err;
+  }
+}
+
 async function openHost(tabId: number): Promise<string> {
   if (hostOnTab(tabId)) throw new Error('a session already holds this tab');
-  const db = await store();
-  const host = await openPageHost(tabId, { engineBundle, storage: sessionStorageFor(db, new Map()), handlerApi: sessionHandlerApiFor(db), nudge: nudgeTab });
+  const host = await leasedPageHost(tabId);
   const id = `host-${++hostSeq}`;
   const entry: OpenHost = { host, events: [], console: [], popups: [], offs: [] };
   entry.offs.push(host.onRuntimeEvent((e) => { entry.events.push(e); }));
@@ -1402,6 +1745,27 @@ const pageHosts = {
     await syncRegistrations();
     await refreshOpenTabs([]);
   },
+  /**
+   * For the harnesses: turn the vault on in this worker (secret settings with
+   * `use` then install, as with VAULT_ENABLED), or off again (vault shims
+   * then stop, as in a build without it).
+   */
+  async setVaultForTests(on: boolean): Promise<void> {
+    await vaultReady;
+    vaultForTests = on;
+    await (await store()).prefs.set(VAULT_ON_TEST_KEY, on);
+    await syncRegistrations();
+    await refreshOpenTabs([]);
+  },
+  /** For the harnesses: the lease's answer for a tab's top document now. */
+  async leaseAllowsTop(tabId: number): Promise<boolean> {
+    await leases.ready;
+    return leases.allows(tabId, await topDocumentId(tabId));
+  },
+  /** For the harnesses: the onInstalled reasons this worker saw. */
+  installEvents: (): string[] => [...installEvents],
+  /** For the harnesses: the vault's generation and whether it holds a key now. */
+  vaultKeeper: (): { generation: number; current: boolean } => ({ generation: vault.generation(), current: vault.isCurrent(vault.generation()) }),
   /** For the harnesses: the vault registrations as the worker holds them (generations and refusals; never a token). */
   async vaultState(): Promise<{ phase: string; generations: Record<string, number>; refused: Record<string, string[]>; scripts: string[] }> {
     await vaultReady;
@@ -1707,7 +2071,7 @@ const controlDeps: ControlDeps = {
     if (!shim) return { ok: false, error: 'unknown-artifact', detail: `no shim "${artifactId}"` };
     if (hostOnTab(tab.tabId)) return { ok: false, error: 'artifact-busy', detail: 'a session already holds this tab' };
     const worldId = crypto.randomUUID();
-    const host = await openPageHost(tab.tabId, { engineBundle, storage: sessionStorageFor(db, new Map()), handlerApi: sessionHandlerApiFor(db), nudge: nudgeTab }, { worldId });
+    const host = await leasedPageHost(tab.tabId, { worldId });
     const id = `host-${++hostSeq}`;
     const entry: OpenHost = { host, events: [], console: [], popups: [], offs: [] };
     openHosts.set(id, entry);
@@ -1718,7 +2082,7 @@ const controlDeps: ControlDeps = {
     }));
     const u = new URL(tab.url);
     const page = { hostname: u.hostname, port: u.port };
-    const runs = shim.enabled && (await runsOn(shim, page, capabilitiesFor(modeNow)));
+    const runs = shim.enabled && (await runsOn(shim, page, caps(modeNow)));
     const committedDown = runs ? null
       : !shim.enabled ? `"${shim.name}" is disabled in Shim for Chrome: its committed rules are not running on the page; previews still apply`
         : `"${shim.name}" needs what Shim for Chrome does not run in ${modeNow} mode: its committed rules are not running on the page; previews still apply`;

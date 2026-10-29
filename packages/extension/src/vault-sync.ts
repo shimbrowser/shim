@@ -19,10 +19,13 @@
 //
 // Rotation (a new generation and token) happens when a shim is first
 // admitted, when its patterns change, when its registration is missing from
-// Chrome, and when asked: on browser start, on install or update (which
-// clear user scripts), on enable, and on a grant change. Not on an ordinary
-// worker wake, and never into a document already open: a world is created
-// only at load, so a document booted on an old token reloads to get the new.
+// Chrome, and when asked: on install or update (which clear user scripts),
+// on enable, and on a grant change. Not on a browser start (the tabs it
+// restores load before anything could rotate, and would lose their vault
+// worlds; a token never leaves the worker's store or its own world), not on
+// an ordinary worker wake, and never into a document already open: a world
+// is created only at load, so a document booted on an old token reloads to
+// get the new.
 
 import {
   admitVaultShims, mintToken, vaultBootCode, vaultRegistrationFor, vaultScriptIdFor, worldIdFor, shimIdForVaultScript, VAULT_WORLD_CSP,

@@ -19,6 +19,10 @@
     .versions .row { margin: 2px 0; }
     .bridge { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 12px; }
     .bridge label { cursor: pointer; }
+    .vault { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 12px; }
+    .vault-form { display: grid; gap: 6px; margin-top: 6px; }
+    .vault-input { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 4px 8px; flex: 1; min-width: 0; }
+    .status { min-height: 1.2em; }
   </style>
 </head>
 <body>
@@ -28,6 +32,7 @@
   </header>
   <div id="list"></div>
   <div id="empty" class="muted" hidden>no shims yet. install a .shim file exported from the Shim browser or saved by Claude Code.</div>
+  <section id="vault" class="vault" hidden></section>
   <section id="bridge" class="bridge"></section>
   <footer id="mode" class="muted"></footer>
   <script src="popup.js"></script>

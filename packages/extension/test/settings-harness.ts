@@ -89,7 +89,7 @@ console.log('what may be stored:');
   const undeclared = checkSettingValue(SPEC, 'nope', 'x');
   check('an undeclared key is refused, named', !undeclared.ok && undeclared.error.includes('"nope" is not a declared setting'));
   const secret = checkSettingValue({ settings: [{ key: 'token', type: 'secret' }] }, 'token', 'abc');
-  check('a secret field is never stored here', !secret.ok && secret.error.includes('cannot store encrypted'));
+  check('a secret field is never stored here', !secret.ok && secret.error.includes('never stored as a plain setting'));
   check('a non-string key is refused', !ok(5, 'x'));
 }
 
@@ -117,6 +117,24 @@ console.log('the reboot digest:');
   check('a dropped field\'s row does not change it', settingsKey(SPEC, { limit: 1, gone: 'x' }) === a);
   check('absent for a shim without settings', settingsKey({}, { x: 1 }) === undefined);
   check('it carries no value', !String(a).includes('metric'));
+}
+
+console.log('secrets read as presence only:');
+{
+  const S = { settings: [
+    { key: 'apiKey', type: 'secret', label: 'Key', required: true, use: { origin: 'https://api.example.com', header: 'Authorization', format: 'Bearer {}' } },
+    { key: 'units', type: 'text', label: 'Units' },
+  ] };
+  const none = new Map<string, number>();
+  const set = new Map([['apiKey', 1000]]);
+  check('unset: undefined', valueForHandler(S, {}, 'apiKey', none) === undefined && valuesForHandler(S, {}, none).apiKey === undefined);
+  check('set: true, never the value', valueForHandler(S, {}, 'apiKey', set) === true && valuesForHandler(S, { apiKey: 'leaked-plain-row' }, set).apiKey === true);
+  check('a plain row under a secret key is never read', valuesForHandler(S, { apiKey: 'leaked-plain-row' }, none).apiKey === undefined);
+  check('the transport carries presence too', fromSettingsTransport(JSON.parse(JSON.stringify(settingsTransport(S, {}, set)))).apiKey === true);
+  check('a required secret needs setup until set', needsSetup(S, {}, none) && !needsSetup(S, {}, set));
+  check('the page shows whether it is set, never a value', settingsPageFields(S, {}, set)[0]?.isSet === true && settingsPageFields(S, {}, set)[0]?.value === null);
+  const k1 = settingsKey(S, {}, set);
+  check('the digest moves when a secret is set or replaced (its revision, never its value)', settingsKey(S, {}, none) !== k1 && settingsKey(S, {}, new Map([['apiKey', 2000]])) !== k1);
 }
 
 console.log('');

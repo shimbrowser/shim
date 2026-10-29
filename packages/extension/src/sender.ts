@@ -6,16 +6,17 @@
 // kind of sender its type expects. Pure, so a harness pins it.
 
 export type SenderContext =
-  /** One of the extension's own pages. */
-  | { kind: 'page' }
-  /** The page runtime, on a site the content script was registered for. */
-  | { kind: 'content'; hostname: string; port: string; origin: string; pathname: string; tabId?: number }
+  /** One of the extension's own pages; `path` is its file (popup.html, settings.html, …). */
+  | { kind: 'page'; path: string }
+  /** The page runtime, on a site the content script was registered for; `documentId` is the sending document's, as Chrome names it. */
+  | { kind: 'content'; hostname: string; port: string; origin: string; pathname: string; tabId?: number; documentId?: string }
   | { kind: 'unknown' };
 
 export interface SenderLike {
   id?: string;
   url?: string;
   tab?: unknown;
+  documentId?: string;
 }
 
 /**
@@ -24,7 +25,11 @@ export interface SenderLike {
  */
 export function senderContext(sender: SenderLike | undefined, extensionId: string, extensionBase: string): SenderContext {
   if (!sender || sender.id !== extensionId || typeof sender.url !== 'string') return { kind: 'unknown' };
-  if (sender.url.startsWith(extensionBase)) return { kind: 'page' };
+  if (sender.url.startsWith(extensionBase)) {
+    let path = '';
+    try { path = new URL(sender.url).pathname.replace(/^\/+/, ''); } catch { /* no path */ }
+    return { kind: 'page', path };
+  }
   let url: URL;
   try {
     url = new URL(sender.url);
@@ -33,7 +38,11 @@ export function senderContext(sender: SenderLike | undefined, extensionId: strin
   }
   if ((url.protocol !== 'http:' && url.protocol !== 'https:') || !sender.tab) return { kind: 'unknown' };
   const tab = sender.tab as { id?: unknown };
-  return { kind: 'content', hostname: url.hostname, port: url.port, origin: url.origin, pathname: url.pathname, ...(typeof tab.id === 'number' ? { tabId: tab.id } : {}) };
+  return {
+    kind: 'content', hostname: url.hostname, port: url.port, origin: url.origin, pathname: url.pathname,
+    ...(typeof tab.id === 'number' ? { tabId: tab.id } : {}),
+    ...(typeof sender.documentId === 'string' ? { documentId: sender.documentId } : {}),
+  };
 }
 
 /** Message types the extension's own pages may send. */
@@ -41,11 +50,23 @@ export const PAGE_MESSAGES: ReadonlySet<string> = new Set([
   'mode', 'shims.list', 'shims.setEnabled', 'shims.uninstall', 'shims.export', 'shims.versions', 'shims.restore', 'install.commit',
   'bridge.status', 'bridge.setEnabled', 'attach.pending', 'attach.answer', 'settings.fields', 'settings.set', 'settings.clear',
 ]);
+/**
+ * Messages that touch the vault, its secrets or the grants: answered only to
+ * the extension's own settings page and popup, never to
+ * a site, a session, the bridge, the install page or the sandbox.
+ */
+export const VAULT_MESSAGES: ReadonlySet<string> = new Set([
+  'vault.status', 'vault.setup', 'vault.unlock', 'vault.lock', 'vault.reset', 'vault.changePassphrase', 'vault.rotateKey', 'vault.setLockAfter',
+  'secrets.set', 'secrets.clear', 'grants.list', 'grants.approve', 'grants.revoke',
+]);
+/** The only pages vault messages are answered to. */
+export const VAULT_PAGES: ReadonlySet<string> = new Set(['popup.html', 'settings.html']);
+
 /** Message types the page runtime may send. */
 export const CONTENT_MESSAGES: ReadonlySet<string> = new Set(['bundle', 'storage', 'settings', 'fetch', 'event']);
 
 export function allowedFrom(type: string, context: SenderContext): boolean {
-  if (context.kind === 'page') return PAGE_MESSAGES.has(type);
+  if (context.kind === 'page') return PAGE_MESSAGES.has(type) || (VAULT_MESSAGES.has(type) && VAULT_PAGES.has(context.path));
   if (context.kind === 'content') return CONTENT_MESSAGES.has(type);
   return false;
 }

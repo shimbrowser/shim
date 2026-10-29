@@ -16,11 +16,26 @@
     .field input:focus, .field select:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
     .status { font-size: 12px; min-height: 1.45em; }
     .status.ok { color: var(--ok); }
+    #vault { margin-bottom: 18px; }
+    .vault-form { display: grid; gap: 6px; margin: 6px 0; }
+    .vault-input {
+      font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 5px 8px; width: 100%;
+    }
+    details { margin: 8px 0; }
+    details > summary { cursor: pointer; }
+    details > *:not(summary) { margin-top: 6px; }
+    .trusted { border: 1px solid var(--accent); border-radius: var(--radius); padding: 8px 10px; margin-top: 6px; display: grid; gap: 6px; background: var(--surface); }
+    .trusted-caption { font-size: 11px; font-weight: 600; color: var(--accent-deep); letter-spacing: 0.02em; }
+    .ok-text { color: var(--ok); }
+    .warn-text { color: var(--accent-deep); }
+    button.link { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; }
   </style>
 </head>
 <body>
   <h1 id="title">settings</h1>
-  <p class="soft">These values stay in this browser. A shim's handlers read them; exporting the shim never includes them.</p>
+  <p id="intro" class="soft">These values stay in this browser. A shim's handlers read them; exporting the shim never includes them.</p>
+  <section id="vault"></section>
   <section id="fields"></section>
   <p id="error" class="error" hidden></p>
   <script src="settings.js"></script>

@@ -16,6 +16,8 @@ export interface PrepareRequest {
   token: number;
   text: string;
   mode: ExtensionMode;
+  /** The vault is on in the worker (its secret settings are kept sealed). */
+  vault?: boolean;
 }
 
 export interface PrepareAnswer {
@@ -49,8 +51,8 @@ if (typeof window !== 'undefined' && window.parent !== window) {
       return;
     }
     if (!isPrepareRequest(event.data)) return;
-    const { token, text, mode } = event.data;
-    const result = prepareInstall(text, capabilitiesFor(mode), mode);
+    const { token, text, mode, vault } = event.data;
+    const result = prepareInstall(text, capabilitiesFor(mode, vault === true), mode);
     const answer: PrepareAnswer = { type: 'prepared', token, result };
     window.parent.postMessage(answer, event.origin);
   });

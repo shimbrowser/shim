@@ -15,6 +15,8 @@ import type { ExtensionMode } from './capabilities';
 import type { VersionRecord } from './store';
 import type { PendingConsent } from './attach-consent';
 import type { SettingsPageField } from './settings';
+import type { GrantView } from './credential-grants';
+import type { VaultStatus } from './vault-keeper';
 
 export type StorageMethod = 'get' | 'set' | 'delete' | 'list';
 
@@ -53,7 +55,61 @@ export type ToWorker =
   | { type: 'bridge.setEnabled'; enabled: boolean }
   /** The attach card: the requests waiting for an answer, and the answer to one. */
   | { type: 'attach.pending' }
-  | { type: 'attach.answer'; id: string; answer: 'allow-once' | 'allow-host' | 'deny' };
+  | { type: 'attach.answer'; id: string; answer: 'allow-once' | 'allow-host' | 'deny' }
+  // The vault (settings page and popup only, sender.ts VAULT_MESSAGES). Each
+  // is checked against its exact shape before it is answered (vaultMessageProblem).
+  | { type: 'vault.status' }
+  | { type: 'vault.setup'; passphrase: string }
+  | { type: 'vault.unlock'; passphrase: string }
+  | { type: 'vault.lock' }
+  /** Forgot the passphrase: a new vault, every secret and grant cleared. `confirm` must be 'reset'. */
+  | { type: 'vault.reset'; passphrase: string; confirm: 'reset' }
+  | { type: 'vault.changePassphrase'; current: string; next: string }
+  /** A new data key, every secret re-encrypted (after a suspected exposure). */
+  | { type: 'vault.rotateKey'; passphrase: string }
+  | { type: 'vault.setLockAfter'; ms: number }
+  /** Enter a value for a shim's placed secret (sealed for its declared placement). */
+  | { type: 'secrets.set'; id: string; key: string; value: string }
+  | { type: 'secrets.clear'; id: string; key: string }
+  /** A shim's placed secrets with their grants, for review. */
+  | { type: 'grants.list'; id: string }
+  /** Approve one placed secret exactly as reviewed (`review` from grants.list). */
+  | { type: 'grants.approve'; id: string; key: string; review: string }
+  | { type: 'grants.revoke'; id: string; key: string };
+
+/** The exact fields each vault message carries (beside `type`), with their kinds. */
+const VAULT_SHAPES: Record<string, Record<string, 'string' | 'number'>> = {
+  'vault.status': {},
+  'vault.setup': { passphrase: 'string' },
+  'vault.unlock': { passphrase: 'string' },
+  'vault.lock': {},
+  'vault.reset': { passphrase: 'string', confirm: 'string' },
+  'vault.changePassphrase': { current: 'string', next: 'string' },
+  'vault.rotateKey': { passphrase: 'string' },
+  'vault.setLockAfter': { ms: 'number' },
+  'secrets.set': { id: 'string', key: 'string', value: 'string' },
+  'secrets.clear': { id: 'string', key: 'string' },
+  'grants.list': { id: 'string' },
+  'grants.approve': { id: 'string', key: 'string', review: 'string' },
+  'grants.revoke': { id: 'string', key: 'string' },
+};
+/** The longest string any vault message field may carry (a secret is at most 8 KiB of UTF-8). */
+const VAULT_FIELD_MAX = 16 * 1024;
+
+/** Why a vault message is malformed (unknown fields, missing ones, wrong kinds, too long), or null. */
+export function vaultMessageProblem(msg: Record<string, unknown>): string | null {
+  const shape = typeof msg.type === 'string' ? VAULT_SHAPES[msg.type] : undefined;
+  if (!shape) return 'not a vault message';
+  const keys = Object.keys(msg).filter((k) => k !== 'type');
+  if (keys.length !== Object.keys(shape).length || keys.some((k) => !Object.hasOwn(shape, k))) return 'a vault message carries exactly its own fields';
+  for (const [k, kind] of Object.entries(shape)) {
+    const v = msg[k];
+    if (typeof v !== kind) return `"${k}" must be a ${kind}`;
+    if (typeof v === 'string' && v.length > VAULT_FIELD_MAX) return `"${k}" is too long`;
+  }
+  if (msg.type === 'vault.reset' && msg.confirm !== 'reset') return 'a reset is confirmed with "reset"';
+  return null;
+}
 
 /**
  * One shim as the page runtime receives it: the spec with the installed id,
@@ -132,6 +188,18 @@ export interface ReviewItem {
   occurredAt: number;
 }
 
+/** The vault as the settings page and the popup show it. */
+export interface VaultView {
+  state: VaultStatus;
+  /** When an unlocked vault locks on its own (the earlier of the idle window and the 12-hour limit). */
+  expiresAt: number | null;
+  lockAfterMs: number;
+  /** What unlocking enables: every current grant, by shim name and plain description. */
+  grants: Array<{ shimId: string; shimName: string; label: string; description: string }>;
+  /** Whether the vault is turned on in this build; until it is, nothing installs a secret-bearing shim. */
+  enabled: boolean;
+}
+
 /** One snapshot as the popup lists it. */
 export type VersionSummary = Pick<VersionRecord, 'version' | 'at' | 'reason'>;
 
@@ -151,11 +219,13 @@ export type WorkerAnswer =
   | { ok: true; pending: PendingConsent[] }
   | { ok: true; value: unknown }
   | { ok: true; mode: ExtensionMode; shims: ShimSummary[] }
-  | { ok: true; mode: ExtensionMode }
+  | { ok: true; mode: ExtensionMode; vault?: boolean }
   | { ok: true; id: string }
   | { ok: true; file: string; fileName: string }
   | { ok: true; versions: VersionSummary[] }
   | { ok: true; name: string; fields: SettingsPageField[] }
+  | { ok: true; vault: VaultView }
+  | { ok: true; name: string; grants: GrantView[] }
   | { ok: true }
   | { ok: false; error: string };
 
