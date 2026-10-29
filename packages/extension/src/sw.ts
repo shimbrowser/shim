@@ -246,9 +246,11 @@ async function syncVault(vaultShims: readonly InstalledShim[], configure: boolea
     await reconcileVault({
       load: () => Promise.resolve(vaultState),
       save: async (state) => {
-        await db.prefs.set(VAULT_STATE_KEY, state);
-        vaultState = state;
-        vaultOwnRun = state.phase === 'running';
+        // The cache is a copy, published only once the store has it.
+        const copy = structuredClone(state);
+        await db.prefs.set(VAULT_STATE_KEY, copy);
+        vaultState = copy;
+        vaultOwnRun = copy.phase === 'running';
       },
       registeredIds: async () => (await chrome.userScripts.getScripts()).map((x) => x.id).filter((id) => id.startsWith(VAULT_SCRIPT_PREFIX)),
       unregister: (ids) => chrome.userScripts.unregister({ ids }),
@@ -266,6 +268,10 @@ async function syncVault(vaultShims: readonly InstalledShim[], configure: boolea
       engineSource: engineBundle,
     }, { candidates, rotate: rotation === 'all' ? 'all' : [...rotation], configure });
   } catch (err) {
+    // Whatever the store holds now, this worker answers no vault token until
+    // a later sync recovers (it reads the persisted state, interrupted or not,
+    // and an interrupted one revokes everything first).
+    vaultState = { ...(vaultState ?? emptyVaultState()), phase: 'running' };
     vaultOwnRun = false;
     console.error('[shim] the vault registrations could not be synced; vault shims are off until the next sync', err instanceof Error ? err.message : String(err));
   }

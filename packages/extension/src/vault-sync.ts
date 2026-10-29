@@ -115,11 +115,10 @@ export async function reconcileVault(deps: VaultSyncDeps, request: VaultSyncRequ
 
   if (!interrupted && !leaving.length && !changing.length && !strays.length) {
     if (request.configure) for (const id of admission.admitted) await deps.configureWorld(worldIdFor(id), VAULT_WORLD_CSP);
-    if (refusedChanged) {
-      state.refused = refused;
-      await deps.save(state);
-    }
-    return state;
+    if (!refusedChanged) return state;
+    const next: VaultState = { ...copyState(state), refused };
+    await deps.save(next);
+    return next;
   }
 
   // Revoke first: from here on, no document holding a token of a shim that is
@@ -128,7 +127,7 @@ export async function reconcileVault(deps: VaultSyncDeps, request: VaultSyncRequ
   state.phase = 'running';
   const revoke = interrupted ? Object.keys(state.records) : [...leaving, ...changing];
   for (const id of revoke) delete state.records[id];
-  await deps.save(state);
+  await deps.save(copyState(state));
 
   const unregisterIds = interrupted
     ? [...registered]
@@ -150,17 +149,18 @@ export async function reconcileVault(deps: VaultSyncDeps, request: VaultSyncRequ
       registrations.push(vaultRegistrationFor(candidate, engine, vaultBootCode(source, { shimId: id, generation, token: record.token })));
     }
     // The tokens are saved before the scripts exist: a script never runs with a token the worker does not know.
-    await deps.save(state);
+    await deps.save(copyState(state));
     for (const r of registrations) await deps.configureWorld(r.worldId, VAULT_WORLD_CSP);
     if (registrations.length) await deps.register(registrations);
   }
   if (request.configure) {
     for (const id of admission.admitted) if (!toRegister.includes(id)) await deps.configureWorld(worldIdFor(id), VAULT_WORLD_CSP);
   }
-  state.refused = refused;
-  state.phase = 'idle';
-  await deps.save(state);
-  return state;
+  // A fresh object for the last transition: a store that kept the running
+  // state by reference must not see it turn idle unless this save succeeds.
+  const done: VaultState = { ...copyState(state), phase: 'idle', refused };
+  await deps.save(done);
+  return done;
 }
 
 /**

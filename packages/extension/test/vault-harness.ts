@@ -205,6 +205,42 @@ void (async () => {
     check('recovering from it unregisters everything Chrome holds, re-registers the admitted at a new generation', !f.chrome.has('shimv:zombie') && f.chrome.has('shimv:a') && s.records.a?.generation === 6 && tokenOf(s, 'a') !== 'p'.repeat(43), s);
   }
   {
+    // A store that keeps what it is given by reference (as a worker's cache
+    // would) and refuses the final save: the state it holds must stay running.
+    let held: VaultState | undefined;
+    let saves = 0;
+    let failAt = 0;
+    const chrome = new Set<string>();
+    let n = 100;
+    const deps: VaultSyncDeps = {
+      load: () => Promise.resolve(held),
+      save: (st) => {
+        saves++;
+        if (saves === failAt) return Promise.reject(new Error('store refused'));
+        held = st;
+        return Promise.resolve();
+      },
+      registeredIds: () => Promise.resolve([...chrome]),
+      unregister: (ids) => { for (const id of ids) chrome.delete(id); return Promise.resolve(); },
+      register: (regs) => { for (const r of regs) chrome.add(r.id); return Promise.resolve(); },
+      configureWorld: () => Promise.resolve(),
+      runtimeSource: () => Promise.resolve(''),
+      engineSource: () => Promise.resolve(''),
+      token: () => `token-${String(++n).padStart(40, '0')}`,
+    };
+    const s1 = await reconcileVault(deps, { candidates: [a] });
+    saves = 0;
+    failAt = 3; // revoke, tokens, then the idle transition
+    let threw = false;
+    try { await reconcileVault(deps, { candidates: [a], rotate: 'all' }); } catch { threw = true; }
+    check('a refused final save throws', threw);
+    check('and what the store kept by reference is still running, not idle', held?.phase === 'running', held?.phase);
+    check('so no token is honored, the new generation\'s included', principalForToken(held, tokenOf(held, 'a')) === null && principalForToken(held, tokenOf(s1, 'a')) === null);
+    failAt = 0;
+    const s2 = await reconcileVault(deps, { candidates: [a] });
+    check('the next reconcile recovers to idle under a newer generation', s2.phase === 'idle' && s2.records.a?.generation === 3 && principalForToken(s2, tokenOf(s2, 'a')) !== null, s2);
+  }
+  {
     const f = fake();
     await reconcileVault(f.deps, { candidates: [] });
     check('with no vault shim nothing is registered or saved', f.chrome.size === 0 && f.saved() === undefined, f.log);
