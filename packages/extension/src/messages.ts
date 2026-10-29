@@ -117,6 +117,13 @@ export interface ShimSummary {
   settingsCount: number;
   /** A required setting has no value and no default: the shim needs setup before it does what it says. */
   needsSetup: boolean;
+  /**
+   * A vault shim (it declares a secret) runs in a world of its own, which
+   * only a page load creates: changes reach open pages when they reload.
+   * `overlapping` names the shims it was refused beside (too many vault
+   * shims could run on one page), or null when it was admitted.
+   */
+  vault?: { overlapping: string[] | null };
 }
 
 export interface ReviewItem {
@@ -188,11 +195,32 @@ export const SESSION_CLOSE_EVENT = 'shim-core:session-closed';
 export const RUNTIME_PORT = 'shim-runtime';
 
 /**
+ * The error a vault world's message gets when its token is not its shim's
+ * current one (rotated, revoked, or the worker's accounting interrupted):
+ * the runtime tears down, and the next load boots with the new token.
+ */
+export const STALE_TOKEN = 'stale-token';
+
+/**
+ * The token a vault world's runtime adds to every message (`auth`). The
+ * worker takes it off before the message is narrowed and answered; it is
+ * never echoed, logged or stored with the message.
+ */
+export function splitAuth(msg: object): { auth: unknown; rest: Record<string, unknown> } {
+  const { auth, ...rest } = msg as Record<string, unknown>;
+  return { auth, rest };
+}
+
+/**
  * What a runtime posts on its port: as it retires, whether it had run any
  * shim, so the worker reboots a surviving rival only when the teardown
  * can have taken something the survivor shares; and the ack of a hold.
  */
 export type FromRuntime =
+  /** The first message on a default-world (or isolated-world) runtime's port: nothing is sent to the port before it. */
+  | { type: 'hello' }
+  /** The first message on a vault world's port: its token (vault.ts). Refused, the port is closed. */
+  | { type: 'auth'; token: string }
   | { type: 'retiring'; booted: boolean }
   /**
    * A nudge with `seq` was seen: applied, or ignored as older than what the
@@ -205,6 +233,8 @@ export type FromRuntime =
 export function isFromRuntime(msg: unknown): msg is FromRuntime {
   if (typeof msg !== 'object' || msg === null) return false;
   const m = msg as { type?: unknown; booted?: unknown; seq?: unknown; applied?: unknown; versions?: unknown };
+  if (m.type === 'hello') return true;
+  if (m.type === 'auth') return typeof (msg as { token?: unknown }).token === 'string';
   if (m.type === 'retiring') return typeof m.booted === 'boolean';
   if (m.type !== 'ack' || typeof m.seq !== 'number' || typeof m.applied !== 'boolean') return false;
   if (m.versions === undefined) return true;

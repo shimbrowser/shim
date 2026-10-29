@@ -5,6 +5,8 @@
 //   dist/manifest.json       the manifest (static/manifest.json, version stamped)
 //   dist/sw.js               the service worker
 //   dist/content.js          the page runtime, registered per shim after
+//   dist/vault-content.js    the page runtime for a vault shim's own world, which the
+//                            worker registers as code with its token bound (vault.ts)
 //   dist/shim-core.page.js   the engine: @shimbrowser/core's page bundle,
 //                            built here from the same source with the same
 //                            options, so it is the bundle the other hosts run
@@ -35,6 +37,7 @@ const DIST = path.join(PKG_ROOT, 'dist');
 const ENTRIES = {
   sw: 'sw.ts',
   content: 'content.ts',
+  'vault-content': 'vault-content.ts',
   popup: 'popup.ts',
   install: 'install-page.ts',
   prepare: 'prepare.ts',
@@ -63,7 +66,7 @@ async function buildExtension() {
     bundle: true,
     format: 'iife',
     platform: 'browser',
-    target: 'chrome120',
+    target: 'chrome135',
     conditions: ['shim-source'],
     define: { SHIM_EXTENSION_VERSION: JSON.stringify(pkg.version) },
     sourcemap: false,

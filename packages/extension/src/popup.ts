@@ -66,6 +66,19 @@ function renderShim(shim: ShimSummary, refresh: () => void): HTMLElement {
   // Rules the ladder could not re-find after a site change: held for review,
   // never silently mis-attached. The way to repair here is to export the
   // file and repair it in Shim or with Claude Code.
+  // A vault shim's world comes only with a page load, so the popup says so;
+  // one refused for want of room on its pages says beside which shims.
+  if (shim.vault) {
+    const note = el('div', 'review');
+    if (shim.vault.overlapping) {
+      note.append(el('span', 'pill warn', 'not running'));
+      note.append(el('div', 'muted', `Too many shims that keep secrets would run on the same pages. It overlaps: ${shim.vault.overlapping.join(', ')}.`));
+    } else {
+      note.append(el('div', 'muted', 'Changes apply when you reload the page.'));
+    }
+    card.append(note);
+  }
+
   if (shim.review.length) {
     const review = el('div', 'review');
     review.append(el('span', 'pill warn', 'needs review'));

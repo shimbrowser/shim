@@ -107,9 +107,12 @@ export const FIXTURE_HELD = 'shim-held.test';
  * `extra.hosts` resolve to loopback beside the fixture names; `extra.args` are more Chromium switches.
  */
 export function launch(ext: string, profile: string, extra: { hosts?: string[]; args?: string[] } = {}): Promise<BrowserContext> {
+  const executablePath = process.env.SHIM_CHROME_EXECUTABLE;
   return chromium.launchPersistentContext(profile, {
     headless: true,
-    channel: 'chromium',
+    // SHIM_CHROME_EXECUTABLE runs a harness on another build (CI's minimum-Chrome job: Chrome for
+    // Testing at the manifest's minimum_chrome_version); otherwise Playwright's own Chromium.
+    ...(executablePath ? { executablePath } : { channel: 'chromium' }),
     args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`,
       `--host-resolver-rules=${[FIXTURE_ALIAS, FIXTURE_OWN, FIXTURE_HELD, ...(extra.hosts ?? [])].map((h) => `MAP ${h} 127.0.0.1`).join(',')}`,
       ...(extra.args ?? [])],
@@ -160,9 +163,25 @@ export async function configureExtension(ctx: BrowserContext, extId: string, con
   try {
     await settings.goto(`chrome://extensions/?id=${extId}`);
     return await settings.evaluate(([id, cfg]) => new Promise<string>((resolve) => {
-      const api = (globalThis as { chrome?: { developerPrivate?: { updateExtensionConfiguration(cfg: object, cb: () => void): void }; runtime?: { lastError?: { message: string } } } }).chrome;
+      type Dev = {
+        updateExtensionConfiguration(cfg: object, cb: () => void): void;
+        updateProfileConfiguration(cfg: object, cb: () => void): void;
+      };
+      const api = (globalThis as { chrome?: { developerPrivate?: Dev; runtime?: { lastError?: { message: string } } } }).chrome;
       if (!api?.developerPrivate) { resolve('no developerPrivate'); return; }
-      api.developerPrivate.updateExtensionConfiguration({ extensionId: id, ...cfg }, () => resolve(api.runtime?.lastError ? `err: ${api.runtime.lastError.message}` : 'ok'));
+      const dev = api.developerPrivate;
+      const answer = (): void => resolve(api.runtime?.lastError ? `err: ${api.runtime.lastError.message}` : 'ok');
+      // Before Chrome 138 user scripts follow Developer mode, not a per-extension toggle.
+      const major = Number(/Chrome\/(\d+)/.exec(navigator.userAgent)?.[1] ?? '0');
+      if (major > 0 && major < 138 && 'userScriptsAccess' in cfg) {
+        const { userScriptsAccess, ...rest } = cfg as { userScriptsAccess: unknown };
+        dev.updateProfileConfiguration({ inDeveloperMode: userScriptsAccess === true }, () => {
+          if (api.runtime?.lastError || Object.keys(rest).length === 0) { answer(); return; }
+          dev.updateExtensionConfiguration({ extensionId: id, ...rest }, answer);
+        });
+        return;
+      }
+      dev.updateExtensionConfiguration({ extensionId: id, ...cfg }, answer);
     }), [extId, config] as const);
   } finally {
     await settings.close();
