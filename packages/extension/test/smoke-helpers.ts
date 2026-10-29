@@ -108,6 +108,8 @@ export const FIXTURE_HELD = 'shim-held.test';
  */
 export function launch(ext: string, profile: string, extra: { hosts?: string[]; args?: string[] } = {}): Promise<BrowserContext> {
   const executablePath = process.env.SHIM_CHROME_EXECUTABLE;
+  // Set but empty is a broken setup (the minimum-Chrome job's download failed), never a fallback.
+  if (executablePath === '') throw new Error('SHIM_CHROME_EXECUTABLE is set but empty');
   return chromium.launchPersistentContext(profile, {
     headless: true,
     // SHIM_CHROME_EXECUTABLE runs a harness on another build (CI's minimum-Chrome job: Chrome for
