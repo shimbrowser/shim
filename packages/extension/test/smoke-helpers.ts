@@ -102,13 +102,17 @@ export const FIXTURE_OWN = 'shim-own.test';
 /** A site the extension holds for another shim (grant it with extensionCopy). */
 export const FIXTURE_HELD = 'shim-held.test';
 
-/** A persistent profile with the extension loaded: the toggle on chrome://extensions and the store survive a relaunch of it. */
-export function launch(ext: string, profile: string): Promise<BrowserContext> {
+/**
+ * A persistent profile with the extension loaded: the toggle on chrome://extensions and the store survive a relaunch of it.
+ * `extra.hosts` resolve to loopback beside the fixture names; `extra.args` are more Chromium switches.
+ */
+export function launch(ext: string, profile: string, extra: { hosts?: string[]; args?: string[] } = {}): Promise<BrowserContext> {
   return chromium.launchPersistentContext(profile, {
     headless: true,
     channel: 'chromium',
     args: [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`,
-      `--host-resolver-rules=${[FIXTURE_ALIAS, FIXTURE_OWN, FIXTURE_HELD].map((h) => `MAP ${h} 127.0.0.1`).join(',')}`],
+      `--host-resolver-rules=${[FIXTURE_ALIAS, FIXTURE_OWN, FIXTURE_HELD, ...(extra.hosts ?? [])].map((h) => `MAP ${h} 127.0.0.1`).join(',')}`,
+      ...(extra.args ?? [])],
   });
 }
 
