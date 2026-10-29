@@ -210,7 +210,7 @@ async function renderBridge(): Promise<void> {
     await ask({ type: 'bridge.setEnabled', enabled: toggle.checked });
     await renderBridge();
   });
-  row.append(toggle, el('span', 'grow', 'let Claude Code author here'));
+  row.append(toggle, el('span', 'grow', 'let coding agents author here'));
   box.append(row);
   const state = !b.enabled ? 'off'
     : b.connected ? `connected${b.sessions ? ` · ${b.sessions} session${b.sessions === 1 ? '' : 's'} open` : ''}`

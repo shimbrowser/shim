@@ -19,6 +19,7 @@ import type { LaunchOutcome } from './launch';
 import { browserDataDirs, extensionIdProblem, installHost, hostStatus, SHIM_FOR_CHROME_ID, type InstallFs } from './bridge-install';
 import { readDiscoveryFile, ensurePrivateDir, BRIDGE_DIR } from './bridge-server';
 import { VERSION } from './version';
+import { GUIDE_TOPICS, guideText, isGuideTopic } from './guide';
 
 export const USAGE = `shim — author Shim shims from the command line
 
@@ -40,6 +41,11 @@ Usage:
       Apply a shim folder to a page in a fresh headless Chromium and print the
       evidence: per-rule matches, handler errors, console. Needs Playwright
       (once: npm install -g playwright && playwright install chromium).
+
+  shim guide [topic]
+      Print the authoring guide: the session loop, the shim folder format,
+      every mutation kind, anchors and the runtime api. A topic prints one
+      reference file: ${GUIDE_TOPICS.join(', ')}.
 
   shim launch [--timeout <seconds>] [--json]
       Attach to the running Shim browser, or start it with its control
@@ -155,6 +161,14 @@ async function run(argv: string[], ctx: ShimCliContext): Promise<number> {
     case '-v':
       ctx.out(VERSION);
       return EXIT_OK;
+
+    case 'guide': {
+      const { positionals } = parse(rest, {}, { min: 0, max: 1, names: 'a guide topic' });
+      const topic = positionals[0];
+      if (topic !== undefined && !isGuideTopic(topic)) throw new UsageError(`no guide topic "${topic}"; the topics are ${GUIDE_TOPICS.join(', ')}`);
+      ctx.out(guideText(topic));
+      return EXIT_OK;
+    }
 
     case 'pack': {
       const { values, positionals } = parse(rest, { out: { type: 'string', short: 'o' } }, { min: 1, max: 1, names: 'a shim folder' });
@@ -278,7 +292,7 @@ async function run(argv: string[], ctx: ShimCliContext): Promise<number> {
           for (const m of out.manifests) ctx.out(`${m.browser}: ${m.file}`);
           for (const sk of out.skipped) ctx.out(`${sk.browser}: not found (${sk.dir}), skipped`);
           if (!out.manifests.length) ctx.out('no browser found: pass --user-data-dir <dir> for the one to use');
-          else ctx.out('Now turn on "let Claude Code author here" in the Shim for Chrome popup.');
+          else ctx.out('Now turn on "let coding agents author here" in the Shim for Chrome popup.');
         }
         return out.manifests.length ? EXIT_OK : EXIT_PROBLEM;
       }
@@ -297,7 +311,7 @@ async function run(argv: string[], ctx: ShimCliContext): Promise<number> {
           for (const m of status.manifests) {
             ctx.out(`${m.browser}: ${m.present ? `${m.file} allows ${m.extensionId ?? 'no extension'}${m.pathMatches ? '' : ' (points at another wrapper)'}` : 'no manifest'}`);
           }
-          ctx.out(bridge.up ? `bridge: up (process ${String(bridge.pid)}, ${String(bridge.socketPath)})` : 'bridge: not running (it starts when the extension\'s "let Claude Code author here" is on)');
+          ctx.out(bridge.up ? `bridge: up (process ${String(bridge.pid)}, ${String(bridge.socketPath)})` : 'bridge: not running (it starts when the extension\'s "let coding agents author here" is on)');
         }
         return EXIT_OK;
       }

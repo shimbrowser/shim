@@ -20,8 +20,8 @@ is built on them.
 
 | Package | What it is |
 |---|---|
-| [Shim for Chrome](packages/extension) (`@shimbrowser/extension`) | Runs your shims in the Chrome you already use. Installs a `.shim` file, asks Chrome for access to exactly the sites it names, and keeps it applied as the site changes. Claude Code can author on its tabs. |
-| [Claude Code plugin and `shim` CLI](packages/mcp) (`@shimbrowser/mcp`) | The authoring loop: Claude opens a session on a tab (in the Shim browser, Shim for Chrome, or a headless Chromium), edits the shim, previews it on the live page, checks a screenshot and iterates, then saves it. The `shim` command line packs, lints and previews shims, and sets up the Chrome bridge. |
+| [Shim for Chrome](packages/extension) (`@shimbrowser/extension`) | Runs your shims in the Chrome you already use. Installs a `.shim` file, asks Chrome for access to exactly the sites it names, and keeps it applied as the site changes. Your coding agent can author on its tabs. |
+| [MCP server, Claude Code plugin and `shim` CLI](packages/mcp) (`@shimbrowser/mcp`) | The authoring loop for any MCP agent (Claude Code, Codex, …): the agent opens a session on a tab (in the Shim browser, Shim for Chrome, or a headless Chromium), edits the shim, previews it on the live page, checks a screenshot and iterates, then saves it. The `shim` command line packs, lints and previews shims, and sets up the Chrome bridge. |
 | [The engine](packages/core) (`@shimbrowser/core`) | What applies a shim to a page: anchors, the deterministic rebase, the spec format, and the contract every authoring host implements. No dependencies, no network, no AI. |
 
 ## Install
@@ -47,12 +47,17 @@ without the Shim browser or Shim for Chrome, also install Playwright's Chromium
 (`npm install -g playwright && playwright install chromium`).
 [Full instructions](packages/mcp/README.md#install-beta).
 
-**The `shim` CLI** (also what connects Claude Code to Shim for Chrome):
+**The `shim` CLI and `shim-mcp`** (also what connects your agent to Shim for Chrome):
 
 ```sh
 npm install -g https://github.com/shimbrowser/shim/releases/latest/download/shimbrowser-mcp.tgz
 shim --help
 ```
+
+**Codex and other MCP agents**, after installing the CLI: `codex mcp add shim -- shim-mcp`,
+or `{ "mcpServers": { "shim": { "command": "shim-mcp" } } }` in your client's config. The
+agent reads the authoring guide through the `shim_guide` tool.
+[Full instructions](packages/mcp/README.md#codex-and-other-mcp-agents).
 
 **The engine**, as a dependency of your own project:
 

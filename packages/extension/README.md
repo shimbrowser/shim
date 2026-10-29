@@ -68,12 +68,13 @@ reports sent to whoever the service chooses; the review says so. Forgot your pas
 **reset** in the vault clears every secret and approval, and you enter them again.
 Exports never carry secrets, the vault or approvals.
 
-### Let Claude Code author on your Chrome tabs (optional)
+### Let coding agents author on your Chrome tabs (optional)
 
-With this on, Claude Code can open a session on a tab here, preview changes on the live page
-and save them as a new version of the installed shim.
+With this on, your coding agent (Claude Code, or any agent that runs the `shim-mcp` server)
+can open a session on a tab here, preview changes on the live page and save them as a new
+version of the installed shim.
 
-1. Install the `shim` CLI and the Claude Code plugin
+1. Install the `shim` CLI, and the Claude Code plugin or `shim-mcp` in your agent
    ([instructions](../mcp/README.md#install-beta)).
 2. Register the bridge once (Chrome starts it when the extension asks for it):
 
@@ -84,7 +85,7 @@ and save them as a new version of the installed shim.
    This writes a native messaging host manifest for every Chromium-based browser it finds,
    allowing only Shim for Chrome's ID, and the small wrapper script it runs. `shim extension
    status` checks it.
-3. In the extension's popup, turn on **let Claude Code author here**. It says *connected*.
+3. In the extension's popup, turn on **let coding agents author here**. It says *connected*.
 
 Each session Claude opens waits on an attach card first: who is asking, for which shim and
 site. Nothing runs on the tab until you allow it. While a session holds a tab, Chrome shows a
@@ -118,7 +119,7 @@ time.
 | `storage` | The extension's own bookkeeping between restarts. Your shims live in the extension's database, which is removed with it. |
 | `webNavigation` | Notices page loads, to re-check whether user scripts are allowed and to wait for a tab Claude opened to finish loading. |
 | `debugger` | Only during a Claude Code session, only on that session's tab: previews, screenshots and the page tools. Chrome shows its bar while it's attached. |
-| `nativeMessaging` | Talks to Claude Code through the bridge you register, only while **let Claude Code author here** is on. |
+| `nativeMessaging` | Talks to Claude Code through the bridge you register, only while **let coding agents author here** is on. |
 | `alarms` | Locks the secrets vault on time (after the idle window you choose, and 12 hours at most). |
 
 It never asks for `tabs`, cookies, history or downloads. A shim's `api.fetch` sends no
@@ -164,7 +165,7 @@ Beta. What works today:
   evaluate in the engine world and the page's, screenshots, trusted input, loads, runtime
   events and the engine's console lines, under the same conformance suite the Shim
   browser and the headless host run (below).
-- Claude Code can author on a real Chrome tab: the popup's "let Claude Code author here"
+- Claude Code can author on a real Chrome tab: the popup's "let coding agents author here"
   connects the extension to `shim bridge`, a native messaging host that serves the Shim
   browser's control endpoint over a socket, and each session the agent opens waits for
   you on the attach card. Commits land as new versions of the installed shim (below).
@@ -238,7 +239,7 @@ one member call at a time (`test/host-proxy.ts`).
 
 ## Authoring through the bridge
 
-With the popup's "let Claude Code author here" on, the service worker holds a native
+With the popup's "let coding agents author here" on, the service worker holds a native
 messaging port to `shim bridge` (`@shimbrowser/mcp`), which Chrome starts for it. The
 bridge listens on a Unix socket under Shim's user data directory (`bridge/chrome.sock`,
 0600 in a 0700 directory, a bearer token compared in constant time) and writes

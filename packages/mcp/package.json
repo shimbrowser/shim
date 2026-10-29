@@ -2,7 +2,7 @@
   "name": "@shimbrowser/mcp",
   "version": "0.7.0",
   "private": true,
-  "description": "MCP server and command line for authoring Shim shims from Claude Code: against the running Shim browser, or headless in Playwright Chromium.",
+  "description": "MCP server and command line for authoring Shim shims from Claude Code, Codex or any MCP agent: against the running Shim browser, or headless in Playwright Chromium.",
   "license": "Apache-2.0",
   "author": "Artificial Apps, LLC",
   "homepage": "https://shimbrowser.com",

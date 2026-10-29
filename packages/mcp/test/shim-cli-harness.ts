@@ -455,7 +455,7 @@ async function main(): Promise<void> {
     check('install-host writes the wrapper and a manifest for the browser that is there', (await cli(r, 'extension', 'install-host', '--extension-id', id)) === EXIT_OK
       && fs.existsSync(path.join(r.home, 'ud', 'bridge', 'shim-bridge'))
       && fs.readFileSync(path.join(chrome, 'NativeMessagingHosts', 'com.shimbrowser.bridge.json'), 'utf8').includes(id)
-      && r.out.some((l) => /Chromium: not found/.test(l)) && r.out.some((l) => /let Claude Code author here/.test(l)), r.out.join('\n'));
+      && r.out.some((l) => /Chromium: not found/.test(l)) && r.out.some((l) => /let coding agents author here/.test(l)), r.out.join('\n'));
     check('the wrapper execs the Node and bundle the context named', fs.readFileSync(path.join(r.home, 'ud', 'bridge', 'shim-bridge'), 'utf8').includes(`'/opt/node/bin/node' '/opt/shim/dist/shim.js' bridge`));
     check('--json reports the files', (await cli(r, 'extension', 'install-host', '--extension-id', id, '--json')) === EXIT_OK && (JSON.parse(r.out[0] ?? '{}') as { manifests: unknown[] }).manifests.length === 1);
     const custom = path.join(r.home, 'profile');

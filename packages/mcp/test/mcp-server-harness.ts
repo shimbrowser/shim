@@ -37,6 +37,7 @@ import { COMPOSITION_MARKER } from '../src/folder';
 import { createShimMcpServer, agentDisplayName, cardWaitMessage, clockLeft, type ShimMcpDeps } from '../src/server';
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { SESSION_TOOL_NAMES, SESSION_TOOLS } from '../src/contract';
+import { guideText } from '../src/guide';
 import { ControlTransportError, type ControlClient, type ControlReply } from '../src/control-client';
 
 let failures = 0;
@@ -151,6 +152,20 @@ async function main(): Promise<void> {
     const open = tools.find((t) => t.name === 'shim_open_session');
     check('session tools carry their schema', JSON.stringify(open?.inputSchema) === JSON.stringify(SESSION_TOOLS.shim_open_session.input_schema));
     check('the server states its instructions', (client.getInstructions() ?? '').includes('shim_preview'));
+    await client.close();
+  }
+
+  console.log('the guide:');
+  {
+    const { deps, sent } = rig(() => ok({}), { running: false });
+    const client = await connect(deps);
+    const main = await call(client, 'shim_guide');
+    check('shim_guide with no Shim running serves the main guide', main.isError !== true && /# Authoring Shim shims/.test(main.content[0]?.text ?? ''));
+    const hosts = await call(client, 'shim_guide', { topic: 'hosts' });
+    check('a topic serves its reference file', hosts.isError !== true && (hosts.content[0]?.text ?? '') === guideText('hosts'));
+    const bad = await call(client, 'shim_guide', { topic: 'nope' });
+    check('an unknown topic is refused with the list', bad.isError === true && /invalid-request[\s\S]*handlers, api/.test(bad.content[0]?.text ?? ''));
+    check('it never reaches Shim', sent.length === 0);
     await client.close();
   }
 

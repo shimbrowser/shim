@@ -1,5 +1,5 @@
 // The worker's end of the bridge: the native messaging port to `shim bridge`
-// (packages/mcp), held while the "let Claude Code author here" setting is on.
+// (packages/mcp), held while the "let coding agents author here" setting is on.
 // Chrome frames the messages, so what arrives here is the JSON the bridge
 // sent: a request (whole, or in chunks the assembler joins), or an abort.
 // Each request is answered by the route handler and the answer posted back

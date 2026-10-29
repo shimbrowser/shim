@@ -13,10 +13,13 @@
 //   node out/packages/mcp/test/mcp-plugin-harness.js
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
+import { spawnSync } from 'child_process';
 import { BUILTIN_KINDS } from '@shimbrowser/core/spec-lint';
 import { packShim } from '@shimbrowser/core/shim-folder';
 import { staticTools } from '../src/contract';
+import { GUIDE_TOPICS, guideText, stripFrontmatter } from '../src/guide';
 import { AI_UNAVAILABLE_SHIM_USER_MESSAGE, AI_UNAVAILABLE_USER_MESSAGE } from '@shimbrowser/core/composition-session-tools';
 
 let failures = 0;
@@ -228,6 +231,26 @@ if (specBlock && handlerBlock) {
     check('the example folder packs cleanly (lint, handlers bound, hosts)', packed.spec.rules?.length === 2);
   } catch (e) {
     check('the example folder packs cleanly (lint, handlers bound, hosts)', false, e instanceof Error ? e.message : String(e));
+  }
+}
+
+console.log('shim_guide:');
+check('its topics are exactly the reference files', JSON.stringify([...GUIDE_TOPICS].sort()) === JSON.stringify(refs.map((f) => f.slice(0, -3))), refs.join(', '));
+const served = guideText().replace(/\r\n/g, '\n');
+check('without a topic it serves the main guide, without its frontmatter', served.includes('# Authoring Shim shims') && !served.includes('name: shim-authoring') && served.includes(stripFrontmatter(core)));
+check('it tells the agent how to read the reference files', /call shim_guide with that topic/.test(served));
+for (const t of GUIDE_TOPICS) {
+  check(`topic ${t} serves references/${t}.md`, guideText(t) === read(`skills/shim-authoring/references/${t}.md`));
+}
+// The bundle embeds the guide: a copy of the CLI with nothing beside it still serves it.
+{
+  const lone = fs.mkdtempSync(path.join(os.tmpdir(), 'shim-guide-'));
+  try {
+    fs.copyFileSync(build.CLI_OUT_FILE, path.join(lone, 'shim.js'));
+    const r = spawnSync(process.execPath, [path.join(lone, 'shim.js'), 'guide', 'hosts'], { encoding: 'utf8' });
+    check('the CLI bundle serves the guide from anywhere (`shim guide hosts`)', r.status === 0 && r.stdout.trim() === read('skills/shim-authoring/references/hosts.md').trim(), `${r.status} ${r.stderr}`);
+  } finally {
+    fs.rmSync(lone, { recursive: true, force: true });
   }
 }
 

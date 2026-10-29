@@ -1,16 +1,19 @@
 # @shimbrowser/mcp
 
-Change any website from Claude Code. Describe the change you want ("hide the upsell banner",
-"add a notes field to every track", "put the columns I use first"), and Claude writes a
-**shim**, applies it to the live page, takes a screenshot, checks the result and keeps
-iterating until the page looks right. Then it saves the shim.
+Change any website from your coding agent. Describe the change you want ("hide the upsell
+banner", "add a notes field to every track", "put the columns I use first"), and the agent
+writes a **shim**, applies it to the live page, takes a screenshot, checks the result and
+keeps iterating until the page looks right. Then it saves the shim.
 
 That loop is the product. This package provides it:
 
-- **an MCP server** (`shim-mcp`) that gives Claude Code the session, preview and page tools;
-- **an authoring guide**, shipped as the `shim-authoring` skill, that teaches Claude the shim
-  format and the loop;
-- **a command line** (`shim`) for packing, linting and previewing shims yourself.
+- **an MCP server** (`shim-mcp`) that gives any MCP agent the session, preview and page
+  tools: Claude Code through its plugin, Codex, or any other MCP client;
+- **an authoring guide** that teaches the agent the shim format and the loop: Claude Code
+  loads it as the `shim-authoring` skill, and every other agent reads it through the
+  `shim_guide` tool;
+- **a command line** (`shim`) for packing, linting and previewing shims yourself, and
+  reading the guide (`shim guide`).
 
 A shim is a small, declarative patch: anchors that find elements on a page, plus
 mutations to apply to them (hide, restyle, inject, run a script handler). It runs as a
@@ -44,16 +47,40 @@ build or install with it. To update, run `claude plugin marketplace update shimb
 which fetches the newest release's plugin (or turn on auto-update for the marketplace in
 `/plugin`).
 
-### The `shim` CLI
+### The `shim` CLI and `shim-mcp`
 
 ```sh
 npm install -g https://github.com/shimbrowser/shim/releases/latest/download/shimbrowser-mcp.tgz
 shim --help
 ```
 
-It installs `shim` (pack, lint, preview, and the bridge for Shim for Chrome:
-`shim extension install-host`) and `shim-mcp` (the MCP server, for an MCP client other than
+It installs `shim` (pack, lint, preview, the guide, and the bridge for Shim for Chrome:
+`shim extension install-host`) and `shim-mcp` (the MCP server, for agents other than
 Claude Code). Run the same command again to update.
+
+### Codex and other MCP agents
+
+`shim-mcp` is a standard stdio MCP server. Install the CLI (above), then add it to your
+agent. Codex:
+
+```sh
+codex mcp add shim -- shim-mcp
+```
+
+Any client that reads an `mcpServers` config (Cursor, Windsurf, Claude Desktop, …):
+
+```json
+{
+  "mcpServers": {
+    "shim": { "command": "shim-mcp" }
+  }
+}
+```
+
+The server tells the agent to read the authoring guide with the `shim_guide` tool before its
+first session; the guide is the same one the Claude Code plugin ships as a skill. Then ask
+for a change, the same way as in Claude Code. To read the guide yourself: `shim guide`, or
+`shim guide handlers` for one of its reference files.
 
 ### From a checkout
 
@@ -64,22 +91,22 @@ npm run build                     # writes packages/mcp/dist/shim-mcp.js and dis
 claude --plugin-dir packages/mcp  # the plugin, for this session
 ```
 
-### What Claude can author on
+### What your agent can author on
 
-The plugin works with or without a Shim host; there is nothing to configure:
+The server works with or without a Shim host; there is nothing to configure:
 
 - **The Shim browser** ([shimbrowser.com](https://shimbrowser.com)), with its control
-  endpoint on: Claude works in its tabs.
+  endpoint on: the agent works in its tabs.
 - **Shim for Chrome** ([`@shimbrowser/extension`](../extension/README.md)), once you've run
-  `shim extension install-host` and turned on **let Claude Code author here** in its popup:
-  Claude works in your Chrome tabs.
-- **Neither:** Claude opens the page in a headless Chromium (below).
+  `shim extension install-host` and turned on **let coding agents author here** in its popup:
+  the agent works in your Chrome tabs.
+- **Neither:** the agent opens the page in a headless Chromium (below).
 
-Then ask Claude for a change, for example: *"On news.example.com, hide the cookie banner
-and make the article text wider."* The skill tells Claude how to open a session, edit the
-shim, preview it and verify the result.
+Then ask for a change, for example: *"On news.example.com, hide the cookie banner and make
+the article text wider."* The guide tells the agent how to open a session, edit the shim,
+preview it and verify the result.
 
-`shim_status` tells Claude which hosts are reachable and why.
+`shim_status` tells the agent which hosts are reachable and why.
 
 **Headless needs Playwright**, which downloads the Chromium that headless mode drives.
 Shim doesn't bundle a browser. Install it once:
@@ -88,7 +115,7 @@ Shim doesn't bundle a browser. Install it once:
 npm install -g playwright && playwright install chromium
 ```
 
-Or install it in the project you run Claude Code in
+Or install it in the project you run your agent in
 (`npm install -D playwright && npx playwright install chromium`). If Playwright is missing
 when a session opens, the tool answer gives the exact command. In a checkout of this
 repository Playwright is already a dev dependency, so `npx playwright install chromium` is

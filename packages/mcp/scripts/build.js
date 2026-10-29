@@ -48,6 +48,18 @@ async function corePageBundle() {
   return file.text;
 }
 
+// The authoring guide, embedded for shim_guide / `shim guide` (src/guide.ts): SKILL.md
+// minus its frontmatter, and every references/*.md by name.
+function guideFiles() {
+  const dir = path.join(PKG_ROOT, 'skills', 'shim-authoring');
+  const main = fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8').replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n)+/, '');
+  const references = {};
+  for (const f of fs.readdirSync(path.join(dir, 'references')).filter((n) => n.endsWith('.md')).sort()) {
+    references[f.slice(0, -3)] = fs.readFileSync(path.join(dir, 'references', f), 'utf8');
+  }
+  return { main, references };
+}
+
 async function buildMcp() {
   const pkg = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'package.json'), 'utf8'));
   const pageBundle = await corePageBundle();
@@ -70,7 +82,7 @@ async function buildMcp() {
     // `@shimbrowser/core/page` is only a fallback lookup: this bundle embeds
     // the page bundle (SHIM_CORE_PAGE_BUNDLE).
     external: ['playwright', 'playwright-core', '@shimbrowser/core/page'],
-    define: { SHIM_MCP_VERSION: JSON.stringify(pkg.version), SHIM_CORE_PAGE_BUNDLE: JSON.stringify(pageBundle) },
+    define: { SHIM_MCP_VERSION: JSON.stringify(pkg.version), SHIM_CORE_PAGE_BUNDLE: JSON.stringify(pageBundle), SHIM_GUIDE: JSON.stringify(guideFiles()) },
     legalComments: 'inline',
     logLevel: 'warning',
   });

@@ -21,8 +21,8 @@ user's sites through `window.api`. They use the same session loop with a differe
 `references/compositions.md` covers what differs. `references/headless.md` covers headless
 mode, which runs without the Shim browser.
 
-This file is what every session needs. The rest of the guide is in reference files beside
-it, each read before the work it covers; section 8 lists them.
+This file is what every session needs; section 8 lists the reference files beside it, each
+read before the work it covers.
 
 ## 1. The session loop
 
@@ -475,9 +475,9 @@ in) targets an element inside that frame. Warn the user before touching payment 
 
 ## 8. Reference files
 
-This file covers every session. The rest of the guide is in `references/`, beside it. Read
-a file **before** the work it covers, not after a preview goes wrong: a guessed field,
-`api` member or tool answer is refused or silently does nothing.
+This file covers every session; the rest is in `references/` (without skills: `shim_guide`,
+topic = file name minus `.md`). Read a file **before** the work it covers, not after a
+preview goes wrong: a guessed field, `api` member or tool answer is refused or does nothing.
 
 | Read | Before |
 |---|---|

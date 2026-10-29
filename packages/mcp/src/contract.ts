@@ -11,6 +11,7 @@ import { SESSION_PAGE_TOOLS, PAGE_TOOL_NAMES, type ToolDefinition } from '@shimb
 import { SESSION_API_MAP_TOOLS, API_MAP_TOOL_NAMES } from '@shimbrowser/core/api-map-tools';
 import { SESSION_DATA_TOOLS, DATA_TOOL_NAMES } from '@shimbrowser/core/data-tools';
 import { SESSION_COMPOSITION_TOOLS, COMPOSITION_SESSION_TOOL_NAMES } from '@shimbrowser/core/composition-session-tools';
+import { GUIDE_TOPICS } from './guide';
 
 export const SESSION_TOOL_NAMES = [
   'shim_status',
@@ -21,6 +22,7 @@ export const SESSION_TOOL_NAMES = [
   'shim_preview',
   'shim_commit',
   'shim_end_session',
+  'shim_guide',
 ] as const;
 export type SessionToolName = (typeof SESSION_TOOL_NAMES)[number];
 
@@ -186,6 +188,20 @@ export const SESSION_TOOLS: Record<SessionToolName, ToolDefinition> = {
       'evaluate_in_page took on a site are not undone.',
     input_schema: { type: 'object', properties: { sessionId: SESSION_ID } },
   },
+  shim_guide: {
+    name: 'shim_guide',
+    description:
+      'The authoring guide: the session loop, the shim folder format, every mutation kind, anchors, the runtime ' +
+      'api and the evidence each preview returns. Read it before your first session if your client has not ' +
+      'loaded the shim-authoring skill. Without a topic, the main guide; with one, the reference file it names ' +
+      '(read each before the work it covers).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        topic: { type: 'string', enum: [...GUIDE_TOPICS], description: 'A reference file: handlers, api, databases, network-and-modules, site-data, compositions, page-driving, sites, headless or hosts. Omit for the main guide.' },
+      },
+    },
+  },
 };
 
 // A page, API map, data or composition tool as this server registers it: core's
@@ -227,8 +243,9 @@ export const SERVER_INSTRUCTIONS =
   '(list_discovered_hosts, request_sources, search_discovered_api, inspect_endpoint, replay_endpoint) read ' +
   'what Shim recorded of it, per site the user grants. inspect_storage and query_db read what the work has ' +
   'saved, and read_sibling_shim a shim\'s pack siblings; a composition session also has probe_request, ' +
-  'read_calls and verify_mint. The shim-authoring skill documents both formats, every mutation kind, anchors, the runtime ' +
-  'api and window.api.';
+  'read_calls and verify_mint. Read the authoring guide before the first session: the shim-authoring skill ' +
+  'if your client loaded it, otherwise shim_guide. It documents both formats, every mutation kind, anchors, the ' +
+  'runtime api and window.api.';
 
 export const HEADLESS_SERVER_INSTRUCTIONS =
   'Shim applies user-authored modifications ("shims") to live websites. This server runs in HEADLESS mode: no ' +
@@ -239,7 +256,8 @@ export const HEADLESS_SERVER_INSTRUCTIONS =
   'shim_end_session. Headless supports a subset of shim features: a preview that declares anything else answers ' +
   '"unsupported" and applies nothing, and a rule reported verification "partial" is unverified — tell the user. ' +
   'Compositions, the API map tools and other tools that need the Shim browser answer requires-shim-browser. ' +
-  'The shim-authoring skill documents the spec format, every mutation kind, anchors and the runtime api.';
+  'Read the authoring guide before the first session: the shim-authoring skill if your client loaded it, ' +
+  'otherwise shim_guide. It documents the spec format, every mutation kind, anchors and the runtime api.';
 
 export const AUTO_SERVER_INSTRUCTIONS =
   'Shim applies user-authored modifications ("shims") to live websites. This server authors shims in two modes, ' +
@@ -254,5 +272,6 @@ export const AUTO_SERVER_INSTRUCTIONS =
   'before committing. Headless supports a subset of shim features: a preview declaring anything else answers ' +
   '"unsupported", and a rule reported verification "partial" is unverified — tell the user. Attach sessions also ' +
   'author compositions (compositionId or newCompositionName) and have the API map and data tools; a headless ' +
-  'session answers requires-shim-browser for those. The shim-authoring skill documents the spec format, every ' +
+  'session answers requires-shim-browser for those. Read the authoring guide before the first session: the ' +
+  'shim-authoring skill if your client loaded it, otherwise shim_guide. It documents the spec format, every ' +
   'mutation kind, anchors, the runtime api and window.api.';

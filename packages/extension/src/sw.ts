@@ -1945,7 +1945,7 @@ const pageHosts = {
 // The session registry runs here (sessions.ts), the routes an MCP client
 // drives are answered here (control.ts), and both reach the worker only
 // through the native messaging port to `shim bridge` (bridge-port.ts),
-// held while the popup's "let Claude Code author here" is on. Every session
+// held while the popup's "let coding agents author here" is on. Every session
 // pends on the attach card (attach-consent.ts, attach.html) before it
 // opens; nothing on a route answers a card.
 

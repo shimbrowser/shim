@@ -49,6 +49,7 @@ import { isApiMapToolName } from '@shimbrowser/core/api-map-tools';
 import { isDataToolName } from '@shimbrowser/core/data-tools';
 import { isCompositionSessionToolName } from '@shimbrowser/core/composition-session-tools';
 import { COMPOSITION_WIRE_LIMITS, SHIM_WIRE_LIMITS } from '@shimbrowser/core/working-copy-wire';
+import { GUIDE_TOPICS, guideText, isGuideTopic } from './guide';
 import { staticTools, isSessionToolName, SERVER_INSTRUCTIONS, HEADLESS_SERVER_INSTRUCTIONS, AUTO_SERVER_INSTRUCTIONS, type SessionToolName } from './contract';
 import { pickAttachHost, type AttachHost, type AttachProbe, type ServerMode, type SessionMode } from './modes';
 import type { HeadlessReadiness } from './playwright-launch';
@@ -106,7 +107,7 @@ export const ATTACH_CARD_TIMEOUT_MS = 2 * 60_000;
 const DEFAULT_WAIT_NOTICES = { firstMs: 2_000, everyMs: 5_000 };
 
 // Session tools that never wait on a card: no progress watch for them.
-const NO_CARD_TOOLS: ReadonlySet<string> = new Set(['shim_status', 'shim_launch', 'shim_list_tabs', 'shim_checkout', 'shim_end_session']);
+const NO_CARD_TOOLS: ReadonlySet<string> = new Set(['shim_status', 'shim_launch', 'shim_list_tabs', 'shim_checkout', 'shim_end_session', 'shim_guide']);
 
 // "1:52" — whole seconds left, never negative.
 export function clockLeft(ms: number): string {
@@ -803,6 +804,13 @@ export function createShimMcpServer(deps: ShimMcpDeps): Server {
         const reply = await control(endpointOf(id), 'DELETE', sessionPath(id));
         forget(id);
         return [text({ ended: true, sessionId: id, reason: reply.reason, lastVersionId: reply.versionId ?? null })];
+      }
+      case 'shim_guide': {
+        const topic = str(input, 'topic');
+        if (topic !== undefined && !isGuideTopic(topic)) {
+          throw new ToolFailure('invalid-request', `no guide topic "${topic}"; the topics are ${GUIDE_TOPICS.join(', ')}`);
+        }
+        return [text(guideText(topic))];
       }
     }
   }
