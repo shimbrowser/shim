@@ -165,9 +165,12 @@ check('says a supabase connection\'s storage creates nothing but still allowlist
 check('does not claim setting values never travel', !/Values never travel with the shim/.test(skill));
 check('says non-secret setting values ride a pack export', /`secret` values never do, but non-secret\s+values ride along when the user exports a pack/.test(skill));
 // api.fetch omits cookies but forwards the caller's headers (capabilities/
-// fetch.ts), so key-authenticated third-party APIs work through it.
+// fetch.ts); a key-authenticated third-party API goes through a placed
+// secret (core D17): `use` on the field, `secrets` on the request.
 check('does not restrict api.fetch to public content', !/public content only/.test(skill));
-check('says api.fetch sends the headers you pass (key-authenticated APIs work)', /does send the headers\s+you pass/.test(skill) && /`secret`\s+setting and pass it as `Authorization`/.test(skill));
+check('says api.fetch sends the headers you pass, and steers keys to placed secrets',
+  /does send the headers\s+you pass/.test(skill) && /api\.fetch\(url, \{ secrets: \['openaiKey'\] \}\)/.test(skill)
+    && /"use": \{ "origin": "https:\/\/api\.openai\.com", "header":\s+"Authorization", "format": "Bearer \{\}" \}/.test(skill));
 // The local read caps are defaults a shim can raise via storage.limits, up to
 // the transport's hard ceilings (shim-db/transport-sqlite.ts, schema.ts).
 check('documents storage.limits and its ceilings', /"limits": \{ "maxRows": \d+,\s+"maxResultBytes": \d+ \}/.test(skill) && /up to 100,000 rows \/ 20 MB/.test(skill));

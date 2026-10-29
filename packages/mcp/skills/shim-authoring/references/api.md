@@ -66,11 +66,25 @@ Don't repeat it.
   field). The schema travels with the shim; `secret` values never do, but non-secret
   values ride along when the user exports a pack — keep anything personal in a `secret`
   field (or in `api.storage`) rather than a `text`, `number`, `boolean` or `select` one.
+  **A key for a service: declare where it is sent (`use`) and let Shim place it.** Give
+  the `secret` field `"use": { "origin": "https://api.openai.com", "header":
+  "Authorization", "format": "Bearer {}" }` — one exact https origin, written canonically
+  (no path or trailing slash), and either one `header` or one `query` parameter
+  (`"query": "key"`, only when the API takes the key in the URL), with a `format`
+  holding one `{}` where the value goes. The handler then never reads the value
+  (`api.settings.get` answers `true` once it is set) and names it on the request instead:
+  `api.fetch(url, { secrets: ['openaiKey'] })`. Shim adds it to requests to that origin
+  only, refuses a request that sets that header or parameter itself, follows no
+  redirect, and redacts echoes of the key from the answer. The user approves each placed
+  secret in the shim's settings after the commit, and again whenever the shim changes;
+  until then the call answers `{ ok: false, error }`, so render a "turn it on in Settings"
+  state. A field with `use` takes no `default`. This is the only form Shim for Chrome
+  accepts; a global shim can't declare it yet.
 - **`api.fetch(url, { method, headers, body })`** — a request from Shim's main process,
   outside the page's CSP and CORS: `{ ok, status, url, headers, text, truncated }` (no
   `.json()` — `JSON.parse(res.text)`). It sends no cookies, but it does send the headers
-  you pass, so a third-party API authenticated by a key works: read the key from a `secret`
-  setting and pass it as `Authorization` or the API's key header. Only for the site's own
+  you pass. For a third-party API authenticated by a key, use a placed secret (`secrets`,
+  above) rather than reading the key and passing it yourself. Only for the site's own
   endpoints that need the user's logged-in session, use the page's
   `fetch(url, { credentials: 'include' })`. It **cannot reach the local network**: localhost,
   LAN addresses and hostnames resolving to private or link-local addresses answer
