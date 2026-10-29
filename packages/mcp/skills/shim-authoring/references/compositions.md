@@ -91,9 +91,10 @@ style.css
   `kind` and `operationName` for a GraphQL / JSON-RPC operation. **Declare every write**
   (a method that changes data): the commit asks the user to approve each new one, and an
   undeclared write is refused at runtime. A REST path segment written `{name}` stands for
-  exactly one segment of a real request: `POST /tracks/favor/{id}` covers
-  `/tracks/favor/42`, never `/tracks/favor/42/x` or a path with `.`, `..` or an empty
-  segment. `access: "read"` marks a REST POST that only
+  exactly one segment of a real request made of letters, digits and `.` `_` `~` `-`:
+  `POST /tracks/favor/{id}` covers `/tracks/favor/42`, never `/tracks/favor/42/x`, a
+  value with any other character, or a path with `.`, `..` or an empty segment. Start a
+  template with a literal segment (`/{a}/{b}` covers nothing). `access: "read"` marks a REST POST that only
   searches; the user confirms it on a card in Shim the first time it runs (in a session,
   once per endpoint), and the page's call waits for the answer, so tell the user to look
   at Shim before you preview code that makes it. Declined, it answers
