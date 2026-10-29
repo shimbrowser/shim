@@ -12,7 +12,7 @@ byte for byte) and tells you honestly what it can run.
 ## Install (beta)
 
 Shim for Chrome isn't on the Chrome Web Store yet. Install it from a GitHub release; it needs
-Chrome 120 or later (or another Chromium-based browser: Brave, Edge, Chromium).
+Chrome 135 or later (or another Chromium-based browser on Chromium 135 or later: Brave, Edge, Chromium).
 
 1. **Download** [`shim-for-chrome.zip`](https://github.com/shimbrowser/shim/releases/latest/download/shim-for-chrome.zip)
    and unzip it into a folder you will keep. Chrome runs the extension from that folder, so
@@ -22,7 +22,7 @@ Chrome 120 or later (or another Chromium-based browser: Brave, Edge, Chromium).
    ID `cihnpejdfdhimjfkegngpndfpiecjhoe`. Every install has this same ID.
 4. Pin it: open the extensions menu (the puzzle piece in the toolbar) and pin Shim for Chrome.
 5. **Allow user scripts.** On the extension's card, click **Details** and turn on **Allow user
-   scripts** (Chrome 138 and later; on Chrome 120 to 137, Developer mode alone does this).
+   scripts** (Chrome 138 and later; on Chrome 135 to 137, Developer mode alone does this).
    Shims with script handlers need it. Without it, the extension runs only declarative rules
    (hide, restyle, inject and the like), refuses to install a shim that has handlers, and its
    popup says how to turn them on.
@@ -150,7 +150,7 @@ engine needs compiled handler functions, so rules with handlers run only in **fu
 mode**, where the engine runs in a user-script world whose CSP permits `eval`. Full mode
 is on while the user allows user scripts for the extension: the "Allow user scripts"
 toggle on the extension's card at `chrome://extensions` (Chrome 138 and later), or
-developer mode there (Chrome 120 to 137). The popup says which mode is on and opens that
+developer mode there (Chrome 135 to 137). The popup says which mode is on and opens that
 page. Without it, the extension runs in **declarative mode** and refuses a shim with
 handler rules at install, naming the toggle. Everything declarative works in both.
 

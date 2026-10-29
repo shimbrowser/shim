@@ -18,7 +18,9 @@
 //     document starts the count again;
 //   - storage access levels: storage.session is closed to content scripts by
 //     default, storage.local is open until restricted, and
-//     setAccessLevel('TRUSTED_CONTEXTS') closes it;
+//     setAccessLevel('TRUSTED_CONTEXTS') closes it where Chrome has it for
+//     storage.local (Chrome 135 has it for storage.session only, so the vault
+//     keeps nothing secret in chrome.storage.local);
 //   - Network Error Logging: a fetch the extension's worker makes to an
 //     origin whose policy an earlier worker fetch installed is reported with
 //     its full URL, query included, to the endpoint the origin names; a policy
@@ -155,6 +157,7 @@ self.contentStorage = async (tabId) => {
 self.workerFetch = async (url) => {
   try { return (await fetch(url, { cache: 'no-store', credentials: 'omit' })).status; } catch { return 'network-error'; }
 };
+self.canRestrictLocal = () => typeof chrome.storage.local.setAccessLevel === 'function';
 self.restrictLocal = () => chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
 self.workerStorage = async () => {
   await chrome.storage.local.set({ probe: 1 });
@@ -343,10 +346,17 @@ async function main(): Promise<void> {
       const before = await call<{ local: string; session: string }>('contentStorage', tabId);
       check('a content script cannot read storage.session by default', before.session === 'refused', before);
       check('but can read storage.local until it is restricted', before.local === 'readable', before);
-      await call('restrictLocal');
-      const after = await call<{ local: string; session: string }>('contentStorage', tabId);
-      check('setAccessLevel(TRUSTED_CONTEXTS) closes storage.local to content scripts', after.local === 'refused' && after.session === 'refused', after);
-      check('and the worker still reads both', JSON.stringify(await call('workerStorage')) === JSON.stringify({ local: 1, session: 1 }));
+      // storage.local.setAccessLevel is missing on Chrome 135 (session's alone exists there), so
+      // the vault keeps its tokens out of chrome.storage.local altogether (in the worker's
+      // IndexedDB, which no content script reaches); where it exists, it closes local too.
+      if (await call<boolean>('canRestrictLocal')) {
+        await call('restrictLocal');
+        const after = await call<{ local: string; session: string }>('contentStorage', tabId);
+        check('setAccessLevel(TRUSTED_CONTEXTS) closes storage.local to content scripts', after.local === 'refused' && after.session === 'refused', after);
+        check('and the worker still reads both', JSON.stringify(await call('workerStorage')) === JSON.stringify({ local: 1, session: 1 }));
+      } else {
+        console.log(`    storage.local.setAccessLevel is absent on Chrome ${major}: storage.local stays open to content scripts (tokens never live there)`);
+      }
       await page.close();
     }
 

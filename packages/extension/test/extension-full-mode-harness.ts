@@ -288,25 +288,32 @@ async function main(): Promise<void> {
     // connection starts with a sync: a new port from the user-script world
     // hears one before it says anything. (The worker cannot be made to die
     // on cue under Playwright, whose session keeps it alive, so the
-    // mechanism is pinned here rather than the gap itself.)
+    // mechanism is pinned here rather than the gap itself.) A port says
+    // who holds it first (a hello; a vault world's token), and nothing is
+    // posted to it before: a silent one hears nothing and is closed.
     const tabs = await worker.evaluate(() => chrome.tabs.query({ url: '*://127.0.0.1/*' }).then((t) => t.map((x) => x.id)));
     const tabId = tabs[0];
     check('a fixture tab is open', typeof tabId === 'number');
     if (typeof tabId === 'number') {
-      const heard = await worker.evaluate(async (id) => {
+      const connectAndListen = (hello: boolean): Promise<unknown[]> => worker.evaluate(async ([id, sayHello]) => {
         const res = await chrome.userScripts.execute({
           target: { tabId: id },
           js: [{
             code: `new Promise((resolve) => {
               const port = chrome.runtime.connect({ name: 'shim-runtime' });
-              const timer = setTimeout(() => { resolve('nothing'); port.disconnect(); }, 3000);
+              const timer = setTimeout(() => { resolve('nothing'); port.disconnect(); }, 2500);
               port.onMessage.addListener((m) => { clearTimeout(timer); resolve(JSON.stringify(m)); port.disconnect(); });
+              port.onDisconnect.addListener(() => { clearTimeout(timer); resolve('closed'); });
+              ${sayHello ? "port.postMessage({ type: 'hello' });" : ''}
             })`,
           }],
         });
         return res.map((x) => x.result);
-      }, tabId);
-      check('a new port from the user-script world is greeted with a sync', heard[0] === '{"type":"sync"}', heard);
+      }, [tabId, hello] as const);
+      const heard = await connectAndListen(true);
+      check('a new port from the user-script world is greeted with a sync once it says hello', heard[0] === '{"type":"sync"}', heard);
+      const silent = await connectAndListen(false);
+      check('one that says nothing hears nothing', silent[0] === 'nothing' || silent[0] === 'closed', silent);
     }
   }
 
