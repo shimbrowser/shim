@@ -12,6 +12,7 @@
 // is approved). settings.html?vault opens the vault alone.
 
 import type { GrantView } from './credential-grants';
+import { accessText, placementText } from './grant-text';
 import type { SettingsPageField } from './settings';
 import { ask, el, vaultView, renderVaultSection } from './vault-ui';
 import type { VaultView } from './messages';
@@ -78,12 +79,16 @@ function controlFor(field: SettingsPageField): { node: HTMLElement; read(): unkn
  */
 function renderSecret(card: HTMLElement, field: SettingsPageField, grant: GrantView | undefined, vault: VaultView | null, shimName: string, rerender: () => void): void {
   if (!vault?.enabled || !grant) {
-    card.append(el('div', 'muted', 'secret settings are not available in Shim for Chrome yet; use this shim in the Shim browser to set one'));
+    card.append(el('div', 'muted', vault?.enabled
+      ? 'this secret declares no destination, so Shim for Chrome cannot send it for the shim'
+      : 'secret settings are turned off in this build of Shim for Chrome'));
     return;
   }
   const trusted = el('div', 'trusted');
   trusted.append(el('div', 'trusted-caption', 'Shim for Chrome'));
   trusted.append(el('div', undefined, `${shimName} sends this value ${grant.description}. It never sees the value itself.`));
+  trusted.append(el('div', 'soft', `Placed in ${placementText(grant)}.`));
+  if (grant.state !== 'granted') trusted.append(el('div', 'soft', accessText(grant)));
   const status = el('div', 'status');
   const say = (answer: { ok: boolean; error?: string }, ok: string): void => {
     status.className = answer.ok ? 'status ok' : 'status error';
@@ -105,6 +110,20 @@ function renderSecret(card: HTMLElement, field: SettingsPageField, grant: GrantV
     const approve = el('button', 'primary', grant.state === 'suspended' ? 'approve again' : 'approve');
     approve.addEventListener('click', async () => {
       approve.disabled = true;
+      // Chrome's prompt needs this click: the request comes first, nothing awaited before it.
+      let granted: boolean;
+      try {
+        granted = grant.access !== '' && await chrome.permissions.request({ origins: [grant.access] });
+      } catch (err) {
+        say({ ok: false, error: `could not ask for access to ${grant.origin}: ${err instanceof Error ? err.message : String(err)}` }, '');
+        approve.disabled = false;
+        return;
+      }
+      if (!granted) {
+        say({ ok: false, error: `access to ${grant.origin} was not granted, so this was not approved` }, '');
+        approve.disabled = false;
+        return;
+      }
       const answer = await ask({ type: 'grants.approve', id: shimId, key: field.key, review: grant.review });
       say(answer, 'approved: reload the shim\'s pages to use it');
       if (answer.ok) rerender();

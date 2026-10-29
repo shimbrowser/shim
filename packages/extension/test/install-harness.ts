@@ -7,8 +7,8 @@
 
 import { prepareInstall, mintShimId } from '../src/install';
 import {
-  EXTENSION_CAPABILITIES, EXTENSION_DECLARATIVE_CAPABILITIES, HANDLER_KINDS, USER_SCRIPTS_REASON, HOW_TO_ENABLE, capabilitiesFor, detectMode,
-  userScriptsAvailable,
+  EXTENSION_CAPABILITIES, EXTENSION_DECLARATIVE_CAPABILITIES, EXTENSION_VAULT_CAPABILITIES, HANDLER_KINDS, USER_SCRIPTS_REASON, HOW_TO_ENABLE, capabilitiesFor, detectMode,
+  userScriptsAvailable, VAULT_ENABLED, SESSION_CAPABILITIES, SESSION_VAULT_CAPABILITIES, sessionCapabilities,
 } from '../src/capabilities';
 import { preflightSpec } from '@shimbrowser/core/capability-preflight';
 import { CONFORMANCE_CAPABILITIES } from '@shimbrowser/core/page-host-conformance';
@@ -52,12 +52,19 @@ check('neither claims iframes, component identity or inspection',
   [EXTENSION_CAPABILITIES, EXTENSION_DECLARATIVE_CAPABILITIES].every((c) => !c.iframeRules && !c.componentIdentity && !c.engineInspection));
 check('both install the spec stylesheet', EXTENSION_CAPABILITIES.specCss && EXTENSION_DECLARATIVE_CAPABILITIES.specCss);
 check('the constants are frozen', Object.isFrozen(EXTENSION_CAPABILITIES) && Object.isFrozen(EXTENSION_CAPABILITIES.mutationKinds));
-check('capabilitiesFor maps each mode', capabilitiesFor('full') === EXTENSION_CAPABILITIES && capabilitiesFor('declarative') === EXTENSION_DECLARATIVE_CAPABILITIES);
+check('the vault is on in this build', VAULT_ENABLED === true);
+check('capabilitiesFor maps each mode: full takes the vault\'s, declarative never', capabilitiesFor('full') === EXTENSION_VAULT_CAPABILITIES && capabilitiesFor('declarative') === EXTENSION_DECLARATIVE_CAPABILITIES
+  && capabilitiesFor('full', false) === EXTENSION_CAPABILITIES && capabilitiesFor('declarative', true) === EXTENSION_DECLARATIVE_CAPABILITIES);
+check('full mode with the vault advertises declared secrets, and nothing else differs',
+  EXTENSION_VAULT_CAPABILITIES.secretSettings === 'declared' && JSON.stringify({ ...EXTENSION_VAULT_CAPABILITIES, secretSettings: 'none' }) === JSON.stringify(EXTENSION_CAPABILITIES));
+check('a session advertises declared secrets while the vault is on, none while it is off',
+  sessionCapabilities() === SESSION_VAULT_CAPABILITIES && SESSION_VAULT_CAPABILITIES.secretSettings === 'declared' && sessionCapabilities(false) === SESSION_CAPABILITIES && SESSION_CAPABILITIES.secretSettings === 'none'
+  && JSON.stringify({ ...SESSION_VAULT_CAPABILITIES, secretSettings: 'none' }) === JSON.stringify(SESSION_CAPABILITIES));
 check('full mode runs script and replace-root, not mount-route', EXTENSION_CAPABILITIES.mutationKinds.includes('script') && EXTENSION_CAPABILITIES.mutationKinds.includes('replace-root') && !EXTENSION_CAPABILITIES.mutationKinds.includes('mount-route'));
 check('declarative mode runs no handler kind', !HANDLER_KINDS.some((k) => EXTENSION_DECLARATIVE_CAPABILITIES.mutationKinds.includes(k)));
 check('full mode serves api.settings and api.fetch; declarative serves the settings declaration only',
   JSON.stringify(EXTENSION_CAPABILITIES.apiMembers) === '["settings","fetch"]' && JSON.stringify(EXTENSION_DECLARATIVE_CAPABILITIES.apiMembers) === '["settings"]');
-check('neither mode keeps a secret setting (no encrypted store)', EXTENSION_CAPABILITIES.secretSettings === 'none' && EXTENSION_DECLARATIVE_CAPABILITIES.secretSettings === 'none');
+check('without the vault, neither mode keeps a secret setting', EXTENSION_CAPABILITIES.secretSettings === 'none' && EXTENSION_DECLARATIVE_CAPABILITIES.secretSettings === 'none');
 check('neither serves api.ai, api.db or the shared code-space', [EXTENSION_CAPABILITIES, EXTENSION_DECLARATIVE_CAPABILITIES].every((c) => !c.apiMembers.some((m) => m === 'ai' || m === 'db' || m === 'shared')));
 
 check('the refusal names the toggle and says to install again', USER_SCRIPTS_REASON.includes(HOW_TO_ENABLE) && USER_SCRIPTS_REASON.includes('install the shim again') && HOW_TO_ENABLE.includes('Allow user scripts'));
@@ -157,6 +164,18 @@ console.log('settings:');
   check('a secret field is refused, by name (no encrypted store)', !secret.ok && secret.error === 'unsupported'
     && secret.problems.some((p) => p.includes('"apiKey"') && p.includes('cannot store encrypted')) && !secret.problems.some((p) => p.includes('"units"')), JSON.stringify(secret));
   check('…in declarative mode too', !prepareInstall(file({ spec: { settings: [{ key: 'apiKey', type: 'secret' }] } }), EXTENSION_DECLARATIVE_CAPABILITIES, 'declarative').ok);
+  const placed = { key: 'apiKey', type: 'secret', label: 'Key', use: { origin: 'https://api.example.com', header: 'Authorization', format: 'Bearer {}' } };
+  const queryPlaced = { key: 'mapsKey', type: 'secret', label: 'Maps', use: { origin: 'https://maps.example.com', query: 'key', format: '{}' } };
+  const vaultOk = prepareInstall(file({ spec: { settings: [...settings, placed, queryPlaced] } }), capabilitiesFor('full'), 'full');
+  check('with the vault, a secret that declares use (header or query) installs in full mode', vaultOk.ok, JSON.stringify(vaultOk));
+  const plainWithVault = prepareInstall(file({ spec: { settings: [placed, { key: 'raw', type: 'secret' }] } }), capabilitiesFor('full'), 'full');
+  check('a secret without use is still refused with the vault on, by name', !plainWithVault.ok && plainWithVault.error === 'unsupported'
+    && plainWithVault.problems.some((p) => p.includes('"raw"')) && !plainWithVault.problems.some((p) => p.includes('"apiKey"')), JSON.stringify(plainWithVault));
+  check('a placed secret is refused in declarative mode (no world of its own)', !prepareInstall(file({ spec: { settings: [placed] } }), capabilitiesFor('declarative'), 'declarative').ok);
+  check('…and with the vault turned off', !prepareInstall(file({ spec: { settings: [placed] } }), capabilitiesFor('full', false), 'full').ok);
+  const placedSpec = (JSON.parse(file({ spec: { settings: [placed] } })) as { spec: Parameters<typeof preflightSpec>[0] }).spec;
+  check('a session preflights a placed secret through with the vault on, not without',
+    preflightSpec(placedSpec, sessionCapabilities(true)).ok && !preflightSpec(placedSpec, sessionCapabilities(false)).ok);
   const malformed = prepareInstall(file({ spec: { settings: [{ key: 'a' }, { key: 'a' }] } }), EXTENSION_CAPABILITIES, 'full');
   check('a malformed declaration is refused with its problem', !malformed.ok && malformed.error === 'malformed-shim-folder'
     && malformed.problems.some((p) => p.includes('duplicate key "a"')), JSON.stringify(malformed));

@@ -39,6 +39,8 @@ export interface VaultStore {
   grants: {
     get(shimId: string, key: string): Promise<GrantRow | undefined>;
     listForShim(shimId: string): Promise<GrantRow[]>;
+    /** Every grant, of every shim. */
+    list(): Promise<GrantRow[]>;
     put(row: GrantRow): Promise<void>;
     delete(shimId: string, key: string): Promise<boolean>;
     /** Re-bind this shim's grants at digest `from` to `to` (an anchor-only rebase); answers how many moved. */
@@ -137,6 +139,7 @@ function bind(db: IDBDatabase): VaultStore {
     grants: {
       get: (shimId, key) => request(read(GRANTS).objectStore(GRANTS).get([shimId, key]) as IDBRequest<GrantRow | undefined>),
       listForShim: (shimId) => byShim<GrantRow>(GRANTS, shimId),
+      list: () => request(read(GRANTS).objectStore(GRANTS).getAll() as IDBRequest<GrantRow[]>),
       put: (row) => putOne(GRANTS, row),
       delete: (shimId, key) => deleteOne(GRANTS, [shimId, key]),
       async rebind(shimId, from, to) {

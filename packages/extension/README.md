@@ -39,9 +39,34 @@ every unpacked extension: keep Shim for Chrome enabled.
 
 A shim can ask for settings (a name, a choice, a number). Its card in the popup then has a
 **settings** button, and says **needs setup** while a required one has no value. Values stay
-in this browser and are never part of an export. A shim that asks for a secret (an API key,
-a token) can't be installed here: Chrome gives extensions no encrypted storage, so such a
-shim runs only in the Shim browser for now.
+in this browser and are never part of an export.
+
+### Secrets (API keys, tokens)
+
+A shim can ask for a secret only by saying exactly where it is sent: one service (an
+exact `https://` address) and one header or web-address parameter. The extension keeps
+the value in its own encrypted vault and adds it to that request itself. The shim's
+code never sees the value; it learns only whether one is set.
+
+1. **Install the shim.** The review lists each secret: where it goes, in which header or
+   parameter, and in what format. You can approve sending it right there, or later.
+2. **Set up the vault.** Open the shim's settings from the popup and choose a passphrase
+   only you know. Shim for Chrome never asks for it on a website, only in its own popup
+   or settings page.
+3. **Enter the value and approve it.** Approving asks Chrome for access to that one
+   service, so the extension can read its answers. No shim runs there because of it,
+   and the access goes back when you revoke the last approval that needs it.
+
+The vault unlocks for at most 12 hours, or less if you choose a shorter idle time, and
+locks whenever Chrome or the extension restarts. Unlock it again from the popup. While it
+is locked, or while a Claude Code session is working on the tab, the shim's keyed
+requests are refused. If the shim's code changes, its approval pauses until you approve
+again.
+
+A key sent in a web-address parameter can end up in the service's logs, and in error
+reports sent to whoever the service chooses; the review says so. Forgot your passphrase?
+**reset** in the vault clears every secret and approval, and you enter them again.
+Exports never carry secrets, the vault or approvals.
 
 ### Let Claude Code author on your Chrome tabs (optional)
 
@@ -87,7 +112,7 @@ time.
 
 | Permission | What it is for |
 |---|---|
-| Site access (`optional_host_permissions`) | Asked when you install a shim, for exactly the sites it names, and given back when you remove it. Never all sites at once. |
+| Site access (`optional_host_permissions`) | Asked when you install a shim, for exactly the sites it names, and given back when you remove it. Also asked when you approve a secret, for exactly the service it goes to, and given back when you revoke it. Never all sites at once. |
 | `userScripts` | Runs shims with script handlers in Chrome's user-script world, where a site's own security policy can't block them. Needs **Allow user scripts**. |
 | `scripting` | Runs declarative shims as content scripts, and applies a change to tabs already open. |
 | `storage` | The extension's own bookkeeping between restarts. Your shims live in the extension's database, which is removed with it. |
@@ -113,9 +138,11 @@ Beta. What works today:
   Handlers compile in Chrome's user-script world, so a site's own CSP cannot block them.
 - A shim that declares settings gets a settings page, opened from the popup, and its
   handlers read the values with `api.settings`. Saving a value re-runs the shim on the
-  pages already open. Values stay in this browser and never travel with an export. A
-  `secret` field is refused at install: the extension has no encrypted store, so a shim
-  that needs a credential runs in the Shim browser.
+  pages already open. Values stay in this browser and never travel with an export.
+- Secrets that declare where they are sent (`use`) live in a passphrase vault and are
+  added to the request by the extension, only to that service, only once you approve,
+  and only while the vault is unlocked (see Secrets above). A `secret` field without
+  `use` is refused at install. Secrets need full mode.
 - `api.fetch` is brokered by the extension's worker with the Shim browser's bounds:
   cookie-less, http(s) only, no loopback, private or link-local address, at most 5 MB
   read and 15 s. A shim's handlers read its own sites directly, but never a site the
@@ -142,7 +169,7 @@ Beta. What works today:
   browser's control endpoint over a socket, and each session the agent opens waits for
   you on the attach card. Commits land as new versions of the installed shim (below).
 
-Not yet: the Chrome Web Store, and secret settings (they need an encrypted store first).
+Not yet: the Chrome Web Store.
 
 ## Modes
 

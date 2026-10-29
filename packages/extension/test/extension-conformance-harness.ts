@@ -21,7 +21,7 @@ import {
 import type { PageRuntimeEvent, PageConsoleMessage, PageHostCapabilities } from '@shimbrowser/core/page-host';
 import { workDir, extensionCopy, fixtureServer, launch, workerOf } from './smoke-helpers';
 import { proxyHost, until, isRecord } from './host-proxy';
-import { SESSION_CAPABILITIES, UNSUPPORTED_ERROR } from '../src/capabilities';
+import { sessionCapabilities, UNSUPPORTED_ERROR } from '../src/capabilities';
 
 let failures = 0;
 function check(label: string, ok: boolean, detail?: unknown): void {
@@ -61,7 +61,7 @@ async function main(): Promise<void> {
   check('a PageHost opened on the tab', typeof hostId === 'string');
   const host = proxyHost(worker, hostId);
   const caps = await worker.evaluate(([id]) => (globalThis as unknown as { shimPageHosts: { call(id: string, m: string, a: unknown[]): Promise<unknown> } }).shimPageHosts.call(id, 'capabilities', []), [hostId] as const) as PageHostCapabilities;
-  check('the host advertises the session capabilities', JSON.stringify(caps) === JSON.stringify(SESSION_CAPABILITIES), caps);
+  check('the host advertises the session capabilities (the vault on: declared secrets)', JSON.stringify(caps) === JSON.stringify(sessionCapabilities()) && caps.secretSettings === 'declared', caps);
 
   try {
     const only = process.env.SHIM_CONFORMANCE_ONLY ? process.env.SHIM_CONFORMANCE_ONLY.split(',') : undefined;
@@ -73,7 +73,7 @@ async function main(): Promise<void> {
 
     console.log('\n── extension-only checks');
     const covered = coveredCapabilities();
-    const uncovered = SESSION_CAPABILITIES.mutationKinds.filter((k) => !(covered as Set<string>).has(k));
+    const uncovered = sessionCapabilities().mutationKinds.filter((k) => !(covered as Set<string>).has(k));
     check('every mutation kind the session host advertises has a conformance case', uncovered.length === 0, uncovered);
 
     // Console provenance: the engine world's lines are proven by the

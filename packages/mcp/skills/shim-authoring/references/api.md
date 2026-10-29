@@ -78,8 +78,10 @@ Don't repeat it.
   redirect, and redacts echoes of the key from the answer. The user approves each placed
   secret in the shim's settings after the commit, and again whenever the shim changes;
   until then the call answers `{ ok: false, error }`, so render a "turn it on in Settings"
-  state. A field with `use` takes no `default`. This is the only form Shim for Chrome
-  accepts; a global shim can't declare it yet.
+  state. A field with `use` takes no `default`. This is the only secret form Shim for
+  Chrome accepts (its vault places it); a global shim can't declare it yet. In a
+  session no secret is ever sent: a preview reads it as unset and a preview's fetch
+  naming `secrets` is refused, so preview the "turn it on in Settings" state.
 - **`api.fetch(url, { method, headers, body })`** — a request from Shim's main process,
   outside the page's CSP and CORS: `{ ok, status, url, headers, text, truncated }` (no
   `.json()` — `JSON.parse(res.text)`). It sends no cookies, but it does send the headers

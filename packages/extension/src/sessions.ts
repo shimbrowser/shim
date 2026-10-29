@@ -38,7 +38,7 @@ import { isCompositionSessionToolName } from '@shimbrowser/core/composition-sess
 import type { DeltaOp } from '@shimbrowser/core/spec-delta';
 import type { ExtensionPageHost, NudgeOutcome } from './page-host';
 import type { ShimStore, InstalledShim } from './store';
-import { capabilitiesFor, UNSUPPORTED_ERROR, HOW_TO_ENABLE, type ExtensionMode } from './capabilities';
+import { capabilitiesFor, UNSUPPORTED_ERROR, HOW_TO_ENABLE, VAULT_ENABLED, type ExtensionMode } from './capabilities';
 
 export const REQUIRES_SHIM_BROWSER = 'requires-shim-browser';
 /** How long a commit's activation waits for the tab's runtime to run the new version. */
@@ -66,6 +66,8 @@ export interface ExtensionSessionTarget extends ShimSessionTarget<ExtensionShimS
 export interface SessionsDeps {
   store(): Promise<ShimStore>;
   mode(): ExtensionMode;
+  /** Whether the vault is on in this worker (secret fields with `use` commit). Default the build's VAULT_ENABLED. */
+  vault?(): boolean;
   /** Runs `work` in the shim's write chain (no rebase or fingerprint write interleaves). */
   chained<T>(shimId: string, work: () => Promise<T>): Promise<T>;
   /** Nudge the tab's committed runtime to sync; acked once it runs `version` of `shimId`. */
@@ -256,7 +258,7 @@ export function createSessions(deps: SessionsDeps): Sessions {
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.sleep ? { sleep: deps.sleep } : {}),
     unsupportedError: UNSUPPORTED_ERROR,
-    unsupportedDetail: 'Shim for Chrome runs hide, restyle, reorder, reshape, remove, inject-element, inject-html, script and replace-root rules, with api.storage, api.settings (no secret fields), api.fetch and api.cleanup. Nothing was applied. Remove what is listed, or author this shim in the Shim browser.',
+    unsupportedDetail: 'Shim for Chrome runs hide, restyle, reorder, reshape, remove, inject-element, inject-html, script and replace-root rules, with api.storage, api.settings (a secret field only with a declared use, which the extension places on the request), api.fetch and api.cleanup. Nothing was applied. Remove what is listed, or author this shim in the Shim browser.',
     unsupportedNote: (ruleId, member) => `rule "${ruleId}" used api.${member}, which Shim for Chrome does not provide (${UNSUPPORTED_ERROR}) — its result is partial`,
     // Shim for Chrome has no commit card to ask about widening where a shim
     // runs, so it does not opt into match editing (the fail-closed default): a
@@ -289,7 +291,7 @@ export function createSessions(deps: SessionsDeps): Sessions {
     // settings page could show nothing of a malformed one.
     const settingsProblems = settingsSchemaProblems(prepared.file.spec);
     if (settingsProblems.length) return { ok: false, error: 'malformed-shim-folder', detail: settingsProblems.join('; ') };
-    const pre = preflightSpec(prepared.file.spec, capabilitiesFor(deps.mode()));
+    const pre = preflightSpec(prepared.file.spec, capabilitiesFor(deps.mode(), deps.vault?.() ?? VAULT_ENABLED));
     if (!pre.ok) {
       return { ok: false, error: 'unsupported-in-mode', detail: `this shim needs what Shim for Chrome does not run in ${deps.mode()} mode: ${pre.unsupported.map((u) => u.message).join('; ')}. ${HOW_TO_ENABLE}` };
     }

@@ -53,7 +53,10 @@ export const PAGE_MESSAGES: ReadonlySet<string> = new Set([
 /**
  * Messages that touch the vault, its secrets or the grants: answered only to
  * the extension's own settings page and popup, never to
- * a site, a session, the bridge, the install page or the sandbox.
+ * a site, a session, the bridge, the install page or the sandbox. (The one
+ * approval outside them: install.commit may approve the placed secrets of
+ * the shim it installs, which the install review listed, each only with
+ * its site access granted in the same click.)
  */
 export const VAULT_MESSAGES: ReadonlySet<string> = new Set([
   'vault.status', 'vault.setup', 'vault.unlock', 'vault.lock', 'vault.reset', 'vault.changePassphrase', 'vault.rotateKey', 'vault.setLockAfter',

@@ -9,7 +9,7 @@ import type {
   PageHost, PageRuntimeEvent, PageConsoleMessage, PageLoadOutcome, PageInputCommand, PageInputResult, ScreenshotResult,
 } from '@shimbrowser/core/page-host';
 import { sleep } from './smoke-helpers';
-import { SESSION_CAPABILITIES } from '../src/capabilities';
+import { sessionCapabilities } from '../src/capabilities';
 
 export async function until<T>(probe: () => Promise<T | null | undefined> | T | null | undefined, timeoutMs = 6000): Promise<T | null> {
   const deadline = Date.now() + timeoutMs;
@@ -62,7 +62,7 @@ export function proxyHost(worker: Worker, id: string): PageHost & { stop(): Prom
     return () => { set.delete(listener); };
   };
   return {
-    capabilities: SESSION_CAPABILITIES,
+    capabilities: sessionCapabilities(),
     url: () => urlCache,
     isClosed: () => closedCache,
     async evaluate(code, world) {

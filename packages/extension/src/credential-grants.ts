@@ -21,6 +21,7 @@ import { normalizeSchema, settingsSchemaProblems, type CredentialUse } from '@sh
 import { credentialUseBinding, describeCredentialUse } from '@shimbrowser/core/credential-placement';
 import { executionManifestDigest, executionManifestDigestWithoutAnchors } from '@shimbrowser/core/credential-grant';
 import { sha256Hex } from '@shimbrowser/core/sha256';
+import { accessPatternForOrigin } from './credential-access';
 
 export interface GrantRow {
   shimId: string;
@@ -38,6 +39,14 @@ export interface GrantView {
   label: string;
   /** Where the value goes, in plain words (core's describeCredentialUse; Chrome's worker cannot suppress error reports). */
   description: string;
+  /** The exact origin the value goes to. */
+  origin: string;
+  /** How it is placed: the header's name, or the web-address parameter's. */
+  placement: { header: string } | { query: string };
+  /** The value's format, `{}` standing for the value (`Bearer {}`). */
+  format: string;
+  /** The Chrome match pattern approving asks site access for (credential-access.ts). */
+  access: string;
   state: GrantState;
   /** A value is stored for exactly this placement. */
   isSet: boolean;
@@ -82,6 +91,10 @@ export function grantViews(
     key: f.key,
     label: f.label,
     description: describeCredentialUse(f.use),
+    origin: f.use.origin,
+    placement: f.use.header !== undefined ? { header: f.use.header } : { query: f.use.query },
+    format: f.use.format,
+    access: accessPatternForOrigin(f.use.origin) ?? '',
     state: grantState(rows.get(f.key), f.use, digest),
     isSet: setPlacements.get(f.key) === credentialUseBinding(f.use),
     review: reviewToken(f.use, digest),

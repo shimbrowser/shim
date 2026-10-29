@@ -49,7 +49,12 @@ export type ToWorker =
   /** A restore is a forward change: the current spec is snapshotted, the chosen one becomes the next version. */
   | { type: 'shims.restore'; id: string; version: number }
   /** The install page, after the user granted the hosts: write and register. */
-  | { type: 'install.commit'; prepared: PreparedInstall; provenance: InstallProvenance }
+  /**
+   * `approveGrants`: the placed secrets the user approved on the review, in
+   * the same click that asked Chrome for their sites' access (the worker
+   * writes each grant only with that access held).
+   */
+  | { type: 'install.commit'; prepared: PreparedInstall; provenance: InstallProvenance; approveGrants?: string[] }
   /** The popup: whether the bridge to Claude Code is on, and its state. */
   | { type: 'bridge.status' }
   | { type: 'bridge.setEnabled'; enabled: boolean }
@@ -220,7 +225,8 @@ export type WorkerAnswer =
   | { ok: true; value: unknown }
   | { ok: true; mode: ExtensionMode; shims: ShimSummary[] }
   | { ok: true; mode: ExtensionMode; vault?: boolean }
-  | { ok: true; id: string }
+  /** An install; `unapproved`: approved keys whose grant was not written (no site access). */
+  | { ok: true; id: string; unapproved?: string[] }
   | { ok: true; file: string; fileName: string }
   | { ok: true; versions: VersionSummary[] }
   | { ok: true; name: string; fields: SettingsPageField[] }
