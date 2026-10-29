@@ -84,8 +84,7 @@ loaded unpacked, the headless host, the CLI and the plugin end to end); run
 
 ## Contributing
 
-Issues and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first: the
-first pull request asks you to sign the [CLA](CLA.md), once.
+Issues and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 
 ## License
 

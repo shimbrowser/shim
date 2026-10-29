@@ -34,12 +34,6 @@ runs only the harnesses whose file name contains `<name>`. Each package's tests 
 2. Make your change. New behavior comes with a test (a harness in the package's `test/`), and `npm run typecheck` and `npm test` keep passing.
 3. Open a pull request against `main` describing what changed and why.
 
-## Contributor License Agreement
+## Licensing your contribution
 
-Before we can merge your first pull request, you need to sign the [Contributor License Agreement](CLA.md). You keep the copyright to your contribution; the agreement gives Artificial Apps, LLC, which maintains Shim, a license to use and distribute it, including in the Shim browser, and a patent license. You sign once, and it covers all your future contributions.
-
-To sign, a bot comments on your first pull request with a link to the agreement. Read it, then reply on the pull request with this exact comment:
-
-> I have read the CLA Document and I hereby sign the CLA
-
-The bot records your signature and the check on your pull request turns green. If you contribute on behalf of your employer, make sure you have their permission first (see section 4 of the agreement).
+This repository is licensed under the Apache License 2.0 (see [LICENSE](LICENSE)). As section 5 of the license says, anything you submit for inclusion, such as a pull request, is licensed under the same terms. Only submit work you have the right to contribute: if you write it as part of your job, make sure your employer is fine with you contributing it.
