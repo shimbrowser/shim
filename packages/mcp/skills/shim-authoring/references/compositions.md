@@ -125,6 +125,10 @@ in `try` / `catch`.
 - **Site media** — audio, video and images from a declared, granted host load through the
   composition's own origin: `<img src="/_media/<host>/<path>">`
   (`<audio src="/_media/media.example.com/preview/1.mp3">`). A direct https URL is blocked.
+  An HLS stream works the same way: point `<audio>` at the playlist's media path
+  (`/_media/<host>/<path>.m3u8`, its signed query included) and Shim rewrites the
+  chunk URLs inside it so they load through the route too. Declare every host the
+  playlist's chunks come from, or those chunks are refused.
 - **`api.storage.get / set / delete / list`** — a key/value store private to the
   composition (JSON values). `get(key)` resolves the stored value itself, or `null` when
   unset — never an `{ ok, value }` wrapper; `set` resolves the value, `delete` a boolean,
