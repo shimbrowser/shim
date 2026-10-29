@@ -15,7 +15,7 @@
         "source": "git-subdir",
         "url": "https://github.com/shimbrowser/shim.git",
         "path": "packages/mcp",
-        "ref": "plugin-v0.7.0"
+        "ref": "plugin-v0.7.1"
       }
     }
   ]

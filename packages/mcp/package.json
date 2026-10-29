@@ -1,6 +1,6 @@
 {
   "name": "@shimbrowser/mcp",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "private": true,
   "description": "MCP server and command line for authoring Shim shims from Claude Code, Codex or any MCP agent: against the running Shim browser, or headless in Playwright Chromium.",
   "license": "Apache-2.0",
@@ -31,7 +31,7 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
-    "@shimbrowser/core": "0.7.0",
+    "@shimbrowser/core": "0.7.1",
     "@types/node": "26.6.5",
     "esbuild": "0.28.2",
     "typescript": "6.0.3"
