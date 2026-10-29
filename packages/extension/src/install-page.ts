@@ -66,16 +66,16 @@ let lastToken = 0;
 
 /** Prepare `text` in the sandbox. Answers are matched by token, so a slower earlier file never answers a later one. */
 /** The mode in force, from the worker, which is the one that measures it. */
-async function modeInForce(): Promise<ExtensionMode> {
+async function modeInForce(): Promise<{ mode: ExtensionMode; vault: boolean }> {
   const answer = await ask({ type: 'mode' });
   if (!answer.ok || !('mode' in answer)) throw new Error(`could not read the mode: ${answer.ok ? 'no mode in the answer' : answer.error}`);
-  return answer.mode;
+  return { mode: answer.mode, vault: 'vault' in answer && answer.vault === true };
 }
 
 async function prepare(text: string): Promise<PreparedInstall | InstallRefusal> {
   const token = ++lastToken;
   const deadline = Date.now() + PREPARE_TIMEOUT_MS;
-  const mode = await modeInForce();
+  const { mode, vault } = await modeInForce();
   await waitForSandbox(deadline);
   return new Promise((resolve, reject) => {
     const done = (): void => {
@@ -92,7 +92,7 @@ async function prepare(text: string): Promise<PreparedInstall | InstallRefusal> 
       reject(new Error('the install check did not answer'));
     }, Math.max(0, deadline - Date.now()));
     window.addEventListener('message', onAnswer);
-    const request: PrepareRequest = { type: 'prepare', token, text, mode };
+    const request: PrepareRequest = { type: 'prepare', token, text, mode, vault };
     sandbox.contentWindow?.postMessage(request, '*');
   });
 }

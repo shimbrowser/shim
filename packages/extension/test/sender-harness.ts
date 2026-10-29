@@ -2,7 +2,7 @@
 // pages change what is installed, the page runtime on a site only asks and
 // stores for that site, and anything else is answered nothing.
 
-import { senderContext, allowedFrom, PAGE_MESSAGES, CONTENT_MESSAGES } from '../src/sender';
+import { senderContext, allowedFrom, PAGE_MESSAGES, CONTENT_MESSAGES, VAULT_MESSAGES } from '../src/sender';
 
 let failures = 0;
 let passes = 0;
@@ -36,7 +36,7 @@ check('a non-http url with a tab is unknown', ctx({ id: ID, url: 'file:///tmp/x.
 check('an unparseable url is unknown', ctx({ id: ID, url: 'not a url', tab: {} }).kind === 'unknown');
 
 console.log('what each may send:');
-const page = { kind: 'page' } as const;
+const page = { kind: 'page', path: 'popup.html' } as const;
 const content = { kind: 'content', hostname: 'example.com', port: '', origin: 'https://example.com', pathname: '/' } as const;
 const unknown = { kind: 'unknown' } as const;
 for (const t of PAGE_MESSAGES) check(`a page may ${t}`, allowedFrom(t, page));
@@ -50,6 +50,24 @@ check('an unknown type is allowed to nobody', !allowedFrom('reset', page) && !al
 check('content may read settings and fetch', allowedFrom('settings', content) && allowedFrom('fetch', content));
 check('content may never write or list a shim\'s settings', !allowedFrom('settings.set', content) && !allowedFrom('settings.clear', content) && !allowedFrom('settings.fields', content));
 check('the settings page may set, clear and list, never fetch as a handler', allowedFrom('settings.set', page) && allowedFrom('settings.clear', page) && allowedFrom('settings.fields', page) && !allowedFrom('fetch', page) && !allowedFrom('settings', page));
+
+console.log('the vault (settings page and popup only):');
+{
+  const c = ctx({ id: ID, url: `${BASE}settings.html?id=x#y` });
+  check('a page names its file', c.kind === 'page' && c.path === 'settings.html', JSON.stringify(c));
+  const d = ctx({ id: ID, url: 'https://example.com/', tab: { id: 1 }, documentId: 'DOC1' });
+  check('content carries the document Chrome names', d.kind === 'content' && d.documentId === 'DOC1', JSON.stringify(d));
+  const settingsPage = { kind: 'page', path: 'settings.html' } as const;
+  for (const t of VAULT_MESSAGES) {
+    check(`the popup may ${t}`, allowedFrom(t, page));
+    check(`the settings page may ${t}`, allowedFrom(t, settingsPage));
+    for (const other of ['install.html', 'attach.html', 'prepare.html', '', 'popup.html/../install.html', 'settings.html.evil']) {
+      check(`${other || 'a pathless page'} may not ${t}`, !allowedFrom(t, { kind: 'page', path: other }));
+    }
+    check(`content may not ${t}`, !allowedFrom(t, content));
+    check(`unknown may not ${t}`, !allowedFrom(t, unknown));
+  }
+}
 
 console.log('');
 if (failures) { console.error(`${failures} check(s) failed`); process.exit(1); }

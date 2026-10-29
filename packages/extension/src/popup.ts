@@ -3,6 +3,7 @@
 // rendered as text, never as markup.
 
 import type { ToWorker, WorkerAnswer, ShimSummary, VersionSummary } from './messages';
+import { vaultView, renderVaultCompact } from './vault-ui';
 
 const ask = (msg: ToWorker): Promise<WorkerAnswer> => chrome.runtime.sendMessage(msg);
 
@@ -218,5 +219,16 @@ async function renderBridge(): Promise<void> {
   box.append(el('div', b.enabled && !b.connected ? 'error' : 'muted', state));
 }
 
+// The vault: unlock (it lists what unlocking enables) and lock, here or on
+// the settings page, never on a website. Shown only once the vault is on.
+async function renderVault(): Promise<void> {
+  const box = must<HTMLElement>('vault');
+  const view = await vaultView();
+  if (!view?.enabled) { box.hidden = true; return; }
+  box.hidden = false;
+  renderVaultCompact(box, view, () => { void renderVault(); });
+}
+
 void render();
+void renderVault();
 void renderBridge();

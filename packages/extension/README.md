@@ -94,6 +94,7 @@ time.
 | `webNavigation` | Notices page loads, to re-check whether user scripts are allowed and to wait for a tab Claude opened to finish loading. |
 | `debugger` | Only during a Claude Code session, only on that session's tab: previews, screenshots and the page tools. Chrome shows its bar while it's attached. |
 | `nativeMessaging` | Talks to Claude Code through the bridge you register, only while **let Claude Code author here** is on. |
+| `alarms` | Locks the secrets vault on time (after the idle window you choose, and 12 hours at most). |
 
 It never asks for `tabs`, cookies, history or downloads. A shim's `api.fetch` sends no
 cookies, can't reach your local network, and reads directly only the shim's own sites;

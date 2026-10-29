@@ -14,6 +14,14 @@ import type { PageHostCapabilities } from '@shimbrowser/core/page-host';
 
 export type ExtensionMode = 'full' | 'declarative';
 
+/**
+ * Whether this build turns the vault on: secret
+ * settings with a declared `use`, sealed in the vault and placed by the
+ * worker. Off until it ships; the harnesses turn it on in one worker through its
+ * test flag (sw.ts), never in a shipped build.
+ */
+export const VAULT_ENABLED = false;
+
 /** Mutation kinds whose rules carry handler source: they run in full mode only. */
 export const HANDLER_KINDS: readonly string[] = Object.freeze(['script', 'replace-root', 'mount-route']);
 
@@ -46,7 +54,7 @@ export const EXTENSION_DECLARATIVE_CAPABILITIES: PageHostCapabilities = Object.f
  * browser keeps in main, so it stays out. A handler gets the core members,
  * `api.storage`, and the host extras listed here: `api.settings` (values
  * from the settings page) and `api.fetch` (the worker's cookie-less broker).
- * Secret settings are refused: the extension has no encrypted store.
+ * Secret settings are refused here; EXTENSION_VAULT_CAPABILITIES takes them once the vault is on.
  */
 export const EXTENSION_CAPABILITIES: PageHostCapabilities = Object.freeze({
   mutationKinds: Object.freeze([...DECLARATIVE_KINDS, 'script', 'replace-root']),
@@ -58,6 +66,14 @@ export const EXTENSION_CAPABILITIES: PageHostCapabilities = Object.freeze({
   engineInspection: false,
   trustedInput: false,
 });
+
+/**
+ * Full mode with the vault on: a secret field that declares `use` installs;
+ * its value is sealed in the vault and placed on a request by the worker,
+ * and a handler reads only whether it is set. A vault shim needs its own
+ * user-script world, so declarative mode never takes one.
+ */
+export const EXTENSION_VAULT_CAPABILITIES: PageHostCapabilities = Object.freeze({ ...EXTENSION_CAPABILITIES, secretSettings: 'declared' });
 
 /**
  * What a session's PageHost (page-host.ts) can run: the engine in a world
@@ -84,8 +100,9 @@ export const SESSION_CAPABILITIES: PageHostCapabilities = Object.freeze({
 /** What a never-throw api member this host lacks resolves with (D15). */
 export const UNSUPPORTED_ERROR = 'not-available-in-shim-for-chrome';
 
-export function capabilitiesFor(mode: ExtensionMode): PageHostCapabilities {
-  return mode === 'full' ? EXTENSION_CAPABILITIES : EXTENSION_DECLARATIVE_CAPABILITIES;
+export function capabilitiesFor(mode: ExtensionMode, vault: boolean = VAULT_ENABLED): PageHostCapabilities {
+  if (mode !== 'full') return EXTENSION_DECLARATIVE_CAPABILITIES;
+  return vault ? EXTENSION_VAULT_CAPABILITIES : EXTENSION_CAPABILITIES;
 }
 
 /**

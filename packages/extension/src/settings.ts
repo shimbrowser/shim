@@ -6,10 +6,12 @@
 //
 // A handler reads declared keys only, each resolving to its stored value,
 // else its declared default, else undefined, as in every Shim host. A value
-// is checked against its field's type before it is stored. Secret fields
-// never reach here: the extension has no encrypted store, so the install and
-// session preflight refuse them (`secretSettings: 'none'`), and this module
-// refuses to store one as a second line.
+// is checked against its field's type before it is stored. A secret field's
+// value never reaches here: it is sealed in the vault (vault-keeper.ts) and
+// placed on a request by the worker (credential-fetch.ts). A handler reads a
+// secret's presence only: `true` when a value is stored for its declared
+// placement, else undefined, as on every Shim host. This module refuses to
+// store a secret as a plain setting.
 
 import { normalizeSchema, settingsSchemaProblems, type SettingFieldSchema, type SettingsDeclarer } from '@shimbrowser/core/settings-schema';
 import { sha256Hex } from '@shimbrowser/core/sha256';
@@ -20,6 +22,13 @@ export interface SettingsPageField extends SettingFieldSchema {
   /** The stored value, else the declared default, else null. */
   value: unknown;
 }
+
+/**
+ * The secret fields with a value stored for their declared placement, each
+ * with an opaque revision (when it was last set): presence, never a value.
+ */
+export type SecretPresence = ReadonlyMap<string, number>;
+const NO_SECRETS: SecretPresence = new Map();
 
 export type SettingValueCheck = { ok: true; value: unknown } | { ok: false; error: string };
 
@@ -38,10 +47,10 @@ function setOwn(target: Record<string, unknown>, key: string, value: unknown): v
 }
 
 /** What `api.settings.getAll()` answers: every declared key, resolved. Stored rows a since-removed field left are ignored. */
-export function valuesForHandler(declarer: SettingsDeclarer | null | undefined, stored: Record<string, unknown>): Record<string, unknown> {
+export function valuesForHandler(declarer: SettingsDeclarer | null | undefined, stored: Record<string, unknown>, secrets: SecretPresence = NO_SECRETS): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const f of settingsFields(declarer)) {
-    if (f.type === 'secret') { setOwn(out, f.key, undefined); continue; }
+    if (f.type === 'secret') { setOwn(out, f.key, secrets.has(f.key) ? true : undefined); continue; }
     setOwn(out, f.key, own(stored, f.key) ? stored[f.key] : f.default);
   }
   return out;
@@ -58,8 +67,8 @@ export interface SettingsTransport {
   values: Record<string, unknown>;
 }
 
-export function settingsTransport(declarer: SettingsDeclarer | null | undefined, stored: Record<string, unknown>): SettingsTransport {
-  const values = valuesForHandler(declarer, stored);
+export function settingsTransport(declarer: SettingsDeclarer | null | undefined, stored: Record<string, unknown>, secrets: SecretPresence = NO_SECRETS): SettingsTransport {
+  const values = valuesForHandler(declarer, stored, secrets);
   return { keys: Object.keys(values), values };
 }
 
@@ -77,16 +86,16 @@ export function fromSettingsTransport(transport: unknown): Record<string, unknow
 }
 
 /** What `api.settings.get(key)` answers: the declared key resolved, undefined for an undeclared one. */
-export function valueForHandler(declarer: SettingsDeclarer | null | undefined, stored: Record<string, unknown>, key: unknown): unknown {
+export function valueForHandler(declarer: SettingsDeclarer | null | undefined, stored: Record<string, unknown>, key: unknown, secrets: SecretPresence = NO_SECRETS): unknown {
   if (typeof key !== 'string') return undefined;
-  const all = valuesForHandler(declarer, stored);
+  const all = valuesForHandler(declarer, stored, secrets);
   return own(all, key) ? all[key] : undefined;
 }
 
 /** The settings page's fields, in declaration order. */
-export function settingsPageFields(declarer: SettingsDeclarer | null | undefined, stored: Record<string, unknown>): SettingsPageField[] {
+export function settingsPageFields(declarer: SettingsDeclarer | null | undefined, stored: Record<string, unknown>, secrets: SecretPresence = NO_SECRETS): SettingsPageField[] {
   return settingsFields(declarer).map((f) => {
-    const isSet = f.type !== 'secret' && own(stored, f.key);
+    const isSet = f.type === 'secret' ? secrets.has(f.key) : own(stored, f.key);
     const value = isSet ? stored[f.key] : (f.default ?? null);
     return { ...f, isSet, value: f.type === 'secret' ? null : value };
   });
@@ -97,16 +106,17 @@ export function settingsPageFields(declarer: SettingsDeclarer | null | undefined
  * compares to know a setting changed (reconcile.ts). Undefined when the shim
  * declares no settings. A digest, so the bundle carries no value.
  */
-export function settingsKey(declarer: SettingsDeclarer | null | undefined, stored: Record<string, unknown>): string | undefined {
+export function settingsKey(declarer: SettingsDeclarer | null | undefined, stored: Record<string, unknown>, secrets: SecretPresence = NO_SECRETS): string | undefined {
   const fields = settingsFields(declarer);
   if (!fields.length) return undefined;
-  const values = valuesForHandler(declarer, stored);
-  return sha256Hex(JSON.stringify(fields.map((f) => [f.key, values[f.key] === undefined ? null : values[f.key]]))).slice(0, 16);
+  const values = valuesForHandler(declarer, stored, secrets);
+  // A secret contributes its revision, never its value.
+  return sha256Hex(JSON.stringify(fields.map((f) => [f.key, f.type === 'secret' ? (secrets.get(f.key) ?? null) : values[f.key] === undefined ? null : values[f.key]]))).slice(0, 16);
 }
 
 /** A required field with no default and no stored value: the shim needs setup before it can do what it says. */
-export function needsSetup(declarer: SettingsDeclarer | null | undefined, stored: Record<string, unknown>): boolean {
-  return settingsFields(declarer).some((f) => f.required && f.default === undefined && !own(stored, f.key));
+export function needsSetup(declarer: SettingsDeclarer | null | undefined, stored: Record<string, unknown>, secrets: SecretPresence = NO_SECRETS): boolean {
+  return settingsFields(declarer).some((f) => f.required && f.default === undefined && !(f.type === 'secret' ? secrets.has(f.key) : own(stored, f.key)));
 }
 
 /**
@@ -121,7 +131,7 @@ export function checkSettingValue(declarer: SettingsDeclarer | null | undefined,
   if (!field) return { ok: false, error: `"${key}" is not a declared setting of this shim` };
   switch (field.type) {
     case 'secret':
-      return { ok: false, error: `"${key}" is a secret setting, which Shim for Chrome cannot store encrypted` };
+      return { ok: false, error: `"${key}" is a secret setting: it is entered into the vault, never stored as a plain setting` };
     case 'text':
       return typeof value === 'string' ? { ok: true, value } : { ok: false, error: `"${key}" takes text` };
     case 'number':
