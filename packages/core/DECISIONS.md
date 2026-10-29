@@ -22,3 +22,4 @@ there.
 | D14 | One ordered queue per session, numbered revisions, an idempotent commit, and ending a session takes effect immediately. |
 | D15 | Headless supports a stated subset of shim features and refuses the rest up front; each rule's result is `full` or `partial` verification. |
 | D16 | A session is trusted while it authors (and never spends the user's AI key); anything sensitive a commit would grant is approved once, on a card, at commit. |
+| D17 | A secret setting a handler uses at a service declares `use`: one exact HTTPS origin, one header or one query parameter, and a format. The host places the value there itself, so the handler never sees it; a user approves each placement, and any authored change to the code suspends the approval. |

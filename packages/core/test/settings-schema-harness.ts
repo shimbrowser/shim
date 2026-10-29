@@ -9,11 +9,15 @@
 //   - normalizeSchema fills label (the key when blank), type (text), required,
 //     help, and stringifies a select's options;
 //   - secretSettingKeys names the secret fields, defensively on a raw
-//     declaration.
+//     declaration;
+//   - a secret field's `use` (D17) validates strictly: exactly one of header
+//     and query, a canonical https origin, a safe header or query name, one
+//     `{}` in a bounded, well-formed format, no unknown keys, no default;
+//     secretSettingPlacements splits placed from plain secrets.
 //
 //   node out/packages/core/test/settings-schema-harness.js
 
-import { settingsSchemaProblems, validateSchema, normalizeSchema, secretSettingKeys, effectiveFieldType } from '../src/settings-schema';
+import { settingsSchemaProblems, validateSchema, normalizeSchema, secretSettingKeys, effectiveFieldType, credentialUseProblems, secretSettingPlacements, credentialHeaderAllowed, hasLoneSurrogate } from '../src/settings-schema';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string): void {
@@ -73,6 +77,65 @@ console.log('secretSettingKeys');
   check('names the secret fields in order', JSON.stringify(secretSettingKeys({ settings: [{ key: 'a' }, { key: 'tok', type: 'secret' }, { key: 'p', type: 'secret' }] })) === '["tok","p"]');
   check('a raw, unvalidated declaration is read defensively', JSON.stringify(secretSettingKeys({ settings: [null, 3, { type: 'secret' }] })) === '["?"]');
   check('none when there is no list', secretSettingKeys({ settings: 'x' }).length === 0 && secretSettingKeys(undefined).length === 0);
+}
+
+console.log('use (D17)');
+{
+  const H = { origin: 'https://api.example.com', header: 'Authorization', format: 'Bearer {}' };
+  const Q = { origin: 'https://maps.example.com', query: 'key', format: '{}' };
+  check('a header use is valid', credentialUseProblems(H).length === 0, credentialUseProblems(H).join(' | '));
+  check('a query use is valid', credentialUseProblems(Q).length === 0);
+  check('a non-default port is part of the origin', credentialUseProblems({ ...Q, origin: 'https://maps.example.com:8443' }).length === 0);
+  const bad: Array<[string, unknown]> = [
+    ['not an object', 'https://x.test'],
+    ['both header and query', { ...H, query: 'key' }],
+    ['neither header nor query', { origin: H.origin, format: '{}' }],
+    ['an unknown property', { ...H, method: 'POST' }],
+    ['http', { ...H, origin: 'http://api.example.com' }],
+    ['a trailing slash', { ...H, origin: 'https://api.example.com/' }],
+    ['a path', { ...H, origin: 'https://api.example.com/v1' }],
+    ['userinfo', { ...H, origin: 'https://u:p@api.example.com' }],
+    ['upper-case host (not canonical)', { ...H, origin: 'https://API.example.com' }],
+    ['an explicit default port (not canonical)', { ...H, origin: 'https://api.example.com:443' }],
+    ['a unicode host (not punycode)', { ...H, origin: 'https://bücher.example' }],
+    ['a wildcard', { ...H, origin: 'https://*.example.com' }],
+    ['a private address', { ...H, origin: 'https://127.0.0.1' }],
+    ['localhost', { ...H, origin: 'https://localhost' }],
+    ['a forbidden header', { ...H, header: 'Cookie' }],
+    ['a hop-by-hop header', { ...H, header: 'Connection' }],
+    ['a sec- header', { ...H, header: 'Sec-Fetch-Site' }],
+    ['a proxy- header', { ...H, header: 'Proxy-Authorization' }],
+    ['a body header', { ...H, header: 'Content-Type' }],
+    ['a header name with a space', { ...H, header: 'X Api Key' }],
+    ['a query name with "="', { ...Q, query: 'k=y' }],
+    ['a query name with "&"', { ...Q, query: 'a&b' }],
+    ['an empty query name', { ...Q, query: '' }],
+    ['no slot', { ...H, format: 'Bearer' }],
+    ['two slots', { ...H, format: '{}{}' }],
+    ['a long format', { ...Q, format: '{}' + 'x'.repeat(300) }],
+    ['a lone surrogate', { ...Q, format: '{}\uD800' }],
+    ['CR/LF in a header format', { ...H, format: 'Bearer {}\r\nX-Evil: 1' }],
+    ['a non-latin1 header format', { ...H, format: 'Bearer {} ✓' }],
+  ];
+  for (const [label, use] of bad) check(`refused: ${label}`, credentialUseProblems(use).length > 0);
+  check('header names compare case-insensitively', credentialHeaderAllowed('x-api-key') && credentialHeaderAllowed('X-API-KEY') && !credentialHeaderAllowed('COOKIE'));
+  check('lone surrogates are detected, pairs are not', hasLoneSurrogate('a\uDC00') && !hasLoneSurrogate('a\uD83D\uDE00'));
+
+  const ok = settingsSchemaProblems({ settings: [{ key: 'k', type: 'secret', use: H }] });
+  check('a secret field with a valid use is a valid declaration', ok.length === 0, ok.join(' | '));
+  const probs = settingsSchemaProblems({ settings: [
+    { key: 'a', type: 'text', use: H },
+    { key: 'b', type: 'secret', use: H, default: 'x' },
+    { key: 'c', type: 'secret', use: { ...H, origin: 'http://x.test' } },
+  ] });
+  check('use on a non-secret field, a default beside use, and a bad use are each named',
+    probs.some((p) => p.startsWith('settings[0]: only a "secret"')) && probs.some((p) => p.startsWith('settings[1]: a secret field with `use` may not have a `default`'))
+      && probs.some((p) => p.startsWith('settings[2]: `use.origin`')), probs.join(' | '));
+  check('a plain secret may still carry a default (unchanged)', settingsSchemaProblems({ settings: [{ key: 'p', type: 'secret', default: 'x' }] }).length === 0);
+  const [n1, n2] = normalizeSchema({ settings: [{ key: 'k', type: 'secret', use: H }, { key: 'p', type: 'secret' }] });
+  check('normalizeSchema carries a valid use, and none for a plain secret', JSON.stringify(n1?.use) === JSON.stringify(H) && n2?.use === undefined);
+  const sp = secretSettingPlacements({ settings: [{ key: 'k', type: 'secret', use: H }, { key: 'p', type: 'secret' }, { key: 'x', type: 'secret', use: { origin: 'nope' } }, { key: 't' }] });
+  check('secretSettingPlacements splits placed from plain, an invalid use reading as plain', JSON.stringify(sp) === '{"placed":["k"],"plain":["p","x"]}', JSON.stringify(sp));
 }
 
 if (failures) { console.error(`\n${failures} settings-schema check(s) failed`); process.exit(1); }

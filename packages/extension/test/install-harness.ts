@@ -57,7 +57,7 @@ check('full mode runs script and replace-root, not mount-route', EXTENSION_CAPAB
 check('declarative mode runs no handler kind', !HANDLER_KINDS.some((k) => EXTENSION_DECLARATIVE_CAPABILITIES.mutationKinds.includes(k)));
 check('full mode serves api.settings and api.fetch; declarative serves the settings declaration only',
   JSON.stringify(EXTENSION_CAPABILITIES.apiMembers) === '["settings","fetch"]' && JSON.stringify(EXTENSION_DECLARATIVE_CAPABILITIES.apiMembers) === '["settings"]');
-check('neither mode keeps a secret setting (no encrypted store)', !EXTENSION_CAPABILITIES.secretSettings && !EXTENSION_DECLARATIVE_CAPABILITIES.secretSettings);
+check('neither mode keeps a secret setting (no encrypted store)', EXTENSION_CAPABILITIES.secretSettings === 'none' && EXTENSION_DECLARATIVE_CAPABILITIES.secretSettings === 'none');
 check('neither serves api.ai, api.db or the shared code-space', [EXTENSION_CAPABILITIES, EXTENSION_DECLARATIVE_CAPABILITIES].every((c) => !c.apiMembers.some((m) => m === 'ai' || m === 'db' || m === 'shared')));
 
 check('the refusal names the toggle and says to install again', USER_SCRIPTS_REASON.includes(HOW_TO_ENABLE) && USER_SCRIPTS_REASON.includes('install the shim again') && HOW_TO_ENABLE.includes('Allow user scripts'));

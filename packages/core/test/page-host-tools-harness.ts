@@ -44,7 +44,7 @@ function scriptedHost(
     shots,
     capabilities: {
       mutationKinds: ['hide'], iframeRules: false, specCss: false, apiMembers: [], componentIdentity: false, engineInspection: false, trustedInput: false,
-      secretSettings: false,
+      secretSettings: 'none',
     },
     url: () => 'https://example.com/a',
     isClosed: () => false,

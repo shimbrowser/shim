@@ -23,7 +23,7 @@ import type { ManagedFingerprint } from './managed-anchor';
 import { WITNESS_VERSION } from './witness';
 import { SET_WITNESS_VERSION } from './set-witness';
 import type { PageHostCapabilities, PageHostApiMember } from './page-host';
-import { secretSettingKeys } from './settings-schema';
+import { secretSettingPlacements } from './settings-schema';
 import { PAGE_HOST_API_MEMBERS } from './page-host';
 import { referencedHandlerNames } from './shim-folder';
 import { moduleToExpression } from './handler-source';
@@ -100,15 +100,22 @@ export function preflightSpec(spec: Spec, capabilities: PageHostCapabilities): P
     });
   }
   // A secret field is a credential: a host that serves settings but cannot
-  // encrypt them at rest refuses it, never stores it in the clear. Named
-  // field by field, so the author knows which to drop (or author in Shim).
-  if (members.has('settings') && !capabilities.secretSettings) {
-    const secrets = secretSettingKeys(spec);
-    if (secrets.length) {
+  // keep a field the way it is declared refuses it, never stores it in the
+  // clear. Named field by field, so the author knows what to change.
+  if (members.has('settings') && capabilities.secretSettings !== 'plaintext') {
+    const { placed, plain } = secretSettingPlacements(spec);
+    const names = (keys: string[]) => keys.map((k) => JSON.stringify(k)).join(', ');
+    if (capabilities.secretSettings === 'none' && placed.length + plain.length) {
       unsupported.push({
         feature: 'settings',
-        message: `the shim declares secret settings (${secrets.map((k) => JSON.stringify(k)).join(', ')}), which this host cannot store encrypted — `
+        message: `the shim declares secret settings (${names([...placed, ...plain])}), which this host cannot store encrypted — `
           + 'drop the secret fields or author this shim in the Shim browser',
+      });
+    } else if (capabilities.secretSettings === 'declared' && plain.length) {
+      unsupported.push({
+        feature: 'settings',
+        message: `the shim declares secret settings without \`use\` (${names(plain)}); this host sends a secret only where its field declares — `
+          + 'add `use: { origin, header | query, format }` to each and pass `secrets: [key]` to api.fetch, or author this shim in the Shim browser',
       });
     }
   }

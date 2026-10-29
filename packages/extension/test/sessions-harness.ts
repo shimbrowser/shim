@@ -234,7 +234,7 @@ async function main(): Promise<void> {
     const appliedIds: string[] = [];
     const host: ExtensionPageHost = {
       ...base,
-      capabilities: { ...CAPS, apiMembers: ['settings', 'fetch'], secretSettings: false } as unknown as ExtensionPageHost['capabilities'],
+      capabilities: { ...CAPS, apiMembers: ['settings', 'fetch'], secretSettings: 'none' } as unknown as ExtensionPageHost['capabilities'],
       applyPreview: (p) => { appliedIds.push(p.rule.id); base.applyPreview(p); },
     };
     const spec: Spec = {
