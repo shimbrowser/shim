@@ -29,13 +29,16 @@ function canonical(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
 
-// A rule without its anchor's witness fields and without its inline
-// handler sources (those are hashed as the rule's effective handlers below).
+// A rule without its anchor's witness fields — the only part of a rule the
+// engine manages itself. Everything else, inline `handlers` included, is
+// hashed as written: the digest never drops what it doesn't model (fail
+// closed). A host that stores the same code in two forms (the browser's
+// bare imported rules vs their hydrated view) brings a spec to one form
+// before hashing it.
 function stripRule(rule: unknown): unknown {
   if (!isRecord(rule)) return rule;
   const copy: Record<string, unknown> = JSON.parse(JSON.stringify(rule)) as Record<string, unknown>;
   if (isRecord(copy.anchor)) deleteManagedKeys(copy.anchor);
-  delete copy.handlers;
   return copy;
 }
 
@@ -43,36 +46,19 @@ function stripRules(rules: unknown): unknown {
   return Array.isArray(rules) ? rules.map(stripRule) : rules;
 }
 
-// What each rule actually runs: the stored handlers with the rule's own
-// inline ones on top (a rule's inline handler wins on a name collision, as
-// the engine resolves it). Hashing this rather than the raw spec keeps the
-// digest stable when a store copies stored handler modules onto rules (an
-// imported shim read through its hydrated view, then written back).
-function effectiveHandlers(rules: unknown, handlers: Record<string, string>): unknown {
-  if (!Array.isArray(rules)) return [];
-  return rules.map((r) => (isRecord(r) && isRecord(r.handlers) ? { ...handlers, ...r.handlers } : { ...handlers }));
-}
-
 /**
- * The digest a credential grant is bound to. `handlers` are the shim's
- * stored handler sources by name; a rule's inline `rule.handlers` override
- * them for that rule.
+ * The digest a credential grant is bound to: the spec as written (minus the
+ * top-level fields that never change what runs and the anchors' witness
+ * fields) and the host's stored handler sources by name.
  */
 export function executionManifestDigest(spec: Spec, handlers: Record<string, string> = {}): string {
   const body: Record<string, unknown> = {};
-  const record = spec as unknown as Record<string, unknown>;
-  for (const [k, v] of Object.entries(record)) {
+  for (const [k, v] of Object.entries(spec as unknown as Record<string, unknown>)) {
     if (UNMANAGED_TOP_LEVEL.has(k)) continue;
     body[k] = k === 'rules' ? stripRules(v) : v;
   }
-  let defaultRuns: unknown = null;
-  if (isRecord(body.default)) {
-    const d = body.default;
-    const dHandlers = isRecord(d.handlers) ? d.handlers as Record<string, string> : {};
-    defaultRuns = effectiveHandlers(d.rules, dHandlers);
-    body.default = { ...d, rules: stripRules(d.rules), handlers: undefined };
-  }
-  return sha256Hex(canonical({ spec: body, handlers, runs: effectiveHandlers(record.rules, handlers), defaultRuns }));
+  if (isRecord(body.default)) body.default = { ...body.default, rules: stripRules(body.default.rules) };
+  return sha256Hex(canonical({ spec: body, handlers }));
 }
 
 /**

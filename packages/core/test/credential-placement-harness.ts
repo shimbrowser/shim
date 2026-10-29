@@ -205,10 +205,19 @@ console.log('executionManifestDigest');
   check('a match change moves it', !same({ ...base, match: { hosts: ['a.test', 'b.test'] } }));
   check('a settings change moves it', !same({ ...base, settings: [{ key: 'k', type: 'secret', use: { ...HEADER, origin: 'https://evil.example' } }] }));
   check('a mutation change moves it', !same({ ...base, rules: [rule({ primary: { kind: 'css', value: '.x' } }, 'g')] }));
-  check('a hydrated copy (stored modules copied onto the rules) keeps the digest',
-    same({ ...base, rules: [{ ...rule({ primary: { kind: 'css', value: '.x' } }), handlers: { ...H } }] }));
-  check('an inline handler overriding the stored one moves it',
-    !same({ ...base, rules: [{ ...rule({ primary: { kind: 'css', value: '.x' } }), handlers: { h: 'function h(){ x() }' } }] }));
+  // Fail closed: what the digest doesn't model is hashed as written, never
+  // dropped (a host brings its two storage forms to one before hashing).
+  const r0 = () => rule({ primary: { kind: 'css', value: '.x' } });
+  check('inline rule handlers move it', !same({ ...base, rules: [{ ...r0(), handlers: { h: 'function h(){ x() }' } }] }));
+  check('…as an array too (never dropped as "not a record")', !same({ ...base, rules: [{ ...r0(), handlers: ['function h(){ x() }'] }] }));
+  check('…and with odd keys', !same({ ...base, rules: [{ ...r0(), handlers: { '__proto__x': 'a', '': 'b' } }] }));
+  check('an array and an object with the same entries differ',
+    executionManifestDigest(asSpec({ ...base, rules: [{ ...r0(), handlers: ['a'] }] }), H) !== executionManifestDigest(asSpec({ ...base, rules: [{ ...r0(), handlers: { 0: 'a' } }] }), H));
+  check('spec-level handlers move it', !same({ ...base, handlers: { h: 'function h(){ x() }' } }));
+  check('spec-level and rule-level handlers with the same source differ',
+    executionManifestDigest(asSpec({ ...base, handlers: { g: 's' } }), H) !== executionManifestDigest(asSpec({ ...base, rules: [{ ...r0(), handlers: { g: 's' } }] }), H));
+  check('a mutation naming a handler defined only at the spec level moves it',
+    !same({ ...base, handlers: { g: 'function g(){}' }, rules: [rule({ primary: { kind: 'css', value: '.x' } }, 'g')] }));
   const a1 = executionManifestDigestWithoutAnchors(base, H);
   const moved = asSpec({ ...base, rules: [rule({ primary: { kind: 'css', value: '.y' } })] });
   check('without anchors, an anchor-only change keeps the digest', executionManifestDigestWithoutAnchors(moved, H) === a1);
