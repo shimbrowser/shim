@@ -1,6 +1,6 @@
 // The secrets vault end to end in the built extension, in a real Chromium
-// with user scripts allowed and the vault turned on through the worker's
-// test flag (it ships off): a shim declaring two placed secrets
+// with user scripts allowed (the vault is on; the worker's test flag turns
+// it off for the first check): a shim declaring two placed secrets
 // installs; the settings page sets up the vault, approves a grant and
 // seals a value; the shim's handler reads presence only and its api.fetch
 // reaches an HTTPS service with the value placed exactly as declared, the
@@ -118,7 +118,8 @@ async function main(): Promise<void> {
     } finally { await p.close(); }
   };
 
-  console.log('off by default:');
+  console.log('turned off (as a build that must stop vault operations ships):');
+  await hosts('setVaultForTests', false);
   {
     const { install } = installer(ctx, extId);
     const { page, heading } = await install(shimFile);

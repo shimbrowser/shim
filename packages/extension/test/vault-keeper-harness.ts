@@ -157,7 +157,10 @@ async function main(): Promise<void> {
     check('none at first', (await k.status()).state === 'none');
     check('unlocking with no vault refuses', !(await k.unlock(PASS)).ok);
     check('a weak passphrase is refused at setup', !(await k.setup('password1234')).ok && (await k.status()).state === 'none');
+    // An approval given before the first vault (the install review, or the settings page).
+    await w.db.grants.put({ shimId: 's1', key: 'apiKey', binding: PLACE, digest: 'd', grantedAt: 1 });
     check('setup', (await k.setup(PASS)).ok);
+    check('setup keeps an approval given before it (approvals are not values)', (await w.db.grants.get('s1', 'apiKey')) !== undefined);
     const st = await k.status();
     check('setup leaves it unlocked, expiring 12 h on', st.state === 'unlocked' && st.expiresAt === w.clock.now + UNLOCK_MAX_MS, st);
     check('a second setup is refused', errOf(await k.setup(PASS2)) === VAULT_ERRORS.exists);
@@ -233,7 +236,7 @@ async function main(): Promise<void> {
   {
     type Op = 'setup' | 'unlock' | 'changePassphrase' | 'reset' | 'rotateDataKey';
     const cases: Array<[Op, string[]]> = [
-      ['setup', ['loadRecord', 'resetAll', 'session.set']],
+      ['setup', ['loadRecord', 'replaceAll', 'session.set']],
       ['unlock', ['loadRecord', 'session.set']],
       ['changePassphrase', ['loadRecord', 'saveRecord', 'session.set']],
       ['reset', ['session.remove', 'resetAll', 'session.set']],

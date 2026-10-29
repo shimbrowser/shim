@@ -15,7 +15,7 @@
 // that does not parse refused at install (the sandboxed check), and the
 // toggle flipped off and on again with shims installed: the one that needs
 // full mode stops and says so, the declarative one keeps running, and both
-// return with the toggle. Then settings and fetch from a handler: a secret
+// return with the toggle. Then settings and fetch from a handler: a plain secret
 // setting refused at install, a handler reading its defaults, api.fetch
 // through the worker without the site's cookie and refusing a private
 // address, the popup's "needs setup" and settings page, a value set there
@@ -529,8 +529,8 @@ async function main(): Promise<void> {
     ], { settings: [{ key: 'token', type: 'secret' }] });
     const refused = await inst.install(secretive);
     const problems = await refused.page.$$eval('#review ul.problems li', (li) => li.map((x) => x.textContent ?? ''));
-    check('a shim with a secret setting is refused at install, naming the field', refused.heading.startsWith('cannot install')
-      && problems.some((p) => p.includes('"token"') && p.includes('cannot store encrypted')), { heading: refused.heading, problems });
+    check('a shim with a secret setting that declares no use is refused at install, naming the field and the fix', refused.heading.startsWith('cannot install')
+      && problems.some((p) => p.includes('"token"') && p.includes('without `use`')), { heading: refused.heading, problems });
     await refused.page.close();
 
     const configured = shimFile('configured', 'Configured fixture', [

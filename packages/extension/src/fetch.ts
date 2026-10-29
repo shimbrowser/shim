@@ -14,6 +14,12 @@
 // when that site allows cross-origin reads. That is stricter than the Shim
 // browser, which skips CORS everywhere.
 //
+// A site the extension holds only because the user approved sending a secret
+// there (credential-access.ts) is no shim's site: a plain fetch to it is not
+// refused as held, but it is read as CORS would allow (corsOnly), since
+// Chrome itself skips CORS there. A request CORS would preflight is refused,
+// because a worker cannot send a preflight of its own.
+//
 // Redirects are followed by fetch itself: an MV3 worker cannot read a
 // redirect's Location to vet each hop (`redirect: 'manual'` answers an opaque
 // response). So where the request landed is checked, and a body from a
@@ -39,7 +45,11 @@ import { hostMatches } from '@shimbrowser/core/host-match';
  * (`nas.local.` is nas.local), so no spelling slips past either check. `held`
  * answers whether the extension holds a match pattern; a throw refuses.
  */
-export function fetchReach(ownHosts: readonly unknown[] | undefined, held: (pattern: string) => Promise<boolean>): (url: URL) => Promise<string | null> {
+export function fetchReach(
+  ownHosts: readonly unknown[] | undefined,
+  held: (pattern: string) => Promise<boolean>,
+  grantOnly: (host: string) => Promise<boolean> = async () => false,
+): (url: URL) => Promise<string | null> {
   const own = (ownHosts ?? []).filter((h): h is string => typeof h === 'string');
   return async (url) => {
     const host = url.hostname.toLowerCase().replace(/\.+$/, '');
@@ -47,6 +57,9 @@ export function fetchReach(ownHosts: readonly unknown[] | undefined, held: (patt
     if (hostMatches(own, host, url.port || undefined)) return null;
     let isHeld = true;
     try {
+      // Access a credential grant owns is no shim's site: the fetch goes
+      // ahead, read only as CORS allows (corsOnlyReach).
+      if (url.protocol === 'https:' && await grantOnly(host)) return null;
       isHeld = await held(`${url.protocol}//${host}/*`);
     } catch { /* refuse below */ }
     return isHeld
@@ -54,6 +67,89 @@ export function fetchReach(ownHosts: readonly unknown[] | undefined, held: (patt
       : null;
   };
 }
+
+/**
+ * The worker's CORS rule for one shim (FetchBrokerDeps.corsOnly): a site the
+ * extension holds only for a credential grant (credential-access.ts), and
+ * not one of the shim's own, is read as CORS would allow, since Chrome skips
+ * CORS for every site the extension holds.
+ */
+export function corsOnlyReach(ownHosts: readonly unknown[] | undefined, grantOnly: (host: string) => Promise<boolean>): (url: URL) => Promise<boolean> {
+  const own = (ownHosts ?? []).filter((h): h is string => typeof h === 'string');
+  return async (url) => {
+    const host = url.hostname.toLowerCase().replace(/\.+$/, '');
+    if (url.protocol !== 'https:' || hostMatches(own, host, url.port || undefined)) return false;
+    try {
+      return await grantOnly(host);
+    } catch {
+      return true;
+    }
+  };
+}
+
+const SAFELISTED_CONTENT_TYPES = new Set(['application/x-www-form-urlencoded', 'multipart/form-data', 'text/plain']);
+const SAFELISTED_REQUEST_HEADERS = new Set(['accept', 'accept-language', 'content-language', 'content-type']);
+const SAFELISTED_RESPONSE_HEADERS = new Set(['cache-control', 'content-language', 'content-length', 'content-type', 'expires', 'last-modified', 'pragma']);
+
+/** A CORS-unsafe request-header byte (Fetch): a control byte other than tab, `"():<>?@[\]{}` or DEL. */
+function hasCorsUnsafeByte(bytes: Uint8Array): boolean {
+  for (const b of bytes) {
+    if ((b < 0x20 && b !== 0x09) || b === 0x7f) return true;
+    if ('"():<>?@[\\]{}'.includes(String.fromCharCode(b))) return true;
+  }
+  return false;
+}
+
+/**
+ * A request CORS sends without a preflight (Fetch's CORS-safelisted method
+ * and request-headers): GET, HEAD or POST; only accept, accept-language,
+ * content-language and content-type; each value at most 128 bytes; accept
+ * and content-type without a CORS-unsafe byte; the language headers only
+ * `0-9 A-Z a-z space * , - . ; =`; content-type's essence one of the three
+ * form types; and at most 1024 safelisted bytes in all. A worker cannot send
+ * a preflight of its own (the Access-Control-Request-* headers are forbidden
+ * to set), so a request that would need one is refused where CORS is
+ * emulated.
+ */
+export function corsSimpleRequest(method: string, headers: Record<string, string>): boolean {
+  if (method !== 'GET' && method !== 'HEAD' && method !== 'POST') return false;
+  const encoder = new TextEncoder();
+  let total = 0;
+  for (const [name, value] of Object.entries(headers)) {
+    const n = name.toLowerCase();
+    if (!SAFELISTED_REQUEST_HEADERS.has(n)) return false;
+    const bytes = encoder.encode(value);
+    if (bytes.length > 128) return false;
+    total += bytes.length;
+    if (n === 'accept' && hasCorsUnsafeByte(bytes)) return false;
+    if ((n === 'accept-language' || n === 'content-language') && !/^[0-9A-Za-z *,.;=-]*$/.test(value)) return false;
+    if (n === 'content-type') {
+      if (hasCorsUnsafeByte(bytes)) return false;
+      if (!SAFELISTED_CONTENT_TYPES.has((value.split(';')[0] ?? '').trim().toLowerCase())) return false;
+    }
+  }
+  return total <= 1024;
+}
+
+/** Does a response allow a cookie-less cross-origin read by `origin`? */
+export function corsAllowsRead(headers: Headers, origin: string): boolean {
+  const allow = headers.get('access-control-allow-origin')?.trim();
+  return allow === '*' || (origin !== '' && allow === origin);
+}
+
+/** The response headers a CORS read exposes: the safelisted ones and those the server lists. */
+export function corsExposedHeaders(headers: Headers): Set<string> {
+  const out = new Set(SAFELISTED_RESPONSE_HEADERS);
+  const listed = headers.get('access-control-expose-headers') ?? '';
+  for (const name of listed.split(',')) {
+    const n = name.trim().toLowerCase();
+    if (n && n !== '*') out.add(n);
+    if (n === '*') headers.forEach((_v, k) => { out.add(k.toLowerCase()); });
+  }
+  return out;
+}
+
+const CORS_REFUSED = 'the request failed (the site does not allow cross-origin reads). Shim for Chrome reads a site it has no access to only when that site allows cross-origin reads (CORS)';
 
 export interface FetchBrokerDeps {
   /** The fetch to make the request with (the worker's own by default). */
@@ -65,6 +161,14 @@ export interface FetchBrokerDeps {
    * site it holds access to for another shim (see the header).
    */
   mayRead?(url: URL): Promise<string | null>;
+  /**
+   * Whether `url` is read only as CORS would allow (corsOnlyReach): a
+   * request there must be simple, and its answer is read only when the
+   * response allows `corsOrigin` (or anyone), with only the exposed headers.
+   */
+  corsOnly?(url: URL): Promise<boolean>;
+  /** The origin requests come from (the extension's), for the CORS check. */
+  corsOrigin?: string;
 }
 
 function errName(err: unknown): string {
@@ -115,6 +219,10 @@ export async function brokerFetch(url: unknown, opts: unknown, deps: FetchBroker
   const { method, headers, body } = handlerFetchInit(opts);
   const refusedBefore = await deps.mayRead?.(checked.url) ?? null;
   if (refusedBefore) return { ok: false, error: refusedBefore };
+  const corsAtStart = await deps.corsOnly?.(checked.url) ?? false;
+  if (corsAtStart && !corsSimpleRequest(method, headers)) {
+    return { ok: false, error: `api.fetch sends ${checked.url.hostname} only simple requests (GET, HEAD or POST with standard headers): Shim for Chrome holds access to it for a secret you approved, and cannot run the cross-origin check (CORS) this request needs` };
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -140,6 +248,15 @@ export async function brokerFetch(url: unknown, opts: unknown, deps: FetchBroker
         return { ok: false, status: res.status, error: `redirected, then ${refusedAfter}` };
       }
     }
+    // Read as CORS would allow, where the extension's access is a grant's alone.
+    let exposed: Set<string> | null = null;
+    if (corsAtStart || (await deps.corsOnly?.(landed.url) ?? false)) {
+      if (!corsAllowsRead(res.headers, deps.corsOrigin ?? '')) {
+        controller.abort();
+        return { ok: false, error: CORS_REFUSED };
+      }
+      exposed = corsExposedHeaders(res.headers);
+    }
     // Refuse before reading the body when the server declares an absurd size.
     const declared = Number(res.headers.get('content-length'));
     if (Number.isFinite(declared) && declared > FETCH_HARD_CONTENT_LENGTH) {
@@ -149,6 +266,7 @@ export async function brokerFetch(url: unknown, opts: unknown, deps: FetchBroker
     const { text, truncated } = await readCapped(res, FETCH_MAX_BODY_BYTES);
     const outHeaders: Record<string, string> = {};
     res.headers.forEach((value, key) => {
+      if (exposed && !exposed.has(key.toLowerCase())) return;
       Object.defineProperty(outHeaders, key, { value, enumerable: true, writable: true, configurable: true });
     });
     return { ok: res.ok, status: res.status, statusText: res.statusText, url: res.url, headers: outHeaders, text, truncated };

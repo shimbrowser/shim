@@ -24,10 +24,10 @@ import { preflightSpec } from '@shimbrowser/core/capability-preflight';
 import type { PageHostCapabilities } from '@shimbrowser/core/page-host';
 import { openShimStore, type ShimStore, type InstalledShim } from './store';
 import {
-  registrationsFor, userScriptRegistrationsFor, shimIdFor, patternsFor, originsToRelease, RUNTIME_FILES,
+  registrationsFor, userScriptRegistrationsFor, shimIdFor, patternsFor, RUNTIME_FILES,
   USER_SCRIPT_WORLD_CSP,
 } from './registration';
-import { capabilitiesFor, detectMode, SESSION_CAPABILITIES, VAULT_ENABLED, type ExtensionMode } from './capabilities';
+import { capabilitiesFor, detectMode, sessionCapabilities, VAULT_ENABLED, type ExtensionMode } from './capabilities';
 import { arbitrate, type RuntimeWorld as ArbitratedWorld } from './arbitrate';
 import { baselineForPath, pagePathKey } from '@shimbrowser/core/deploy-id';
 import {
@@ -51,10 +51,11 @@ import { VaultKeeper, LOCK_AFTER_KEY, VAULT_SESSION_KEY, type SecretRow } from '
 import { openVaultStore, type VaultStore } from './vault-store';
 import { CredentialLeases, LEASE_KEY } from './credential-lease';
 import { runCredentialFetch, CredentialBudget, SECRETS_NOT_AVAILABLE_IN_SESSION, type CredentialFetchDeps } from './credential-fetch';
-import { placedFields, placedUse, grantViews, grantState, checkApproval, rebindDigest, manifestDigest } from './credential-grants';
+import { placedFields, placedUse, grantViews, grantState, checkApproval, rebindDigest, manifestDigest, type GrantRow } from './credential-grants';
+import { accessReplaced, accessToRelease, grantAccessPattern, grantAccessPatterns, grantOnlyHost, grantOrigin } from './credential-access';
 import { credentialUseBinding, describeCredentialUse, CREDENTIAL_MAX_VALUE_BYTES } from '@shimbrowser/core/credential-placement';
 import { hasLoneSurrogate } from '@shimbrowser/core/settings-schema';
-import { brokerFetch, fetchReach } from './fetch';
+import { brokerFetch, fetchReach, corsOnlyReach, type FetchBrokerDeps } from './fetch';
 import { createConsentGate, type ConsentAnswer, type PendingConsent } from './attach-consent';
 import { routeControlRequest, type ControlDeps, type TabInfo, type AttachRequest } from './control';
 import { createBridgePort, type PortLike } from './bridge-port';
@@ -144,13 +145,13 @@ let vaultOwnRun = false;
 /** Shims given a world of their own for the harnesses (pageHosts.setVaultTestWorlds), with no secret declared. */
 let vaultTestWorlds = new Set<string>();
 const VAULT_TEST_KEY = 'vault.testWorlds';
-/** The harnesses' switch for the vault in this worker (pageHosts.setVaultForTests); a shipped build turns it on with VAULT_ENABLED. */
-let vaultForTests = false;
+/** The harnesses' switch for the vault in this worker (pageHosts.setVaultForTests); unset (null), the build's VAULT_ENABLED decides. */
+let vaultForTests: boolean | null = null;
 const VAULT_ON_TEST_KEY = 'vault.testOn';
 
 /** Is the vault on: secret settings with `use` install, and the broker places them? */
 function vaultOn(): boolean {
-  return VAULT_ENABLED || vaultForTests;
+  return vaultForTests ?? VAULT_ENABLED;
 }
 
 /** The capabilities of `mode` with the vault as it is in this worker. */
@@ -181,7 +182,8 @@ async function loadVault(): Promise<void> {
   vaultOwnRun = false;
   const test = await db.prefs.get(VAULT_TEST_KEY);
   vaultTestWorlds = new Set(Array.isArray(test) ? test.filter((x): x is string => typeof x === 'string') : []);
-  vaultForTests = (await db.prefs.get(VAULT_ON_TEST_KEY)) === true;
+  const testOn = await db.prefs.get(VAULT_ON_TEST_KEY);
+  vaultForTests = typeof testOn === 'boolean' ? testOn : null;
 }
 const vaultReady: Promise<void> = loadVault().catch((err: unknown) => {
   console.error('[shim] could not read the vault state', err);
@@ -305,13 +307,64 @@ const credentialDeps: CredentialFetchDeps = {
     const shim = await (await store()).getShim(shimId);
     return shim && shim.enabled && isVaultShim(shim) && fitsMode(shim) ? shim : null;
   },
-  grant: async (shimId, key) => (await vaultStore()).grants.get(shimId, key),
+  // A grant whose site access the user withdrew is no grant (the onRemoved
+  // sweep drops it; this covers the moment before it runs).
+  grant: async (shimId, key) => {
+    const row = await (await vaultStore()).grants.get(shimId, key);
+    const pattern = row ? grantAccessPattern(row) : null;
+    return row && pattern !== null && (await accessHeld(pattern)) ? row : undefined;
+  },
   reveal: (shimId, key, placement) => vault.reveal(shimId, key, placement),
   vaultCurrent: (gen) => vault.isCurrent(gen),
   leaseReady: leases.ready,
   leaseAllows: (tabId, documentId) => leases.allows(tabId, documentId),
   epoch: () => credentialEpoch,
 };
+
+/** Does the extension hold `pattern` now? A throw answers no. */
+async function accessHeld(pattern: string): Promise<boolean> {
+  try {
+    return await chrome.permissions.contains({ origins: [pattern] });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Gives back the site access `patterns` stood for (a shim's sites, a
+ * grant's origin) that no remaining shim's sites and no remaining grant
+ * still need (credential-access.ts).
+ */
+async function releaseUnusedAccess(patterns: readonly string[]): Promise<void> {
+  if (!patterns.length) return;
+  const release = accessToRelease(patterns, await (await store()).listShims(), await (await vaultStore()).grants.list());
+  // One at a time, only what is held: one pattern the user already revoked
+  // must not keep the others.
+  for (const pattern of release) {
+    try {
+      if (await accessHeld(pattern)) await chrome.permissions.remove({ origins: [pattern] });
+    } catch {
+      // Already gone: nothing to release.
+    }
+  }
+}
+
+/**
+ * Drops every grant whose site access the extension no longer holds (the
+ * user withdrew it on chrome://extensions, or it never came back): a grant
+ * is usable only with its access, and approving again asks for it again.
+ * Run on every permission removal and at boot; fail closed.
+ */
+async function dropGrantsWithoutAccess(): Promise<void> {
+  const vdb = await vaultStore();
+  const changed = new Set<string>();
+  for (const row of await vdb.grants.list()) {
+    const pattern = grantAccessPattern(row);
+    if (pattern !== null && (await accessHeld(pattern))) continue;
+    if (await vdb.grants.delete(row.shimId, row.key)) changed.add(row.shimId);
+  }
+  if (changed.size) await afterGrantChange([...changed]);
+}
 
 /** A grant changed for these shims: their tokens rotate, so a document booted on the old one reloads. */
 async function afterGrantChange(shimIds: readonly string[] | 'all'): Promise<void> {
@@ -350,6 +403,33 @@ function secretValueProblem(value: string, use: { header?: string; format: strin
   return null;
 }
 
+/**
+ * The grants a fresh install approves in the install click (the review
+ * listed each one, and the page asked Chrome for its site access with the
+ * shim's own): written for the stored shim, each only with its access held
+ * and only for a placed secret of that shim. Answers the keys left
+ * unapproved; the settings page approves them later.
+ */
+async function approveAtInstall(shim: InstalledShim, keys: unknown): Promise<string[]> {
+  if (!Array.isArray(keys) || !keys.length) return [];
+  const fields = placedFields(shim.spec);
+  const digest = manifestDigest(shim.spec, shim.handlers);
+  const vdb = await vaultStore();
+  const unapproved: string[] = [];
+  const approved: string[] = [];
+  for (const key of new Set(keys.filter((k): k is string => typeof k === 'string'))) {
+    const field = fields.find((f) => f.key === key);
+    if (!field) continue;
+    const row: GrantRow = { shimId: shim.id, key, binding: credentialUseBinding(field.use), digest, grantedAt: Date.now() };
+    const pattern = grantAccessPattern(row);
+    if (!vaultOn() || pattern === null || !(await accessHeld(pattern))) { unapproved.push(key); continue; }
+    await vdb.grants.put(row);
+    approved.push(key);
+  }
+  if (approved.length) requestVaultRotation([shim.id]);
+  return unapproved;
+}
+
 /** The vault's messages, from the settings page and the popup only (allowedFrom checked it); each shape is checked here. */
 async function handleVault(msg: ToWorker & { type: string }): Promise<WorkerAnswer> {
   const problem = vaultMessageProblem(msg as unknown as Record<string, unknown>);
@@ -367,9 +447,14 @@ async function handleVault(msg: ToWorker & { type: string }): Promise<WorkerAnsw
     case 'vault.unlock': return vault.unlock(msg.passphrase);
     case 'vault.lock': await vault.lock(); return { ok: true };
     case 'vault.reset': {
+      const before = await (await vaultStore()).grants.list();
       const done = await vault.reset(msg.passphrase);
-      // Every grant went with the old vault: every vault shim's token rotates.
-      if (done.ok) await afterGrantChange('all');
+      // Every grant went with the old vault: every vault shim's token rotates,
+      // and the site access the grants owned goes back.
+      if (done.ok) {
+        await afterGrantChange('all');
+        await releaseUnusedAccess([...grantAccessPatterns(before)]);
+      }
       return done;
     }
     case 'vault.changePassphrase': return vault.changePassphrase(msg.current, msg.next);
@@ -409,14 +494,32 @@ async function handleVault(msg: ToWorker & { type: string }): Promise<WorkerAnsw
       if (!shim) return { ok: false, error: 'no such shim' };
       const checked = checkApproval(shim, msg.key, msg.review);
       if (!checked.ok) return { ok: false, error: checked.error };
-      await (await vaultStore()).grants.put({ ...checked.row, grantedAt: Date.now() });
+      // The page asked Chrome for the grant's site access in the same click;
+      // without it nothing is approved.
+      const pattern = grantAccessPattern(checked.row);
+      if (pattern === null || !(await accessHeld(pattern))) {
+        return { ok: false, error: `access to ${grantOrigin(checked.row) ?? 'its site'} was not granted, so this was not approved` };
+      }
+      const vdb = await vaultStore();
+      const previous = await vdb.grants.get(shim.id, checked.row.key);
+      await vdb.grants.put({ ...checked.row, grantedAt: Date.now() });
       await afterGrantChange([shim.id]);
+      // Approving a field whose destination changed replaces the row that
+      // owned the old one: its access goes back unless something else needs it.
+      const replaced = accessReplaced(previous, checked.row);
+      if (replaced !== null) await releaseUnusedAccess([replaced]);
       return { ok: true };
     }
     case 'grants.revoke': {
       const shim = await db.getShim(msg.id);
       if (!shim) return { ok: false, error: 'no such shim' };
-      if (await (await vaultStore()).grants.delete(shim.id, msg.key)) await afterGrantChange([shim.id]);
+      const vdb = await vaultStore();
+      const row = await vdb.grants.get(shim.id, msg.key);
+      if (await vdb.grants.delete(shim.id, msg.key)) {
+        await afterGrantChange([shim.id]);
+        const pattern = row ? grantAccessPattern(row) : null;
+        if (pattern !== null) await releaseUnusedAccess([pattern]);
+      }
       return { ok: true };
     }
     default:
@@ -856,17 +959,6 @@ function reconcileMode(): Promise<void> {
 // this one's. A worker that merely idled out and restarted is the same
 // instance, and its runtimes reconnect their ports on their own.
 // chrome.storage.session lives exactly as long as an instance.
-/** Gives back the origins `patterns` needed that no installed shim still needs. */
-async function releaseUnusedOrigins(db: ShimStore, patterns: readonly string[]): Promise<void> {
-  const remaining = await db.listShims();
-  const release = originsToRelease(patterns, remaining);
-  if (!release.length) return;
-  try {
-    await chrome.permissions.remove({ origins: release });
-  } catch {
-    // A pattern the user already revoked: nothing to release.
-  }
-}
 
 // A draft is a shim a session created and never committed. Its session
 // died with the worker that ran it (a finish would have settled it), so
@@ -877,7 +969,7 @@ async function sweepDrafts(): Promise<void> {
   for (const shim of await db.listShims()) {
     if (!shim.sessionDraft) continue;
     await db.deleteShim(shim.id);
-    await releaseUnusedOrigins(db, patternsFor(shim));
+    await releaseUnusedAccess(patternsFor(shim));
   }
 }
 
@@ -887,6 +979,7 @@ async function bootRefresh(): Promise<void> {
   // Secrets and grants of shims that are gone (a removal that died midway).
   try {
     await (await vaultStore()).sweep(new Set((await (await store()).listShims()).map((x) => x.id)));
+    await dropGrantsWithoutAccess();
   } catch (err) {
     console.error('[shim] could not sweep the vault store', err instanceof Error ? err.message : String(err));
   }
@@ -918,7 +1011,9 @@ chrome.runtime.onStartup.addListener(() => { void syncRegistrations(); });
 // and tears the shims down on the pages already open; access granted again
 // (or granted for a shim whose install never got it) brings them back.
 chrome.permissions.onRemoved.addListener(() => {
-  void syncRegistrations().then(() => refreshOpenTabs([]));
+  void dropGrantsWithoutAccess().catch((err: unknown) => {
+    console.error('[shim] could not drop grants whose access went', err instanceof Error ? err.message : String(err));
+  }).then(() => syncRegistrations()).then(() => refreshOpenTabs([]));
 });
 chrome.permissions.onAdded.addListener((added) => {
   void syncRegistrations().then(() => refreshOpenTabs(added.origins ?? []));
@@ -1166,7 +1261,7 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld, p
         const value = await runCredentialFetch({ shimId: shim.id, tabId: page.tabId, documentId: page.documentId, url: msg.url, opts: msg.opts }, credentialDeps, credentialBudget);
         return { ok: true, value };
       }
-      return { ok: true, value: await brokerFetch(msg.url, msg.opts, { mayRead: fetchReachFor(shim.spec.match?.hosts) }) };
+      return { ok: true, value: await brokerFetch(msg.url, msg.opts, brokerDepsFor(shim.spec.match?.hosts)) };
     }
     case 'event': {
       if (!page) return { ok: false, error: 'no page' };
@@ -1233,6 +1328,9 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld, p
         for (const state of await db.ruleState.listForShim(shim.id)) {
           if (state.quarantine || state.capture) await db.ruleState.put({ ...state, quarantine: undefined, capture: undefined });
         }
+        // A restore can add or drop a secret: the registrations follow
+        // (a new vault world comes with the next load).
+        await syncRegistrations();
         await refreshOpenTabs(patternsFor(shim));
         return { ok: true };
       });
@@ -1271,12 +1369,13 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld, p
       const shim = await db.getShim(msg.id);
       if (!shim) return { ok: false, error: 'no such shim' };
       await sessions.preempt(msg.id);
+      const grantPatterns = [...grantAccessPatterns(await (await vaultStore()).grants.listForShim(shim.id))];
       await db.deleteShim(msg.id);
       await syncRegistrations();
       // Open pages tear the shim down while its hosts are still ours; the
-      // release comes after.
+      // release comes after, with the access its grants owned.
       await refreshOpenTabs(patternsFor(shim));
-      await releaseUnusedOrigins(db, patternsFor(shim));
+      await releaseUnusedAccess([...patternsFor(shim), ...grantPatterns]);
       return { ok: true };
     }
     case 'install.commit': {
@@ -1307,9 +1406,12 @@ async function handle(msg: ToWorker, from: SenderContext, world: RuntimeWorld, p
       const rank = await db.addShim(shim);
       await db.versions.snapshot({ ...shim, rank }, 'install');
       await db.userData.restore(id, prepared.userData);
+      // The grants bind to the shim as stored (the digest of what will run).
+      const stored = await db.getShim(id);
+      const unapproved = stored ? await approveAtInstall(stored, msg.approveGrants) : [];
       await syncRegistrations();
       await refreshOpenTabs(patterns);
-      return { ok: true, id };
+      return unapproved.length ? { ok: true, id, unapproved } : { ok: true, id };
     }
     case 'bridge.status':
       return { ok: true, bridge: { enabled: await bridgeEnabled(), connected: bridgePort.connected(), error: bridgePort.lastError(), sessions: sessions.registry.list().length } };
@@ -1497,7 +1599,17 @@ async function nudgeTab(
  * and what a fetch reaches does not depend on what else is installed.
  */
 function fetchReachFor(hosts: readonly unknown[] | undefined): (url: URL) => Promise<string | null> {
-  return fetchReach(hosts, (pattern) => chrome.permissions.contains({ origins: [pattern] }));
+  return fetchReach(hosts, (pattern) => chrome.permissions.contains({ origins: [pattern] }), grantOnly);
+}
+
+/** Is `host` held only for a credential grant (credential-access.ts)? */
+async function grantOnly(host: string): Promise<boolean> {
+  return grantOnlyHost(host, await (await store()).listShims(), await (await vaultStore()).grants.list());
+}
+
+/** A plain api.fetch's bounds for a shim whose own sites are `hosts`. */
+function brokerDepsFor(hosts: readonly unknown[] | undefined): FetchBrokerDeps {
+  return { mayRead: fetchReachFor(hosts), corsOnly: corsOnlyReach(hosts, grantOnly), corsOrigin: self.location.origin };
 }
 
 /**
@@ -1517,7 +1629,7 @@ async function installedRunsOn(db: ShimStore, scope: SessionStorageScope): Promi
   } catch {
     return null;
   }
-  return (await runsOn(shim, page, SESSION_CAPABILITIES)) ? shim : null;
+  return (await runsOn(shim, page, sessionCapabilities(vaultOn()))) ? shim : null;
 }
 
 /**
@@ -1553,7 +1665,7 @@ function sessionHandlerApiFor(db: ShimStore): SessionHandlerApi {
       // otherwise no site is its own, and CORS decides everywhere else.
       const shim = await installedRunsOn(db, scope);
       const hosts = shim ? (sessions.workingSpec(scope.patchId) ?? shim.spec).match?.hosts : [];
-      return brokerFetch(url, opts, { mayRead: fetchReachFor(hosts) });
+      return brokerFetch(url, opts, brokerDepsFor(hosts));
     },
   };
 }
@@ -1633,7 +1745,9 @@ async function leasedPageHost(tabId: number, opts?: { worldId: string }): Promis
   }
   try {
     const db = await store();
-    const host = await openPageHost(tabId, { engineBundle, storage: sessionStorageFor(db, new Map()), handlerApi: sessionHandlerApiFor(db), nudge: nudgeTab }, opts);
+    const host = await openPageHost(tabId, {
+      engineBundle, storage: sessionStorageFor(db, new Map()), handlerApi: sessionHandlerApiFor(db), nudge: nudgeTab, capabilities: sessionCapabilities(vaultOn()),
+    }, opts);
     host.onClosed(() => { void leases.release(tabId, owner); });
     return host;
   } catch (err) {
@@ -1846,9 +1960,15 @@ async function syncTabForVersion(tabId: number, shimId: string, version: number)
 const sessions = createSessions({
   store,
   mode: () => modeNow,
+  vault: () => vaultOn(),
   chained,
   syncTab: syncTabForVersion,
-  refreshTabs: (shim) => refreshOpenTabs(patternsFor(shim)),
+  // A commit can add or drop a secret: the registrations follow (a new
+  // vault world comes with the next load), then the open pages look again.
+  refreshTabs: async (shim) => {
+    await syncRegistrations();
+    await refreshOpenTabs(patternsFor(shim));
+  },
   removeDraft: async (shimId) => {
     const db = await store();
     const shim = await db.getShim(shimId);
@@ -1856,7 +1976,7 @@ const sessions = createSessions({
     await db.deleteShim(shimId);
     await syncRegistrations();
     await refreshOpenTabs(patternsFor(shim));
-    await releaseUnusedOrigins(db, patternsFor(shim));
+    await releaseUnusedAccess(patternsFor(shim));
   },
 });
 
@@ -2033,8 +2153,7 @@ const controlDeps: ControlDeps = {
     return now;
   },
   async releaseOrigins(origins) {
-    const db = await store();
-    await releaseUnusedOrigins(db, origins);
+    await releaseUnusedAccess(origins);
   },
   async createShim(req, tab, draftId) {
     const db = await store();
@@ -2063,7 +2182,7 @@ const controlDeps: ControlDeps = {
     await db.deleteShim(artifactId);
     await syncRegistrations();
     await refreshOpenTabs(patternsFor(shim));
-    await releaseUnusedOrigins(db, patternsFor(shim));
+    await releaseUnusedAccess(patternsFor(shim));
   },
   async targetFor(tab, artifactId) {
     const db = await store();

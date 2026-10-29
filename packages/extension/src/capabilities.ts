@@ -15,12 +15,12 @@ import type { PageHostCapabilities } from '@shimbrowser/core/page-host';
 export type ExtensionMode = 'full' | 'declarative';
 
 /**
- * Whether this build turns the vault on: secret
- * settings with a declared `use`, sealed in the vault and placed by the
- * worker. Off until it ships; the harnesses turn it on in one worker through its
- * test flag (sw.ts), never in a shipped build.
+ * Whether this build turns the vault on: secret settings with a declared
+ * `use`, sealed in the vault and placed by the worker. On; the harnesses can
+ * turn it off in one worker through its test flag (sw.ts), as a build that
+ * must stop vault operations would ship it off (there is no remote switch).
  */
-export const VAULT_ENABLED = false;
+export const VAULT_ENABLED = true;
 
 /** Mutation kinds whose rules carry handler source: they run in full mode only. */
 export const HANDLER_KINDS: readonly string[] = Object.freeze(['script', 'replace-root', 'mount-route']);
@@ -40,7 +40,8 @@ export const EXTENSION_DECLARATIVE_CAPABILITIES: PageHostCapabilities = Object.f
   // declaration is still served (its values are kept and the settings page
   // shows them), so the shim installs the same in either mode.
   apiMembers: Object.freeze(['settings'] as const),
-  // No OS-backed key store: a secret field is refused, never kept in the clear.
+  // A vault shim runs in a user-script world of its own, which declarative
+  // mode never has: a secret field is refused here, never kept in the clear.
   secretSettings: 'none',
   componentIdentity: false,
   // Page inspection and trusted input arrive with the PageHost.
@@ -54,7 +55,7 @@ export const EXTENSION_DECLARATIVE_CAPABILITIES: PageHostCapabilities = Object.f
  * browser keeps in main, so it stays out. A handler gets the core members,
  * `api.storage`, and the host extras listed here: `api.settings` (values
  * from the settings page) and `api.fetch` (the worker's cookie-less broker).
- * Secret settings are refused here; EXTENSION_VAULT_CAPABILITIES takes them once the vault is on.
+ * Secret settings are refused here; EXTENSION_VAULT_CAPABILITIES takes them while the vault is on.
  */
 export const EXTENSION_CAPABILITIES: PageHostCapabilities = Object.freeze({
   mutationKinds: Object.freeze([...DECLARATIVE_KINDS, 'script', 'replace-root']),
@@ -96,6 +97,20 @@ export const SESSION_CAPABILITIES: PageHostCapabilities = Object.freeze({
   engineInspection: false,
   trustedInput: true,
 });
+
+/**
+ * A session's capabilities with the vault on: a shim declaring a placed
+ * secret can be previewed and committed. Its previews read every secret as
+ * unset and a preview's fetch naming `secrets` is refused (the worker's
+ * session handler api), and a session holding the tab suspends the
+ * installed shim's secret use (credential-lease.ts), so no secret reaches a
+ * session.
+ */
+export const SESSION_VAULT_CAPABILITIES: PageHostCapabilities = Object.freeze({ ...SESSION_CAPABILITIES, secretSettings: 'declared' });
+
+export function sessionCapabilities(vault: boolean = VAULT_ENABLED): PageHostCapabilities {
+  return vault ? SESSION_VAULT_CAPABILITIES : SESSION_CAPABILITIES;
+}
 
 /** What a never-throw api member this host lacks resolves with (D15). */
 export const UNSUPPORTED_ERROR = 'not-available-in-shim-for-chrome';

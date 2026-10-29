@@ -239,8 +239,11 @@ export class VaultKeeper {
       if (rec.status === 'corrupt') return { ok: false, error: VAULT_ERRORS.corrupt };
       const { record, dataKey } = await createVault(passphrase as string, this.deps.iterations);
       if (gen !== this.gen) return { ok: false, error: VAULT_ERRORS.interrupted };
-      // A new vault starts with nothing: no row or grant of an earlier one survives.
-      await this.deps.resetAll(record);
+      // A new vault starts with no secret row. Grants are the user's
+      // approvals, not values, and with no vault before this one any grant
+      // was approved under no other vault (the install review, or the
+      // settings page before setup): they stay. A reset clears both.
+      await this.deps.replaceAll(record, []);
       const next = await this.open(dataKey, record.vaultId);
       return (await this.commitUnlocked(gen, next)) ? { ok: true } : { ok: false, error: VAULT_ERRORS.interrupted };
     });

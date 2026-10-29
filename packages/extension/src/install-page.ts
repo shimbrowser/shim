@@ -11,6 +11,10 @@ import type { PreparedInstall, InstallRefusal } from './install';
 import type { ExtensionMode } from './capabilities';
 import { isPrepareAnswer, PREPARE_READY, PREPARE_PING, type PrepareRequest } from './prepare';
 import type { ToWorker, WorkerAnswer } from './messages';
+import { placedFields } from './credential-grants';
+import { accessPatternForOrigin } from './credential-access';
+import { describeCredentialUse } from '@shimbrowser/core/credential-placement';
+import { accessText, placementText } from './grant-text';
 
 const ask = (msg: ToWorker): Promise<WorkerAnswer> => chrome.runtime.sendMessage(msg);
 const PREPARE_TIMEOUT_MS = 15000;
@@ -136,7 +140,36 @@ function showReview(prepared: PreparedInstall, fileName: string): void {
   if (prepared.userData.length) facts.append(...describe('saved data', `${prepared.userData.length} row${prepared.userData.length === 1 ? '' : 's'} come with it`));
   if (typeof prepared.envelope.intent === 'string') facts.append(...describe('intent', prepared.envelope.intent));
   review.append(facts);
-  review.append(el('p', 'soft', 'Installing asks Chrome to let Shim run on these sites. Nothing else is requested.'));
+
+  // Each placed secret, worded by Shim for Chrome itself: where the value
+  // goes and how. Approving one here is the same grant the settings page
+  // writes, its site access asked for in the install click.
+  const secrets = placedFields(prepared.spec).map((f) => ({ ...f, access: accessPatternForOrigin(f.use.origin) }));
+  const approvals = new Map<string, HTMLInputElement>();
+  if (secrets.length) {
+    const box = el('div', 'secrets');
+    box.append(el('h3', undefined, 'secrets it sends'));
+    box.append(el('p', 'soft', 'The shim never sees these values. After installing, set a passphrase for the vault and enter each value on the shim\'s settings page.'));
+    for (const f of secrets) {
+      const item = el('div', 'secret');
+      const placement = { origin: f.use.origin, placement: f.use.header !== undefined ? { header: f.use.header } : { query: f.use.query }, format: f.use.format };
+      item.append(el('div', 'secret-label', `the shim calls it: ${f.label}`));
+      item.append(el('div', undefined, `Sent ${describeCredentialUse(f.use)}.`));
+      item.append(el('div', 'soft', `Placed in ${placementText(placement)}.`));
+      const row = el('label', 'row');
+      const check = el('input');
+      check.type = 'checkbox';
+      check.disabled = f.access === null;
+      row.append(check, el('span', undefined, ' approve sending it now'));
+      item.append(row, el('div', 'muted', accessText(placement)));
+      approvals.set(f.key, check);
+      box.append(item);
+    }
+    review.append(box);
+  }
+  review.append(el('p', 'soft', secrets.length
+    ? 'Installing asks Chrome to let Shim run on these sites, and for access to each secret\'s destination you approve. Nothing else is requested.'
+    : 'Installing asks Chrome to let Shim run on these sites. Nothing else is requested.'));
 
   const actions = el('div', 'actions');
   const install = el('button', 'primary', 'install');
@@ -144,9 +177,11 @@ function showReview(prepared: PreparedInstall, fileName: string): void {
   install.addEventListener('click', async () => {
     install.disabled = true;
     status.textContent = '';
+    const approved = secrets.filter((f) => approvals.get(f.key)?.checked === true && f.access !== null);
+    const origins = [...new Set([...prepared.matchPatterns, ...approved.map((f) => f.access as string)])];
     let granted: boolean;
     try {
-      granted = await chrome.permissions.request({ origins: prepared.matchPatterns });
+      granted = await chrome.permissions.request({ origins });
     } catch (err) {
       status.textContent = `could not ask for site access: ${err instanceof Error ? err.message : String(err)}`;
       install.disabled = false;
@@ -157,7 +192,7 @@ function showReview(prepared: PreparedInstall, fileName: string): void {
       install.disabled = false;
       return;
     }
-    const answer = await ask({ type: 'install.commit', prepared, provenance: { source: 'file' } });
+    const answer = await ask({ type: 'install.commit', prepared, provenance: { source: 'file' }, approveGrants: approved.map((f) => f.key) });
     if (!answer.ok) {
       status.textContent = `the extension refused the install: ${answer.error}`;
       install.disabled = false;
@@ -168,6 +203,9 @@ function showReview(prepared: PreparedInstall, fileName: string): void {
     result.hidden = false;
     result.append(el('h2', undefined, `${prepared.name} is installed`));
     result.append(el('p', undefined, `It runs on ${prepared.hosts.join(', ')} from the next page load. Turn it off or remove it from the Shim popup.`));
+    if (secrets.length) result.append(el('p', 'soft', 'Open its settings from the Shim popup to set up the vault and enter its secrets.'));
+    const unapproved = 'unapproved' in answer && Array.isArray(answer.unapproved) ? answer.unapproved : [];
+    if (unapproved.length) result.append(el('p', 'error', `Not approved (no site access): ${unapproved.join(', ')}. Approve them on its settings page.`));
     const another = el('button', undefined, 'install another');
     another.addEventListener('click', () => { result.hidden = true; });
     result.append(another);

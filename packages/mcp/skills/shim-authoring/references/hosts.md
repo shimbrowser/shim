@@ -26,12 +26,16 @@ every tool works the same; what differs is where the tab lives and where a commi
   version; those answer `requires-shim-browser`.
 - On Shim for Chrome a handler gets `api.storage`, `api.settings` and `api.fetch`;
   `api.ai`, `api.db` and the shared code-space answer `not-available-in-shim-for-chrome`
-  in their own shape. A `secret` settings field is refused at preview and at commit: the
-  extension has no encrypted store, so author a shim that needs a credential in the Shim
-  browser. `api.fetch` has the browser's bounds (cookie-less, http(s), no local-network
+  in their own shape. A `secret` field must declare `use` there (a plain `secret` is
+  refused at preview and at commit): the extension keeps the value in its passphrase
+  vault and places it on the request itself. A preview reads it as unset and a preview's
+  fetch naming `secrets` answers `secrets-not-available-in-session`, so verify the
+  "add your key in Settings" state, not the keyed call; the user enters the key and
+  approves it in the extension after the commit. `api.fetch` has the browser's bounds (cookie-less, http(s), no local-network
   address, 5 MB, 15 s), but it reads directly only the shim's own sites, never a site
   Shim for Chrome holds for another shim, and anywhere else only a site that allows
-  cross-origin reads (CORS): prefer endpoints that send `Access-Control-Allow-Origin`, or
+  cross-origin reads (CORS), including a placed secret's destination when the call
+  names no `secrets`: prefer endpoints that send `Access-Control-Allow-Origin`, or
   the shim's own site.
 - A preview on Shim for Chrome does not get the browser's isolated preview `api`: when the
   shim is installed and runs on the page, `api.storage` reads and writes its saved data

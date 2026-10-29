@@ -27,7 +27,7 @@
 
 import type {
   PageHost, PageWorld, PreviewRule, PageRuntimeEvent, PageConsoleMessage, Unsubscribe, ScreenshotOptions, ScreenshotResult,
-  LoadWaitOptions, PageLoadOutcome, PageInputCommand, PageInputResult,
+  LoadWaitOptions, PageLoadOutcome, PageInputCommand, PageInputResult, PageHostCapabilities,
 } from '@shimbrowser/core/page-host';
 import { DOCUMENT_TOKEN_SCRIPT, NET_ERR_ABORTED, SUPERSEDED_LOAD_GRACE_MS, sendInputCommands } from '@shimbrowser/core/page-host';
 import { pageRuntimeSource } from '@shimbrowser/core/page-runtime';
@@ -130,6 +130,8 @@ export interface PageHostDeps {
   nudge(tabId: number, msg: Extract<ToRuntime, { seq?: number }>): Promise<NudgeOutcome>;
   /** How long a preview apply or an engine-world evaluate waits for the world. Default 5000. */
   worldWaitMs?: number;
+  /** What the host advertises (SESSION_CAPABILITIES, or the vault's while it is on). Default SESSION_CAPABILITIES. */
+  capabilities?: PageHostCapabilities;
 }
 
 export interface ExtensionPageHost extends PageHost {
@@ -812,7 +814,7 @@ export async function openPageHost(tabId: number, deps: PageHostDeps, options: P
 
   return {
     tabId,
-    capabilities: SESSION_CAPABILITIES,
+    capabilities: deps.capabilities ?? SESSION_CAPABILITIES,
     url: () => (closed ? '' : currentUrl),
     isClosed: () => closed,
     evaluate,
