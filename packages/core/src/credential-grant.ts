@@ -29,28 +29,35 @@ function canonical(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
 
-function stripAnchors(rules: unknown): unknown {
-  if (!Array.isArray(rules)) return rules;
-  return rules.map((rule) => {
-    if (!isRecord(rule)) return rule;
-    const copy: Record<string, unknown> = JSON.parse(JSON.stringify(rule)) as Record<string, unknown>;
-    if (isRecord(copy.anchor)) deleteManagedKeys(copy.anchor);
-    return copy;
-  });
+// A rule without its anchor's witness fields — the only part of a rule the
+// engine manages itself. Everything else, inline `handlers` included, is
+// hashed as written: the digest never drops what it doesn't model (fail
+// closed). A host that stores the same code in two forms (the browser's
+// bare imported rules vs their hydrated view) brings a spec to one form
+// before hashing it.
+function stripRule(rule: unknown): unknown {
+  if (!isRecord(rule)) return rule;
+  const copy: Record<string, unknown> = JSON.parse(JSON.stringify(rule)) as Record<string, unknown>;
+  if (isRecord(copy.anchor)) deleteManagedKeys(copy.anchor);
+  return copy;
+}
+
+function stripRules(rules: unknown): unknown {
+  return Array.isArray(rules) ? rules.map(stripRule) : rules;
 }
 
 /**
- * The digest a credential grant is bound to. `handlers` are the shim's
- * handler sources by name (a host that keeps them beside the spec passes
- * them; inline `rule.handlers` are part of the spec already).
+ * The digest a credential grant is bound to: the spec as written (minus the
+ * top-level fields that never change what runs and the anchors' witness
+ * fields) and the host's stored handler sources by name.
  */
 export function executionManifestDigest(spec: Spec, handlers: Record<string, string> = {}): string {
   const body: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(spec as unknown as Record<string, unknown>)) {
     if (UNMANAGED_TOP_LEVEL.has(k)) continue;
-    body[k] = k === 'rules' ? stripAnchors(v) : v;
+    body[k] = k === 'rules' ? stripRules(v) : v;
   }
-  if (isRecord(body.default)) body.default = { ...body.default, rules: stripAnchors(body.default.rules) };
+  if (isRecord(body.default)) body.default = { ...body.default, rules: stripRules(body.default.rules) };
   return sha256Hex(canonical({ spec: body, handlers }));
 }
 

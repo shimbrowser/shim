@@ -746,10 +746,27 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown): LintResult {
   // non-array — e.g. a hallucinated `"rules": {}` — makes for...of throw, which
   // rejects the emit, the intended anti-hallucination behavior); undefined → [].
   const rulesList = ((s && s.rules) || []) as unknown[];
+  // Handler sources the engine compiles from a spec: the spec-level map and
+  // each rule's map. Each must be a plain object of name → source string;
+  // anything else (an array, a non-string value, an odd prototype) is
+  // refused, so what a host compiles is exactly what a reader — the
+  // credential grant's digest included — sees.
+  const handlersProblem = (value: unknown): string | null => {
+    if (value === undefined) return null;
+    if (!isRecord(value) || Array.isArray(value)) return 'must be an object mapping handler names to source strings';
+    const proto: unknown = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) return 'must be a plain object';
+    const bad = Object.entries(value).find(([, src]) => typeof src !== 'string');
+    return bad ? `"${bad[0]}" must be a source string` : null;
+  };
+  const specHandlersProblem = handlersProblem(s?.handlers);
+  if (specHandlersProblem) errors.push(`the spec-level "handlers" ${specHandlersProblem}`);
   for (const ruleValue of rulesList) {
     if (!isRecord(ruleValue)) continue;
     const rule = ruleValue as unknown as Rule;
     const rid = rule.id || '(unnamed)';
+    const ruleHandlersProblem = handlersProblem(ruleValue.handlers);
+    if (ruleHandlersProblem) errors.push(`rule "${rid}": "handlers" ${ruleHandlersProblem}`);
 
     for (const k of Object.keys(ruleValue)) {
       if (!RULE_KEYS.has(k)) {

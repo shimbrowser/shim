@@ -595,6 +595,20 @@ res = lintSpec({
 });
 check('handler without api.db.connection is silent', res.warnings.length === 0, JSON.stringify(res.warnings));
 
+console.log('handlers must be plain objects of source strings → error');
+{
+  const anchor = { primary: { kind: 'css', value: '.x' } };
+  const withRuleHandlers = (handlers: unknown) => lintSpec({ rules: [{ id: 'h', anchor, mutations: [{ kind: 'script', handler: 'h' }], handlers }] } as never);
+  check('an array of handlers is refused', withRuleHandlers(['function h(){}']).errors.some((e) => e.includes('rule "h": "handlers" must be an object')));
+  check('a non-string source is refused', withRuleHandlers({ h: 42 }).errors.some((e) => e.includes('"h" must be a source string')));
+  check('a handlers object with a non-plain prototype is refused',
+    withRuleHandlers(Object.assign(Object.create({ inherited: 'x' }) as object, { h: 'function h(){}' })).errors.some((e) => e.includes('must be a plain object')));
+  check('a null handlers value is refused', withRuleHandlers(null).errors.some((e) => e.includes('"handlers" must be an object')));
+  check('a plain object of strings is fine', withRuleHandlers({ h: 'function h(){}' }).errors.length === 0);
+  const specLevel = lintSpec({ handlers: ['x'], rules: [] } as never);
+  check('a spec-level array of handlers is refused', specLevel.errors.some((e) => e.includes('the spec-level "handlers" must be an object')));
+}
+
 console.log('');
 if (failures) { console.error(`✗ ${failures} check(s) failed`); process.exit(1); }
 console.log('✓ all spec-lint checks passed');
