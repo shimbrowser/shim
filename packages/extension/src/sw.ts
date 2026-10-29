@@ -1623,19 +1623,22 @@ function hostOnTab(tabId: number): ExtensionPageHost | undefined {
  * documents it could touch refused a secret for good.
  */
 async function leasedPageHost(tabId: number, opts?: { worldId: string }): Promise<ExtensionPageHost> {
+  let owner: number;
   try {
-    await leases.hold(tabId, () => topDocumentId(tabId));
-  } catch {
-    await leases.release(tabId);
-    throw new Error('could not record the session on this tab; try again');
+    owner = await leases.hold(tabId, () => topDocumentId(tabId));
+  } catch (err) {
+    const failed = (err as { owner?: unknown }).owner;
+    if (typeof failed === 'number') await leases.release(tabId, failed);
+    throw new Error('could not record the session on this tab; try again', { cause: err });
   }
   try {
     const db = await store();
     const host = await openPageHost(tabId, { engineBundle, storage: sessionStorageFor(db, new Map()), handlerApi: sessionHandlerApiFor(db), nudge: nudgeTab }, opts);
-    host.onClosed(() => { void leases.release(tabId); });
+    host.onClosed(() => { void leases.release(tabId, owner); });
     return host;
   } catch (err) {
-    await leases.release(tabId);
+    // Only this acquisition's own hold goes: a rival that attached first keeps the tab held.
+    await leases.release(tabId, owner);
     throw err;
   }
 }

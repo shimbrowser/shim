@@ -25,7 +25,7 @@ export const LEASE_KEY = 'credential.leases';
 export const TAINT_CAP = 256;
 
 interface TabLease {
-  /** A session holds the tab now. */
+  /** A session holds the tab now (some acquisition still owns it). */
   held: boolean;
   /** Top-frame documents that existed while a session held the tab. */
   tainted: string[];
@@ -72,6 +72,9 @@ export class CredentialLeases {
   readonly ready: Promise<void>;
   /** Writes in order; each answers its own outcome. */
   private writes: Promise<void> = Promise.resolve();
+  /** The acquisitions owning each held tab: only its own owner releases one, so a failed rival never frees another's hold. */
+  private owners = new Map<number, Set<number>>();
+  private ownerSeq = 0;
 
   constructor(private readonly deps: LeaseDeps) {
     this.ready = deps.load().then((v) => {
@@ -105,11 +108,16 @@ export class CredentialLeases {
   /**
    * A session takes the tab. Held at once (a commit from here on is
    * tainted), then `current` names the tab's document now, then the lease is
-   * persisted. Rejects when it could not be persisted: the caller must not
-   * attach (and releases).
+   * persisted. Answers this acquisition's owner token, which its release
+   * names. Rejects (with the token in the error's `owner`) when it could not
+   * be persisted: the caller must not attach, and releases.
    */
-  async hold(tabId: number, current: () => Promise<string | undefined>): Promise<void> {
+  async hold(tabId: number, current: () => Promise<string | undefined>): Promise<number> {
     if (!this.loaded) await this.ready;
+    const owner = ++this.ownerSeq;
+    const owners = this.owners.get(tabId) ?? new Set<number>();
+    owners.add(owner);
+    this.owners.set(tabId, owners);
     const lease = this.tabs.get(tabId) ?? { held: false, tainted: [], sealed: false };
     lease.held = true;
     this.tabs.set(tabId, lease);
@@ -120,12 +128,25 @@ export class CredentialLeases {
       documentId = undefined;
     }
     this.taint(lease, documentId);
-    await this.persist();
+    try {
+      await this.persist();
+    } catch (err) {
+      throw Object.assign(new Error('the lease could not be recorded'), { owner, cause: err });
+    }
+    return owner;
   }
 
-  /** The session let go of the tab: what it could touch stays tainted. The held mark clears durably only if this write succeeds. */
-  async release(tabId: number): Promise<void> {
+  /**
+   * One acquisition let go of the tab: the tab stays held while another owns
+   * it. What a session could touch stays tainted, and the held mark clears
+   * durably only if this write succeeds.
+   */
+  async release(tabId: number, owner: number): Promise<void> {
     await this.ready;
+    const owners = this.owners.get(tabId);
+    if (!owners?.delete(owner)) return;
+    if (owners.size) return;
+    this.owners.delete(tabId);
     const lease = this.tabs.get(tabId);
     if (!lease) return;
     lease.held = false;
@@ -150,6 +171,7 @@ export class CredentialLeases {
 
   /** The tab closed: its documents are gone with it. */
   closed(tabId: number): void {
+    this.owners.delete(tabId);
     if (!this.tabs.delete(tabId)) return;
     void this.persist().catch(() => undefined);
   }
