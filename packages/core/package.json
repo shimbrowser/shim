@@ -1,6 +1,6 @@
 {
   "name": "@shimbrowser/core",
-  "version": "0.7.0-dev",
+  "version": "0.7.0",
   "description": "The Shim patch engine: applies declarative patch specs to any page with a DOM.",
   "license": "Apache-2.0",
   "author": "Artificial Apps, LLC",
