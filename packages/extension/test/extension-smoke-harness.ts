@@ -23,6 +23,8 @@
 import fs from 'fs';
 import path from 'path';
 import type { BrowserContext } from 'playwright';
+import { pagePathKey } from '@shimbrowser/core/deploy-id';
+import { STORE_DB_NAME } from '../src/store';
 import {
   workDir, extensionCopy, fixtureServer, shimWriter, css, launch, workerOf, installer, configureExtension, setExtensionEnabled, settle, sleep,
 } from './smoke-helpers';
@@ -426,6 +428,33 @@ async function main(): Promise<void> {
       return r as { version: number; review: { ruleId: string; reason: string }[] };
     };
 
+    // The deploy baseline of one page kind, as the worker stored it (read from its own
+    // database, from an extension page). Build 2 is judged against /deploy's baseline,
+    // and the spec's bundle hash can't stand in for it: the earlier /apply visit sets
+    // that before /deploy's baseline is recorded.
+    const baselineOf = async (pathname: string): Promise<string | null> => {
+      const p = await popupPage();
+      const hash = await p.evaluate(([dbName, pathKey]) => chrome.runtime.sendMessage({ type: 'shims.list' }).then((list: { shims: { id: string; name: string }[] }) => {
+        const shimId = list.shims.find((s) => s.name === 'Rebase fixture')?.id;
+        return new Promise<string | null>((resolve, reject) => {
+          const open = indexedDB.open(dbName);
+          open.onerror = () => reject(open.error);
+          open.onsuccess = () => {
+            const db = open.result;
+            const all = db.transaction('baselines', 'readonly').objectStore('baselines').getAll();
+            all.onerror = () => { db.close(); reject(all.error); };
+            all.onsuccess = () => {
+              const row = (all.result as { shimId: string; pathKey: string; bundleHash: string }[]).find((r) => r.shimId === shimId && r.pathKey === pathKey);
+              db.close();
+              resolve(row ? row.bundleHash : null);
+            };
+          };
+        });
+      }), [STORE_DB_NAME, pagePathKey(pathname)] as const);
+      await p.close();
+      return hash;
+    };
+
     const page = await ctx.newPage();
     await page.goto(`${origin}/apply`);
     await settle(() => page.evaluate(() => getComputedStyle(document.getElementById('ad') as Element).display), (d) => d === 'none');
@@ -442,6 +471,8 @@ async function main(): Promise<void> {
     check('the captured fingerprints are kept on the rules that had none', kept.spec.rules.filter((r) => r.anchor.witness).length >= 4, kept.spec.rules.map((r) => `${r.id}:${r.anchor.witness ? 'w' : '-'}`));
     check('and the page kind\'s baseline is recorded (the spec carries a bundle hash)', typeof kept.spec.bundleHash === 'string', kept.spec.bundleHash);
     check('the spec is still version 1', (kept.spec.version ?? 1) === 1 && (await summaryOf()).version === 1);
+    const deployBaseline = await settle(() => baselineOf('/deploy'), (h) => h !== null, 10000);
+    check('build 1\'s baseline for this page kind is recorded before the deploy', deployBaseline !== null, deployBaseline);
 
     setDeploy(2);
     await page.reload();
