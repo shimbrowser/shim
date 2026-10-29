@@ -1623,7 +1623,12 @@ function hostOnTab(tabId: number): ExtensionPageHost | undefined {
  * documents it could touch refused a secret for good.
  */
 async function leasedPageHost(tabId: number, opts?: { worldId: string }): Promise<ExtensionPageHost> {
-  await leases.hold(tabId, await topDocumentId(tabId));
+  try {
+    await leases.hold(tabId, () => topDocumentId(tabId));
+  } catch {
+    await leases.release(tabId);
+    throw new Error('could not record the session on this tab; try again');
+  }
   try {
     const db = await store();
     const host = await openPageHost(tabId, { engineBundle, storage: sessionStorageFor(db, new Map()), handlerApi: sessionHandlerApiFor(db), nudge: nudgeTab }, opts);

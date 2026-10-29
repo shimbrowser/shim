@@ -327,6 +327,30 @@ async function main(): Promise<void> {
     check('every row re-encrypted', (await w.db.secrets.list()).map((r) => r.sealed.ct).join() !== before);
     check('and still readable', ((await k.reveal('b', 'k', PLACE_Q)) as { value?: string }).value === 'vb');
     check('the vault id is kept', (await w.db.record() as VaultRecord).vaultId === oldId);
+    // A worker that dies right after a rotation commits: the next one must not take the old key as current.
+    {
+      const w2 = await world();
+      const r1 = new VaultKeeper(w2.deps);
+      await r1.setup(PASS);
+      await r1.setSecret('a', 'k', PLACE, 'va');
+      let afterCommit: VaultKeeper | null = null;
+      w2.hook.at = async (n) => {
+        if (n !== 'session.set' || afterCommit) return;
+        // replaceAll has committed (session.set comes after it): a new worker starts here.
+        afterCommit = new VaultKeeper((await world({ db: w2.db, session: w2.session, clock: w2.clock, lockAfter: w2.lockAfter })).deps);
+        const st = await afterCommit.status();
+        check('a worker woken between the rotation\'s commit and its new key sees the vault locked', st.state === 'locked', st);
+      };
+      await r1.rotateDataKey(PASS);
+      w2.hook.at = undefined;
+      const r2 = new VaultKeeper((await world({ db: w2.db, session: w2.session, clock: w2.clock, lockAfter: w2.lockAfter })).deps);
+      await r2.lock();
+      check('it unlocks with the passphrase, under the new key', (await r2.unlock(PASS)).ok && ((await r2.reveal('a', 'k', PLACE)) as { value?: string }).value === 'va');
+      await r2.setSecret('a', 'k', PLACE, 'vb');
+      await r2.lock();
+      await r2.unlock(PASS);
+      check('a value saved after it stays readable across lock and unlock', ((await r2.reveal('a', 'k', PLACE)) as { value?: string }).value === 'vb');
+    }
     const gen = k.generation();
     check('reset needs a valid passphrase', !(await k.reset('short')).ok);
     check('reset', (await k.reset(PASS)).ok);

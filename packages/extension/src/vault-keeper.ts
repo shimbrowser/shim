@@ -363,9 +363,19 @@ export class VaultKeeper {
         rows.push({ ...row, sealed: await sealSecret(rotated.dataKey, binding, value) });
       }
       if (gen !== this.gen) return { ok: false, error: VAULT_ERRORS.interrupted };
+      // The old key goes before the rows change: rotation keeps the vault id,
+      // so a session record still holding the old key would look current to
+      // a worker that wakes after the commit below and before the new key is
+      // saved. Locked in between; a failure here leaves the vault locked.
+      this.gen += 1;
+      const mine = this.gen;
+      this.unlocked = null;
+      this.deps.schedule?.(null);
+      await this.deps.session.remove();
+      if (mine !== this.gen) return { ok: false, error: VAULT_ERRORS.interrupted };
       await this.deps.replaceAll(rotated.record, rows);
       const opened = await this.open(rotated.dataKey, rotated.record.vaultId);
-      return (await this.commitUnlocked(gen, opened)) ? { ok: true, dropped } : { ok: false, error: VAULT_ERRORS.interrupted };
+      return (await this.commitUnlocked(mine, opened)) ? { ok: true, dropped } : { ok: false, error: VAULT_ERRORS.interrupted };
     });
   }
 

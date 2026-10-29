@@ -211,7 +211,7 @@ async function main(): Promise<void> {
     const r = await rig();
     approve(r, 'apiKey');
     check('no lease: allowed', (await run(r, `${ORIGIN}/x`, { secrets: ['apiKey'] })).ok === true);
-    await r.leases.hold(TAB, DOC);
+    await r.leases.hold(TAB, async () => DOC);
     check('while a session holds the tab: refused', err(await run(r, `${ORIGIN}/x`, { secrets: ['apiKey'] })) === SECRETS_NOT_AVAILABLE_IN_SESSION);
     r.leases.committed(TAB, 'DOC-B');
     await r.leases.release(TAB);
@@ -226,19 +226,64 @@ async function main(): Promise<void> {
     const woke = new CredentialLeases({ load: async () => stored, save: async (s) => { stored = s; } });
     check('nothing is answered before the stored leases are read', !woke.allows(9, 'DOC-Z'));
     await woke.ready;
-    check('a lease left held wakes as tainted, not released clean', !woke.allows(TAB, 'DOC-X') && woke.allows(TAB, 'DOC-Y'));
+    check('a lease left held wakes refusing every document that existed (some writes may be lost)', !woke.allows(TAB, 'DOC-X') && !woke.allows(TAB, 'DOC-Y'));
+    woke.committed(TAB, 'DOC-NEW');
+    check('and answers one committed after the wake', woke.allows(TAB, 'DOC-NEW') && !woke.allows(TAB, 'DOC-Y'));
+    check('which survives another wake', await (async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      const again = new CredentialLeases({ load: async () => stored, save: async () => undefined });
+      await again.ready;
+      return again.allows(TAB, 'DOC-NEW') && !again.allows(TAB, 'DOC-Y');
+    })());
+
+    console.log('the lease: acquisition and lost writes');
+    {
+      // A navigation that commits while the current document is being named is tainted too.
+      const l = new CredentialLeases({ load: async () => undefined, save: async () => undefined });
+      await l.ready;
+      await l.hold(5, async () => { l.committed(5, 'NAV-B'); return 'NAV-A'; });
+      await l.release(5);
+      check('a commit during the hold\'s own sampling is tainted', !l.allows(5, 'NAV-A') && !l.allows(5, 'NAV-B'));
+      // A hold that cannot be persisted refuses (the caller must not attach).
+      let fail = true;
+      let saved: unknown;
+      const f = new CredentialLeases({ load: async () => undefined, save: async (st) => { if (fail) throw new Error('quota'); saved = structuredClone(st); } });
+      await f.ready;
+      check('a hold whose write fails rejects', await f.hold(6, async () => 'D').then(() => false, () => true));
+      check('and the tab is refused meanwhile', !f.allows(6, 'D'));
+      // A lost write after a persisted hold cannot open a document on the next wake.
+      fail = false;
+      await f.hold(7, async () => 'H1');
+      fail = true;
+      f.committed(7, 'H2');
+      await f.release(7);
+      await new Promise((r) => setTimeout(r, 5));
+      const next = new CredentialLeases({ load: async () => saved, save: async () => undefined });
+      await next.ready;
+      check('lost taint and release writes: the next worker refuses what the session could touch', !next.allows(7, 'H1') && !next.allows(7, 'H2'));
+      check('and a release written cleanly ends held-only refusal', await (async () => {
+        let st: unknown;
+        const ok = new CredentialLeases({ load: async () => undefined, save: async (x) => { st = structuredClone(x); } });
+        await ok.ready;
+        await ok.hold(8, async () => 'K1');
+        await ok.release(8);
+        const w = new CredentialLeases({ load: async () => st, save: async () => undefined });
+        await w.ready;
+        return !w.allows(8, 'K1') && w.allows(8, 'K-LATER');
+      })());
+    }
     const broken = new CredentialLeases({ load: async () => { throw new Error('unreadable'); }, save: async () => undefined });
     await broken.ready;
     check('unreadable lease state refuses every tab', !broken.allows(1, 'D'));
     const many = new CredentialLeases({ load: async () => undefined, save: async () => undefined });
     await many.ready;
-    await many.hold(3, 'D0');
+    await many.hold(3, async () => 'D0');
     for (let i = 1; i <= TAINT_CAP; i++) many.committed(3, `D${i}`);
     await many.release(3);
     check('past the taint cap, the tab is refused outright', !many.allows(3, 'FRESH'));
     const noDoc = new CredentialLeases({ load: async () => undefined, save: async () => undefined });
     await noDoc.ready;
-    await noDoc.hold(4, undefined);
+    await noDoc.hold(4, async () => undefined);
     await noDoc.release(4);
     check('a hold whose document Chrome could not name seals the tab', !noDoc.allows(4, 'ANY'));
     many.closed(3);
@@ -250,7 +295,7 @@ async function main(): Promise<void> {
     const points = ['shim', 'grant', 'reveal', 'vault.session', 'vault.record', 'vault.getRow'];
     const attacks: Array<[string, (r: Rig) => void | Promise<void>, (res: HandlerFetchResult) => boolean]> = [
       ['a lock', (r) => { void r.vault.lock(); }, (res) => err(res).includes('locked')],
-      ['a session taking the tab', (r) => { void r.leases.hold(TAB, DOC); }, (res) => err(res) === SECRETS_NOT_AVAILABLE_IN_SESSION],
+      ['a session taking the tab', (r) => { void r.leases.hold(TAB, async () => DOC); }, (res) => err(res) === SECRETS_NOT_AVAILABLE_IN_SESSION],
       ['a revoke', (r) => { r.grants.delete('apiKey'); r.epoch.n++; }, (res) => err(res).includes('approve')],
       ['a code change', (r) => { r.shim.handlers = { go: 'module.exports = () => steal()' }; r.epoch.n++; }, (res) => err(res).includes('approve')],
       ['the shim turned off', (r) => { r.shim.enabled = false; r.epoch.n++; }, (res) => err(res).includes('turned off')],
