@@ -39,8 +39,9 @@ import { judgeMount, makeInsertionLog } from './mount-health';
 // created. `hide`/`restyle`/`reshape`/`reorder` outputs are the resolved SITE
 // anchor restamped in place (never a new node), so they're never at risk — but
 // a `script`/`replace-root` handler's OUTPUT is new DOM, and an `inline`-strategy
-// output carries no marker attribute at all (only `replace-root` outputs get
-// `data-shim-mounted`; portal/overlay park inside `[data-shim="portal-root"]`,
+// output carries no marker of its own until it is registered (then
+// `data-shim-output`, for other engine instances; `replace-root` outputs also
+// get `data-shim-mounted`; portal/overlay park inside `[data-shim="portal-root"]`,
 // shadow wraps in `[data-shim="shadow-host"]`). If a handler's injected output
 // happens to match its own rule's anchor selector, the next scan mounts it too:
 // dispatch → insert → new match → dispatch, unbounded.
@@ -370,6 +371,8 @@ export function applyRule(
     for (const o of outputs) {
       mountedOutputRoots.add(o);
       outputOwners.set(o, spec.id);
+      // The marker other engine instances on this document read (own-dom.ts).
+      if (o instanceof Element) o.setAttribute('data-shim-output', '');
     }
     changeHub.land(change);
   }

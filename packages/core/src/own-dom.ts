@@ -6,8 +6,9 @@
 // created. `hide`/`restyle`/`reshape`/`reorder` outputs are the resolved SITE
 // anchor restamped in place (never a new node), so they're never at risk — but
 // a `script`/`replace-root` handler's OUTPUT is new DOM, and an `inline`-
-// strategy output carries no marker attribute at all (only `replace-root`
-// outputs get `data-shim-mounted`; portal/overlay park inside
+// strategy output carries no marker of its own until it is registered (then
+// `data-shim-output`, below; `replace-root` outputs also get
+// `data-shim-mounted`; portal/overlay park inside
 // `[data-shim="portal-root"]`, shadow wraps in `[data-shim="shadow-host"]`).
 // If a handler's injected output happens to match its own rule's anchor
 // selector, the next scan mounts it too: dispatch → insert → new match →
@@ -26,7 +27,14 @@
 // outputs always carry it, giving marker coverage even where the registry
 // arm can't reach (a node detached and reattached outside the engine's
 // bookkeeping).
-const OWN_DOM_SELECTOR = '[data-shim-mounted],[data-shim="portal-root"],[data-shim="shadow-host"],[data-shim="route-host"],[data-shim-injected]';
+//
+// `data-shim-output` is stamped on every output root a handler returned when
+// it is registered (apply-rule.ts `mountOn`). The registry below already
+// covers those roots for the instance that mounted them; the marker is what
+// another engine instance sharing the document (another isolated world, with
+// its own registry) sees, so an `inline` output of one instance is never an
+// anchor for the other.
+const OWN_DOM_SELECTOR = '[data-shim-mounted],[data-shim="portal-root"],[data-shim="shadow-host"],[data-shim="route-host"],[data-shim-injected],[data-shim-output]';
 
 // O(1) per node: does this node ITSELF carry one of the engine's own-DOM
 // markers? (Ancestry is the caller's walk — anchor-change.ts walks to the top

@@ -5,6 +5,17 @@
 // `replaceRootRuleNodes`), so it has no dependency back on the engine core.
 // `firstGreaterIndex` is covered by scripts/css-priority-harness.
 //
+// More than one engine instance can share a document (one per isolated world,
+// each with its own copy of this module). Each instance writes only into
+// <style> elements it created, tagged `data-shim-instance` with its own id, so
+// no instance updates, mirrors or tears down another's rules. Anything that has
+// to agree across instances lives in the DOM, never in this module's memory:
+// the tier-1 cascade order is carried by the elements' `data-shim-priority`
+// and their document order (see injectTier1Rule). Cooperative correctness
+// between engines that share a page, not a security boundary: any script on
+// the page can rewrite these elements. Covered by
+// scripts/engine-multi-world-harness.
+//
 // Every write to an engine <style> is followed by a style-mirror sync: on a
 // page whose CSP refuses inline <style> (style-src without 'unsafe-inline')
 // the element's text is mirrored into an adopted constructable sheet, so the
@@ -12,6 +23,10 @@
 // teardown (style-mirror.ts; scripts/strict-csp-css-harness).
 import type { Spec } from './types';
 import { syncStyleMirror, syncStyleOwner } from './style-mirror';
+
+// This engine instance's id on the elements it owns. Random per module
+// instance: two worlds loading the same bundle get different ids.
+const INSTANCE_ID = Math.random().toString(36).slice(2, 10) || '0';
 
 // All shim CSS lives inside one named cascade layer, `shim`. This is what
 // makes "your local layer wins over the site" a guarantee rather than a
@@ -55,7 +70,7 @@ export function injectStyle(id: string, css: string): void {
 //
 // The per-token Map (rather than a bare Set) lets us (a) update a rule's CSS
 // in place when it's re-applied with different properties, and (b) cleanly
-// remove it from the sheet during rule teardown. Each entry stores the text
+// remove it from its sheet during rule teardown. Each entry stores the text
 // node plus its `priority` so cross-shim conflicts resolve deterministically
 // (see injectTier1Rule).
 interface Tier1RuleEntry {
@@ -63,13 +78,33 @@ interface Tier1RuleEntry {
   priority: number;
 }
 const tier1RuleNodes = new Map<string, Tier1RuleEntry>();
-function ensureTier1Sheet(): HTMLStyleElement {
-  let sheet = document.querySelector('style[data-shim="tier1-css"]') as HTMLStyleElement | null;
-  if (!sheet) {
-    sheet = document.createElement('style');
-    sheet.setAttribute('data-shim', 'tier1-css');
-    (document.head || document.documentElement).appendChild(sheet);
-  }
+
+// The numeric priority a tier-1 <style> carries, or -Infinity when it carries
+// none (sorts first, as an untracked rule did).
+function sheetPriority(el: Element): number {
+  const p = Number(el.getAttribute('data-shim-priority'));
+  return el.hasAttribute('data-shim-priority') && Number.isFinite(p) ? p : -Infinity;
+}
+
+// This instance's tier-1 <style> for one priority, created at its cascade
+// slot: before the first tier-1 sheet (of any instance) with a strictly higher
+// priority, else after the last one. Every instance places its sheets by the
+// same rule, so the document order of all tier-1 sheets stays ascending by
+// priority whichever instance created which, and in whatever order.
+function ensureTier1Sheet(priority: number): HTMLStyleElement {
+  const sheets = Array.from(document.querySelectorAll('style[data-shim="tier1-css"]'));
+  const own = sheets.find((el) => el.getAttribute('data-shim-instance') === INSTANCE_ID && sheetPriority(el) === priority);
+  if (own instanceof HTMLStyleElement) return own;
+  const sheet = document.createElement('style');
+  sheet.setAttribute('data-shim', 'tier1-css');
+  sheet.setAttribute('data-shim-instance', INSTANCE_ID);
+  sheet.setAttribute('data-shim-priority', String(priority));
+  const idx = firstGreaterIndex(sheets.map(sheetPriority), priority);
+  const before = sheets[idx];
+  const last = sheets[sheets.length - 1];
+  if (before && before.parentNode) before.parentNode.insertBefore(sheet, before);
+  else if (last && last.parentNode) last.parentNode.insertBefore(sheet, last.nextSibling);
+  else (document.head || document.documentElement).appendChild(sheet);
   return sheet;
 }
 // All tier-1 rules share one `@layer shim` (so they all beat the site), which
@@ -77,34 +112,26 @@ function ensureTier1Sheet(): HTMLStyleElement {
 // by SOURCE ORDER within the layer — later wins. Blind append makes that
 // order depend on apply timing (which shim's rule resolved first, whether a
 // rule self-healed late), so the winner flips between reload and toggle. We
-// instead insert each rule at a position keyed by `priority` (higher wins):
-// the sheet stays sorted low→high, so the highest-priority shim's rule is
-// always last and always wins, regardless of when it resolved. Priority is
-// assigned in main (user shims > platform fixtures; among user shims, the
-// one higher in the sidebar list) and threaded in via the spec.
+// instead place each rule by `priority` (higher wins): one <style> per
+// priority, the sheets in ascending priority order, so the highest-priority
+// shim's rule always comes last and always wins, regardless of when it
+// resolved or which engine instance applied it. Within one sheet (one
+// priority — e.g. two rules of one shim) rules append, keeping authoring
+// order. Priority is assigned in main (user shims > platform fixtures; among
+// user shims, the one higher in the sidebar list) and threaded in via the spec.
 export function injectTier1Rule(token: string, cssBody: string, priority = 0): void {
   const text = layered(`[data-shim-css~="${token}"] { ${cssBody} }`);
   const existing = tier1RuleNodes.get(token);
-  if (existing) {
+  if (existing && existing.priority === priority && existing.node.parentNode) {
     existing.node.nodeValue = text;
-    existing.priority = priority;
     syncStyleOwner(existing.node.parentNode);
     return;
   }
+  // New, or re-applied at another priority (moves to that priority's sheet).
+  if (existing) removeTier1Rule(token);
   const node = document.createTextNode(text);
-  const sheet = ensureTier1Sheet();
-  // Keep the sheet ordered ascending by priority: insert before the first
-  // already-placed node whose priority is strictly higher. Ties (same
-  // priority — e.g. two rules of one shim) fall to append-after, preserving
-  // intra-shim authoring order. Walking childNodes (DOM order) keeps the
-  // position correct even as nodes are added and removed over time.
-  const children = Array.from(sheet.childNodes);
-  const priorities = children.map((c) => {
-    const entry = nodeToEntry(c);
-    return entry ? entry.priority : -Infinity; // untracked nodes sort first
-  });
-  const idx = firstGreaterIndex(priorities, priority);
-  sheet.insertBefore(node, children[idx] || null); // out-of-range → append
+  const sheet = ensureTier1Sheet(priority);
+  sheet.appendChild(node);
   tier1RuleNodes.set(token, { node, priority });
   syncStyleMirror(sheet);
 }
@@ -116,20 +143,15 @@ export function firstGreaterIndex(priorities: number[], priority: number): numbe
   }
   return priorities.length;
 }
-// Reverse lookup (text node → its tracked entry) for the ordered insert.
-// The rule set is small (a handful per page), so the linear scan is cheap.
-function nodeToEntry(node: Node): Tier1RuleEntry | null {
-  for (const entry of tier1RuleNodes.values()) {
-    if (entry.node === node) return entry;
-  }
-  return null;
-}
 export function removeTier1Rule(token: string): void {
   const entry = tier1RuleNodes.get(token);
   if (!entry) return;
   const owner = entry.node.parentNode;
   entry.node.remove();
   tier1RuleNodes.delete(token);
+  // An emptied sheet goes too: it is this instance's alone, and a later rule
+  // at its priority recreates it at the right slot.
+  if (owner instanceof HTMLStyleElement && !owner.firstChild) owner.remove();
   syncStyleOwner(owner);
 }
 export function tagElement(el: Element, token: string): void {
@@ -159,12 +181,12 @@ export function cssBodyFromProps(props?: Record<string, string>): string {
 // just this rule's CSS out of the sheet.
 const replaceRootRuleNodes = new Map<string, Text>();
 function ensureReplaceRootSheet(): HTMLStyleElement {
-  let sheet = document.querySelector('style[data-shim="replace-root"]') as HTMLStyleElement | null;
-  if (!sheet) {
-    sheet = document.createElement('style');
-    sheet.setAttribute('data-shim', 'replace-root');
-    (document.head || document.documentElement).appendChild(sheet);
-  }
+  const found = document.querySelector(`style[data-shim="replace-root"][data-shim-instance="${INSTANCE_ID}"]`);
+  if (found instanceof HTMLStyleElement) return found;
+  const sheet = document.createElement('style');
+  sheet.setAttribute('data-shim', 'replace-root');
+  sheet.setAttribute('data-shim-instance', INSTANCE_ID);
+  (document.head || document.documentElement).appendChild(sheet);
   return sheet;
 }
 export function injectReplaceRootRule(token: string): void {
