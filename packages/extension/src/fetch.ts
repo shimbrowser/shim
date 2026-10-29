@@ -91,21 +91,44 @@ const SAFELISTED_CONTENT_TYPES = new Set(['application/x-www-form-urlencoded', '
 const SAFELISTED_REQUEST_HEADERS = new Set(['accept', 'accept-language', 'content-language', 'content-type']);
 const SAFELISTED_RESPONSE_HEADERS = new Set(['cache-control', 'content-language', 'content-length', 'content-type', 'expires', 'last-modified', 'pragma']);
 
+/** A CORS-unsafe request-header byte (Fetch): a control byte other than tab, `"():<>?@[\]{}` or DEL. */
+function hasCorsUnsafeByte(bytes: Uint8Array): boolean {
+  for (const b of bytes) {
+    if ((b < 0x20 && b !== 0x09) || b === 0x7f) return true;
+    if ('"():<>?@[\\]{}'.includes(String.fromCharCode(b))) return true;
+  }
+  return false;
+}
+
 /**
- * A request CORS sends without a preflight: GET, HEAD or POST with only
- * safelisted headers. A worker cannot send a preflight of its own (the
- * Access-Control-Request-* headers are forbidden to set), so a request that
- * would need one is refused where CORS is emulated.
+ * A request CORS sends without a preflight (Fetch's CORS-safelisted method
+ * and request-headers): GET, HEAD or POST; only accept, accept-language,
+ * content-language and content-type; each value at most 128 bytes; accept
+ * and content-type without a CORS-unsafe byte; the language headers only
+ * `0-9 A-Z a-z space * , - . ; =`; content-type's essence one of the three
+ * form types; and at most 1024 safelisted bytes in all. A worker cannot send
+ * a preflight of its own (the Access-Control-Request-* headers are forbidden
+ * to set), so a request that would need one is refused where CORS is
+ * emulated.
  */
 export function corsSimpleRequest(method: string, headers: Record<string, string>): boolean {
   if (method !== 'GET' && method !== 'HEAD' && method !== 'POST') return false;
+  const encoder = new TextEncoder();
+  let total = 0;
   for (const [name, value] of Object.entries(headers)) {
     const n = name.toLowerCase();
     if (!SAFELISTED_REQUEST_HEADERS.has(n)) return false;
-    if (value.length > 128) return false;
-    if (n === 'content-type' && !SAFELISTED_CONTENT_TYPES.has((value.split(';')[0] ?? '').trim().toLowerCase())) return false;
+    const bytes = encoder.encode(value);
+    if (bytes.length > 128) return false;
+    total += bytes.length;
+    if (n === 'accept' && hasCorsUnsafeByte(bytes)) return false;
+    if ((n === 'accept-language' || n === 'content-language') && !/^[0-9A-Za-z *,.;=-]*$/.test(value)) return false;
+    if (n === 'content-type') {
+      if (hasCorsUnsafeByte(bytes)) return false;
+      if (!SAFELISTED_CONTENT_TYPES.has((value.split(';')[0] ?? '').trim().toLowerCase())) return false;
+    }
   }
-  return true;
+  return total <= 1024;
 }
 
 /** Does a response allow a cookie-less cross-origin read by `origin`? */

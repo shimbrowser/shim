@@ -46,6 +46,17 @@ export function grantAccessPattern(row: Pick<GrantRow, 'binding'>): string | nul
   return origin === null ? null : accessPatternForOrigin(origin);
 }
 
+/**
+ * The access a grant row gave up when `next` replaced `previous` (the same
+ * field approved again after its destination changed): the old pattern, for
+ * releaseUnusedAccess to give back unless something else needs it; null when
+ * nothing changed hands.
+ */
+export function accessReplaced(previous: Pick<GrantRow, 'binding'> | undefined, next: Pick<GrantRow, 'binding'>): string | null {
+  const before = previous ? grantAccessPattern(previous) : null;
+  return before !== null && before !== grantAccessPattern(next) ? before : null;
+}
+
 /** Every pattern the grants in `rows` own. */
 export function grantAccessPatterns(rows: readonly Pick<GrantRow, 'binding'>[]): Set<string> {
   const out = new Set<string>();

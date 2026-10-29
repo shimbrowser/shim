@@ -15,7 +15,7 @@
 //   - a host a shim's own sites cover stays its own: no CORS emulation.
 
 import {
-  accessPatternForOrigin, grantOrigin, grantAccessPattern, grantAccessPatterns, accessToRelease, grantOnlyHost, hostOfPattern, shimSitesCover,
+  accessPatternForOrigin, accessReplaced, grantOrigin, grantAccessPattern, grantAccessPatterns, accessToRelease, grantOnlyHost, hostOfPattern, shimSitesCover,
 } from '../src/credential-access';
 import { brokerFetch, fetchReach, corsOnlyReach, corsSimpleRequest } from '../src/fetch';
 import { credentialUseBinding } from '@shimbrowser/core/credential-placement';
@@ -68,6 +68,14 @@ async function main(): Promise<void> {
   check('a shim\'s site pattern nobody needs goes', accessToRelease(['*://site.test/*'], [shim('other.test')], [row('https://api.test')]).join() === '*://site.test/*');
   check('duplicates release once', accessToRelease(['https://api.test/*', 'https://api.test/*'], [], []).filter((p) => p === 'https://api.test/*').length === 1);
 
+  console.log('approving a changed destination:');
+  check('the old access is given up when the same field is approved for another origin', accessReplaced(row('https://api.a.test'), row('https://api.b.test')) === 'https://api.a.test/*');
+  check('nothing when the host is the same (another port, another header)', accessReplaced(row('https://api.a.test'), row('https://api.a.test:444', { query: 'k' })) === null);
+  check('nothing on a first approval', accessReplaced(undefined, row('https://api.a.test')) === null);
+  check('and the old one is then released unless another grant still owns it',
+    accessToRelease(['https://api.a.test/*'], [], [row('https://api.b.test')]).includes('https://api.a.test/*')
+    && accessToRelease(['https://api.a.test/*'], [], [row('https://api.b.test'), row('https://api.a.test', { query: 'k' })]).length === 0);
+
   console.log('grant-only hosts:');
   check('a host only a grant owns', grantOnlyHost('api.test', [shim('site.test')], [row('https://api.test')]));
   check('…spelled with a root dot or upper case', grantOnlyHost('API.test.', [], [row('https://api.test')]));
@@ -102,6 +110,16 @@ async function main(): Promise<void> {
   check('an Authorization header is not simple', !corsSimpleRequest('GET', { Authorization: 'Bearer x' }));
   check('PUT is not simple', !corsSimpleRequest('PUT', {}));
   check('an over-long safelisted value is not simple', !corsSimpleRequest('GET', { accept: 'x'.repeat(129) }));
+  check('a content type with a quoted parameter is not simple (CORS-unsafe bytes)', !corsSimpleRequest('POST', { 'content-type': 'text/plain; charset="utf-8"' }));
+  check('an accept with a quoted or bracketed value is not simple', !corsSimpleRequest('GET', { accept: 'text/html; q="0.5"' }) && !corsSimpleRequest('GET', { accept: 'a{b}' }));
+  check('a control byte is not simple', !corsSimpleRequest('GET', { accept: 'text/html\u0001' }));
+  check('a language header outside its alphabet is not simple', !corsSimpleRequest('GET', { 'accept-language': 'en/us' }) && !corsSimpleRequest('GET', { 'content-language': 'en"' }));
+  check('a well-formed language header is simple', corsSimpleRequest('GET', { 'accept-language': 'en-US,en;q=0.9' }));
+  check('a 128-byte value counts bytes, not characters', !corsSimpleRequest('GET', { accept: 'é'.repeat(65) }));
+  const spellings = ['accept', 'Accept', 'ACCEPT', 'aCcept', 'acCept', 'accEpt', 'accePt', 'ACCept', 'AcCePt'];
+  check('more than 1024 safelisted bytes in all is not simple (one header spelled nine ways)',
+    !corsSimpleRequest('GET', Object.fromEntries(spellings.map((k) => [k, 'a'.repeat(128)])))
+    && corsSimpleRequest('POST', { accept: 'a'.repeat(128), 'accept-language': 'b'.repeat(128), 'content-language': 'c'.repeat(128), 'content-type': 'text/plain' }));
 
   console.log('the broker on a grant-only host:');
   {
@@ -131,6 +149,8 @@ async function main(): Promise<void> {
     seen.length = 0;
     const preflighted = await brokerFetch('https://api.test/data', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }, deps(respond({ 'access-control-allow-origin': '*' })));
     check('a request CORS would preflight is refused before any request', preflighted.ok === false && seen.length === 0 && errOf(preflighted).includes('simple requests'), preflighted);
+    const quoted = await brokerFetch('https://api.test/data', { method: 'POST', headers: { 'content-type': 'text/plain; charset="utf-8"' }, body: 'x' }, deps(respond({ 'access-control-allow-origin': '*' })));
+    check('…a quoted content-type parameter too: it never reaches fetch', quoted.ok === false && seen.length === 0, quoted);
     const redirected = await brokerFetch('https://public.test/start', {}, deps(respond({ 'content-type': 'text/plain' }, 'https://api.test/landed')));
     check('a redirect landing on a grant-only host is read only as CORS allows', redirected.ok === false && errOf(redirected).includes('cross-origin'), redirected);
     const elsewhere = await brokerFetch('https://public.test/x', {}, deps(respond({ 'content-type': 'text/plain', 'x-any': '1' })));

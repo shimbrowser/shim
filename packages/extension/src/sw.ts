@@ -52,7 +52,7 @@ import { openVaultStore, type VaultStore } from './vault-store';
 import { CredentialLeases, LEASE_KEY } from './credential-lease';
 import { runCredentialFetch, CredentialBudget, SECRETS_NOT_AVAILABLE_IN_SESSION, type CredentialFetchDeps } from './credential-fetch';
 import { placedFields, placedUse, grantViews, grantState, checkApproval, rebindDigest, manifestDigest, type GrantRow } from './credential-grants';
-import { accessToRelease, grantAccessPattern, grantAccessPatterns, grantOnlyHost, grantOrigin } from './credential-access';
+import { accessReplaced, accessToRelease, grantAccessPattern, grantAccessPatterns, grantOnlyHost, grantOrigin } from './credential-access';
 import { credentialUseBinding, describeCredentialUse, CREDENTIAL_MAX_VALUE_BYTES } from '@shimbrowser/core/credential-placement';
 import { hasLoneSurrogate } from '@shimbrowser/core/settings-schema';
 import { brokerFetch, fetchReach, corsOnlyReach, type FetchBrokerDeps } from './fetch';
@@ -500,8 +500,14 @@ async function handleVault(msg: ToWorker & { type: string }): Promise<WorkerAnsw
       if (pattern === null || !(await accessHeld(pattern))) {
         return { ok: false, error: `access to ${grantOrigin(checked.row) ?? 'its site'} was not granted, so this was not approved` };
       }
-      await (await vaultStore()).grants.put({ ...checked.row, grantedAt: Date.now() });
+      const vdb = await vaultStore();
+      const previous = await vdb.grants.get(shim.id, checked.row.key);
+      await vdb.grants.put({ ...checked.row, grantedAt: Date.now() });
       await afterGrantChange([shim.id]);
+      // Approving a field whose destination changed replaces the row that
+      // owned the old one: its access goes back unless something else needs it.
+      const replaced = accessReplaced(previous, checked.row);
+      if (replaced !== null) await releaseUnusedAccess([replaced]);
       return { ok: true };
     }
     case 'grants.revoke': {
