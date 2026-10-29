@@ -205,6 +205,10 @@ console.log('executionManifestDigest');
   check('a match change moves it', !same({ ...base, match: { hosts: ['a.test', 'b.test'] } }));
   check('a settings change moves it', !same({ ...base, settings: [{ key: 'k', type: 'secret', use: { ...HEADER, origin: 'https://evil.example' } }] }));
   check('a mutation change moves it', !same({ ...base, rules: [rule({ primary: { kind: 'css', value: '.x' } }, 'g')] }));
+  check('a hydrated copy (stored modules copied onto the rules) keeps the digest',
+    same({ ...base, rules: [{ ...rule({ primary: { kind: 'css', value: '.x' } }), handlers: { ...H } }] }));
+  check('an inline handler overriding the stored one moves it',
+    !same({ ...base, rules: [{ ...rule({ primary: { kind: 'css', value: '.x' } }), handlers: { h: 'function h(){ x() }' } }] }));
   const a1 = executionManifestDigestWithoutAnchors(base, H);
   const moved = asSpec({ ...base, rules: [rule({ primary: { kind: 'css', value: '.y' } })] });
   check('without anchors, an anchor-only change keeps the digest', executionManifestDigestWithoutAnchors(moved, H) === a1);

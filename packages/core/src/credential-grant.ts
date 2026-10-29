@@ -29,29 +29,50 @@ function canonical(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
 
-function stripAnchors(rules: unknown): unknown {
-  if (!Array.isArray(rules)) return rules;
-  return rules.map((rule) => {
-    if (!isRecord(rule)) return rule;
-    const copy: Record<string, unknown> = JSON.parse(JSON.stringify(rule)) as Record<string, unknown>;
-    if (isRecord(copy.anchor)) deleteManagedKeys(copy.anchor);
-    return copy;
-  });
+// A rule without its anchor's witness fields and without its inline
+// handler sources (those are hashed as the rule's effective handlers below).
+function stripRule(rule: unknown): unknown {
+  if (!isRecord(rule)) return rule;
+  const copy: Record<string, unknown> = JSON.parse(JSON.stringify(rule)) as Record<string, unknown>;
+  if (isRecord(copy.anchor)) deleteManagedKeys(copy.anchor);
+  delete copy.handlers;
+  return copy;
+}
+
+function stripRules(rules: unknown): unknown {
+  return Array.isArray(rules) ? rules.map(stripRule) : rules;
+}
+
+// What each rule actually runs: the stored handlers with the rule's own
+// inline ones on top (a rule's inline handler wins on a name collision, as
+// the engine resolves it). Hashing this rather than the raw spec keeps the
+// digest stable when a store copies stored handler modules onto rules (an
+// imported shim read through its hydrated view, then written back).
+function effectiveHandlers(rules: unknown, handlers: Record<string, string>): unknown {
+  if (!Array.isArray(rules)) return [];
+  return rules.map((r) => (isRecord(r) && isRecord(r.handlers) ? { ...handlers, ...r.handlers } : { ...handlers }));
 }
 
 /**
  * The digest a credential grant is bound to. `handlers` are the shim's
- * handler sources by name (a host that keeps them beside the spec passes
- * them; inline `rule.handlers` are part of the spec already).
+ * stored handler sources by name; a rule's inline `rule.handlers` override
+ * them for that rule.
  */
 export function executionManifestDigest(spec: Spec, handlers: Record<string, string> = {}): string {
   const body: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(spec as unknown as Record<string, unknown>)) {
+  const record = spec as unknown as Record<string, unknown>;
+  for (const [k, v] of Object.entries(record)) {
     if (UNMANAGED_TOP_LEVEL.has(k)) continue;
-    body[k] = k === 'rules' ? stripAnchors(v) : v;
+    body[k] = k === 'rules' ? stripRules(v) : v;
   }
-  if (isRecord(body.default)) body.default = { ...body.default, rules: stripAnchors(body.default.rules) };
-  return sha256Hex(canonical({ spec: body, handlers }));
+  let defaultRuns: unknown = null;
+  if (isRecord(body.default)) {
+    const d = body.default;
+    const dHandlers = isRecord(d.handlers) ? d.handlers as Record<string, string> : {};
+    defaultRuns = effectiveHandlers(d.rules, dHandlers);
+    body.default = { ...d, rules: stripRules(d.rules), handlers: undefined };
+  }
+  return sha256Hex(canonical({ spec: body, handlers, runs: effectiveHandlers(record.rules, handlers), defaultRuns }));
 }
 
 /**
