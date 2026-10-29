@@ -1,0 +1,18 @@
+title = "Shim"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Shim for Chrome's manifest key is the extension's public key: it pins the extension's ID and is published by design (the private key is never in this repository)."
+paths = ['''^packages/extension/static/manifest\.json$''']
+regexTarget = "line"
+regexes = ['''^\s*"key": "[A-Za-z0-9+/]+={0,2}",?$''']
+condition = "AND"
+
+[[allowlists]]
+description = "Placeholder keys the credential tests send to local test servers. They are made-up fixtures (a fixed 1234567890 tail), never real keys."
+paths = ['''^packages/[a-z]+/test/[A-Za-z0-9-]+\.ts$''']
+regexTarget = "secret"
+regexes = ['''^sk-live-(?:[A-Z]+-)?1234567890$''']
+condition = "AND"

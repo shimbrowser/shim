@@ -1,0 +1,66 @@
+# Build, typecheck and test every package on each pull request and push to main.
+# `test` runs every harness that needs no browser; `browser` runs the ones that
+# drive Chromium (Shim for Chrome loaded unpacked, the headless host, the CLI and
+# the Claude Code plugin end to end).
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: node scripts/test.mjs
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Install Chromium (the full browser, which extensions need)
+        run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: node scripts/test.mjs --browser-only
+
+  min-chrome:
+    # Shim for Chrome on the oldest Chrome it supports (the manifest's
+    # minimum_chrome_version, as Chrome for Testing).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: The shared libraries Chrome needs
+        run: npx playwright install-deps chromium
+      - name: Chrome for Testing at the minimum version
+        id: chrome
+        run: |
+          chrome="$(node packages/extension/scripts/min-chrome.js "$RUNNER_TEMP/min-chrome")"
+          echo "path=$chrome" >> "$GITHUB_OUTPUT"
+      - run: npm run build
+      - name: The extension's browser tests on the minimum Chrome
+        env:
+          SHIM_CHROME_EXECUTABLE: ${{ steps.chrome.outputs.path }}
+        run: node scripts/test.mjs --browser-only extension-chrome-facts extension-vault-worlds extension-vault extension-vault-enable extension-full-mode

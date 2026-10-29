@@ -1,0 +1,27 @@
+{
+  "name": "shim-workspace",
+  "private": true,
+  "description": "Shim's open-source packages: the engine (@shimbrowser/core), the Claude Code plugin and shim CLI (@shimbrowser/mcp), and Shim for Chrome (@shimbrowser/extension).",
+  "license": "Apache-2.0",
+  "workspaces": [
+    "packages/core",
+    "packages/mcp",
+    "packages/extension"
+  ],
+  "scripts": {
+    "build": "npm run build -w @shimbrowser/core && npm run build -w @shimbrowser/mcp && npm run build -w @shimbrowser/extension",
+    "typecheck": "npm run typecheck --workspaces",
+    "test": "npm run build && node scripts/test.mjs",
+    "test:browser": "npm run build && node scripts/test.mjs --browser"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "playwright": "1.64.1"
+  },
+  "engines": {
+    "node": ">=26"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

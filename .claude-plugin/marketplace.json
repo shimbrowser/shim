@@ -1,0 +1,22 @@
+{
+  "name": "shimbrowser",
+  "owner": {
+    "name": "Artificial Apps, LLC",
+    "url": "https://shimbrowser.com"
+  },
+  "metadata": {
+    "description": "Shim's Claude Code plugin: change any website from Claude Code."
+  },
+  "plugins": [
+    {
+      "name": "shim",
+      "description": "Change any website from Claude Code: open a session on a tab in the Shim browser, Shim for Chrome or a headless Chromium, edit the shim as a folder, preview it on the live page, commit.",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/shimbrowser/shim.git",
+        "path": "packages/mcp",
+        "ref": "plugin-v0.7.0"
+      }
+    }
+  ]
+}

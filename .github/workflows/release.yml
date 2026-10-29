@@ -1,0 +1,59 @@
+# A release: pushing a `v<version>` tag builds and tests every package, then
+# publishes a GitHub release with:
+#
+#   shim-for-chrome.zip     Shim for Chrome, ready to load unpacked
+#   shimbrowser-mcp.tgz     the shim CLI and the MCP server (npm install -g <url>)
+#   shimbrowser-core.tgz    the engine
+#   SHA256SUMS
+#
+# The names carry no version and the release is not marked pre-release, so the
+# READMEs' .../releases/latest/download/<name> links always reach the newest
+# release (GitHub's "latest" skips pre-releases); the title says beta instead.
+#
+# and the tag `plugin-v<version>`: the Claude Code plugin with its dist/ built,
+# which .claude-plugin/marketplace.json points at (Claude Code installs a plugin
+# from git without building it). The steps are scripts/release.mjs.
+#
+# Before tagging: every package, packages/mcp/.claude-plugin/plugin.json and the
+# marketplace entry's ref carry the version (`release.mjs check` refuses otherwise).
+
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - name: The tag names every package's version
+        run: node scripts/release.mjs check "$GITHUB_REF_NAME"
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+      - run: node scripts/test.mjs
+      - name: Install Chromium (the full browser, which extensions need)
+        run: npx playwright install --with-deps chromium
+      - name: The tests that drive Chromium, the Chrome facts Shim for Chrome's vault depends on included
+        run: node scripts/test.mjs --browser-only
+      - name: Build the release files
+        run: node scripts/release.mjs assets "$GITHUB_REF_NAME"
+      - name: Publish the plugin tag
+        run: node scripts/release.mjs plugin-tag "$GITHUB_REF_NAME"
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" release/shim-for-chrome.zip release/shimbrowser-core.tgz release/shimbrowser-mcp.tgz release/SHA256SUMS
+          --title "Shim ${GITHUB_REF_NAME#v} (beta)" --notes-file release/NOTES.md --latest --verify-tag
