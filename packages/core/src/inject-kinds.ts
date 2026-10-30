@@ -1,8 +1,11 @@
 // Pure logic for the Tier-2 declarative injection kinds — `inject-element`
-// and `inject-html`. Static-only by contract: no event
-// handlers, no scripts — behavior belongs in `script` handlers where
-// api.cleanup + self-healing apply. Validation/scan run in main (spec-lint)
-// with no DOM; builder/strip/placement run in the page's isolated world.
+// and `inject-html`. Static-only by contract: nothing that executes, embeds
+// another document, or changes where the page navigates or submits —
+// behavior belongs in `script` handlers where api.cleanup + self-healing
+// apply. One policy (blockedTagReason + activeAttrReason) backs the lint
+// validation, the html scan, the builder and the strip, so they can't
+// disagree. Validation/scan run in main (spec-lint) with no DOM;
+// builder/strip/placement run in the page's isolated world.
 // Everything is bare-node testable (packages/core/test/inject-kinds-harness.ts).
 import type { InjectNode } from './types';
 
@@ -12,27 +15,75 @@ const INJECT_MAX_NODES = 50;
 const INJECT_HTML_MAX_CHARS = 32768;
 
 const NODE_KEYS = new Set(['tag', 'text', 'attrs', 'style', 'children']);
-const URL_ATTRS = new Set(['href', 'src', 'xlink:href']);
+
+// Elements that run script or load another document, or that change how the
+// surrounding page resolves, refreshes or fetches. A <style> element stays:
+// CSS is a shim's own capability (restyle reaches the same page).
+const BLOCKED_TAGS = new Set([
+  'script', 'iframe', 'frame', 'frameset', 'object', 'embed', 'applet',
+  'portal', 'fencedframe', 'base', 'meta', 'link',
+]);
+const FORM_TARGET_ATTRS = new Set(['action', 'formaction']);
+const URL_ATTRS = new Set(['href', 'src', 'xlink:href', 'data', 'poster', 'background', 'cite', 'srcset']);
+// SMIL can write an attribute after every static check has run, so an
+// animation may not target a URL attribute or an event handler.
+const ANIMATION_TAGS = new Set(['animate', 'set', 'animatemotion', 'animatetransform']);
+const ANIMATED_ACTIVE_ATTR = /^(?:href|xlink:href|src|on.*)$/i;
+// data: stays only where it's plain media: an inline image on an <img>.
+const DATA_URL_TAGS = new Set(['img', 'image', 'source', 'video', 'audio', 'input']);
+const DATA_URL_ATTRS = new Set(['src', 'href', 'xlink:href', 'poster', 'srcset']);
+const DATA_MEDIA_URL = /^data:(?:image|audio|video)\//;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-// Scheme-normalized javascript:-URL check. Browsers strip ASCII whitespace
-// and control chars from the scheme before matching, so "  JavaScript\t:"
-// executes — normalize the same way before comparing (the classic bypass).
-// A char-code filter (not a regex control-char range) sidesteps ESLint's
-// no-control-regex rule while doing the identical strip.
-function isJavascriptUrl(value: string): boolean {
+// Browsers strip ASCII whitespace and control chars from a URL's scheme before
+// matching, so "  JavaScript\t:" executes — normalize the same way before
+// comparing (the classic bypass). A char-code filter (not a regex control-char
+// range) sidesteps ESLint's no-control-regex rule while doing the identical strip.
+function normalizeUrl(value: string): string {
   let stripped = '';
   for (const ch of value) {
     if (ch.charCodeAt(0) > 0x20) stripped += ch;
   }
-  return stripped.toLowerCase().startsWith('javascript:');
+  return stripped.toLowerCase();
 }
 
 function isEventAttr(name: string): boolean {
   return /^on/i.test(name);
+}
+
+function normalizeTag(tag: unknown): string {
+  return typeof tag === 'string' ? tag.trim().toLowerCase() : '';
+}
+
+function isBlockedTag(tag: unknown): boolean {
+  return BLOCKED_TAGS.has(normalizeTag(tag));
+}
+
+// Why an attribute can't appear on `tag`, or null when it's static.
+function activeAttrReason(tag: string, name: string, value: string): string | null {
+  const attr = name.toLowerCase();
+  if (isEventAttr(attr)) return 'an event handler';
+  if (attr === 'srcdoc') return 'inline frame content';
+  if (FORM_TARGET_ATTRS.has(attr)) return 'a form submission target';
+  if (attr === 'ping') return 'a click beacon';
+  if (ANIMATION_TAGS.has(tag) && attr === 'attributename' && ANIMATED_ACTIVE_ATTR.test(value.trim())) {
+    return 'an animation of a URL or event attribute';
+  }
+  if (!URL_ATTRS.has(attr)) return null;
+  const url = normalizeUrl(value);
+  if (url.startsWith('javascript:')) return 'a javascript: URL';
+  if (url.startsWith('vbscript:')) return 'a vbscript: URL';
+  if (url.startsWith('data:')
+    && !(DATA_URL_TAGS.has(tag) && DATA_URL_ATTRS.has(attr) && DATA_MEDIA_URL.test(url))) {
+    return 'a data: URL outside an inline image, audio or video';
+  }
+  if (tag === 'use' && (attr === 'href' || attr === 'xlink:href') && !url.startsWith('#')) {
+    return 'an external <use> reference';
+  }
+  return null;
 }
 
 // Validate an inject-element node tree. Returns human-readable problems
@@ -58,6 +109,9 @@ function validateInjectTree(root: unknown): string[] {
     if (tag !== undefined && (typeof tag !== 'string' || !tag.trim())) {
       problems.push('"tag" must be a non-empty string');
     }
+    if (isBlockedTag(tag)) {
+      problems.push(`tag "${normalizeTag(tag)}" is active content — inject kinds are static-only; use a script handler for behavior`);
+    }
     if (node.text !== undefined && typeof node.text !== 'string') {
       problems.push('"text" must be a string');
     }
@@ -66,11 +120,9 @@ function validateInjectTree(root: unknown): string[] {
       else {
         for (const [name, value] of Object.entries(node.attrs)) {
           if (typeof value !== 'string') { problems.push(`attr "${name}" must be a string`); continue; }
-          if (isEventAttr(name)) {
-            problems.push(`attr "${name}" is an event handler — inject kinds are static-only; use a script handler for behavior`);
-          }
-          if (URL_ATTRS.has(name.toLowerCase()) && isJavascriptUrl(value)) {
-            problems.push(`attr "${name}" is a javascript: URL — inject kinds are static-only; use a script handler for behavior`);
+          const reason = activeAttrReason(normalizeTag(tag), name, value);
+          if (reason) {
+            problems.push(`attr "${name}" is ${reason} — inject kinds are static-only; use a script handler for behavior`);
           }
         }
       }
@@ -96,28 +148,52 @@ function validateInjectTree(root: unknown): string[] {
   return problems;
 }
 
+const NAMED_ENTITIES: Record<string, string> = {
+  colon: ':', tab: '\t', newline: '\n', lpar: '(', rpar: ')', amp: '&', quot: '"', apos: "'",
+};
+
+// Enough entity decoding for the scan to read a value the way the parser will
+// ("java&#115;cript&colon;x"). Numeric references don't need their semicolon.
+function decodeEntities(value: string): string {
+  return value.replace(/&(?:#x([0-9a-f]+)|#([0-9]+)|([a-z]+));?/gi, (whole, hex, dec, named) => {
+    if (named !== undefined) return NAMED_ENTITIES[String(named).toLowerCase()] ?? whole;
+    const code = hex !== undefined ? parseInt(hex, 16) : parseInt(dec, 10);
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '';
+  });
+}
+
 // Heuristic active-content scan for an inject-html string — spec-lint runs in
-// main with no DOM, so this is regex-based and warning-grade only (the
-// runtime strip pass is the authoritative belt).
+// main with no DOM, so this tokenizes tags by regex and is warning-grade only
+// (the runtime strip pass is the authoritative belt). It reads only the prefix
+// the runtime parses, and applies the same policy to what it finds.
 function scanHtmlForActiveContent(html: string): string[] {
-  const found: string[] = [];
-  if (/<script\b/i.test(html)) found.push('the html contains a <script> element');
-  if (/\son[a-z]+\s*=/i.test(html)) found.push('the html contains inline event-handler attributes (on*)');
-  if (/(?:href|src)\s*=\s*["']?\s*javascript:/i.test(html)) found.push('the html contains a javascript: URL');
-  return found;
+  const found = new Set<string>();
+  const markup = html.slice(0, INJECT_HTML_MAX_CHARS).replace(/<!--[\s\S]*?(?:-->|$)/g, '');
+  for (const element of markup.matchAll(/<([a-zA-Z][^\s/>]*)((?:[^>"']|"[^"]*"|'[^']*')*)/g)) {
+    const tag = (element[1] ?? '').toLowerCase();
+    if (isBlockedTag(tag)) found.add(`the html contains a <${tag}> element`);
+    for (const attr of (element[2] ?? '').matchAll(/([^\s=/>"']+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+)))?/g)) {
+      const name = (attr[1] ?? '').toLowerCase();
+      const reason = activeAttrReason(tag, name, decodeEntities(attr[2] ?? attr[3] ?? attr[4] ?? ''));
+      if (reason) found.add(`the html contains ${reason} (${name})`);
+    }
+  }
+  return [...found];
 }
 
 const toKebab = (s: string): string => s.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase());
 
 // Build a validated InjectNode tree into real DOM. createElement/textContent
-// only — never innerHTML. Defensively skips active attrs even though
-// validation already rejected them (belt for hand-edited specs).
+// only — never innerHTML. Defensively skips active tags and attrs even though
+// validation already rejected them (belt for hand-edited specs): a blocked
+// root builds an empty span, a blocked child builds nothing.
 function buildElement(node: InjectNode, doc: Document): HTMLElement {
+  if (isBlockedTag(node.tag)) return doc.createElement('span');
   const el = doc.createElement(typeof node.tag === 'string' && node.tag.trim() ? node.tag : 'span');
+  const tag = normalizeTag(el.tagName);
   for (const [name, value] of Object.entries(node.attrs || {})) {
     if (typeof value !== 'string') continue;
-    if (isEventAttr(name)) continue;
-    if (URL_ATTRS.has(name.toLowerCase()) && isJavascriptUrl(value)) continue;
+    if (activeAttrReason(tag, name, value)) continue;
     el.setAttribute(name, value);
   }
   const styleEntries = Object.entries(node.style || {}).filter(([, v]) => typeof v === 'string');
@@ -126,7 +202,9 @@ function buildElement(node: InjectNode, doc: Document): HTMLElement {
   }
   if (typeof node.text === 'string' && node.text) el.appendChild(doc.createTextNode(node.text));
   for (const child of node.children || []) {
-    if (child && typeof child.tag === 'string') el.appendChild(buildElement(child, doc));
+    if (child && typeof child.tag === 'string') {
+      if (!isBlockedTag(child.tag)) el.appendChild(buildElement(child, doc));
+    }
     else if (child && typeof child.text === 'string') el.appendChild(doc.createTextNode(child.text));
   }
   return el;
@@ -137,14 +215,13 @@ function buildElement(node: InjectNode, doc: Document): HTMLElement {
 function stripActiveContent(root: Element): number {
   let stripped = 0;
   const visit = (el: Element): void => {
-    const tag = (el.tagName || '').toUpperCase();
-    if (tag === 'SCRIPT') { el.remove(); stripped += 1; return; }
+    const tag = (el.tagName || '').toLowerCase();
+    if (BLOCKED_TAGS.has(tag)) { el.remove(); stripped += 1; return; }
     if (typeof (el as { getAttributeNames?: unknown }).getAttributeNames === 'function') {
       for (const name of [...el.getAttributeNames()]) {
-        if (isEventAttr(name)) { el.removeAttribute(name); stripped += 1; continue; }
-        if (URL_ATTRS.has(name.toLowerCase())) {
-          const value = el.getAttribute(name);
-          if (value !== null && isJavascriptUrl(value)) { el.removeAttribute(name); stripped += 1; }
+        if (activeAttrReason(tag, name, el.getAttribute(name) ?? '')) {
+          el.removeAttribute(name);
+          stripped += 1;
         }
       }
     }
@@ -153,7 +230,7 @@ function stripActiveContent(root: Element): number {
       if ((child as { nodeType?: number }).nodeType === 1) visit(child as Element);
     }
     const content = (el as { content?: Element }).content;
-    if (tag === 'TEMPLATE' && content) {
+    if (tag === 'template' && content) {
       const inner = [...(content.childNodes as unknown as Iterable<Node>)];
       for (const child of inner) {
         if ((child as { nodeType?: number }).nodeType === 1) visit(child as Element);

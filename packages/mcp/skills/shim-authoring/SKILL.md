@@ -372,8 +372,8 @@ anchor, no handler needed:
 ```
 
 `placement`: `before` | `after` (default) | `prepend` | `append`. A multi-match anchor
-injects once per element. Both are **static by contract**: scripts, `on*` attributes and
-`javascript:` URLs are stripped or refused. Anything interactive must be a `script` handler.
+injects once per element. Both are **static by contract**: scripts, frames, embeds, `on*`,
+form targets and active URLs are dropped. Anything interactive must be a `script` handler.
 `mount.strategy` works as on `script`.
 
 ### DOM removal: `remove`

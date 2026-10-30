@@ -154,7 +154,7 @@ export function dispatchMutation(
       const noteKey = `${spec.id}/${rule.id}`;
       if (stripped > 0) {
         injectStripNotes.set(noteKey,
-          `inject-html stripped ${stripped} active item(s) (scripts / on* handlers / javascript: URLs) — `
+          `inject-html stripped ${stripped} active item(s) (scripts, embeds, on* handlers, form targets, active URLs) — `
           + 'inject kinds are static-only; use a script handler for behavior');
       } else {
         injectStripNotes.delete(noteKey);

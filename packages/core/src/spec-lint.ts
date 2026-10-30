@@ -381,6 +381,7 @@ function lintLayoutMutation(rid: string, mut: Mutation, errors: string[], warnin
 
 // Inject kinds: payload-shape problems are ERRORS (a malformed tree is
 // a silent no-op otherwise); strippable content in inject-html is a WARNING
+// (one policy with the runtime strip, inject-kinds.ts)
 // (the runtime strip is the belt — the model should hear it before apply).
 // inject-element's tree is inspectable, so active content there is an ERROR
 // at emit rather than a runtime strip.

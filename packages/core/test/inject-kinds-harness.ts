@@ -126,6 +126,99 @@ function tBuild(): void {
   assert(sneaky.getAttribute('href') === null, 'builder drops javascript: URL defensively');
 }
 
+// ---- one active-content policy across lint, scan, builder and strip -----
+{
+  console.log('active-content policy:');
+  const refused = (node: Record<string, unknown>): boolean => validateInjectTree(node).length > 0;
+  for (const tag of ['script', 'SCRIPT', ' iframe ', 'frame', 'frameset', 'object', 'embed', 'applet',
+    'portal', 'fencedframe', 'base', 'meta', 'link']) {
+    assert(refused({ tag }), `validator refuses tag "${tag}"`);
+    assert(refused({ tag: 'div', children: [{ tag }] }), `validator refuses nested tag "${tag}"`);
+  }
+  assert(validateInjectTree({ tag: 'iframe' }).some((p) => p.includes('script handler')), 'blocked tag message points to script');
+
+  const attrCases: [string, string, string][] = [
+    ['div', 'srcdoc', '<script>x()</script>'],
+    ['form', 'action', 'https://collector.example/'],
+    ['button', 'formaction', 'https://collector.example/'],
+    ['a', 'ping', 'https://collector.example/'],
+    ['a', 'href', 'vbscript:x'],
+    ['a', 'href', ' JaVa\tScript:x()'],
+    ['a', 'xlink:href', 'javascript:x()'],
+    ['a', 'href', 'data:text/html,<script>x()</script>'],
+    ['img', 'src', 'data:text/html,x'],
+    ['div', 'background', 'javascript:x()'],
+    ['use', 'href', 'data:image/svg+xml,<svg/>'],
+    ['use', 'xlink:href', 'https://a.example/s.svg#i'],
+    ['animate', 'attributeName', 'href'],
+    ['set', 'attributeName', ' XLINK:HREF '],
+    ['animate', 'attributeName', 'onclick'],
+  ];
+  for (const [tag, name, value] of attrCases) {
+    const label = `${tag} ${name}="${value}"`;
+    assert(refused({ tag, attrs: { [name]: value } }), `validator refuses ${label}`);
+    const built = buildElement({ tag, attrs: { [name]: value } }, docStub) as unknown as StubNode;
+    assert(built.getAttribute(name) === null, `builder drops ${label}`);
+    const root = elStub('div');
+    const child = elStub(tag);
+    child.setAttribute(name, value);
+    root.appendChild(child);
+    assert(stripActiveContent(root as unknown as Element) === 1 && child.getAttribute(name) === null, `strip removes ${label}`);
+    const escaped = value.replace(/"/g, '&quot;');
+    assert(scanHtmlForActiveContent(`<${tag} ${name}="${escaped}"></${tag}>`).length > 0, `scan flags ${label}`);
+  }
+
+  const staticCases: [string, string, string][] = [
+    ['img', 'src', 'data:image/png;base64,AAAA'],
+    ['video', 'poster', 'data:image/png;base64,AAAA'],
+    ['audio', 'src', 'data:audio/mpeg;base64,AAAA'],
+    ['img', 'srcset', 'https://a.example/x.png 2x'],
+    ['use', 'href', '#icon'],
+    ['animate', 'attributeName', 'opacity'],
+    ['a', 'href', 'https://a.example/'],
+    ['a', 'href', '/relative'],
+    ['form', 'data-action', 'open'],
+    ['div', 'title', 'javascript:not-a-url-attr'],
+  ];
+  for (const [tag, name, value] of staticCases) {
+    const label = `${tag} ${name}="${value}"`;
+    assert(!refused({ tag, attrs: { [name]: value } }), `validator keeps ${label}`);
+    const built = buildElement({ tag, attrs: { [name]: value } }, docStub) as unknown as StubNode;
+    assert(built.getAttribute(name) === value, `builder keeps ${label}`);
+    const root = elStub('div');
+    const child = elStub(tag);
+    child.setAttribute(name, value);
+    root.appendChild(child);
+    assert(stripActiveContent(root as unknown as Element) === 0, `strip keeps ${label}`);
+    assert(scanHtmlForActiveContent(`<${tag} ${name}="${value}"></${tag}>`).length === 0, `scan keeps ${label}`);
+  }
+
+  // A <script> built from JSON runs its text when inserted, so the belt has to
+  // catch the tag and not just its attributes.
+  const blockedRoot = buildElement({ tag: 'script', text: 'x()', attrs: { src: '/x.js' } }, docStub) as unknown as StubNode;
+  assert(blockedRoot.tagName === 'SPAN' && blockedRoot.childNodes.length === 0 && blockedRoot.attrs.size === 0, 'blocked root builds an empty span');
+  const blockedChild = buildElement({ tag: 'div', children: [{ tag: 'SCRIPT', text: 'x()' }, { tag: 'b' }] }, docStub) as unknown as StubNode;
+  assert(blockedChild.childNodes.length === 1 && blockedChild.childNodes[0]?.tagName === 'B', 'blocked child builds nothing');
+
+  const root = elStub('div');
+  for (const tag of ['iframe', 'object', 'embed', 'base', 'meta', 'link']) root.appendChild(elStub(tag));
+  const keep = elStub('style');
+  root.appendChild(keep);
+  assert(stripActiveContent(root as unknown as Element) === 6 && root.childNodes.length === 1, 'strip removes blocked elements and keeps <style>');
+
+  assert(scanHtmlForActiveContent('<a href="java&#115;cript&colon;x()">y</a>').length === 1, 'scan decodes entity-encoded schemes');
+  assert(scanHtmlForActiveContent('<a href="&#x6a;avascript:x()">y</a>').length === 1, 'scan decodes hex entities');
+  assert(scanHtmlForActiveContent('<a href="java&Tab;script:x()">y</a>').length === 1, 'scan decodes named whitespace entities');
+  assert(scanHtmlForActiveContent('<svg><animate attributeName=href values=javascript:x()></svg>').length === 1, 'scan reads unquoted attrs');
+  assert(scanHtmlForActiveContent('<!-- <iframe src=x></iframe> --><span>ok</span>').length === 0, 'scan skips comments');
+  assert(scanHtmlForActiveContent('<a title="<iframe>">y</a>').length === 0, 'scan skips markup inside a quoted value');
+  assert(scanHtmlForActiveContent(`<span>${'x'.repeat(INJECT_HTML_MAX_CHARS)}</span><iframe>`).length === 0, 'scan reads only what the runtime parses');
+  assert(scanHtmlForActiveContent('<iframe title="unterminated').length === 1, 'scan still sees the tag of an unterminated element');
+  const start = Date.now();
+  scanHtmlForActiveContent('<a "'.repeat(10000));
+  assert(Date.now() - start < 1000, 'scan stays fast on unterminated quotes');
+}
+
 // ---- stripActiveContent ------------------------------------------------
 function tStrip(): void {
   console.log('stripActiveContent:');
