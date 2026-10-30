@@ -761,7 +761,11 @@ const teardownCase: ConformanceCase = {
         shadowHosts: document.querySelectorAll('[data-shim="shadow-host"]').length,
         stamped: Array.from(document.querySelectorAll('[data-shim-css], [data-shim-replace-root]')).map((e) => e.id || e.tagName),
       }))()`);
-      return isRecord(s) && s.cleaned === 'yes' && s.portal === 0 && s.adDisplay !== 'none' ? s : null;
+      // Each removal is its own message, and a read can land between two of
+      // them. Shadow is the last key sent, so the snapshot waits for it: stopping
+      // earlier reports a removal that simply hasn't arrived as a leak. A real
+      // leak never gets here, and every check below fails on the empty snapshot.
+      return isRecord(s) && s.cleaned === 'yes' && s.portal === 0 && s.adDisplay !== 'none' && s.shadowHosts === 0 ? s : null;
     });
     const s: Record<string, unknown> = restored ?? {};
     kit.check('hide undone', s.adDisplay === 'block', s.adDisplay);
@@ -1903,9 +1907,31 @@ const unattachedOutputCase: ConformanceCase = {
   },
 };
 
+const noNodeCase: ConformanceCase = {
+  id: 'handler-no-node',
+  title: 'a handler sees no require or process',
+  covers: ['script'],
+  async run(kit) {
+    if (!(await kit.load('/apply'))) return;
+    kit.apply({
+      id: 'no-node',
+      anchor: css('#lead'),
+      mutations: [{ kind: 'script', handler: 'probe' }],
+      handlers: {
+        probe: `function ({ anchor }) {
+          anchor.setAttribute('data-conf-node', [typeof require, typeof process, typeof Buffer, typeof __dirname === 'string' ? 'string' : ''].join(','));
+        }`,
+      },
+    });
+    const seen = await kit.until(async () => (await kit.read(`document.querySelector('#lead').getAttribute('data-conf-node')`)) ?? null);
+    kit.check('require, process and Buffer are all undefined in a handler',
+      typeof seen === 'string' && seen.startsWith('undefined,undefined,undefined,'), seen);
+  },
+};
+
 export const CONFORMANCE_CASES: readonly ConformanceCase[] = [
   applyCase, setWitnessCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, cropScrollCase, strictCspCase, sharedModuleCase, noMatchCase, ariaCase,
-  inputCase, supersededLoadCase, anchorChangeCase, unattachedOutputCase,
+  inputCase, supersededLoadCase, anchorChangeCase, unattachedOutputCase, noNodeCase,
 ];
 
 /** Every capability some case vouches for. */
@@ -1918,6 +1944,8 @@ export function coveredCapabilities(cases: readonly ConformanceCase[] = CONFORMA
 export interface RunConformanceOptions {
   /** Run only these case ids. */
   only?: readonly string[];
+  /** Skip these case ids: a host that can't meet one yet, and says why. */
+  skip?: readonly string[];
   /** Called as each case finishes. */
   onCase?(result: ConformanceCaseResult): void;
 }
@@ -1925,7 +1953,8 @@ export interface RunConformanceOptions {
 /** Run the suite against one host. Never throws: a case that throws fails with the error. */
 export async function runConformance(ctx: ConformanceContext, options: RunConformanceOptions = {}): Promise<ConformanceCaseResult[]> {
   const results: ConformanceCaseResult[] = [];
-  const cases = options.only ? CONFORMANCE_CASES.filter((c) => options.only?.includes(c.id)) : CONFORMANCE_CASES;
+  const cases = (options.only ? CONFORMANCE_CASES.filter((c) => options.only?.includes(c.id)) : CONFORMANCE_CASES)
+    .filter((c) => !options.skip?.includes(c.id));
   for (const c of cases) {
     const checks: ConformanceCheck[] = [];
     const applied = new Set<string>();
