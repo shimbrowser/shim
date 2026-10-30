@@ -30,6 +30,18 @@ export function previewKey(patchId: string, ruleId: string): string {
   return `preview:${patchId}:${ruleId}`;
 }
 
+/**
+ * The patch a preview key belongs to, or null when `key` isn't one. The id ends
+ * at the first `:`, so a rule id may carry colons; a patch id can't (minted ids
+ * never do), and one that somehow did would read as a different patch here.
+ */
+export function previewKeyPatchId(key: string): string | null {
+  const prefix = 'preview:';
+  if (!key.startsWith(prefix)) return null;
+  const end = key.indexOf(':', prefix.length);
+  return end > prefix.length ? key.slice(prefix.length, end) : null;
+}
+
 // Human-readable per-rule status line from the freshest rule-status event
 // this emit produced. mount-route rules report matched: 0 whenever the
 // current path isn't the route — that's the normal resting state, not a

@@ -25,7 +25,7 @@ import {
   preflightSpec, scanHandlerSource, scanRuleHandlers, unsupportedApiMembers, verificationLevel, UNSUPPORTED,
 } from '../src/capability-preflight';
 import type { PageHostCapabilities } from '../src/page-host';
-import { describeRuleStatus, previewKey, previewNoMatch, previewMatchedNothing, shimViewPageCaption } from '../src/preview-evidence';
+import { describeRuleStatus, previewKey, previewKeyPatchId, previewNoMatch, previewMatchedNothing, shimViewPageCaption } from '../src/preview-evidence';
 import type { Spec, Rule } from '../src/types';
 import { ariaSelector } from '../src/anchor-selector';
 
@@ -237,6 +237,8 @@ console.log('evidence wording');
   check('matched 0', describeRuleStatus(hide, { matched: 0 }) === 'matched 0 elements — the anchor does not resolve on this page');
   check('no status yet', describeRuleStatus(hide, undefined) === 'no status event received — the engine may not have scanned yet');
   check('the preview key', previewKey('shim-1', 'r') === 'preview:shim-1:r');
+  check('a preview key reads back to its patch', previewKeyPatchId(previewKey('shim-1', 'r:x')) === 'shim-1');
+  check('anything else has no patch', previewKeyPatchId('shim-1') === null && previewKeyPatchId('preview:shim-1') === null && previewKeyPatchId('preview::r') === null);
   check('the full-viewport caption', shimViewPageCaption({ url: 'https://a.test/', sizeBytes: 2048 }).startsWith('Screenshot of the visible viewport at https://a.test/ (2KB).'));
   check('the crop caption', shimViewPageCaption({ croppedTo: '.a', elementBox: { w: 3, h: 4 } }).startsWith('Cropped screenshot around `.a` (element measures 3×4px) at current page'));
 }
