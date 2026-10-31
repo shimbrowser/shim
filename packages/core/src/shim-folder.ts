@@ -487,11 +487,10 @@ function checkAuthoredSpec(raw: Record<string, unknown>, handlers: Record<string
   return raw as unknown as Spec;
 }
 
-// Import (parseShimFile → assertHandlersBound) compiles and runs every
-// `script` mutation's handler module and refuses the file unless it exports a
-// function; lint only syntax-checks transforms and wraps. So pack refuses
-// what can be told without running the code (handlerModuleProblem) rather
-// than write a file the browser won't import.
+// Import refuses a `script` mutation's handler module that plainly can't
+// export a function (handlerModuleProblem), without running it; lint only
+// syntax-checks transforms and wraps. So pack refuses the same, rather than
+// write a file the browser won't import.
 /**
  * Every `script` handler module that can't export a function, one problem
  * per file — what `packShim` refuses after spec-lint. `shim lint` reports

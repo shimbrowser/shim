@@ -339,8 +339,8 @@ rejects('match.hosts missing at pack', 'malformed-shim-folder', () => packShim(e
 rejects('a non-string host at pack', 'malformed-shim-folder', () => packShim(edit((spec) => { (spec as unknown as { match: unknown }).match = { hosts: [42] }; })), 'match.hosts');
 rejects('a lint error at pack', 'spec-lint', () => packShim(edit((spec) => { spec.rules?.push({ id: 'x', mutations: [{ kind: 'cspRelax' }] }); })), 'unknown mutation kind "cspRelax"');
 rejects('a transform that does not parse', 'spec-lint', () => packShim({ ...good(), 'handlers/strip.js': 'module.exports = function (b) { return b;' }), 'does not parse as JavaScript');
-// The script handler modules import would refuse (assertHandlersBound runs
-// them and wants a function at module.exports).
+// The script handler modules import would refuse (assertHandlersBound reads
+// them, without running them, for a function at module.exports).
 rejects('a script handler module that does not parse', 'malformed-shim-folder',
   () => packShim({ ...good(), 'handlers/notes.js': 'module.exports = function (ctx) {' }), 'handlers/notes.js does not parse as JavaScript');
 rejects('a script handler module exporting a number', 'malformed-shim-folder',

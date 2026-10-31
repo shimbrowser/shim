@@ -307,7 +307,7 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
   Object.defineProperty(host, config.globalName, { value: control, configurable: false, enumerable: false, writable: false });
 
   // --- runtime error reporter (handler throws that escape the engine) ----------
-  // Same attribution as the browser's page-preload-error-reporter: only throws
+  // Same attribution as the browser's runtime error reporter: only throws
   // whose stack or source names a handler's sourceURL are reported.
   const HANDLER_URL_RE = /shim:\/\/patches\/([^/\s]+)\/handlers\/([^/.\s]+)/;
   const trimStack = (stack: string): string => (stack ? stack.split('\n').slice(0, 8).join('\n') : '');

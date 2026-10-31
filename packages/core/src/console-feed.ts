@@ -28,9 +28,8 @@ export interface ConsoleFeed {
   clear(): void;                      // drops every entry (ring and since-emit)
 }
 
-// Same virtual-URL shape page-preload.ts's PATCH_HANDLER_URL_RE matches
-// (committed handlers via compileBag's `filename:`, previews via the
-// //# sourceURL pragma; the headless driver compiles under the same one).
+// Same virtual-URL shape the browser's runtime error reporter matches
+// (every host's compile sets it with a //# sourceURL pragma).
 // Duplicated here because this module is host-agnostic and page-preload is a
 // preload; if the sourceURL shape ever changes, change BOTH (cross-ref
 // comment lives on both regexes). Matched against a line's SOURCE only, never

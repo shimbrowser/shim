@@ -117,9 +117,8 @@ const PAGE_IIFE_PREFIX = '(function () {\nvar module = { exports: {} };\n(functi
 const PAGE_IIFE_SUFFIX = '\n})(module, module.exports);\nreturn typeof module.exports === "function" ? module.exports : null;\n})()';
 // A name referenced from both worlds is one source (lint refuses two), so its
 // expression picks the wrapper where it is evaluated: only the isolated world
-// has a string `__filename` in scope (compileBag's module wrapper on the
-// stored path, compileInlineHandlers inline); a transform / wrap spliced into
-// the page sees none. Re-wrapped as `module.exports = <expr>;` it picks the
+// has a string `__filename` in scope (a host's module and inline compile
+// scopes); a transform / wrap spliced into the page sees none. Re-wrapped as `module.exports = <expr>;` it picks the
 // same way, so a commit keeps both worlds' conventions.
 const CROSS_PREFIX = "(typeof __filename === 'string'\n? ";
 const CROSS_MIDDLE = '\n: ';
@@ -211,21 +210,20 @@ const MODULE_REF_RE = /\bmodule\b/;
 // The other ways a module can reach `module` without spelling it: the
 // wrapper's `arguments` (`arguments[0].exports = …`), a direct `eval`, and a
 // unicode escape in an identifier (`m\u006fdule`). A source using any of them
-// is left to the browser's execution-based check.
+// passes here and answers at run time.
 const INDIRECT_MODULE_REF_RE = /\barguments\b|\beval\b|\\u/;
 
 /**
  * Why a handler module can't give the browser a function, or null when
- * nothing static rules it out. The browser compiles a module as
- * `(function (module, exports) { <source> })` and requires
- * `module.exports` to be a function after it runs (import's
- * assertHandlersBound). Core never runs handler code, so this is the static
- * part of that check, and it never refuses a module import would accept: a
- * syntax error, a module that never refers to `module` and so can't assign
- * `module.exports` (a bare `function notes() {}`), or one that exports a
- * literal (`module.exports = 42;`, `= {}`, `= []`). An export only known at
- * run time (a call's result, a variable) passes here and is the browser's to
- * check.
+ * nothing static rules it out. A host compiles a module as
+ * `(function (module, exports) { <source> })` and needs `module.exports` to
+ * be a function once it runs. Nothing runs handler code to validate it, on
+ * import or commit, because that code isn't approved yet, so this is the whole
+ * check: a syntax error, a module that never refers to `module` and so can't
+ * assign `module.exports` (a bare `function notes() {}`), or one that exports
+ * a literal (`module.exports = 42;`, `= {}`, `= []`). An export only known at
+ * run time (a call's result, a variable) passes here and is reported when the
+ * handler boots.
  */
 export function handlerModuleProblem(moduleSource: string, probe: CompileProbe = syntaxProbe): string | null {
   if (!moduleSource.trim()) return 'is empty';

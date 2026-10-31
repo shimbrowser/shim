@@ -1944,8 +1944,6 @@ export function coveredCapabilities(cases: readonly ConformanceCase[] = CONFORMA
 export interface RunConformanceOptions {
   /** Run only these case ids. */
   only?: readonly string[];
-  /** Skip these case ids: a host that can't meet one yet, and says why. */
-  skip?: readonly string[];
   /** Called as each case finishes. */
   onCase?(result: ConformanceCaseResult): void;
 }
@@ -1953,8 +1951,7 @@ export interface RunConformanceOptions {
 /** Run the suite against one host. Never throws: a case that throws fails with the error. */
 export async function runConformance(ctx: ConformanceContext, options: RunConformanceOptions = {}): Promise<ConformanceCaseResult[]> {
   const results: ConformanceCaseResult[] = [];
-  const cases = (options.only ? CONFORMANCE_CASES.filter((c) => options.only?.includes(c.id)) : CONFORMANCE_CASES)
-    .filter((c) => !options.skip?.includes(c.id));
+  const cases = options.only ? CONFORMANCE_CASES.filter((c) => options.only?.includes(c.id)) : CONFORMANCE_CASES;
   for (const c of cases) {
     const checks: ConformanceCheck[] = [];
     const applied = new Set<string>();
