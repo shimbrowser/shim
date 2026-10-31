@@ -53,7 +53,19 @@ const MODULE_IIFE_SUFFIX = '\n}).call(module.exports, module, module.exports, '
   + 'typeof __filename === "undefined" ? "" : __filename, '
   + 'typeof __dirname === "undefined" ? "" : __dirname);\nreturn module.exports;\n})()';
 
-const WRAPPED_EXPRESSION_RE = /^\s*module\.exports\s*=\s*([\s\S]*?)\s*;?\s*$/;
+// A trailing whitespace run must not be scanned once per position: this reads
+// source no one has approved yet, so it stays linear in the source's length.
+function wrappedExpression(moduleSource: string): string | undefined {
+  const trimmed = moduleSource.trim();
+  const body = trimmed.endsWith(';') ? trimmed.slice(0, -1).trimEnd() : trimmed;
+  const prefix = /^module\.exports\s*=\s*/.exec(body);
+  return prefix ? body.slice(prefix[0].length) : undefined;
+}
+
+// wholeLiteral parses once per closing bracket. Past these bounds it gives no
+// answer, and the handler fails where it runs instead.
+const MAX_LITERAL_PROBES = 64;
+const MAX_LITERAL_CHARS = 256 * 1024;
 
 /** `source` without the module wrapper moduleToExpression adds: core's own text, not the handler's. */
 export function withoutModuleWrapper(source: string): string {
@@ -165,7 +177,7 @@ function safeBareExpression(expression: string): boolean {
  * null for any other module.
  */
 export function exportedExpression(moduleSource: string): string | null {
-  const inner = exactWrappedExpression(moduleSource) ?? WRAPPED_EXPRESSION_RE.exec(moduleSource)?.[1];
+  const inner = exactWrappedExpression(moduleSource) ?? wrappedExpression(moduleSource);
   return inner && syntaxProbe(`(${inner}\n)`).ok ? inner : null;
 }
 
@@ -190,8 +202,9 @@ const PRIMITIVE_LITERAL_RE = new RegExp([
 function wholeLiteral(expression: string): string | null {
   const open = expression[0];
   const close = open === '{' ? '}' : open === '[' ? ']' : null;
-  if (!close) return null;
-  for (let end = expression.indexOf(close); end !== -1; end = expression.indexOf(close, end + 1)) {
+  if (!close || expression.length > MAX_LITERAL_CHARS) return null;
+  let probes = 0;
+  for (let end = expression.indexOf(close); end !== -1 && probes < MAX_LITERAL_PROBES; end = expression.indexOf(close, end + 1), probes++) {
     if (!syntaxProbe(`(${expression.slice(0, end + 1)}\n)`).ok) continue;
     if (end !== expression.length - 1) return null;
     return open === '{' ? 'an object' : 'an array';
