@@ -143,7 +143,8 @@ in `try` / `catch`.
   `localStorage` or cookies.
 - **`api.ai.complete({ prompt | messages, system?, model?, maxTokens? })`** — a model call on
   the user's own key, with `"permissions": ["ai"]` declared and granted. Resolves
-  `{ ok: true, text }` or `{ ok: false, error }`.
+  `{ ok: true, text }` or `{ ok: false, error }`; a limit the user set answers
+  `ai-budget-exceeded` or `ai-input-too-large`.
 - **`api.db.query(sql, params?)` / `api.db.run(sql, params?)`** — the composition's own
   SQLite database (`storage` tables), and **`api.db.connection(name)`** — a declared
   remote database the user connects in Shim's settings (`references/databases.md`).
