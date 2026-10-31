@@ -55,6 +55,11 @@ const MODULE_IIFE_SUFFIX = '\n}).call(module.exports, module, module.exports, '
 
 const WRAPPED_EXPRESSION_RE = /^\s*module\.exports\s*=\s*([\s\S]*?)\s*;?\s*$/;
 
+/** `source` without the module wrapper moduleToExpression adds: core's own text, not the handler's. */
+export function withoutModuleWrapper(source: string): string {
+  return source.split(MODULE_IIFE_PREFIX).join('\n').split(MODULE_IIFE_SUFFIX).join('\n');
+}
+
 /**
  * The rule-local expression form of a handler module (a shim folder's
  * handlers/<name>.js going back onto `rule.handlers`). A module that is just

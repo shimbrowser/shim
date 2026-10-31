@@ -36,7 +36,7 @@ import {
 import { validateRewriteMutation, detectTransformForm } from './rewrite-response';
 import { validateInterceptMutation } from './intercept';
 import { syntaxProbe } from './syntax-probe';
-import { expressionToModule, handlerModuleProblem } from './handler-source';
+import { expressionToModule, handlerModuleProblem, withoutModuleWrapper } from './handler-source';
 import { ENGINE_MANAGED_ANCHOR_KEYS } from './managed-anchor';
 
 // A transform / wrap is kept by transformLiteral only if it evaluates to a
@@ -166,6 +166,129 @@ function observerLoopWarning(handlerName: string, src: string): string | null {
     + 'To catch new repeated elements, anchor the element itself (the engine dispatches the handler once per match '
     + 'and auto-dispatches new ones). If you still need an observer, disconnect() before mutating and re-observe() '
     + 'after, plus register observer.disconnect via api.cleanup.';
+}
+
+// Handler source with comments, string and regex contents and template text
+// blanked, so a word in a message or a pattern isn't read as code. Substitutions
+// in a template are code. Core has no parser, so a regex is told from a division
+// by what comes before it. After `)` or `}` either can follow, and a closing `/`
+// on the same line reads as a regex: a false error stops a working handler, while
+// `a) / process.x / b` going unseen only skips a warning about a rare shape.
+const REGEX_MAY_FOLLOW = /(?:^|[(,=:[!&|?{}();+\-*%<>~^]|\b(?:return|typeof|case|in|of|delete|void|throw|new|else|do|yield|await))\s*$/;
+
+const MAX_REGEX_LITERAL = 1024;
+const REGEX_LOOKBEHIND = 12;
+
+function regexEnd(src: string, start: number): number | null {
+  let inClass = false;
+  const limit = Math.min(src.length, start + MAX_REGEX_LITERAL);
+  for (let i = start + 1; i < limit; i++) {
+    const c = src[i];
+    if (c === '\n') return null;
+    if (c === '\\') i++;
+    else if (c === '[') inClass = true;
+    else if (c === ']') inClass = false;
+    else if (c === '/' && !inClass) return i + 1;
+  }
+  return null;
+}
+
+function codeOnly(src: string): string {
+  // Pieces and a short tail, not one growing string: reading the end of a string
+  // built by appending flattens all of it, which made this quadratic in slashes.
+  const pieces: string[] = [];
+  let tail = '';
+  const emit = (text: string): void => {
+    pieces.push(text);
+    tail = (tail + text).slice(-REGEX_LOOKBEHIND);
+  };
+  let i = 0;
+  // Open brace depth inside each `${` still open.
+  const substitutions: number[] = [];
+  const templateText = (from: number): number => {
+    let at = from;
+    while (at < src.length) {
+      if (src[at] === '\\') at += 2;
+      else if (src[at] === '`') { emit(' '); return at + 1; }
+      else if (src[at] === '$' && src[at + 1] === '{') { substitutions.push(0); emit(' '); return at + 2; }
+      else at++;
+    }
+    return at;
+  };
+  while (i < src.length) {
+    const c = src[i];
+    const top = substitutions.length - 1;
+    const regexClose = c === '/' && REGEX_MAY_FOLLOW.test(tail) ? regexEnd(src, i) : null;
+    if (c === '/' && src[i + 1] === '/') {
+      const end = src.indexOf('\n', i);
+      i = end < 0 ? src.length : end;
+    } else if (c === '/' && src[i + 1] === '*') {
+      const end = src.indexOf('*/', i + 2);
+      i = end < 0 ? src.length : end + 2;
+    } else if (regexClose !== null) {
+      i = regexClose;
+      emit('0');
+    } else if (c === '"' || c === "'") {
+      i++;
+      while (i < src.length && src[i] !== c) i += src[i] === '\\' ? 2 : 1;
+      i++;
+      emit('""');
+    } else if (c === '`') {
+      emit('""');
+      i = templateText(i + 1);
+    } else if (c === '}' && top >= 0 && substitutions[top] === 0) {
+      substitutions.pop();
+      emit(' ');
+      i = templateText(i + 1);
+    } else {
+      if (top >= 0 && c === '{') substitutions[top] = (substitutions[top] ?? 0) + 1;
+      if (top >= 0 && c === '}') substitutions[top] = (substitutions[top] ?? 0) - 1;
+      emit(c ?? '');
+      i++;
+    }
+  }
+  return pieces.join('');
+}
+
+// Whether the handler defines `name` itself anywhere: a declaration,
+// destructuring, a parameter, a catch binding, or a method or key of that name.
+// Scope isn't tracked, so a name defined in one place and used free in another
+// goes unreported rather than wrongly refused.
+function bindsName(code: string, name: string): boolean {
+  const word = `(?<![.\\w$])${name}(?![\\w$])`;
+  return [
+    `\\b(?:const|let|var|function|class)\\s+${name}(?![\\w$])`,
+    `\\b(?:const|let|var)\\s*[{[][^=;]{0,200}${word}`,
+    `${word}\\s*=>`,
+    `\\([^()]{0,200}${word}[^()]{0,200}\\)\\s*=>`,
+    `\\bfunction\\b[^(]{0,80}\\([^()]{0,200}${word}[^()]{0,200}\\)`,
+    `(?<!\\b(?:if|while|for|switch|with|catch)\\s*)\\([^().]{0,200}${word}[^().]{0,200}\\)\\s*\\{`,
+    `\\bcatch\\s*\\(\\s*${name}\\s*\\)`,
+    `${word}\\s*\\([^()]{0,200}\\)\\s*\\{`,
+    `[{,]\\s*${name}\\s*:`,
+  ].some((form) => new RegExp(form).test(code));
+}
+
+// What only exists under Node. A bare `typeof require` guard is fine, and so is
+// `api.process(...)` or a name the handler declares itself.
+const NODE_USES: readonly { name: string; use: RegExp }[] = [
+  { name: 'require', use: /(?<![.\w$])require\s*\(/ },
+  { name: 'process', use: /(?<![.\w$])process\s*\./ },
+  { name: 'Buffer', use: /(?<![.\w$])Buffer\s*[.(]/ },
+  { name: '__dirname', use: /(?<![.\w$])__dirname(?![\w$])/ },
+];
+
+const MAX_NODE_SCAN = 256 * 1024;
+
+// Help for an author, not a security check: text can always hide a use, and no
+// amount of parsing here changes that. It gives the benefit of the doubt, since a
+// false refusal stops a working handler.
+function nodeUseProblem(handlerName: string, src: string): string | null {
+  const code = codeOnly(withoutModuleWrapper(src.slice(0, MAX_NODE_SCAN)));
+  const found = NODE_USES.filter(({ name, use }) => use.test(code) && !bindsName(code, name)).map(({ name }) => name).join(', ');
+  if (!found) return null;
+  return `handler "${handlerName}" uses ${found}, which handlers don't have: they run with no Node. `
+    + 'Use the page\'s own APIs, or api.fetch and api.storage for what Node did.';
 }
 
 // The one observer shape that provably can't see its own writes, recognized
@@ -683,7 +806,13 @@ function toPascalCase(value: string): string {
 // `.shim` file's top-level `handlers` map) — same role as
 // shims.assertHandlersBound's extraDefinedSources. Read by the handler-name
 // collision check only; every other check sees exactly what it always has.
-function lintSpec(spec: unknown, carriedHandlers?: unknown): LintResult {
+export interface LintOptions {
+  // A shim being imported. The Node lint helps an author, so it stays out of an
+  // import: the review card says what any handler code can do.
+  imported?: boolean;
+}
+
+function lintSpec(spec: unknown, carriedHandlers?: unknown, options: LintOptions = {}): LintResult {
   const errors: string[] = [];
   const warnings: string[] = [];
 
@@ -910,14 +1039,29 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown): LintResult {
     }
   }
   lintHandlerNameCollisions(rulesList, s ? s.handlers : undefined, carriedHandlers, errors);
+  if (!options.imported) {
+    const seen = new Set<string>();
+    const noteNodeUse = (name: string, src: unknown): void => {
+      if (typeof src !== 'string' || seen.has(`${name}\u0000${src}`)) return;
+      seen.add(`${name}\u0000${src}`);
+      const problem = nodeUseProblem(name, src);
+      if (problem) errors.push(problem);
+    };
+    for (const rule of rulesList) {
+      if (isRecord(rule) && isRecord(rule.handlers)) for (const [name, src] of Object.entries(rule.handlers)) noteNodeUse(name, src);
+    }
+    for (const bag of [s?.handlers, carriedHandlers, s?.sharedHandlers]) {
+      if (isRecord(bag)) for (const [name, src] of Object.entries(bag)) noteNodeUse(name, src);
+    }
+  }
   return { errors, warnings };
 }
 
 // Throw on lint ERRORS (unknown kinds / malformed mutations) — same contract
 // as shims.assertHandlersBound, so a bad emit rejects with a clear message in
 // the same authoring turn. Warnings don't throw; callers surface them.
-function assertNoSpecErrors(spec: unknown, carriedHandlers?: unknown): void {
-  const { errors } = lintSpec(spec, carriedHandlers);
+function assertNoSpecErrors(spec: unknown, carriedHandlers?: unknown, options?: LintOptions): void {
+  const { errors } = lintSpec(spec, carriedHandlers, options);
   if (errors.length === 0) return;
   const err = new Error(`spec uses unsupported constructs: ${errors.join('; ')}`) as Error & {
     code: string;

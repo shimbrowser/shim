@@ -12,6 +12,9 @@ The handler receives `{ anchor, mutation, rule, spec, api }` and returns the DOM
 nodes) it created. Returning them opts into **self-healing**: if the site's re-render
 removes them, the engine runs the handler again.
 
+Handlers run with no Node: `require`, `process`, `Buffer` and `__dirname` aren't there, and a
+handler using them fails lint. Use the page's own APIs, or `api.fetch` and `api.storage`.
+
 A handler may be `async` (return a Promise). The engine awaits it and mounts what it
 resolves to, and a rejection is reported as a handler error, as a throw is. Until it
 settles, that element doesn't count in the rule's match count and isn't handled again. So

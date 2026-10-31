@@ -8,6 +8,7 @@
 // (surfaced to the model + chat). Bare node — no db, no Electron.
 
 import { lintSpec, assertNoSpecErrors, observerLoopWarning } from '../src/spec-lint';
+import { moduleToExpression } from '../src/handler-source';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string) {
@@ -55,6 +56,57 @@ check('no error for unknown mutation field', res.errors.length === 0);
 console.log('unknown anchor field → warning');
 res = lintSpec({ rules: [{ id: 'a', anchor: { primary: {}, bogus: 1 }, mutations: [{ kind: 'hide' }] }] });
 check('unknown anchor field warns', res.warnings.some((w) => /bogus/.test(w)));
+
+console.log('handlers needing Node');
+{
+  const bare = (handlers: Record<string, string>) => ({ rules: [{ id: 'a', mutations: [{ kind: 'script', handler: Object.keys(handlers)[0] }], handlers }] });
+  const flagged = (src: string) => lintSpec(bare({ h: src })).errors.some((e) => /no Node/.test(e));
+  check('require( is an error', flagged('function () { return require("fs"); }'));
+  check('process. is an error', flagged('function () { return process.env.X; }'));
+  check('Buffer is an error', flagged('function () { return Buffer.from("x"); }'));
+  check('__dirname is an error', flagged('function () { return __dirname; }'));
+  check('the error names what it found', lintSpec(bare({ h: 'function () { require("a"); process.exit(); }' })).errors.some((e) => /require, process/.test(e)));
+  check('words in strings and comments aren\'t code', !flagged('function () { /* require("x") */ return "process.env approval-required"; } // Buffer.from'));
+  check('words in a template aren\'t code', !flagged('function () { return `require("x")`; }'));
+  check('a method named the same isn\'t Node', !flagged('function ({ api }) { api.require("x"); api.process.run(); }'));
+  check('a callback parameter isn\'t Node', !flagged('function () { return [{ run: () => 1 }].map(process => process.run()); }'));
+  check('a parenthesized parameter isn\'t Node', !flagged('function () { return [1].map((x, process) => process.run()); }'));
+  check('a function parameter isn\'t Node', !flagged('function (Buffer) { return Buffer.from("x"); }'));
+  check('destructuring isn\'t Node', !flagged('function () { const { process } = { process: { run() {} } }; return process.run(); }'));
+  check('a catch binding isn\'t Node', !flagged('function () { try { x(); } catch (process) { process.run(); } }'));
+  check('a regex isn\'t code', !flagged('function ({ anchor }) { anchor.hidden = /process.env/.test(anchor.textContent); return /require\\(/; }'));
+  check('a division isn\'t a regex', flagged('function (a, b) { const x = a / b; const y = a / b; return require("fs"); }'));
+  check('a substitution is code', flagged('function ({ anchor }) { anchor.textContent = `${require("fs").readFileSync("x")}`; }'));
+  check('a nested template is walked', flagged('function () { return `a${`b${process.env.X}`}c`; }'));
+  check('text after a substitution is text', !flagged('function () { return `${1 + 1} require("x")`; }'));
+  check('braces in a substitution don\'t end it', !flagged('function () { return `${({ a: 1 }).a} process.env`; }'));
+  check('a condition isn\'t a binding', flagged('function ({ anchor }) { if (process.env.NODE_ENV) { anchor.hidden = true; } }'));
+  check('a loop condition isn\'t a binding', flagged('function () { while (process.exitCode) { return; } }'));
+  check('a later substitution is code', flagged('function () { const label = "env"; return `${label}: ${process.env.NODE_ENV}`; }'));
+  check('a regex after a condition isn\'t code', !flagged('function ({ anchor }) { if (anchor) /process.env/.test(anchor.textContent); }'));
+  check('a regex after a block isn\'t code', !flagged('function ({ anchor }) { if (anchor) {} /process.env/.test(anchor.textContent); }'));
+  check('a method parameter isn\'t Node', !flagged('function () { return { run(process) { return process.x; } }; }'));
+  check('a method of that name isn\'t Node', !flagged('function () { const helpers = { require() { return 1; } }; return helpers.require(); }'));
+  check('a key of that name isn\'t Node', !flagged('function () { const metadata = { __dirname: "folder" }; return metadata.__dirname; }'));
+  check('a call in a condition is still a use', flagged('function () { if (require("fs")) { return 1; } }'));
+  check('a guard isn\'t a use', !flagged('function () { return typeof require === "undefined" && typeof process === "undefined"; }'));
+  check('a name the handler declares isn\'t Node', !flagged('function () { const process = { run() {} }; return process.run(); }'));
+  check('core\'s own module wrapper isn\'t a use', !flagged(moduleToExpression('var x = 1;\nmodule.exports = function () { return x; };\n')));
+  check('a use inside a wrapped module still is', flagged(moduleToExpression('var fs = require("fs");\nmodule.exports = function () { return fs; };\n')));
+  const imported = lintSpec(bare({ h: 'function () { require("fs"); }' }), undefined, { imported: true });
+  check('an import isn\'t linted for Node: its review says what code can do', imported.errors.length === 0 && !imported.warnings.some((w) => /Node/.test(w)), imported.warnings.join(' | '));
+  const started = Date.now();
+  flagged(`function () { return ${'/ '.repeat(200000)}; }`);
+  flagged(`function () { ${'('.repeat(100000)} }`);
+  flagged(`function () { return ${'=/['.repeat(85000)}; }`);
+  flagged(`function () { const ${'{'.repeat(100000)} }`);
+  flagged(`function () { require${' '.repeat(200000)}; }`);
+  check('hostile sources scan in bounded time', Date.now() - started < 5000, `${Date.now() - started}ms`);
+  check('on import it never says Node is blocked', !imported.warnings.some((w) => /no Node|don't have/.test(w)), imported.warnings.join(' | '));
+  check('a carried module is scanned', lintSpec({ rules: [] }, { h: 'module.exports = function () { process.exit(); };' }).errors.some((e) => /no Node/.test(e)));
+  check('a shared handler is scanned', lintSpec({ rules: [], sharedHandlers: { h: 'function () { require("x"); }' } }).errors.some((e) => /no Node/.test(e)));
+  check('one source is reported once', lintSpec({ rules: bare({ h: 'function () { require("x"); }' }).rules, handlers: { h: 'function () { require("x"); }' } }).errors.filter((e) => /no Node/.test(e)).length === 1);
+}
 
 console.log('per-patch declarative kind is allowed');
 res = lintSpec({ mutations: { 'my-custom': {} }, rules: [{ id: 'a', mutations: [{ kind: 'my-custom' }] }] });
