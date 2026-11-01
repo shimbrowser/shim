@@ -279,7 +279,7 @@ function run(patch: PatchBundle, api: CoreApi): PatchControl {
     // Tier-1 CSS tokens). Leaves injected stylesheets (`mutation-<kind>` /
     // `patch-<id>`) in place — they're idempotent and may be shared with other
     // patches. Does NOT recall rules already forwarded into child iframes via
-    // anchor.iframe; those persist in the iframe's stub engine until navigation.
+    // anchor.iframe; they run in the iframe's stub engine, and the host recalls them.
     teardownAll() {
       tornDown = true;
       for (const fn of ruleTeardowns.values()) {
