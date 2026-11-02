@@ -91,7 +91,13 @@ function emitDeclarations() {
   if (res.status !== 0) throw new Error(`@shimbrowser/core: tsc declaration emit failed (exit ${res.status})`);
 }
 
-async function buildCore({ declarations = true } = {}) {
+// esbuild options that set how the CommonJS modules are minified and mapped.
+// The default is what the published package carries: inline maps with the
+// source embedded, so a consumer's stack traces resolve with nothing beside
+// the file. A host that packs these modules into a product passes its own.
+const PUBLISHED_MODULE_PROFILE = { sourcemap: 'inline' };
+
+async function buildCore({ declarations = true, moduleProfile = PUBLISHED_MODULE_PROFILE } = {}) {
   fs.rmSync(DIST, { recursive: true, force: true });
   const entryPoints = walk(SRC).filter((f) => f.endsWith('.ts') && !f.endsWith('.d.ts'));
 
@@ -102,9 +108,7 @@ async function buildCore({ declarations = true } = {}) {
     format: 'cjs',
     platform: 'neutral',
     target: 'es2022',
-    // inline, matching the app's own per-file build: the browser turns on
-    // source-mapped stacks at runtime and inline maps survive asar packaging.
-    sourcemap: 'inline',
+    ...moduleProfile,
     logLevel: 'warning',
   });
 
@@ -115,7 +119,7 @@ async function buildCore({ declarations = true } = {}) {
   return { modules: entryPoints.length, pageBundle: path.join(DIST, PAGE_BUNDLE_FILE) };
 }
 
-module.exports = { buildCore, pageBundleOptions, nodeBuiltinGuard, isNodeBuiltin, PAGE_BUNDLE_FILE, PAGE_BUNDLE_GLOBAL, DIST, SRC };
+module.exports = { buildCore, PUBLISHED_MODULE_PROFILE, pageBundleOptions, nodeBuiltinGuard, isNodeBuiltin, PAGE_BUNDLE_FILE, PAGE_BUNDLE_GLOBAL, DIST, SRC };
 
 if (require.main === module) {
   buildCore().then(({ modules }) => {
