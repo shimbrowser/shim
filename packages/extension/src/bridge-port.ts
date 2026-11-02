@@ -10,12 +10,18 @@
 //     shutdown the worker gives it (every session ended, every remembered
 //     consent forgotten), then reconnects with backoff while the setting
 //     stays on; turning the setting off runs the shutdown and disconnects.
-//   - Pure enough to pin: Chrome's port is injected.
+//   - The backoff is a setTimeout, which dies with the worker, and once the
+//     native port is down nothing keeps the worker alive. So a backstop runs
+//     for as long as the setting is on: its tick wakes a worker that went and
+//     retries, and does nothing while the port is up.
+//   - Pure enough to pin: Chrome's port and the backstop are injected.
 
 import { RequestAssembler, isAbort, type BridgeRequest, type ExtensionToHost } from './bridge-frames';
 
 export const HOST_NAME = 'com.shimbrowser.bridge';
 export const RECONNECT_MS = [1000, 3000, 10_000, 30_000];
+/** The backstop's period: the shortest a packed extension's alarm may repeat at. */
+export const BACKSTOP_MINUTES = 0.5;
 
 export interface PortLike {
   postMessage(message: unknown): void;
@@ -35,6 +41,8 @@ export interface BridgePortDeps {
   log(line: string): void;
   setTimeout?(fn: () => void, ms: number): unknown;
   clearTimeout?(h: unknown): void;
+  /** Something that outlives the worker, calling `retry` until stopped. */
+  backstop?: { start(): void; stop(): void };
 }
 
 export interface BridgePort {
@@ -42,6 +50,8 @@ export interface BridgePort {
   enable(): void;
   /** Stop: shutdown, then disconnect; no reconnect. */
   disable(): Promise<void>;
+  /** The backstop's tick: connect now if the setting is on and no port is up. */
+  retry(): void;
   connected(): boolean;
   lastError(): string | null;
 }
@@ -55,6 +65,8 @@ export function createBridgePort(deps: BridgePortDeps): BridgePort {
   let timer: unknown = null;
   let error: string | null = null;
   let generation = 0;
+  /** A disconnect's shutdown is running; the next connection waits for it. */
+  let settling = false;
 
   function connectNow(): void {
     if (!enabled || port) return;
@@ -98,7 +110,9 @@ export function createBridgePort(deps: BridgePortDeps): BridgePort {
       for (const c of inFlight.values()) c.abort();
       inFlight.clear();
       deps.log(`[shim] bridge disconnected${why ? `: ${why}` : ''}`);
+      settling = true;
       void deps.shutdown(why ? `the bridge disconnected: ${why}` : 'the bridge disconnected').finally(() => {
+        settling = false;
         if (enabled && generation === gen) schedule();
       });
     });
@@ -120,9 +134,13 @@ export function createBridgePort(deps: BridgePortDeps): BridgePort {
       if (enabled) return;
       enabled = true;
       attempt = 0;
+      deps.backstop?.start();
       connectNow();
     },
     async disable() {
+      // Before the check: a fresh worker that has not enabled yet still owns a
+      // backstop the last worker left running.
+      deps.backstop?.stop();
       if (!enabled) return;
       enabled = false;
       generation += 1;
@@ -132,6 +150,11 @@ export function createBridgePort(deps: BridgePortDeps): BridgePort {
       await deps.shutdown('the bridge was turned off');
       try { p?.disconnect(); } catch { /* already gone */ }
       error = null;
+    },
+    retry() {
+      if (!enabled || port || settling) return;
+      if (timer !== null) { clearT(timer); timer = null; }
+      connectNow();
     },
     connected: () => port !== null,
     lastError: () => error,

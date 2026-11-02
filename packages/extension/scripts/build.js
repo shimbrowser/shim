@@ -18,6 +18,11 @@
 //   dist/ui.css              their stylesheet
 //   dist/icons/              the toolbar icon, the browser's, in the manifest's sizes
 //
+// dist/ is what ships, so it carries no test surface. dist-test/ is the same
+// folder with a worker built with SHIM_EXTENSION_TEST_BUILD on (the worker's
+// `shimPageHosts` handle and the vault's test switches), and it is the one the
+// real-browser harnesses load. Only sw.js differs. Nothing ships dist-test/.
+//
 // Every script is one self-contained IIFE for the browser platform (an
 // extension page's <script> and a content script resolve no imports).
 // @shimbrowser/core is bundled from its TypeScript source (the "shim-source"
@@ -33,6 +38,7 @@ const PKG_ROOT = path.join(__dirname, '..');
 const SRC = path.join(PKG_ROOT, 'src');
 const STATIC = path.join(PKG_ROOT, 'static');
 const DIST = path.join(PKG_ROOT, 'dist');
+const TEST_DIST = path.join(PKG_ROOT, 'dist-test');
 
 const ENTRIES = {
   sw: 'sw.ts',
@@ -55,23 +61,33 @@ function manifestVersion(version) {
   return String(version).replace(/[-+].*$/, '');
 }
 
-async function buildExtension() {
-  const pkg = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'package.json'), 'utf8'));
-  fs.rmSync(DIST, { recursive: true, force: true });
-  fs.mkdirSync(DIST, { recursive: true });
-
-  await esbuild.build({
-    entryPoints: Object.fromEntries(Object.entries(ENTRIES).map(([name, file]) => [name, path.join(SRC, file)])),
-    outdir: DIST,
+function scriptOptions(pkg, testBuild) {
+  return {
     bundle: true,
     format: 'iife',
     platform: 'browser',
     target: 'chrome135',
     conditions: ['shim-source'],
-    define: { SHIM_EXTENSION_VERSION: JSON.stringify(pkg.version) },
+    define: { SHIM_EXTENSION_VERSION: JSON.stringify(pkg.version), SHIM_EXTENSION_TEST_BUILD: String(testBuild) },
+    // Folds the flag's dead branches. Without it `if (false) { ... }` stays in
+    // the output and tree shaking keeps everything the branch names.
+    minifySyntax: true,
     sourcemap: false,
     legalComments: 'inline',
     logLevel: 'warning',
+  };
+}
+
+async function buildExtension() {
+  const pkg = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, 'package.json'), 'utf8'));
+  fs.rmSync(DIST, { recursive: true, force: true });
+  fs.rmSync(TEST_DIST, { recursive: true, force: true });
+  fs.mkdirSync(DIST, { recursive: true });
+
+  await esbuild.build({
+    ...scriptOptions(pkg, false),
+    entryPoints: Object.fromEntries(Object.entries(ENTRIES).map(([name, file]) => [name, path.join(SRC, file)])),
+    outdir: DIST,
   });
 
   // The engine, from core's own bundle options (one IIFE, global ShimCore,
@@ -85,10 +101,18 @@ async function buildExtension() {
   const manifest = JSON.parse(fs.readFileSync(path.join(STATIC, 'manifest.json'), 'utf8'));
   manifest.version = manifestVersion(pkg.version);
   fs.writeFileSync(path.join(DIST, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+
+  // The harnesses' copy: everything above, with the test worker over sw.js.
+  fs.cpSync(DIST, TEST_DIST, { recursive: true });
+  await esbuild.build({
+    ...scriptOptions(pkg, true),
+    entryPoints: [path.join(SRC, ENTRIES.sw)],
+    outfile: path.join(TEST_DIST, 'sw.js'),
+  });
   return DIST;
 }
 
-module.exports = { buildExtension, manifestVersion, ENTRIES, DIST };
+module.exports = { buildExtension, manifestVersion, ENTRIES, DIST, TEST_DIST };
 
 if (require.main === module) {
   buildExtension().then((dist) => {

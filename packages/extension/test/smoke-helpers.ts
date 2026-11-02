@@ -17,7 +17,8 @@ import { chromium, type BrowserContext, type Page, type Worker } from 'playwrigh
 import { conformanceFixture, type FixtureDeploy } from '@shimbrowser/core/page-host-conformance';
 
 export const REPO = path.resolve(__dirname, '..', '..', '..', '..');
-export const DIST = path.join(REPO, 'packages', 'extension', 'dist');
+/** The test build: dist/ with the worker's test surface on (scripts/build.js). */
+export const DIST = path.join(REPO, 'packages', 'extension', 'dist-test');
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -25,7 +26,7 @@ export function workDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-/** dist/ copied into `work`, with `hostPermissions` granted in the manifest. Throws when nothing is built. */
+/** The test build copied into `work`, with `hostPermissions` granted in the manifest. Throws when nothing is built. */
 export function extensionCopy(work: string, hostPermissions: string[]): string {
   if (!fs.existsSync(path.join(DIST, 'manifest.json'))) throw new Error(`no built extension at ${DIST} (npm run build)`);
   const ext = path.join(work, 'ext');

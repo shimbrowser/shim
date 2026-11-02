@@ -28,7 +28,7 @@ import {
   USER_SCRIPT_WORLD_CSP,
 } from './registration';
 import { capabilitiesFor, detectMode, sessionCapabilities, VAULT_ENABLED, type ExtensionMode } from './capabilities';
-import { arbitrate, type RuntimeWorld as ArbitratedWorld } from './arbitrate';
+import { arbitrate, createModeHold, type RuntimeWorld as ArbitratedWorld } from './arbitrate';
 import { baselineForPath, pagePathKey } from '@shimbrowser/core/deploy-id';
 import {
   rebasedSpec, refreshedSpec, capturedSpec, rememberPath, escalationAllowed, quarantineFrom, emptyRuleState, eventFormMatches, ruleForms,
@@ -58,7 +58,8 @@ import { hasLoneSurrogate } from '@shimbrowser/core/settings-schema';
 import { brokerFetch, fetchReach, corsOnlyReach, type FetchBrokerDeps } from './fetch';
 import { createConsentGate, type ConsentAnswer, type PendingConsent } from './attach-consent';
 import { routeControlRequest, type ControlDeps, type TabInfo, type AttachRequest } from './control';
-import { createBridgePort, type PortLike } from './bridge-port';
+import { BACKSTOP_MINUTES, createBridgePort, type PortLike } from './bridge-port';
+import { createAttachWindow } from './attach-window';
 import type { PageRuntimeEvent, PageConsoleMessage, PreviewRule, ScreenshotOptions, LoadWaitOptions, PageInputCommand, PageWorld } from '@shimbrowser/core/page-host';
 
 /**
@@ -151,7 +152,7 @@ const VAULT_ON_TEST_KEY = 'vault.testOn';
 
 /** Is the vault on: secret settings with `use` install, and the broker places them? */
 function vaultOn(): boolean {
-  return vaultForTests ?? VAULT_ENABLED;
+  return SHIM_EXTENSION_TEST_BUILD ? (vaultForTests ?? VAULT_ENABLED) : VAULT_ENABLED;
 }
 
 /** The capabilities of `mode` with the vault as it is in this worker. */
@@ -180,10 +181,12 @@ async function loadVault(): Promise<void> {
   // interrupted reconcile, so the next one revokes and re-registers everything.
   vaultState = saved === undefined ? undefined : isVaultStateShape(saved) ? saved : { ...emptyVaultState(), phase: 'running' };
   vaultOwnRun = false;
-  const test = await db.prefs.get(VAULT_TEST_KEY);
-  vaultTestWorlds = new Set(Array.isArray(test) ? test.filter((x): x is string => typeof x === 'string') : []);
-  const testOn = await db.prefs.get(VAULT_ON_TEST_KEY);
-  vaultForTests = typeof testOn === 'boolean' ? testOn : null;
+  if (SHIM_EXTENSION_TEST_BUILD) {
+    const test = await db.prefs.get(VAULT_TEST_KEY);
+    vaultTestWorlds = new Set(Array.isArray(test) ? test.filter((x): x is string => typeof x === 'string') : []);
+    const testOn = await db.prefs.get(VAULT_ON_TEST_KEY);
+    vaultForTests = typeof testOn === 'boolean' ? testOn : null;
+  }
 }
 const vaultReady: Promise<void> = loadVault().catch((err: unknown) => {
   console.error('[shim] could not read the vault state', err);
@@ -192,7 +195,8 @@ const vaultReady: Promise<void> = loadVault().catch((err: unknown) => {
 
 /** Does this shim run in a world of its own? Read before vaultReady settles, the test flag reads as unset. */
 function isVaultShim(shim: InstalledShim): boolean {
-  return declaresSecret(shim.spec) || vaultTestWorlds.has(shim.id);
+  if (declaresSecret(shim.spec)) return true;
+  return SHIM_EXTENSION_TEST_BUILD ? vaultTestWorlds.has(shim.id) : false;
 }
 
 /** The vault shim's current registration generation, if it has one. */
@@ -542,6 +546,9 @@ async function refreshMode(): Promise<ExtensionMode> {
   return modeNow;
 }
 
+/** Holds arbitration until this worker's first measurement: a wake starts on the initial guess above. */
+const modeHold = createModeHold(refreshMode());
+
 function fitsCapabilities(shim: InstalledShim, capabilities: PageHostCapabilities): boolean {
   return preflightSpec(shim.spec, capabilities).ok;
 }
@@ -795,6 +802,11 @@ function acceptDefaultPort(port: chrome.runtime.Port, world: RuntimeWorld, tabId
     // The page's mark is only a hint; this is the decision.
     const rival = [...runtimePorts].find(([, r]) => r.tabId === tabId && r.world !== world && isDefaultRecord(r));
     if (rival) {
+      if (!modeHold.settled()) {
+        // Looks again after the wait: either runtime may have gone by then.
+        modeHold.hold(port, () => { acceptDefaultPort(port, world, tabId, documentId); });
+        return;
+      }
       const [rivalPort, { world: rivalWorld }] = rival;
       const verdict = arbitrate(rivalWorld, world, modeNow);
       if (verdict?.retire === 'incoming') {
@@ -999,7 +1011,7 @@ async function bootRefresh(): Promise<void> {
 // it rotates nothing either.
 const installEvents: string[] = [];
 chrome.runtime.onInstalled.addListener((details) => {
-  installEvents.push(details.reason);
+  if (SHIM_EXTENSION_TEST_BUILD) installEvents.push(details.reason);
   if (details.reason === 'install' || details.reason === 'update') {
     requestVaultRotation('all');
     void vault.lock();
@@ -1768,21 +1780,26 @@ async function openHost(tabId: number): Promise<string> {
   return id;
 }
 
+async function closeHost(id: string): Promise<boolean> {
+  const entry = openHosts.get(id);
+  if (!entry) return false;
+  openHosts.delete(id);
+  for (const off of entry.offs) off();
+  await entry.host.close();
+  return true;
+}
+
 /**
  * The worker's handle on its session hosts, for a driver outside the worker
  * (the conformance runner, over the worker's global): open, call a member
- * by name, drain what the page reported since the last drain, close.
+ * by name, drain what the page reported since the last drain, close. Test
+ * builds only: it answers consent cards and attaches the debugger, so nothing
+ * but the assignment below may name it, and a shipped worker holds none of it
+ * (store-build-harness).
  */
 const pageHosts = {
   open: openHost,
-  async close(id: string): Promise<boolean> {
-    const entry = openHosts.get(id);
-    if (!entry) return false;
-    openHosts.delete(id);
-    for (const off of entry.offs) off();
-    await entry.host.close();
-    return true;
-  },
+  close: closeHost,
   drain(id: string): { url: string; closed: boolean; events: PageRuntimeEvent[]; console: PageConsoleMessage[]; popups: string[] } | null {
     const entry = openHosts.get(id);
     if (!entry) return null;
@@ -1938,7 +1955,7 @@ const pageHosts = {
     }
   },
 };
-(globalThis as unknown as { shimPageHosts: typeof pageHosts }).shimPageHosts = pageHosts;
+if (SHIM_EXTENSION_TEST_BUILD) (globalThis as unknown as { shimPageHosts: typeof pageHosts }).shimPageHosts = pageHosts;
 
 // --- sessions and the bridge ----------------------------------------------------
 //
@@ -1950,6 +1967,7 @@ const pageHosts = {
 // opens; nothing on a route answers a card.
 
 const BRIDGE_PREF = 'bridge';
+const BRIDGE_ALARM = 'bridge-backstop';
 const REMEMBERED_KEY = 'attachRemembered';
 const OPEN_TAB_TIMEOUT_MS = 30_000;
 
@@ -1990,44 +2008,23 @@ const rememberedReady = (async () => {
     if (Array.isArray(list)) consent.remember(list.filter((s): s is string => typeof s === 'string'));
   } catch { /* nothing remembered */ }
 })();
-// The attach card is a small window of the extension's own page. The worker
-// owns its lifetime: one window while requests wait, closed a moment after
-// the last is answered, a fresh one for the next. Serialized, so two
-// rapid changes never open two windows or race a close against an open.
-let cardWindowId: number | null = null;
-let cardCloseTimer: ReturnType<typeof setTimeout> | null = null;
-let cardWork: Promise<void> = Promise.resolve();
-const CARD_CLOSE_GRACE_MS = 1200;
-
-function syncCard(pending: PendingConsent[]): void {
-  cardWork = cardWork.then(async () => {
-    if (pending.length > 0) {
-      if (cardCloseTimer !== null) { clearTimeout(cardCloseTimer); cardCloseTimer = null; }
-      if (cardWindowId !== null) {
-        try { await chrome.windows.get(cardWindowId); return; } catch { cardWindowId = null; }
-      }
-      try {
-        const win = await chrome.windows.create({ url: chrome.runtime.getURL('attach.html'), type: 'popup', width: 460, height: 440, focused: true });
-        cardWindowId = win?.id ?? null;
-      } catch (e) {
-        console.error('[shim] could not open the attach card', e);
-      }
-    } else if (cardWindowId !== null && cardCloseTimer === null) {
-      const id = cardWindowId;
-      cardCloseTimer = setTimeout(() => {
-        cardCloseTimer = null;
-        if (cardWindowId === id && consent.pending().length === 0) {
-          cardWindowId = null;
-          void chrome.windows.remove(id).catch(() => undefined);
-        }
-      }, CARD_CLOSE_GRACE_MS);
-    }
-  }, () => undefined);
-}
-chrome.windows.onRemoved.addListener((id) => { if (id === cardWindowId) cardWindowId = null; });
+// The attach card is a small window of the extension's own page (attach-window.ts).
+const CARD_WINDOW_KEY = 'attachCardWindow';
+const attachWindow = createAttachWindow({
+  open: async () => (await chrome.windows.create({ url: chrome.runtime.getURL('attach.html'), type: 'popup', width: 460, height: 440, focused: true }))?.id ?? null,
+  check: (id) => chrome.windows.get(id),
+  close: (id) => chrome.windows.remove(id),
+  load: async () => (await chrome.storage.session.get(CARD_WINDOW_KEY))[CARD_WINDOW_KEY],
+  save: (id) => (id === null ? chrome.storage.session.remove(CARD_WINDOW_KEY) : chrome.storage.session.set({ [CARD_WINDOW_KEY]: id })),
+  waiting: () => consent.pending().length,
+  log: (message, err) => console.error(message, err),
+});
+chrome.windows.onRemoved.addListener((id) => { attachWindow.removed(id); });
+// A card the last worker left open: its requests died with that worker.
+attachWindow.sync(consent.pending().length);
 consent.onChange((pending) => {
   void chrome.storage.session.set({ [REMEMBERED_KEY]: consent.remembered() }).catch(() => undefined);
-  syncCard(pending);
+  attachWindow.sync(pending.length);
 });
 
 const hostPattern = (hostname: string, port: string): string => `*://${hostname}${port ? `:${port}` : ''}/*`;
@@ -2206,13 +2203,13 @@ const controlDeps: ControlDeps = {
       : !shim.enabled ? `"${shim.name}" is disabled in Shim for Chrome: its committed rules are not running on the page; previews still apply`
         : `"${shim.name}" needs what Shim for Chrome does not run in ${modeNow} mode: its committed rules are not running on the page; previews still apply`;
     const target: ExtensionSessionTarget = {
-      page: { host, close: () => pageHosts.close(id).then(() => undefined) },
+      page: { host, close: () => closeHost(id).then(() => undefined) },
       source: { shimId: shim.id, name: shim.name, spec: shim.spec, handlers: shim.handlers, envelope: shim.envelope, created: shim.sessionDraft !== undefined },
       committedDown,
     };
     // The disposer the route calls when the open does not take over the host
     // (a lease busy before begin, a throw): closes it and drops its entry.
-    return { ok: true, target, dispose: () => pageHosts.close(id).then(() => undefined) };
+    return { ok: true, target, dispose: () => closeHost(id).then(() => undefined) };
   },
   async openTab(url, signal) {
     let tab: chrome.tabs.Tab;
@@ -2263,6 +2260,10 @@ const bridgePort = createBridgePort({
   shutdown: () => shutdownSessions(),
   version: SHIM_EXTENSION_VERSION,
   log: (line) => console.log(line),
+  backstop: {
+    start: () => { void chrome.alarms.create(BRIDGE_ALARM, { periodInMinutes: BACKSTOP_MINUTES }).catch(() => undefined); },
+    stop: () => { void chrome.alarms.clear(BRIDGE_ALARM).catch(() => undefined); },
+  },
 });
 
 async function bridgeEnabled(): Promise<boolean> {
@@ -2277,6 +2278,17 @@ async function setBridgeEnabled(enabled: boolean): Promise<void> {
 
 // On while the setting is on, from every worker boot.
 void bridgeEnabled().then((on) => { if (on) bridgePort.enable(); });
+
+// The tick that started this worker has already done its work by the boot
+// above; this one is for a worker still running. An alarm with the setting off
+// is one a dying worker left behind.
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== BRIDGE_ALARM) return;
+  void bridgeEnabled().then((on) => {
+    if (on) bridgePort.retry();
+    else void chrome.alarms.clear(BRIDGE_ALARM).catch(() => undefined);
+  });
+});
 
 type MessageListener = (msg: unknown, sender: chrome.runtime.MessageSender, sendResponse: (answer: WorkerAnswer) => void) => boolean;
 

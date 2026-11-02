@@ -36,3 +36,35 @@ export function arbitrate(existing: RuntimeWorld, incoming: RuntimeWorld, mode: 
     ? { retire: 'existing', survivor: 'incoming' }
     : { retire: 'incoming', survivor: 'existing' };
 }
+
+/** The part of a port a hold needs. */
+export interface HeldPort {
+  onDisconnect: { addListener(cb: () => void): void };
+}
+
+export interface ModeHold {
+  /** Has this worker measured the mode? Until it has, its mode is only the initial guess. */
+  settled(): boolean;
+  /** Runs `resume` once the mode is measured, unless `port` went in the meantime. */
+  hold(port: HeldPort, resume: () => void): void;
+}
+
+/**
+ * A worker wakes with the mode unmeasured, and a verdict on that guess can
+ * retire the runtime that fits. So arbitration waits for the first
+ * measurement. Only arbitration: the port stays open with its listeners on,
+ * and a page with one runtime is accepted at once. A measurement that failed
+ * settles too, on the guess, so no port waits for ever.
+ */
+export function createModeHold(measured: Promise<unknown>): ModeHold {
+  let settled = false;
+  const done = measured.then(() => { settled = true; }, () => { settled = true; });
+  return {
+    settled: () => settled,
+    hold(port, resume) {
+      let gone = false;
+      port.onDisconnect.addListener(() => { gone = true; });
+      void done.then(() => { if (!gone) resume(); });
+    },
+  };
+}

@@ -27,3 +27,10 @@ here:
   a session's bridge connection does too. Durable state lives in IndexedDB and per-instance
   state in `chrome.storage.session` regardless, and the content runtime reconnects when the
   worker has gone, as it does today.
+
+## Two builds
+
+`dist/` is what ships. `dist-test/` is the same folder with a worker built with
+`SHIM_EXTENSION_TEST_BUILD` on, and the browser harnesses load it. Anything that exists only
+for a harness goes behind that flag, in `sw.ts`, and its name joins
+`test/store-build-harness.ts`.

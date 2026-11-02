@@ -235,7 +235,10 @@ the Electron and Playwright hosts run it: a session capability is advertised onl
 its cases pass here too. `test/extension-session-harness.ts` runs a session beside an
 installed shim: the hold through every path above, and the session ended from outside.
 Both drive the worker's host through the worker's own handle on it (`shimPageHosts`),
-one member call at a time (`test/host-proxy.ts`).
+one member call at a time (`test/host-proxy.ts`). That handle exists only in the test
+build, `dist-test/`, which is `dist/` with a worker built with the test surface on. The
+browser harnesses load that build. `dist/` is what a release zips, and
+`test/store-build-harness.ts` pins that it holds none of it.
 
 ## Authoring through the bridge
 
@@ -321,6 +324,7 @@ the other).
 | `src/sessions.ts` | The session registry here: core's shim session over the host and the store; the commit's merge and activation. |
 | `src/control.ts` | The control routes, as the bridge relays them. Pure. |
 | `src/attach-consent.ts` | The attach-consent gate. Pure. |
+| `src/attach-window.ts` | The attach card's window, kept across worker restarts. Chrome's calls injected. |
 | `src/bridge-port.ts` | The native messaging port to `shim bridge`. |
 | `src/attach-page.ts` | The attach card. |
 | `src/capabilities.ts` | The three capability constants (two modes, the session) and the mode. |
