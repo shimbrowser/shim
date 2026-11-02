@@ -36,6 +36,7 @@ import { SET_WITNESS_VERSION } from './set-witness';
 import { moduleForExpression, handlerModuleProblem } from './handler-source';
 import type { CompileProbe } from './rewrite-response';
 import { lintSpec, canonicalModule, HANDLER_REF_FIELDS } from './spec-lint';
+import { isRecord } from './is-record';
 
 export const SHIM_JSON = 'shim.json';
 export const SHIM_STATE_FILE = '.shim-state.json';
@@ -145,10 +146,6 @@ export const MAX_HANDLER_NAME_CHARS = 252;
 
 function isHandlerName(name: string): boolean {
   return name.length <= MAX_HANDLER_NAME_CHARS && HANDLER_NAME_RE.test(name) && !WINDOWS_DEVICE_NAME_RE.test(name);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**

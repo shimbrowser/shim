@@ -17,6 +17,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { HeadlessStorage, StorageScope } from './playwright-page-host';
+import { isRecord } from '@shimbrowser/core/is-record';
 
 export const HEADLESS_STORAGE_FORMAT = 'shim-headless-storage/1';
 
@@ -24,10 +25,6 @@ export const HEADLESS_STORAGE_FORMAT = 'shim-headless-storage/1';
 interface StorageFile {
   format: typeof HEADLESS_STORAGE_FORMAT;
   buckets: Record<string, Record<string, Record<string, unknown>>>;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 // A value as it round-trips through JSON: undefined (and functions) become

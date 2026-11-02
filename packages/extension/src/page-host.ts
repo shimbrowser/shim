@@ -35,6 +35,7 @@ import { remoteObjectValue, netErrorCode, consoleLevel, formatConsoleArg, handle
 import { SESSION_CAPABILITIES, UNSUPPORTED_ERROR } from './capabilities';
 import { SESSION_CLOSE_EVENT, type ToRuntime } from './messages';
 import type { SettingsTransport } from './settings';
+import { isRecord } from '@shimbrowser/core/is-record';
 
 /**
  * The world the host creates for the engine in a session's page: this
@@ -160,10 +161,6 @@ export interface ExtensionPageHost extends PageHost {
   onClosed(listener: () => void): Unsubscribe;
   /** Stop driving the tab: remove every preview, give back held rules, detach the debugger. Leaves the tab open. */
   close(): Promise<void>;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 function errText(err: unknown): string {

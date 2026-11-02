@@ -17,6 +17,8 @@
 //   { id, status, body }                  the reply
 //   { hello: true, version }              the worker's greeting on connect
 
+import { isRecord } from '@shimbrowser/core/is-record';
+
 export const CHUNK_BYTES = 512 * 1024;
 export const MAX_HOST_MESSAGE_BYTES = 1024 * 1024;
 
@@ -133,6 +135,3 @@ export function isHello(message: unknown): message is { hello: true; version: st
   return isRecord(message) && message.hello === true && typeof message.version === 'string';
 }
 
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}

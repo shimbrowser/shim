@@ -25,6 +25,8 @@
 // runs as page script.
 
 /** Cloudflare's same-origin challenge runner: the interstitial's own orchestrator. A standalone Turnstile widget loads from challenges.cloudflare.com instead. */
+import { isRecord } from './is-record';
+
 export const RUNNER_SELECTOR = 'script[src*="/cdn-cgi/challenge-platform/"]';
 
 /** Containers unique to Cloudflare's full-page interstitial (not an embedded widget). */
@@ -133,10 +135,6 @@ export function readBotWallSignals(doc: Document): BotWallSignals {
 
 /** A page-script expression whose value is the document's BotWallSignals (run in any world that sees the DOM). */
 export const BOT_WALL_SCRIPT = `(${readBotWallSignals.toString()})(document)`;
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
 
 /** Signals from an untrusted value (an evaluate result), or null when it isn't their shape. */
 export function asBotWallSignals(v: unknown): BotWallSignals | null {

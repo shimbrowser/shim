@@ -32,6 +32,7 @@ import { moduleToExpression } from './handler-source';
 import { previewNoMatch, type NoMatchEntry, type RuleStatusEvent } from './preview-evidence';
 import { verificationLevel } from './capability-preflight';
 import { clickCommands, keyCommands, locateScript, selectScript, type LocateResult } from './interact';
+import { isRecord } from './is-record';
 
 // --- the fixture site -------------------------------------------------------
 
@@ -345,8 +346,6 @@ function describe(v: unknown): string {
   if (typeof v === 'string') return v;
   try { return JSON.stringify(v); } catch { return String(v); }
 }
-
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
 function makeKit(ctx: ConformanceContext, checks: ConformanceCheck[], applied: Set<string>): CaseKit & { dispose(): void } {
   const events: PageRuntimeEvent[] = [];

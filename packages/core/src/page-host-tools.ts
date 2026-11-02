@@ -16,6 +16,7 @@ import type { PageHost, PageWorld, QueryPageResult, InspectElementResult, PageTo
 import { errMessage } from './error';
 import { syntaxProbe } from './syntax-probe';
 import type { CompileProbe } from './rewrite-response';
+import { isRecord } from './is-record';
 
 export const QUERY_TIMEOUT_MS = 8000;
 export const INSPECT_TIMEOUT_MS = 5000;
@@ -401,10 +402,6 @@ async function measureCropRect(host: PageHost, selector: string, world: PageWorl
 // answered — a token that arrives after that is released at once, never
 // used); 'unleased' when the page can't run the script (or answered nothing
 // usable), which still gets its shot.
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null;
-}
-
 async function acquireViewLease(host: PageHost, world: PageWorld, waitMs: number): Promise<string | 'busy' | 'unleased'> {
   const pending = host.evaluate(viewLeaseAcquireSource(waitMs), world);
   let gaveUp = false;

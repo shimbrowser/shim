@@ -661,6 +661,25 @@ console.log('handlers must be plain objects of source strings → error');
   check('a spec-level array of handlers is refused', specLevel.errors.some((e) => e.includes('the spec-level "handlers" must be an object')));
 }
 
+console.log('a value of the wrong shape is refused, not skipped');
+{
+  const refused = (spec: unknown, needle: string, carried?: unknown): boolean => lintSpec(spec, carried).errors.some((e) => e.includes(needle));
+  check('rules: [[]]', refused({ rules: [[]] }, 'rules[0]: a rule must be an object — got an array'));
+  check('rules: ["x"], at its index', refused({ rules: [{ id: 'a' }, 'x'] }, 'rules[1]: a rule must be an object — got a string'));
+  check('rules: [null]', refused({ rules: [null] }, 'rules[0]: a rule must be an object — got null'));
+  check('anchor: []', refused({ rules: [{ id: 'a', anchor: [], mutations: [{ kind: 'hide' }] }] }, 'rule "a": "anchor" must be an object — got an array'));
+  check('anchor: "x"', refused({ rules: [{ id: 'a', anchor: 'x', mutations: [{ kind: 'hide' }] }] }, 'rule "a": "anchor" must be an object — got a string'));
+  check('primary: []', refused({ rules: [{ id: 'a', anchor: { primary: [] }, mutations: [{ kind: 'hide' }] }] }, 'rule "a": anchor "primary" must be an object — got an array'));
+  check('rule mutations: ["x"]', refused({ rules: [{ id: 'a', mutations: ['x'] }] }, 'rule "a": a mutation must be an object with a "kind" — got a string'));
+  check('rule mutations: [[]]', refused({ rules: [{ id: 'a', mutations: [[]] }] }, 'rule "a": a mutation must be an object with a "kind" — got an array'));
+  check('spec mutations: ["x"]', refused({ mutations: ['x'], rules: [] }, 'the spec-level "mutations" must be an object'));
+  check('an array of spec mutations declares no kind "0"',
+    refused({ mutations: ['x'], rules: [{ id: 'a', mutations: [{ kind: '0' }] }] }, 'unknown mutation kind "0"'));
+  check('a carried array of handlers', refused({ rules: [] }, 'the file\'s "handlers" must be an object', ['module.exports = function () {};']));
+  const absent = lintSpec({ mutations: {}, rules: [{ id: 'a', mutations: [{ kind: 'redirect', from: 'a.com', to: 'b.com' }] }, { id: 'b', anchor: null, mutations: [] }, { id: 'c', anchor: { primary: null }, mutations: [] }] }, {});
+  check('an absent or null anchor, and object-shaped maps, stay clean', absent.errors.length === 0, JSON.stringify(absent.errors));
+}
+
 console.log('');
 if (failures) { console.error(`✗ ${failures} check(s) failed`); process.exit(1); }
 console.log('✓ all spec-lint checks passed');

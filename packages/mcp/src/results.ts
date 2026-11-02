@@ -13,6 +13,8 @@
 // header) and, over budget, truncates text and replaces an image with a note
 // telling the agent to crop — never sending a result Claude Code would drop.
 
+import { isRecord } from '@shimbrowser/core/is-record';
+
 export type McpContent =
   | { type: 'text'; text: string }
   | { type: 'image'; data: string; mimeType: string };
@@ -26,10 +28,6 @@ const PIXELS_PER_TOKEN = 750;
 export function maxOutputTokens(env: Record<string, string | undefined>): number {
   const raw = Number(env.MAX_MCP_OUTPUT_TOKENS);
   return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : DEFAULT_MAX_OUTPUT_TOKENS;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 /** Shim's tool_result content (string or Anthropic blocks) as MCP content. */

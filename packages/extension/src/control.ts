@@ -24,6 +24,7 @@
 
 import type { SessionRegistry, OpenRequest } from '@shimbrowser/core/session-registry';
 import type { ConsentGate, ConsentSubject } from './attach-consent';
+import { isRecord } from '@shimbrowser/core/is-record';
 
 export const MAX_AGENT_LENGTH = 200;
 export const MAX_INTENT_LENGTH = 10_000;
@@ -133,10 +134,6 @@ function fromResult(result: { ok: boolean; error?: unknown }, notes: string[] = 
   if (result.ok) return { status: 200, body };
   const error = typeof result.error === 'string' ? result.error : 'internal-error';
   return { status: statusForError(error), body };
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 function nonEmptyString(v: unknown, max: number): string | null {

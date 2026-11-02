@@ -31,6 +31,7 @@ import { DOCUMENT_TOKEN_SCRIPT, NET_ERR_ABORTED, SUPERSEDED_LOAD_GRACE_MS, sendI
 import { remoteObjectValue, netErrorCode, consoleLevel, formatConsoleArg, handlerSource } from '@shimbrowser/core/cdp-host';
 import { pageRuntimeSource } from './headless-page-runtime';
 import { imageSize } from './results';
+import { isRecord } from '@shimbrowser/core/is-record';
 
 /** The world the engine runs in. */
 export const HEADLESS_ENGINE_WORLD = 'shim-core';
@@ -141,10 +142,6 @@ export function readEngineBundle(): string {
 }
 
 // --- small helpers ---------------------------------------------------------------
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);

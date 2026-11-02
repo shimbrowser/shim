@@ -59,6 +59,7 @@ import {
   FolderError, readWorkingCopy, readCompositionWorkingCopy, writeCheckout, writeCompositionCheckout, checkoutKind, folderKind, type WorkingCopyKind,
 } from './folder';
 import { toMcpContent, fitToBudget, fitText, estimateTokens, type McpContent } from './results';
+import { isRecord } from '@shimbrowser/core/is-record';
 
 export const SERVER_NAME = 'shim';
 
@@ -242,10 +243,6 @@ function failureResult(code: string, detail: string, maxTokens: number, mode: Se
 
 function text(value: unknown): McpContent {
   return { type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) };
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 function str(input: Record<string, unknown>, key: string): string | undefined {

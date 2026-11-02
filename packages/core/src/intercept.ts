@@ -26,6 +26,7 @@
 
 import { transformLiteral } from './rewrite-response';
 import type { TransformForm } from './rewrite-response';
+import { isRecord } from './is-record';
 
 // The shape of `mutation.module` on an `intercept` mutation (design doc
 // "Spec shape"). Today only the `amd` loader is supported — RequireJS-style
@@ -53,10 +54,6 @@ export interface InterceptEntry {
 // the current page (intercept has no host/registrable-domain scoping the way
 // rewrite-response does — a module id is already page-scoped by construction).
 export interface InterceptTablePayload { entries: InterceptEntry[] }
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
-}
 
 // Validate a single `intercept` mutation PAYLOAD (not the bound wrap
 // source — that's a source-scan heuristic and lives in spec-lint, a later

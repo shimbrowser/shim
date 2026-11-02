@@ -23,6 +23,7 @@ import { REQUIRES_SHIM_BROWSER } from './playwright-page-host';
 import {
   runInteract, locateScript, OBSERVE_START_SCRIPT, OBSERVE_READ_SCRIPT, type InteractDeps,
 } from '@shimbrowser/core/interact';
+import { isRecord } from '@shimbrowser/core/is-record';
 
 export {
   SESSION_SETTLE_MS as HEADLESS_SETTLE_MS, MAX_RELOADS_PER_SESSION, BROWSER_ONLY_PAGE_TOOLS, hostPatternMatches, newShimSpec, newShimId,
@@ -55,10 +56,6 @@ export interface HeadlessBackendOptions {
   seedAnchors?: Record<string, string>;
   /** See ShimSessionDeps.seedSetWitnesses. */
   seedSetWitnesses?: Record<string, SetWitnessState>;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 function errMessage(e: unknown): string {

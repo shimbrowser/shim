@@ -15,16 +15,13 @@
 
 import type { Anchor } from './types';
 import { sha256Hex } from './sha256';
+import { isRecord } from './is-record';
 
 export const ENGINE_MANAGED_ANCHOR_KEYS = ['witness', 'setWitness'] as const;
 export type EngineManagedAnchorKey = typeof ENGINE_MANAGED_ANCHOR_KEYS[number];
 
 /** The engine-managed fields of an anchor, each in its own field. */
 export type ManagedFingerprint = Pick<Anchor, EngineManagedAnchorKey>;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 /** Whether an anchor-shaped value carries any engine-managed field. */
 export function hasManagedKeys(anchor: unknown): boolean {

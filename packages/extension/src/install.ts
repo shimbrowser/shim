@@ -24,6 +24,7 @@ import type { Spec } from '@shimbrowser/core/types';
 import type { PageHostCapabilities } from '@shimbrowser/core/page-host';
 import { matchPatternsForHosts } from './match-patterns';
 import { HANDLER_KINDS, USER_SCRIPTS_REASON, type ExtensionMode } from './capabilities';
+import { isRecord } from '@shimbrowser/core/is-record';
 
 /** Where a shim came from. `file` today; `session` is a bridge commit; `marketplace` a fetched, signed listing. */
 export interface InstallProvenance {
@@ -74,10 +75,6 @@ export interface InstallRefusal {
 }
 
 const ENVELOPE_OWN_FIELDS = new Set(['format', 'name', 'spec', 'handlers', 'userData']);
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
 
 function refuse(error: InstallRefusalCode, problems: string[], unsupported?: UnsupportedFeature[]): InstallRefusal {
   return unsupported ? { ok: false, error, problems, unsupported } : { ok: false, error, problems };

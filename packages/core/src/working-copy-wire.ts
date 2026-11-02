@@ -17,6 +17,7 @@
 // Pure and Node-free (TextEncoder / TextDecoder / atob / btoa only).
 
 import type { FolderInput } from './shim-folder';
+import { isRecord } from './is-record';
 
 export const WORKING_COPY_FORMAT = 'shim-working-copy/1';
 
@@ -122,10 +123,6 @@ export function encodeWorkingCopy(folder: FolderInput): WireWorkingCopy {
     files.push(text !== null ? { path, text } : { path, base64: bytesToBase64(content) });
   }
   return { format: WORKING_COPY_FORMAT, files };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 const encoder = new TextEncoder();

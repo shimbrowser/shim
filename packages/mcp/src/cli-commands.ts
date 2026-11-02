@@ -35,6 +35,7 @@ import { readWorkingCopy, writeCheckout, FolderError } from './folder';
 import { createHeadlessControl } from './headless-control';
 import type { HeadlessSessionPage } from './headless-session';
 import { HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER, type HeadlessStorage } from './playwright-page-host';
+import { isRecord } from '@shimbrowser/core/is-record';
 
 /** A command that could not do its job: a stable code, a message, and every problem found. */
 export class CliError extends Error {
@@ -60,10 +61,6 @@ function isFileSystemError(e: unknown): boolean {
   if (typeof e !== 'object' || e === null || !('code' in e)) return false;
   const code: unknown = e.code;
   return typeof code === 'string' && FILE_SYSTEM_CODES.has(code);
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 // FolderError / ShimFolderError → CliError, everything else rethrown.

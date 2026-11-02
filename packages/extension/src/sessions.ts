@@ -39,6 +39,7 @@ import type { DeltaOp } from '@shimbrowser/core/spec-delta';
 import type { ExtensionPageHost, NudgeOutcome } from './page-host';
 import type { ShimStore, InstalledShim } from './store';
 import { capabilitiesFor, UNSUPPORTED_ERROR, HOW_TO_ENABLE, VAULT_ENABLED, type ExtensionMode } from './capabilities';
+import { isRecord } from '@shimbrowser/core/is-record';
 
 export const REQUIRES_SHIM_BROWSER = 'requires-shim-browser';
 /** How long a commit's activation waits for the tab's runtime to run the new version. */
@@ -131,10 +132,6 @@ function exclusiveLeases(): SessionLeases & { preempt(key: string): Promise<void
       await entry.released;
     },
   };
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 function clone<T>(value: T): T {

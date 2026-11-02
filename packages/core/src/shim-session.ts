@@ -86,6 +86,7 @@ import {
 } from './page-host-tools';
 import { navigationScopeOf, runNavigate, isSameDocumentNavigation, type NavigationState, type NavigateLoad } from './navigate-scope';
 import { rememberedBotWall, BOT_WALL_TOOLS, withBotWallEvidence, withBotWallNote, type BotWallNote, type BotWallMemory } from './bot-wall';
+import { isRecord } from './is-record';
 
 // How long the page gets to react after an apply before the evidence is read:
 // the Shim browser's window (APPLY_SETTLE_MS), above the engine's 1.5s
@@ -311,10 +312,6 @@ export interface ShimSessionHandle<S extends ShimSessionSource = ShimSessionSour
 const DOC_TOKEN_KEY = '__shimSessionDocument';
 const DOC_TOKEN_READ = `globalThis[${JSON.stringify(DOC_TOKEN_KEY)}] ?? null`;
 const docTokenWrite = (token: string): string => `globalThis[${JSON.stringify(DOC_TOKEN_KEY)}] = ${JSON.stringify(token)}`;
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;

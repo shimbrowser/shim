@@ -27,6 +27,7 @@ import { secretSettingPlacements } from './settings-schema';
 import { PAGE_HOST_API_MEMBERS } from './page-host';
 import { referencedHandlerNames } from './shim-folder';
 import { moduleToExpression } from './handler-source';
+import { isRecord } from './is-record';
 
 /** The answer a session gives a spec that declares something the host lacks. */
 export const UNSUPPORTED = 'unsupported';
@@ -62,10 +63,6 @@ const DECLARATION_NEEDS: Record<(typeof DECLARATIONS)[number], { member: PageHos
   storage: { member: 'db', what: 'a per-shim database (api.db)' },
   connections: { member: 'db', what: 'remote database connections (api.db connection())' },
 };
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
 
 // A declaration counts when it says something: an empty array or object is
 // what "nothing declared" looks like on the wire.

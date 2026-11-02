@@ -38,6 +38,7 @@ import { validateInterceptMutation } from './intercept';
 import { syntaxProbe } from './syntax-probe';
 import { expressionToModule, handlerModuleProblem, withoutModuleWrapper } from './handler-source';
 import { ENGINE_MANAGED_ANCHOR_KEYS } from './managed-anchor';
+import { isRecord } from './is-record';
 
 // A transform / wrap is kept by transformLiteral only if it evaluates to a
 // function; anything else parses fine and then leaves the rule silently
@@ -360,8 +361,10 @@ export interface LintResult {
 // individual rules yet); same rationale for staying a local extension.
 type LintableSpec = Spec & { mutations?: Record<string, unknown>; handlers?: Record<string, unknown> };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+// A wrong-shaped value, named for an error without echoing it.
+function shapeName(value: unknown): string {
+  if (value === null) return 'null';
+  return Array.isArray(value) ? 'an array' : `a ${typeof value}`;
 }
 
 // Shared positional/generated-class checks — used both for rule primaries
@@ -825,6 +828,10 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown, options: LintOptions
   const declaredKinds = s && isRecord(s.mutations)
     ? new Set(Object.keys(s.mutations))
     : new Set<string>();
+  const declaredKindsValue: unknown = s?.mutations;
+  if (declaredKindsValue !== undefined && declaredKindsValue !== null && !isRecord(declaredKindsValue)) {
+    errors.push(`the spec-level "mutations" must be an object mapping custom kinds to their definitions — got ${shapeName(declaredKindsValue)}`);
+  }
 
   // Declared remote connections. Spec-level,
   // not per-rule — computed once, same as declaredKinds above.
@@ -883,7 +890,7 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown, options: LintOptions
   // credential grant's digest included — sees.
   const handlersProblem = (value: unknown): string | null => {
     if (value === undefined) return null;
-    if (!isRecord(value) || Array.isArray(value)) return 'must be an object mapping handler names to source strings';
+    if (!isRecord(value)) return 'must be an object mapping handler names to source strings';
     const proto: unknown = Object.getPrototypeOf(value);
     if (proto !== Object.prototype && proto !== null) return 'must be a plain object';
     const bad = Object.entries(value).find(([, src]) => typeof src !== 'string');
@@ -891,8 +898,18 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown, options: LintOptions
   };
   const specHandlersProblem = handlersProblem(s?.handlers);
   if (specHandlersProblem) errors.push(`the spec-level "handlers" ${specHandlersProblem}`);
+  // Storage takes any object as a handler map, so an array would run under its
+  // indices while every check below reads no handlers at all.
+  if (Array.isArray(carriedHandlers)) errors.push('the file\'s "handlers" must be an object mapping handler names to source strings — got an array');
+  let ruleIndex = -1;
   for (const ruleValue of rulesList) {
-    if (!isRecord(ruleValue)) continue;
+    ruleIndex += 1;
+    // Every check below reads fields, so a value of the wrong shape would pass
+    // them all and leave a rule that does nothing.
+    if (!isRecord(ruleValue)) {
+      errors.push(`rules[${ruleIndex}]: a rule must be an object — got ${shapeName(ruleValue)}`);
+      continue;
+    }
     const rule = ruleValue as unknown as Rule;
     const rid = rule.id || '(unnamed)';
     const ruleHandlersProblem = handlersProblem(ruleValue.handlers);
@@ -907,11 +924,19 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown, options: LintOptions
       }
     }
 
+    const anchorValue: unknown = ruleValue.anchor;
+    if (anchorValue !== undefined && anchorValue !== null && !isRecord(anchorValue)) {
+      errors.push(`rule "${rid}": "anchor" must be an object — got ${shapeName(anchorValue)}`);
+    }
     if (isRecord(rule.anchor)) {
       for (const k of Object.keys(rule.anchor)) {
         if (!ANCHOR_KEYS.has(k)) {
           warnings.push(`rule "${rid}": unknown anchor field "${k}" — ignored by the engine.`);
         }
+      }
+      const primaryValue: unknown = rule.anchor.primary;
+      if (primaryValue !== undefined && primaryValue !== null && !isRecord(primaryValue)) {
+        errors.push(`rule "${rid}": anchor "primary" must be an object — got ${shapeName(primaryValue)}`);
       }
       lintPrimaryAnchor(rid, rule.anchor.primary, warnings);
       const cardinality: unknown = rule.anchor.cardinality;
@@ -959,7 +984,10 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown, options: LintOptions
     }
 
     for (const mutValue of mutationsList) {
-      if (!isRecord(mutValue)) continue;
+      if (!isRecord(mutValue)) {
+        errors.push(`rule "${rid}": a mutation must be an object with a "kind" — got ${shapeName(mutValue)}`);
+        continue;
+      }
       const mut = mutValue as unknown as Mutation;
       const { kind } = mut;
       if (!kind) {

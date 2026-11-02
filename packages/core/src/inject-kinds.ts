@@ -8,6 +8,7 @@
 // builder/strip/placement run in the page's isolated world.
 // Everything is bare-node testable (packages/core/test/inject-kinds-harness.ts).
 import type { InjectNode } from './types';
+import { isRecord } from './is-record';
 
 const INJECT_PLACEMENTS = new Set(['before', 'after', 'prepend', 'append']);
 const INJECT_MAX_DEPTH = 8;
@@ -33,10 +34,6 @@ const ANIMATED_ACTIVE_ATTR = /^(?:href|xlink:href|src|on.*)$/i;
 const DATA_URL_TAGS = new Set(['img', 'image', 'source', 'video', 'audio', 'input']);
 const DATA_URL_ATTRS = new Set(['src', 'href', 'xlink:href', 'poster', 'srcset']);
 const DATA_MEDIA_URL = /^data:(?:image|audio|video)\//;
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
 
 // Browsers strip ASCII whitespace and control chars from a URL's scheme before
 // matching, so "  JavaScript\t:" executes — normalize the same way before

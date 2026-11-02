@@ -60,6 +60,7 @@ import {
 } from './shim-folder';
 import type { FolderInput } from './shim-folder';
 import { hostPatternProblem, widenedPatterns, MAX_NEW_MATCH_PATTERNS } from './match-scope';
+import { isRecord } from './is-record';
 
 /** The session's working state: the spec it would commit, and the stored handler modules. */
 export interface WorkingState {
@@ -124,10 +125,6 @@ function comparableField(key: string, value: unknown): unknown {
       return { ...rest, anchor: withoutManagedKeys(rest.anchor) };
     }),
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 // The shared code space's per-name ops: set every name the folder adds or

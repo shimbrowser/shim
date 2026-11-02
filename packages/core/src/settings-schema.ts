@@ -20,6 +20,7 @@
 
 import type { Spec } from './types';
 import { isPrivateHost } from './fetch-policy';
+import { isRecord } from './is-record';
 
 export type SettingFieldType = 'text' | 'secret' | 'number' | 'boolean' | 'select';
 
@@ -88,10 +89,6 @@ export function hasLoneSurrogate(s: string): boolean {
   return LONE_SURROGATE.test(s);
 }
 
-function isRecordValue(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
-
 /**
  * Every problem with a `use` declaration, one line each; empty when valid.
  * Strict: unknown properties refuse, and the origin must be written in its
@@ -99,7 +96,7 @@ function isRecordValue(v: unknown): v is Record<string, unknown> {
  * approves is exactly what the host compares.
  */
 export function credentialUseProblems(use: unknown): string[] {
-  if (!isRecordValue(use)) return ['`use` must be an object { origin, header | query, format }'];
+  if (!isRecord(use)) return ['`use` must be an object { origin, header | query, format }'];
   const problems: string[] = [];
   for (const k of Object.keys(use)) {
     if (k !== 'origin' && k !== 'header' && k !== 'query' && k !== 'format') problems.push(`\`use\` has an unknown property "${k}"`);

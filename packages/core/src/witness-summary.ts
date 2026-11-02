@@ -10,13 +10,11 @@
 // Works on whatever the event carried (`unknown`): a value that is neither
 // shape summarizes to null.
 
+import { isRecord } from './is-record';
+
 const MAX_ATTRS = 3;
 const MAX_VALUE = 40;
 const MAX_SUMMARY = 280;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 function clip(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}…` : s;

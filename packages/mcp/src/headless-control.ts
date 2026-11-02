@@ -48,6 +48,7 @@ import {
   HEADLESS_BOT_WALL_ADVICE,
   type HeadlessSessionPage, type HeadlessShimSource, type HeadlessTarget, type HeadlessBackendOptions,
 } from './headless-session';
+import { isRecord } from '@shimbrowser/core/is-record';
 
 /** How long opening a page may take before the session is refused. */
 export const OPEN_PAGE_TIMEOUT_MS = 30_000;
@@ -110,10 +111,6 @@ function reply(body: Record<string, unknown>): ControlReply {
 
 function refuse(error: string, detail?: string, extra: Record<string, unknown> = {}): ControlReply {
   return reply({ ok: false, error, ...(detail !== undefined ? { detail } : {}), ...extra });
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 function errMessage(e: unknown): string {

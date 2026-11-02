@@ -10,13 +10,10 @@
 import type { Spec } from './types';
 import { sha256Hex } from './sha256';
 import { deleteManagedKeys } from './managed-anchor';
+import { isRecord } from './is-record';
 
 // Top-level spec fields that never change what runs.
 const UNMANAGED_TOP_LEVEL = new Set(['version', 'bundleHash', 'priority', '__cssPriority', 'autoRepair', 'intent']);
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
-}
 
 // JSON with object keys sorted at every depth, so a digest doesn't move when
 // a store reorders keys.

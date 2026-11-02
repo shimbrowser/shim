@@ -16,6 +16,7 @@ import { pagePathKey } from '@shimbrowser/core/deploy-id';
 import { readCaptureEvent, inCaptureBinding, supersedes, fingerprintOfCapture, type CaptureEvent } from '@shimbrowser/core/capture-event';
 import { anchorDigest, withManagedFingerprint, withoutManagedKeys, managedFingerprintOf, hasManagedKeys } from '@shimbrowser/core/managed-anchor';
 import type { QuarantineState, RuleStateRecord, CaptureRecord } from './store';
+import { isRecord } from '@shimbrowser/core/is-record';
 
 /** The anchor kinds the engine resolves; a reported anchor of any other kind is not an anchor. */
 export const ANCHOR_KINDS: ReadonlySet<string> = new Set<AnchorSpec['kind']>(['css', 'data-attr', 'aria', 'text']);
@@ -48,10 +49,6 @@ export interface RuntimeEventPayload {
   rev?: unknown;
   applyId?: unknown;
   captureNote?: unknown;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
 /**

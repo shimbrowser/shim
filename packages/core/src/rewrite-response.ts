@@ -28,6 +28,7 @@
 import * as routeMatch from './route-match';
 import type { Token } from './route-match';
 import { handlerExpressionSource } from './handler-source';
+import { isRecord } from './is-record';
 
 // The shape of `mutation.endpoint` on a `rewrite-response` mutation (design
 // doc "Spec shape"). Declared here for downstream consumers (the `Mutation`
@@ -243,10 +244,6 @@ export function matchSerializedTokens(
   // `/budgets` would spuriously match `/budgets/extra`.
   if (si !== segs.length) return null;
   return { params: params };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
 }
 
 // Validate a single `rewrite-response` mutation PAYLOAD (not the bound

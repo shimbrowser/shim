@@ -23,6 +23,7 @@
 
 import type { Witness, SetWitness } from './types';
 import type { ManagedFingerprint } from './managed-anchor';
+import { isRecord } from './is-record';
 
 /** Why a capture ended with no fingerprint (the engine's note on a "none" event). */
 export type CaptureNote = 'one-member' | 'mixed-tags' | 'too-many' | 'remove-rule';
@@ -35,10 +36,6 @@ export interface CaptureEvent {
   rev: number;
   applyId: string | null;
   note: CaptureNote | null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 const NOTES: ReadonlySet<string> = new Set<CaptureNote>(['one-member', 'mixed-tags', 'too-many', 'remove-rule']);
