@@ -24,7 +24,7 @@
 // infra source against a hand-rolled fake DOM + a tiny synchronous AMD
 // loader in a `vm` sandbox.
 
-import { transformLiteral } from './rewrite-response';
+import { isTransformForm, transformLiteral } from './rewrite-response';
 import type { TransformForm } from './rewrite-response';
 import { isRecord } from './is-record';
 
@@ -54,6 +54,12 @@ export interface InterceptEntry {
 // the current page (intercept has no host/registrable-domain scoping the way
 // rewrite-response does — a module id is already page-scoped by construction).
 export interface InterceptTablePayload { entries: InterceptEntry[] }
+
+// An entry with the form its wrap source was found in (rewrite-response.ts's
+// ProbedRewriteEntry). An expose-only entry has no source, so its null means
+// nothing and it always installs.
+export type ProbedInterceptEntry = InterceptEntry & { form: TransformForm | null };
+export interface ProbedInterceptTable { entries: ProbedInterceptEntry[] }
 
 // Validate a single `intercept` mutation PAYLOAD (not the bound wrap
 // source — that's a source-scan heuristic and lives in spec-lint, a later
@@ -535,17 +541,21 @@ function buildInterceptInfraSrc(): string {
 // separately as source text — same split `rewrite-response.ts`'s
 // `buildWrapperSrc` makes between its stripped table and its `transforms`
 // object), plus a `wraps` object keyed the same way, each value a
-// self-invoking literal built via the SHARED `transformLiteral` splice
-// (expr vs module form, `formFor` decides per-source). Exported on its own
+// self-invoking literal built via the SHARED `transformLiteral` splice in the
+// entry's own form. An entry with a source and no form is left out: its source
+// would fail the parse of the one shared script. Exported on its own
 // (not just inlined into `buildInterceptWrapperSrc`) so a live table push —
 // toggle, commit, global pause — can call `window.__shimInterceptInstall(...)`
 // directly with a freshly-built argument, without re-running the infra IIFE.
-export function buildInterceptInstallArg(payload: InterceptTablePayload, formFor: (src: string) => TransformForm): string {
-  const strippedEntries = payload.entries.map(({ wrapSource, ...rest }) => rest);
+export function buildInterceptInstallArg(payload: ProbedInterceptTable): string {
+  const entries = payload.entries.filter((e) => e.wrapSource === null || isTransformForm(e.form));
+  const strippedEntries = entries.map(({ wrapSource, form, ...rest }) => rest);
   const tableJson = JSON.stringify({ entries: strippedEntries });
-  const wrapParts = payload.entries
-    .filter((e): e is InterceptEntry & { wrapSource: string } => typeof e.wrapSource === 'string')
-    .map((e) => `${JSON.stringify(e.key)}: ${transformLiteral(e.wrapSource, formFor(e.wrapSource))}`);
+  const wrapParts = entries.flatMap((e) => (
+    typeof e.wrapSource === 'string' && isTransformForm(e.form)
+      ? [`${JSON.stringify(e.key)}: ${transformLiteral(e.wrapSource, e.form)}`]
+      : []
+  ));
   return `{ table: ${tableJson}, wraps: { ${wrapParts.join(', ')} } }`;
 }
 
@@ -553,6 +563,6 @@ export function buildInterceptInstallArg(payload: InterceptTablePayload, formFor
 // world, CSP-immune — same install mechanism `rewrite-install.ts` uses for
 // `rewrite-response`, a later task's wiring): the once-guarded infra IIFE,
 // followed by one call installing this table's entries + bound wraps.
-export function buildInterceptWrapperSrc(payload: InterceptTablePayload, formFor: (src: string) => TransformForm): string {
-  return `${buildInterceptInfraSrc()}\nwindow.__shimInterceptInstall(${buildInterceptInstallArg(payload, formFor)});`;
+export function buildInterceptWrapperSrc(payload: ProbedInterceptTable): string {
+  return `${buildInterceptInfraSrc()}\nwindow.__shimInterceptInstall(${buildInterceptInstallArg(payload)});`;
 }

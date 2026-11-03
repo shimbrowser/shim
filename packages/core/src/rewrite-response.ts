@@ -22,8 +22,7 @@
 // testable end-to-end (a bare-node harness), including
 // running the built wrapper source in a `vm` sandbox. `detectTransformForm`
 // (below) follows the same discipline for a THIRD piece — transform-source
-// syntax detection — by taking its `vm.Script`-backed compile probe as a
-// parameter rather than importing `vm` itself.
+// syntax detection — by taking its compile probe as a parameter.
 
 import * as routeMatch from './route-match';
 import type { Token } from './route-match';
@@ -85,25 +84,39 @@ export interface RewriteTablePayload {
 // A transform handler's storage form — same split `script` handlers use:
 // the LLM emits a bare function EXPRESSION at `rule.handlers[name]`; an
 // imported/exported shim's handler travels as a full CJS MODULE source
-// (`module.exports = ...`). `buildWrapperSrc`'s caller decides which form a
-// given source string is in (its own concern — this module doesn't sniff).
+// (`module.exports = ...`). A host decides each source's form with
+// `detectTransformForm` and hands it to `buildWrapperSrc` on the entry.
 export type TransformForm = 'expr' | 'module';
+
+// An entry with the form its source was found in. `form: null` is source that
+// parses as neither. It stays in a table until previews are merged, because a
+// broken preview still replaces its committed twin and a broken committed rule
+// still holds its place, and then no wrapper takes it.
+export type ProbedRewriteEntry = RewriteEntry & { form: TransformForm | null };
+export type ProbedRewriteTable = Omit<RewriteTablePayload, 'entries'> & { entries: ProbedRewriteEntry[] };
+
+export function isTransformForm(form: unknown): form is TransformForm {
+  return form === 'expr' || form === 'module';
+}
 
 // Result of one `tryCompile` probe inside `detectTransformForm`, below.
 export interface CompileAttempt {
   ok: boolean;
   error?: string;
+  // The host couldn't check the source at all, so `ok: false` says nothing
+  // about it.
+  unavailable?: boolean;
 }
 
 // A source-parsing probe, INJECTED by the caller: this module stays
 // vm/Node-free (bare-node testable with zero Electron process), so the
 // actual parse lives with each real caller instead — spec-lint.ts
-// (authoring/commit-time syntax check) passes core's Node-free
-// `syntaxProbe` (syntax-probe.ts) and the browser's rewrite-install.ts
-// (document-start install-time filter) its own vm.Script-backed one; the two
-// give identical diagnostics (syntax-probe-harness). That keeps the real
-// expr-then-module DETECTION ALGORITHM (`detectTransformForm` itself) in
-// exactly one place shared by both, rather than reimplemented per caller.
+// (authoring/commit-time syntax check) and a host's install-time filter both
+// pass core's Node-free `syntaxProbe` (syntax-probe.ts), and a harness can
+// pass a `vm.Script`-backed one, with identical diagnostics
+// (syntax-probe-harness). That keeps the real expr-then-module DETECTION
+// ALGORITHM (`detectTransformForm` itself) in exactly one place shared by
+// all of them, rather than reimplemented per caller.
 export type CompileProbe = (code: string) => CompileAttempt;
 
 export type DetectedForm = { form: TransformForm } | { form: null; error: string };
@@ -382,11 +395,11 @@ export type PreviewOwner = { specId: string; ruleId: string };
 // with no committed rewrite yet is placed by `specOrder`). A preview
 // with no committed shim on this host goes last (the shim being authored has
 // the final say while it is previewed).
-export function mergePreviewEntries(
-  committed: RewriteEntry[],
-  previews: Array<{ owner: PreviewOwner | null; entries: RewriteEntry[] }>,
+export function mergePreviewEntries<E extends RewriteEntry>(
+  committed: E[],
+  previews: Array<{ owner: PreviewOwner | null; entries: E[] }>,
   specOrder: string[] = [],
-): RewriteEntry[] {
+): E[] {
   // Previews keep their own (ruleKey) specId, so placement works off the
   // owner recorded here, never off entries already spliced in: each committed
   // shim's slot is rebuilt from its own committed entries plus its previews.
@@ -396,12 +409,12 @@ export function mergePreviewEntries(
   specOrder.forEach((id, i) => { if (!rank.has(id)) rank.set(id, i); });
   const twinKey = (specId: string, ruleId: string): string => `${specId}\u0000${ruleId}`;
   const committedRules = new Set(committed.map((e) => twinKey(e.specId, e.ruleId)));
-  const twins = new Map<string, RewriteEntry[]>(); // twinKey → preview entries
-  const added = new Map<string, RewriteEntry[]>(); // specId with entries → new-rule previews
+  const twins = new Map<string, E[]>(); // twinKey → preview entries
+  const added = new Map<string, E[]>(); // specId with entries → new-rule previews
   // A shim on the host with no committed rewrite yet: its previews go where
   // its priority puts it, before the first entry of any higher-ranked shim.
-  const slotless = new Map<string, RewriteEntry[]>();
-  const tail: RewriteEntry[] = [];
+  const slotless = new Map<string, E[]>();
+  const tail: E[] = [];
   for (const { owner, entries } of previews) {
     if (!owner) { tail.push(...entries); continue; }
     const key = twinKey(owner.specId, owner.ruleId);
@@ -415,7 +428,7 @@ export function mergePreviewEntries(
   const pending = [...slotless.entries()]
     .map(([specId, entries]) => ({ r: rank.get(specId) ?? Infinity, entries }))
     .sort((x, y) => x.r - y.r);
-  const out: RewriteEntry[] = [];
+  const out: E[] = [];
   const flushBelow = (r: number): void => {
     let next = pending[0];
     while (next && next.r < r) {
@@ -665,20 +678,22 @@ function buildInfraSrc(): string {
 // Build the full source to inject via `webFrame.executeJavaScript` (main-
 // world, CSP-immune): the once-guarded
 // infra IIFE, followed by one call installing this table's entries + bound
-// transforms. `formFor` lets the caller (which knows whether a given source
-// string is the LLM's bare-expression convention or an imported shim's full
-// CJS module) pick the right wrap per entry — this module has no opinion.
-export function buildWrapperSrc(payload: RewriteTablePayload, formFor: (src: string) => TransformForm): string {
+// transforms. Each entry's own form picks its wrap (the LLM's bare-expression
+// convention or an imported shim's full CJS module). An entry without one is
+// left out: its source would fail the parse of this ONE script, and with it
+// every other rule on the host.
+export function buildWrapperSrc(payload: ProbedRewriteTable): string {
   // The table sent into the page never carries transform SOURCE — only the
   // compiled matcher shape (key/method/toks/hasWildcard) the wrapper's
   // findEntries() needs. The actual functions live in `transforms`, spliced in
   // as source text below (keyed the same way), never round-tripped through
   // JSON (functions aren't JSON-serializable in the first place).
-  const strippedEntries = payload.entries.map(({ transformSource, ...rest }) => rest);
+  const entries = payload.entries.flatMap((entry) => (isTransformForm(entry.form) ? [{ entry, form: entry.form }] : []));
+  const strippedEntries = entries.map(({ entry: { transformSource, form, ...rest } }) => rest);
   const tableJson = JSON.stringify({ regDomain: payload.regDomain, entries: strippedEntries });
 
-  const transformParts = payload.entries.map(
-    (entry) => `${JSON.stringify(entry.key)}: ${transformLiteral(entry.transformSource, formFor(entry.transformSource))}`,
+  const transformParts = entries.map(
+    ({ entry, form }) => `${JSON.stringify(entry.key)}: ${transformLiteral(entry.transformSource, form)}`,
   );
   const installArg = `{ table: ${tableJson}, transforms: { ${transformParts.join(', ')} } }`;
 

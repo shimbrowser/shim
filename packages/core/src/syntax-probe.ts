@@ -36,8 +36,8 @@
 //
 // Pinned against vm.Script over a corpus in packages/core/test/
 // syntax-probe-harness.ts. Both passes need the host to allow eval: under a
-// page CSP without 'unsafe-eval' the probe answers not-ok with a reason
-// rather than passing source it could not check.
+// page CSP without 'unsafe-eval' the probe answers not-ok with a reason and
+// `unavailable`, rather than passing source it could not check.
 
 import type { CompileProbe } from './rewrite-response';
 
@@ -67,13 +67,13 @@ export const syntaxProbe: CompileProbe = (code) => {
   try {
     parse = getScriptParser();
   } catch (err) {
-    return { ok: false, error: `syntax check unavailable in this host (${messageOf(err)})` };
+    return { ok: false, unavailable: true, error: `syntax check unavailable in this host (${messageOf(err)})` };
   }
   try {
     parse(`throw ${HALT};\n${source}`);
   } catch (err) {
     if (err !== HALT) {
-      if (err instanceof EvalError) return { ok: false, error: `syntax check unavailable in this host (${err.message})` };
+      if (err instanceof EvalError) return { ok: false, unavailable: true, error: `syntax check unavailable in this host (${err.message})` };
       return { ok: false, error: messageOf(err) };
     }
   }
@@ -81,7 +81,7 @@ export const syntaxProbe: CompileProbe = (code) => {
     // Constructed to parse, never called.
     new Function(source);
   } catch (err) {
-    if (err instanceof EvalError) return { ok: false, error: `syntax check unavailable in this host (${err.message})` };
+    if (err instanceof EvalError) return { ok: false, unavailable: true, error: `syntax check unavailable in this host (${err.message})` };
     return { ok: false, error: messageOf(err) };
   }
   return { ok: true };
