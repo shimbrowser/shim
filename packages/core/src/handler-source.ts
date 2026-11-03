@@ -276,8 +276,22 @@ export function moduleForExpression(expression: string): string {
  * (so the module scope and the inline scope evaluate it identically). Source
  * compared ignoring surrounding whitespace and trailing semicolons.
  */
+/**
+ * Module source with surrounding whitespace and trailing semicolons removed: two
+ * sources that differ only there store the same handler. A loop, not a
+ * `/[;\s]+$/` replace: that regex tries every position in a long run of spaces
+ * and backtracks over the rest, which is quadratic, and source comes from
+ * imported files.
+ */
+export function canonicalModuleSource(src: string): string {
+  const s = src.trim();
+  let end = s.length;
+  while (end > 0 && (s[end - 1] === ';' || /\s/.test(s[end - 1] ?? ''))) end--;
+  return s.slice(0, end);
+}
+
 export function isStoredModuleExpression(moduleSource: string, expression: string): boolean {
-  const canonical = (src: string): string => src.trim().replace(/[;\s]+$/, '');
+  const canonical = canonicalModuleSource;
   const stored = canonical(moduleSource);
   const wrapped = wrappedModule(expression);
   // A wrapper is the module either as written (hydration's, before a commit)

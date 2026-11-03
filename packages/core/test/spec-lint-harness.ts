@@ -8,7 +8,7 @@
 // (surfaced to the model + chat). Bare node — no db, no Electron.
 
 import { lintSpec, assertNoSpecErrors, observerLoopWarning } from '../src/spec-lint';
-import { moduleToExpression } from '../src/handler-source';
+import { canonicalModuleSource, isStoredModuleExpression, moduleToExpression } from '../src/handler-source';
 
 let failures = 0;
 function check(label: string, cond: boolean, detail?: string) {
@@ -102,6 +102,12 @@ console.log('handlers needing Node');
   flagged(`function () { const ${'{'.repeat(100000)} }`);
   flagged(`function () { require${' '.repeat(200000)}; }`);
   check('hostile sources scan in bounded time', Date.now() - started < 5000, `${Date.now() - started}ms`);
+  const oldCanonical = (src: string): string => src.trim().replace(/[;\s]+$/, '');
+  check('a module compares the same with or without trailing semicolons and space', ['a;', 'a ; ;\n', '  a  ', 'a;b;', 'a\u00a0;', ';;', ''].every((src) => canonicalModuleSource(src) === oldCanonical(src)));
+  const spacedAt = Date.now();
+  canonicalModuleSource(`module.exports = function () { x${' '.repeat(400000)}; }`);
+  isStoredModuleExpression(`x${' '.repeat(400000)}}`, `y${' '.repeat(400000)}}`);
+  check('a long run of spaces inside a module compares in linear time', Date.now() - spacedAt < 500, `${Date.now() - spacedAt}ms`);
   check('on import it never says Node is blocked', !imported.warnings.some((w) => /no Node|don't have/.test(w)), imported.warnings.join(' | '));
   check('a carried module is scanned', lintSpec({ rules: [] }, { h: 'module.exports = function () { process.exit(); };' }).errors.some((e) => /no Node/.test(e)));
   check('a shared handler is scanned', lintSpec({ rules: [], sharedHandlers: { h: 'function () { require("x"); }' } }).errors.some((e) => /no Node/.test(e)));

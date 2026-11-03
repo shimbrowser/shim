@@ -36,7 +36,7 @@ import {
 import { validateRewriteMutation, detectTransformForm } from './rewrite-response';
 import { validateInterceptMutation } from './intercept';
 import { syntaxProbe } from './syntax-probe';
-import { expressionToModule, handlerModuleProblem, withoutModuleWrapper } from './handler-source';
+import { canonicalModuleSource, expressionToModule, handlerModuleProblem, withoutModuleWrapper } from './handler-source';
 import { ENGINE_MANAGED_ANCHOR_KEYS } from './managed-anchor';
 import { isRecord } from './is-record';
 
@@ -779,7 +779,7 @@ function lintHandlerNameCollisions(
 // Two module sources that differ only in surrounding whitespace or trailing
 // semicolons store the same handler.
 function canonicalModule(moduleSource: string): string {
-  return moduleSource.trim().replace(/[;\s]+$/, '');
+  return canonicalModuleSource(moduleSource);
 }
 
 // The mutation fields that reference a handler by name: `handler` (script,
