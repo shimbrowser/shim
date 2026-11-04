@@ -39,6 +39,7 @@ const HEADLESS: PageHostCapabilities = {
   mutationKinds: ['hide', 'restyle', 'reorder', 'reshape', 'script', 'inject-element', 'inject-html', 'remove', 'replace-root'],
   iframeRules: false,
   specCss: false,
+  pathScope: false,
   apiMembers: [],
   secretSettings: 'none',
   componentIdentity: false,
@@ -49,6 +50,7 @@ const BROWSER: PageHostCapabilities = {
   mutationKinds: [...HEADLESS.mutationKinds, 'mount-route', 'redirect', 'rewrite-response', 'intercept'],
   iframeRules: true,
   specCss: true,
+  pathScope: true,
   apiMembers: ['db', 'ai', 'settings', 'fetch', 'storage.pack', 'storage.global', 'shared', 'modules'],
   secretSettings: 'plaintext',
   componentIdentity: true,
@@ -135,6 +137,16 @@ console.log('secret settings');
   check('a use that does not validate counts as none', !broken.ok && broken.unsupported[0]?.message.includes('"b"') === true);
   check('a none host refuses placed secrets too', !preflightSpec(spec([placed]), NO_SECRETS).ok);
   check('the plaintext host keeps both forms', preflightSpec(spec([placed, query, { key: 'raw', type: 'secret' }]), BROWSER).ok);
+}
+
+console.log('paths');
+{
+  const scoped = { id: 's', match: { hosts: ['a.com'], paths: ['/history'] }, rules: [] } as unknown as Spec;
+  const refused = preflightSpec(scoped, HEADLESS);
+  check('a host that can\'t enforce paths refuses a page-limited spec', !refused.ok && refused.unsupported.some((u) => u.feature === 'paths'), JSON.stringify(refused));
+  check('one that can keeps it', preflightSpec(scoped, BROWSER).ok);
+  const empty = { id: 's', match: { hosts: ['a.com'], paths: [] }, rules: [] } as unknown as Spec;
+  check('empty paths limit nothing, so anyone keeps them', preflightSpec(empty, HEADLESS).ok);
 }
 
 console.log('source scan');

@@ -39,7 +39,7 @@ export const UNSUPPORTED_API_EVENT = 'unsupported-api';
 export interface UnsupportedFeature {
   /** The rule that declares it, or absent for a spec-level declaration. */
   ruleId?: string;
-  /** `mutation-kind`, `iframe-rule`, `css`, or the declaration field (`settings`, `permissions`, `storage`, `connections`). */
+  /** `mutation-kind`, `iframe-rule`, `css`, `paths`, or the declaration field (`settings`, `permissions`, `storage`, `connections`). */
   feature: string;
   /** The kind name, for a mutation kind. */
   kind?: string;
@@ -115,6 +115,15 @@ export function preflightSpec(spec: Spec, capabilities: PageHostCapabilities): P
           + 'add `use: { origin, header | query, format }` to each and pass `secrets: [key]` to api.fetch, or author this shim in the Shim browser',
       });
     }
+  }
+  // A host that runs a shim on whole hosts would run a page-limited one on pages
+  // its author left out (D18).
+  const match = record.match;
+  if (!capabilities.pathScope && isRecord(match) && declares(match.paths)) {
+    unsupported.push({
+      feature: 'paths',
+      message: 'the shim is limited to some pages (match.paths), which this host can\'t enforce — it would run on every page of the site. Remove match.paths or use it in the Shim browser',
+    });
   }
   // A whole-patch stylesheet a host doesn't install would leave every rule
   // reporting a clean apply on a page that lacks the shim's styling.

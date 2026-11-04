@@ -138,7 +138,8 @@ export interface Rule {
 export interface Spec {
   id: string;
   version?: number;
-  match?: { hosts?: string[] };
+  // `paths` limits the shim to some pages of its hosts (path-match.ts, D18).
+  match?: { hosts?: string[]; paths?: string[] };
   rules?: Rule[];
   // Optional top-level CSS blob injected wholesale for the spec (engine's
   // collectCssForSpec) — a real persistable spec field, distinct from the

@@ -193,6 +193,19 @@ rejects('a non-list', 'malformed-shim-folder',
   () => diffWorkingCopy(state, withSpec((spec) => { (spec as unknown as Record<string, unknown>).match = { hosts: 'example.com' }; })), '"match" must be');
 rejects('another key under match (the seam for later match kinds)', 'malformed-shim-folder',
   () => diffWorkingCopy(state, withSpec((spec) => { (spec as unknown as Record<string, unknown>).match = { hosts: ['example.com'], signature: '#x' }; })), '"signature"');
+{
+  // Paths are the person's, set in Shim: a working copy carries them unchanged.
+  const scoped: WorkingState = { spec: { ...WORKING, match: { hosts: ['example.com'], paths: ['/history'] } }, matchEditable: true };
+  const hostsOnly = diffWorkingCopy(scoped, withSpec((spec) => { spec.match = { hosts: ['example.com', 'a.com'], paths: ['/history'] }; }, checkoutShim(scoped)));
+  check('a hosts edit beside unchanged paths is a set-match', hostsOnly.ops.length === 1 && hostsOnly.ops[0]?.op === 'set-match', JSON.stringify(hostsOnly.ops));
+  check('…which still keeps the paths', JSON.stringify(applyDelta(scoped.spec, hostsOnly.ops).match?.paths) === '["/history"]');
+  rejects('an edit to match.paths', 'malformed-shim-folder',
+    () => diffWorkingCopy(scoped, withSpec((spec) => { spec.match = { hosts: ['example.com'], paths: ['/**'] }; }, checkoutShim(scoped))), 'set in the shim');
+  rejects('dropping match.paths', 'malformed-shim-folder',
+    () => diffWorkingCopy(scoped, withSpec((spec) => { spec.match = { hosts: ['example.com', 'a.com'] }; }, checkoutShim(scoped))), 'set in the shim');
+  rejects('adding match.paths', 'malformed-shim-folder',
+    () => diffWorkingCopy(state, withSpec((spec) => { spec.match = { hosts: ['example.com'], paths: ['/x'] }; })), 'set in the shim');
+}
 rejects('a pattern listed twice', 'malformed-shim-folder',
   () => diffWorkingCopy(state, withSpec((spec) => { spec.match = { hosts: ['example.com', 'a.com', 'a.com'] }; })), 'twice');
 {

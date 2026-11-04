@@ -23,7 +23,7 @@ function check(label: string, cond: boolean, detail = ''): void {
 
 const CAPS = Object.freeze({
   mutationKinds: Object.freeze(['hide', 'restyle', 'reorder', 'reshape', 'remove', 'inject-element', 'inject-html', 'script', 'replace-root']),
-  iframeRules: false, specCss: false, apiMembers: Object.freeze([]), componentIdentity: false, engineInspection: false, trustedInput: true,
+  iframeRules: false, specCss: false, pathScope: true, apiMembers: Object.freeze([]), componentIdentity: false, engineInspection: false, trustedInput: true,
 });
 
 function fakeHost(): PageHost {

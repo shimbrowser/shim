@@ -105,6 +105,15 @@ console.log('a good file:');
 
 console.log('refusals:');
 {
+  // Registrations cover whole hosts, so a page-limited shim is refused, never run site-wide.
+  const scoped = file({ spec: { match: { hosts: ['example.com'], paths: ['/history'] } } });
+  for (const [mode, caps] of [['declarative', EXTENSION_DECLARATIVE_CAPABILITIES], ['full', EXTENSION_CAPABILITIES]] as const) {
+    const out = prepareInstall(scoped, caps, mode);
+    check(`a shim limited to some pages is refused (${mode})`, !out.ok && JSON.stringify(out).includes('match.paths'), JSON.stringify(out));
+  }
+  check('no extension host claims to enforce paths', [EXTENSION_CAPABILITIES, EXTENSION_DECLARATIVE_CAPABILITIES, SESSION_CAPABILITIES, SESSION_VAULT_CAPABILITIES].every((c) => c.pathScope === false));
+}
+{
   const out = prepareInstall('{not json', EXTENSION_DECLARATIVE_CAPABILITIES, 'declarative');
   check('bad JSON', !out.ok && out.error === 'malformed-shim-file' && out.problems.length === 1);
 }

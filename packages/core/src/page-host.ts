@@ -213,6 +213,12 @@ export interface PageHostCapabilities {
   iframeRules: boolean;
   /** The spec-level `css` block (the engine's whole-patch stylesheet) is installed with the shim. */
   specCss: boolean;
+  /**
+   * `match.paths` (D18) is honored: committed shims run only on the pages their
+   * paths name, decided per document. Previews aren't limited by paths on any
+   * host, so a host that runs only previews honors them trivially.
+   */
+  pathScope: boolean;
   /** Handler api members beyond the core set. */
   apiMembers: readonly PageHostApiMember[];
   /**

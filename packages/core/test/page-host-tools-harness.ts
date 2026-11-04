@@ -43,7 +43,7 @@ function scriptedHost(
     evals,
     shots,
     capabilities: {
-      mutationKinds: ['hide'], iframeRules: false, specCss: false, apiMembers: [], componentIdentity: false, engineInspection: false, trustedInput: false,
+      mutationKinds: ['hide'], iframeRules: false, specCss: false, pathScope: false, apiMembers: [], componentIdentity: false, engineInspection: false, trustedInput: false,
       secretSettings: 'none',
     },
     url: () => 'https://example.com/a',

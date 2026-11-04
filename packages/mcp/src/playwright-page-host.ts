@@ -55,6 +55,8 @@ export const HEADLESS_CAPABILITIES: PageHostCapabilities = Object.freeze({
   // Previews are per rule (applyExtraRule on a stub spec): nothing installs
   // the spec-level stylesheet, so a shim that has one is refused (D15).
   specCss: false,
+  // Only previews run here, and previews aren't limited by paths anywhere.
+  pathScope: true,
   apiMembers: Object.freeze([]),
   secretSettings: 'none',
   componentIdentity: false,

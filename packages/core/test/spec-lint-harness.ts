@@ -30,11 +30,22 @@ let res = lintSpec(clean);
 check('clean: no errors', res.errors.length === 0, JSON.stringify(res.errors));
 check('clean: no warnings', res.warnings.length === 0, JSON.stringify(res.warnings));
 
-console.log('match.paths → refused until this version enforces it');
-res = lintSpec({ match: { hosts: ['a.com'], paths: ['/history'] }, rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.x' } }, mutations: [{ kind: 'hide' }] }] });
-check('match.paths is an error', res.errors.some((e) => /match\.paths/.test(e)), JSON.stringify(res.errors));
-res = lintSpec({ match: { hosts: ['a.com'], paths: [] }, rules: [] }, undefined, { imported: true });
-check('…even empty, and on import', res.errors.some((e) => /match\.paths/.test(e)), JSON.stringify(res.errors));
+console.log('match.paths');
+const hide = [{ id: 'a', anchor: { primary: { kind: 'css', value: '.x' } }, mutations: [{ kind: 'hide' }] }];
+res = lintSpec({ match: { hosts: ['a.com'], paths: ['/history', '!re:\\?debug'] }, rules: hide });
+check('valid paths lint clean', res.errors.length === 0, JSON.stringify(res.errors));
+res = lintSpec({ match: { hosts: ['a.com'], paths: ['/ok', 're:(a)\\1'] }, rules: hide }, undefined, { imported: true });
+check('a bad entry is an error, on import too', res.errors.some((e) => /match\.paths\[1\].*backreference/.test(e)), JSON.stringify(res.errors));
+res = lintSpec({ match: { hosts: ['a.com'], paths: 'history' }, rules: hide });
+check('paths that aren\'t a list are an error', res.errors.some((e) => /must be a list/.test(e)), JSON.stringify(res.errors));
+res = lintSpec({ match: { hosts: ['a.com'], paths: null }, rules: hide });
+check('null paths are an error', res.errors.some((e) => /must be a list/.test(e)), JSON.stringify(res.errors));
+res = lintSpec({ global: true, match: { hosts: ['a.com'], paths: ['/x'] }, rules: [] });
+check('a global shim can\'t take paths', res.errors.some((e) => /global/.test(e)), JSON.stringify(res.errors));
+res = lintSpec({ match: { hosts: ['a.com'], paths: ['/x'] }, rules: [{ id: 'r', mutations: [{ kind: 'mount-route', handler: 'h', pattern: '/p', title: 'P' }], handlers: { h: 'function h(){}' } }] });
+check('a virtual route can\'t sit beside paths', res.errors.some((e) => /virtual route \(rule "r"\)/.test(e)), JSON.stringify(res.errors));
+res = lintSpec({ match: { hosts: ['a.com'], paths: [] }, rules: [{ id: 'r', mutations: [{ kind: 'mount-route', handler: 'h', pattern: '/p', title: 'P' }], handlers: { h: 'function h(){}' } }] });
+check('empty paths limit nothing, so a route is fine', !res.errors.some((e) => /virtual route/.test(e)), JSON.stringify(res.errors));
 res = lintSpec({ match: { hosts: ['a.com'] }, rules: [] });
 check('hosts alone is fine', !res.errors.some((e) => /match/.test(e)), JSON.stringify(res.errors));
 

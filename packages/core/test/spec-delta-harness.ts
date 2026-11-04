@@ -69,6 +69,15 @@ next = applyDelta(base, [{ op: 'set-match', match: { hosts: ['a.com', '*.b.com']
 check('set-match replaces the match', JSON.stringify(next.match) === '{"hosts":["a.com","*.b.com"]}');
 const hostsIn = next.match?.hosts;
 check('…as a copy of the op\'s list', Array.isArray(hostsIn));
+{
+  const scoped = { ...base, match: { hosts: ['a.com'], paths: ['/history'] } };
+  const moved = applyDelta(scoped, [{ op: 'set-match', match: { hosts: ['b.com'] } }]);
+  check('set-match keeps the paths it found', JSON.stringify(moved.match) === '{"hosts":["b.com"],"paths":["/history"]}', JSON.stringify(moved.match));
+  const forged = applyDelta(scoped, [{ op: 'set-match', match: { hosts: ['b.com'], paths: ['/**'] } }]);
+  check('…and never takes paths from the op', JSON.stringify(forged.match?.paths) === '["/history"]', JSON.stringify(forged.match));
+  const none = applyDelta(base, [{ op: 'set-match', match: { hosts: ['b.com'], paths: ['/x'] } }]);
+  check('…nor adds them to a shim without any', none.match?.paths === undefined, JSON.stringify(none.match));
+}
 check('a malformed set-match leaves the match as it was',
   JSON.stringify(applyDelta(base, [{ op: 'set-match', match: { hosts: 'a.com' } }]).match) === JSON.stringify(base.match)
   && JSON.stringify(applyDelta(base, [{ op: 'set-match', match: null }]).match) === JSON.stringify(base.match));

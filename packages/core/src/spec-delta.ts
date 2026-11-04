@@ -145,15 +145,17 @@ export function applyDelta(spec: Spec, ops: DeltaOp[] | undefined): Spec {
         sharedHandlersTouched = true;
       }
     } else if (op.op === 'set-match') {
-      // Replace where the shim runs (`spec.match`), from an external
-      // session's working copy. Only a `{ hosts: string[] }` value lands; a
-      // malformed one leaves the match as it was (the differ refuses it
-      // before an op is ever made).
+      // Replace which hosts the shim runs on (`spec.match.hosts`), from an
+      // external session's working copy. Only a `{ hosts: string[] }` value
+      // lands; a malformed one leaves the match as it was (the differ refuses
+      // it before an op is ever made). Paths (D18) are the person's, set in
+      // Shim's settings: they're carried through, never taken from the op.
       const value = op.match;
       if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
         const hosts = (value as { hosts?: unknown }).hosts;
         if (Array.isArray(hosts) && hosts.every((h) => typeof h === 'string')) {
-          match = { hosts: [...(hosts as string[])] };
+          const paths = spec.match?.paths;
+          match = { hosts: [...(hosts as string[])], ...(paths !== undefined ? { paths: [...paths] } : {}) };
           matchTouched = true;
         }
       }

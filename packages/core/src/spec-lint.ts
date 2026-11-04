@@ -39,6 +39,7 @@ import { syntaxProbe } from './syntax-probe';
 import { canonicalModuleSource, expressionToModule, handlerModuleProblem, withoutModuleWrapper } from './handler-source';
 import { ENGINE_MANAGED_ANCHOR_KEYS } from './managed-anchor';
 import { isRecord } from './is-record';
+import { compilePathScope } from './path-match';
 
 // A transform / wrap is kept by transformLiteral only if it evaluates to a
 // function; anything else parses fine and then leaves the rule silently
@@ -815,6 +816,15 @@ export interface LintOptions {
   imported?: boolean;
 }
 
+// The first rule with a mount-route mutation, or null.
+function pathScopeRouteRule(spec: LintableSpec | null): string | null {
+  for (const rule of Array.isArray(spec?.rules) ? spec.rules : []) {
+    if (!isRecord(rule) || !Array.isArray(rule.mutations)) continue;
+    if (rule.mutations.some((m) => isRecord(m) && m.kind === 'mount-route')) return typeof rule.id === 'string' ? rule.id : '?';
+  }
+  return null;
+}
+
 function lintSpec(spec: unknown, carriedHandlers?: unknown, options: LintOptions = {}): LintResult {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -833,11 +843,19 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown, options: LintOptions
     errors.push(`the spec-level "mutations" must be an object mapping custom kinds to their definitions — got ${shapeName(declaredKindsValue)}`);
   }
 
-  // Path scope (D18) isn't enforced by this version: a spec carrying it would
-  // run site-wide here, wider than its author chose, so it's refused.
+  // Path scope (D18). A list that doesn't compile runs nowhere, so it's an
+  // error here rather than a surprise later. Paths can't sit on a global shim
+  // (its reach is per host) or beside a virtual route (the route's shell is
+  // served from its own pattern, so a shim out of scope there leaves a blank
+  // page).
   const match: unknown = s?.match;
   if (isRecord(match) && match.paths !== undefined) {
-    errors.push('match.paths limits a shim to some pages, which this version of Shim doesn\'t support yet — remove it, or update Shim');
+    errors.push(...compilePathScope(match.paths).errors);
+    const scoped = Array.isArray(match.paths) && match.paths.length > 0;
+    if (scoped && s?.global === true) errors.push('match.paths can\'t limit a global shim — its reach is set per site');
+    if (scoped && pathScopeRouteRule(s) !== null) {
+      errors.push(`match.paths can't limit a shim with a virtual route (rule "${pathScopeRouteRule(s) ?? ''}") — the route's page would be blank where the shim doesn't run`);
+    }
   }
 
   // Declared remote connections. Spec-level,

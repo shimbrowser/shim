@@ -161,9 +161,16 @@ function matchOp(before: unknown, after: unknown, committed: readonly unknown[] 
     problems.push('"match" must be { "hosts": [host patterns] }');
     return null;
   }
-  const extra = Object.keys(after).filter((key) => key !== 'hosts');
+  const extra = Object.keys(after).filter((key) => key !== 'hosts' && key !== 'paths');
   if (extra.length) {
-    problems.push(`"match" takes only "hosts" (not ${extra.map((k) => JSON.stringify(k)).join(', ')})`);
+    problems.push(`"match" takes only "hosts" and "paths" (not ${extra.map((k) => JSON.stringify(k)).join(', ')})`);
+    return null;
+  }
+  // Which pages a shim runs on is the person's choice, made in Shim's settings
+  // (D18). A working copy carries its paths as they were and can't edit them.
+  const beforePaths = isRecord(before) ? before.paths : undefined;
+  if (stableStringify(beforePaths) !== stableStringify(after.paths)) {
+    problems.push('"match.paths" is set in the shim\'s settings in Shim, not from a session — leave it as it was');
     return null;
   }
   const hosts = after.hosts;

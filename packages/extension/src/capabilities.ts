@@ -36,6 +36,8 @@ export const EXTENSION_DECLARATIVE_CAPABILITIES: PageHostCapabilities = Object.f
   iframeRules: false,
   // The whole committed spec runs through the engine, which installs its stylesheet.
   specCss: true,
+  // Registrations cover whole hosts, so a page-limited shim would run on every page.
+  pathScope: false,
   // Declarative rules have no handler to call a member, but a settings
   // declaration is still served (its values are kept and the settings page
   // shows them), so the shim installs the same in either mode.
@@ -61,6 +63,8 @@ export const EXTENSION_CAPABILITIES: PageHostCapabilities = Object.freeze({
   mutationKinds: Object.freeze([...DECLARATIVE_KINDS, 'script', 'replace-root']),
   iframeRules: false,
   specCss: true,
+  // Registrations cover whole hosts, so a page-limited shim would run on every page.
+  pathScope: false,
   apiMembers: Object.freeze(['settings', 'fetch'] as const),
   secretSettings: 'none',
   componentIdentity: false,
@@ -91,6 +95,7 @@ export const SESSION_CAPABILITIES: PageHostCapabilities = Object.freeze({
   mutationKinds: Object.freeze([...DECLARATIVE_KINDS, 'script', 'replace-root']),
   iframeRules: false,
   specCss: false,
+  pathScope: false,
   apiMembers: Object.freeze(['settings', 'fetch'] as const),
   secretSettings: 'none',
   componentIdentity: false,
