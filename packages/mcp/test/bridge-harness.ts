@@ -17,7 +17,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { PassThrough } from 'stream';
 import { startBridge, OWNER_LOCK_NAME } from '../src/bridge';
-import { FrameReader, encodeFrame, RequestAssembler, isAbort } from '../src/bridge-frames';
+import { FrameReader, encodeFrame } from '../src/bridge-frames';
+import { RequestAssembler, isAbort } from '@shimbrowser/core/bridge-frames';
 import { readControlInfo, socketClient } from '../src/control-client';
 import { lockFileFor } from '../src/file-lock';
 

@@ -125,9 +125,10 @@ control.teardownAll();
 ## Modules
 
 The root export is the page-side runtime: `run`, anchors, witnesses, component identity,
-the deploy fingerprint, route and host matching. Every module is also available on its own
-subpath, `@shimbrowser/core/<module>`. The authoring pieces are subpath-only and not in the
-page bundle:
+the deploy fingerprint, route and host matching. The public modules are also available on
+their own subpaths, `@shimbrowser/core/<module>`, listed one by one in `package.json`'s
+`exports` (D19); the engine's internal modules have none. The authoring pieces are
+subpath-only and not in the page bundle:
 
 | Subpath | What it is |
 |---|---|

@@ -6,9 +6,16 @@
 // The execution manifest is the spec with its handler sources, minus what
 // the engine and the host manage on their own (versions, priority, deploy
 // hashes, and the anchors' witness fingerprints). Pure: no storage.
+//
+// The rest of a grant's rule lives here too, so every host keeps the same
+// one: which fields are placed, what an approval names, when a stored grant
+// is current, and how one re-binds across the engine's own rebase. A host
+// keeps the rows; nothing here reads or writes them.
 
 import type { Spec } from './types';
 import { sha256Hex } from './sha256';
+import { normalizeSchema, type CredentialUse } from './settings-schema';
+import { credentialUseBinding } from './credential-placement';
 import { deleteManagedKeys } from './managed-anchor';
 import { isRecord } from './is-record';
 
@@ -71,4 +78,70 @@ export function executionManifestDigestWithoutAnchors(spec: Spec, handlers: Reco
   copy.rules = noAnchors(copy.rules);
   if (isRecord(copy.default)) copy.default = { ...copy.default, rules: noAnchors(copy.default.rules) };
   return executionManifestDigest(copy as unknown as Spec, handlers);
+}
+
+/** A placed secret: a `secret` setting that declares `use`. */
+export interface PlacedField {
+  key: string;
+  label: string;
+  use: CredentialUse;
+}
+
+/**
+ * The spec's secret fields that declare `use`, in declaration order. A host
+ * that accepts specs whose settings schema didn't validate checks that first
+ * (`settingsSchemaProblems`).
+ */
+export function placedFields(spec: Spec): PlacedField[] {
+  return normalizeSchema(spec).flatMap((f) => (f.type === 'secret' && f.use ? [{ key: f.key, label: f.label, use: f.use }] : []));
+}
+
+/**
+ * What a user is shown and approves: the placement and the code as one
+ * opaque token. An approval naming another token is stale (the shim changed
+ * since it was shown) and is refused.
+ */
+export function grantReviewToken(use: CredentialUse, digest: string): string {
+  return sha256Hex(`${credentialUseBinding(use)}\n${digest}`);
+}
+
+export type GrantState = 'granted' | 'suspended' | 'none';
+
+/** What a host stores for a grant: the placement and the digest approved. */
+export interface StoredGrant {
+  binding: string;
+  digest: string;
+}
+
+/**
+ * A stored grant's state against the field's placement now and the shim's
+ * digest now (null when the host has no code to bind to): granted only when
+ * both are exactly what was approved.
+ */
+export function grantState(row: StoredGrant | undefined, use: CredentialUse, digest: string | null): GrantState {
+  if (!row) return 'none';
+  return digest !== null && row.binding === credentialUseBinding(use) && row.digest === digest ? 'granted' : 'suspended';
+}
+
+export type GrantApproval =
+  | { ok: true; binding: string; digest: string }
+  | { ok: false; error: string; code?: 'stale' };
+
+/** What approving `key` with `review` would store, if `review` is what the shim is now. */
+export function checkGrantApproval(spec: Spec, handlers: Record<string, string>, key: string, review: string): GrantApproval {
+  const field = placedFields(spec).find((f) => f.key === key);
+  if (!field) return { ok: false, error: `"${key}" is not one of this shim's placed secrets` };
+  const digest = executionManifestDigest(spec, handlers);
+  if (review !== grantReviewToken(field.use, digest)) return { ok: false, error: 'the shim changed since this was shown; review it again', code: 'stale' };
+  return { ok: true, binding: credentialUseBinding(field.use), digest };
+}
+
+/**
+ * After the engine's rebase moved an anchor: the digest a grant current for
+ * `before` moves to, when nothing but anchors changed; null otherwise (the
+ * grant then stays bound to the old code, suspended).
+ */
+export function rebindGrantDigest(before: Spec, after: Spec, handlers: Record<string, string>): { from: string; to: string } | null {
+  if (executionManifestDigestWithoutAnchors(before, handlers) !== executionManifestDigestWithoutAnchors(after, handlers)) return null;
+  return { from: executionManifestDigest(before, handlers), to: executionManifestDigest(after, handlers) };
 }

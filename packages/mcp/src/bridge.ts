@@ -23,7 +23,8 @@ import { randomUUID } from 'crypto';
 import type { Readable, Writable } from 'stream';
 import { userDataDir, chromeDiscoveryFilePath, defaultEnv, type PathEnv } from './control-client';
 import { startBridgeServer, bridgeSocketPath, newBridgeToken, ensurePrivateDir, type BridgeResponse } from './bridge-server';
-import { encodeFrame, FrameReader, chunkRequest, isReply, isHello, type BridgeRequest } from './bridge-frames';
+import { encodeFrame, FrameReader, chunkRequest } from './bridge-frames';
+import { isReply, isHello, type BridgeRequest } from '@shimbrowser/core/bridge-frames';
 import { tryLockFile, type FileLock } from './file-lock';
 import { VERSION } from './version';
 

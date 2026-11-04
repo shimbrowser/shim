@@ -1,5 +1,6 @@
 // bridge-frames-harness — the stdio framing between Shim for Chrome's
-// bridge and the extension (packages/mcp/src/bridge-frames.ts): frames
+// bridge and the extension (packages/mcp/src/bridge-frames.ts, and the
+// messages it shares with the worker from @shimbrowser/core/bridge-frames): frames
 // encode and read back across split and joined chunks, a request above the
 // chunk size travels as ordered pieces and reassembles, pieces out of order
 // or for a different total are handled, surrogate pairs survive the split,
@@ -7,7 +8,8 @@
 //
 //   node out/packages/mcp/test/bridge-frames-harness.js
 
-import { encodeFrame, FrameReader, chunkRequest, RequestAssembler, isAbort, isReply, isHello, type BridgeRequest } from '../src/bridge-frames';
+import { encodeFrame, FrameReader, chunkRequest } from '../src/bridge-frames';
+import { RequestAssembler, isAbort, isReply, isHello, type BridgeRequest } from '@shimbrowser/core/bridge-frames';
 
 let failures = 0;
 let passes = 0;

@@ -15,10 +15,270 @@
     },
     "./page": "./dist/shim-core.page.js",
     "./package.json": "./package.json",
-    "./*": {
-      "shim-source": "./src/*.ts",
-      "types": "./dist/*.d.ts",
-      "default": "./dist/*.js"
+    "./anchors": {
+      "shim-source": "./src/anchors.ts",
+      "types": "./dist/anchors.d.ts",
+      "default": "./dist/anchors.js"
+    },
+    "./api": {
+      "shim-source": "./src/api.ts",
+      "types": "./dist/api.d.ts",
+      "default": "./dist/api.js"
+    },
+    "./api-map-tools": {
+      "shim-source": "./src/api-map-tools.ts",
+      "types": "./dist/api-map-tools.d.ts",
+      "default": "./dist/api-map-tools.js"
+    },
+    "./assert": {
+      "shim-source": "./src/assert.ts",
+      "types": "./dist/assert.d.ts",
+      "default": "./dist/assert.js"
+    },
+    "./bot-wall": {
+      "shim-source": "./src/bot-wall.ts",
+      "types": "./dist/bot-wall.d.ts",
+      "default": "./dist/bot-wall.js"
+    },
+    "./bridge-frames": {
+      "shim-source": "./src/bridge-frames.ts",
+      "types": "./dist/bridge-frames.d.ts",
+      "default": "./dist/bridge-frames.js"
+    },
+    "./capability-preflight": {
+      "shim-source": "./src/capability-preflight.ts",
+      "types": "./dist/capability-preflight.d.ts",
+      "default": "./dist/capability-preflight.js"
+    },
+    "./capability-refs": {
+      "shim-source": "./src/capability-refs.ts",
+      "types": "./dist/capability-refs.d.ts",
+      "default": "./dist/capability-refs.js"
+    },
+    "./capture-event": {
+      "shim-source": "./src/capture-event.ts",
+      "types": "./dist/capture-event.d.ts",
+      "default": "./dist/capture-event.js"
+    },
+    "./cdp-host": {
+      "shim-source": "./src/cdp-host.ts",
+      "types": "./dist/cdp-host.d.ts",
+      "default": "./dist/cdp-host.js"
+    },
+    "./component-id": {
+      "shim-source": "./src/component-id.ts",
+      "types": "./dist/component-id.d.ts",
+      "default": "./dist/component-id.js"
+    },
+    "./composition-session-tools": {
+      "shim-source": "./src/composition-session-tools.ts",
+      "types": "./dist/composition-session-tools.d.ts",
+      "default": "./dist/composition-session-tools.js"
+    },
+    "./console-feed": {
+      "shim-source": "./src/console-feed.ts",
+      "types": "./dist/console-feed.d.ts",
+      "default": "./dist/console-feed.js"
+    },
+    "./credential-grant": {
+      "shim-source": "./src/credential-grant.ts",
+      "types": "./dist/credential-grant.d.ts",
+      "default": "./dist/credential-grant.js"
+    },
+    "./credential-placement": {
+      "shim-source": "./src/credential-placement.ts",
+      "types": "./dist/credential-placement.d.ts",
+      "default": "./dist/credential-placement.js"
+    },
+    "./data-tools": {
+      "shim-source": "./src/data-tools.ts",
+      "types": "./dist/data-tools.d.ts",
+      "default": "./dist/data-tools.js"
+    },
+    "./deploy-id": {
+      "shim-source": "./src/deploy-id.ts",
+      "types": "./dist/deploy-id.d.ts",
+      "default": "./dist/deploy-id.js"
+    },
+    "./engine": {
+      "shim-source": "./src/engine.ts",
+      "types": "./dist/engine.d.ts",
+      "default": "./dist/engine.js"
+    },
+    "./error": {
+      "shim-source": "./src/error.ts",
+      "types": "./dist/error.d.ts",
+      "default": "./dist/error.js"
+    },
+    "./fetch-budget": {
+      "shim-source": "./src/fetch-budget.ts",
+      "types": "./dist/fetch-budget.d.ts",
+      "default": "./dist/fetch-budget.js"
+    },
+    "./fetch-policy": {
+      "shim-source": "./src/fetch-policy.ts",
+      "types": "./dist/fetch-policy.d.ts",
+      "default": "./dist/fetch-policy.js"
+    },
+    "./handler-source": {
+      "shim-source": "./src/handler-source.ts",
+      "types": "./dist/handler-source.d.ts",
+      "default": "./dist/handler-source.js"
+    },
+    "./host-match": {
+      "shim-source": "./src/host-match.ts",
+      "types": "./dist/host-match.d.ts",
+      "default": "./dist/host-match.js"
+    },
+    "./intent": {
+      "shim-source": "./src/intent.ts",
+      "types": "./dist/intent.d.ts",
+      "default": "./dist/intent.js"
+    },
+    "./interact": {
+      "shim-source": "./src/interact.ts",
+      "types": "./dist/interact.d.ts",
+      "default": "./dist/interact.js"
+    },
+    "./intercept": {
+      "shim-source": "./src/intercept.ts",
+      "types": "./dist/intercept.d.ts",
+      "default": "./dist/intercept.js"
+    },
+    "./is-record": {
+      "shim-source": "./src/is-record.ts",
+      "types": "./dist/is-record.d.ts",
+      "default": "./dist/is-record.js"
+    },
+    "./managed-anchor": {
+      "shim-source": "./src/managed-anchor.ts",
+      "types": "./dist/managed-anchor.d.ts",
+      "default": "./dist/managed-anchor.js"
+    },
+    "./match-scope": {
+      "shim-source": "./src/match-scope.ts",
+      "types": "./dist/match-scope.d.ts",
+      "default": "./dist/match-scope.js"
+    },
+    "./navigate-scope": {
+      "shim-source": "./src/navigate-scope.ts",
+      "types": "./dist/navigate-scope.d.ts",
+      "default": "./dist/navigate-scope.js"
+    },
+    "./page-host": {
+      "shim-source": "./src/page-host.ts",
+      "types": "./dist/page-host.d.ts",
+      "default": "./dist/page-host.js"
+    },
+    "./page-host-conformance": {
+      "shim-source": "./src/page-host-conformance.ts",
+      "types": "./dist/page-host-conformance.d.ts",
+      "default": "./dist/page-host-conformance.js"
+    },
+    "./page-host-tools": {
+      "shim-source": "./src/page-host-tools.ts",
+      "types": "./dist/page-host-tools.d.ts",
+      "default": "./dist/page-host-tools.js"
+    },
+    "./page-runtime": {
+      "shim-source": "./src/page-runtime.ts",
+      "types": "./dist/page-runtime.d.ts",
+      "default": "./dist/page-runtime.js"
+    },
+    "./page-tools": {
+      "shim-source": "./src/page-tools.ts",
+      "types": "./dist/page-tools.d.ts",
+      "default": "./dist/page-tools.js"
+    },
+    "./path-match": {
+      "shim-source": "./src/path-match.ts",
+      "types": "./dist/path-match.d.ts",
+      "default": "./dist/path-match.js"
+    },
+    "./preview-evidence": {
+      "shim-source": "./src/preview-evidence.ts",
+      "types": "./dist/preview-evidence.d.ts",
+      "default": "./dist/preview-evidence.js"
+    },
+    "./query-bound": {
+      "shim-source": "./src/query-bound.ts",
+      "types": "./dist/query-bound.d.ts",
+      "default": "./dist/query-bound.js"
+    },
+    "./rewrite-response": {
+      "shim-source": "./src/rewrite-response.ts",
+      "types": "./dist/rewrite-response.d.ts",
+      "default": "./dist/rewrite-response.js"
+    },
+    "./route-match": {
+      "shim-source": "./src/route-match.ts",
+      "types": "./dist/route-match.d.ts",
+      "default": "./dist/route-match.js"
+    },
+    "./rule-form": {
+      "shim-source": "./src/rule-form.ts",
+      "types": "./dist/rule-form.d.ts",
+      "default": "./dist/rule-form.js"
+    },
+    "./session-registry": {
+      "shim-source": "./src/session-registry.ts",
+      "types": "./dist/session-registry.d.ts",
+      "default": "./dist/session-registry.js"
+    },
+    "./settings-schema": {
+      "shim-source": "./src/settings-schema.ts",
+      "types": "./dist/settings-schema.d.ts",
+      "default": "./dist/settings-schema.js"
+    },
+    "./sha256": {
+      "shim-source": "./src/sha256.ts",
+      "types": "./dist/sha256.d.ts",
+      "default": "./dist/sha256.js"
+    },
+    "./shim-folder": {
+      "shim-source": "./src/shim-folder.ts",
+      "types": "./dist/shim-folder.d.ts",
+      "default": "./dist/shim-folder.js"
+    },
+    "./shim-session": {
+      "shim-source": "./src/shim-session.ts",
+      "types": "./dist/shim-session.d.ts",
+      "default": "./dist/shim-session.js"
+    },
+    "./spec-delta": {
+      "shim-source": "./src/spec-delta.ts",
+      "types": "./dist/spec-delta.d.ts",
+      "default": "./dist/spec-delta.js"
+    },
+    "./spec-lint": {
+      "shim-source": "./src/spec-lint.ts",
+      "types": "./dist/spec-lint.d.ts",
+      "default": "./dist/spec-lint.js"
+    },
+    "./syntax-probe": {
+      "shim-source": "./src/syntax-probe.ts",
+      "types": "./dist/syntax-probe.d.ts",
+      "default": "./dist/syntax-probe.js"
+    },
+    "./types": {
+      "shim-source": "./src/types.ts",
+      "types": "./dist/types.d.ts",
+      "default": "./dist/types.js"
+    },
+    "./witness-summary": {
+      "shim-source": "./src/witness-summary.ts",
+      "types": "./dist/witness-summary.d.ts",
+      "default": "./dist/witness-summary.js"
+    },
+    "./working-copy-diff": {
+      "shim-source": "./src/working-copy-diff.ts",
+      "types": "./dist/working-copy-diff.d.ts",
+      "default": "./dist/working-copy-diff.js"
+    },
+    "./working-copy-wire": {
+      "shim-source": "./src/working-copy-wire.ts",
+      "types": "./dist/working-copy-wire.d.ts",
+      "default": "./dist/working-copy-wire.js"
     }
   },
   "files": [

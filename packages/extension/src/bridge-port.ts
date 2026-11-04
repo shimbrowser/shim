@@ -16,7 +16,7 @@
 //     retries, and does nothing while the port is up.
 //   - Pure enough to pin: Chrome's port and the backstop are injected.
 
-import { RequestAssembler, isAbort, type BridgeRequest, type ExtensionToHost } from './bridge-frames';
+import { RequestAssembler, isAbort, type BridgeRequest, type ExtensionToHost } from '@shimbrowser/core/bridge-frames';
 
 export const HOST_NAME = 'com.shimbrowser.bridge';
 export const RECONNECT_MS = [1000, 3000, 10_000, 30_000];

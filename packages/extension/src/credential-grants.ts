@@ -17,11 +17,15 @@
 // widen one. Pure: the worker stores the rows.
 
 import type { Spec } from '@shimbrowser/core/types';
-import { normalizeSchema, settingsSchemaProblems, type CredentialUse } from '@shimbrowser/core/settings-schema';
+import { settingsSchemaProblems, type CredentialUse } from '@shimbrowser/core/settings-schema';
 import { credentialUseBinding, describeCredentialUse } from '@shimbrowser/core/credential-placement';
-import { executionManifestDigest, executionManifestDigestWithoutAnchors } from '@shimbrowser/core/credential-grant';
-import { sha256Hex } from '@shimbrowser/core/sha256';
+import {
+  checkGrantApproval, executionManifestDigest, grantReviewToken, grantState, placedFields as declaredPlacedFields,
+  type GrantState,
+} from '@shimbrowser/core/credential-grant';
 import { accessPatternForOrigin } from './credential-access';
+
+export { grantState, rebindGrantDigest as rebindDigest, type GrantState } from '@shimbrowser/core/credential-grant';
 
 export interface GrantRow {
   shimId: string;
@@ -30,8 +34,6 @@ export interface GrantRow {
   digest: string;
   grantedAt: number;
 }
-
-export type GrantState = 'granted' | 'suspended' | 'none';
 
 /** One placed secret as the settings page shows it. */
 export interface GrantView {
@@ -60,8 +62,7 @@ export interface GrantView {
 
 /** The shim's secret fields that declare `use`, in declaration order; none when the declaration does not validate. */
 export function placedFields(spec: Spec): Array<{ key: string; label: string; use: CredentialUse }> {
-  if (settingsSchemaProblems(spec).length) return [];
-  return normalizeSchema(spec).flatMap((f) => (f.type === 'secret' && f.use ? [{ key: f.key, label: f.label, use: f.use }] : []));
+  return settingsSchemaProblems(spec).length ? [] : declaredPlacedFields(spec);
 }
 
 export function placedUse(spec: Spec, key: string): CredentialUse | undefined {
@@ -70,15 +71,6 @@ export function placedUse(spec: Spec, key: string): CredentialUse | undefined {
 
 export function manifestDigest(spec: Spec, handlers: Record<string, string>): string {
   return executionManifestDigest(spec, handlers);
-}
-
-export function reviewToken(use: CredentialUse, digest: string): string {
-  return sha256Hex(`${credentialUseBinding(use)}\n${digest}`);
-}
-
-export function grantState(row: GrantRow | undefined, use: CredentialUse, digest: string): GrantState {
-  if (!row) return 'none';
-  return row.binding === credentialUseBinding(use) && row.digest === digest ? 'granted' : 'suspended';
 }
 
 export function grantViews(
@@ -97,7 +89,7 @@ export function grantViews(
     access: accessPatternForOrigin(f.use.origin) ?? '',
     state: grantState(rows.get(f.key), f.use, digest),
     isSet: setPlacements.get(f.key) === credentialUseBinding(f.use),
-    review: reviewToken(f.use, digest),
+    review: grantReviewToken(f.use, digest),
   }));
 }
 
@@ -106,19 +98,8 @@ export type ApproveCheck = { ok: true; row: Omit<GrantRow, 'grantedAt'> } | { ok
 /** The grant row an approval writes, if `review` is what the shim is now. */
 export function checkApproval(shim: { id: string; spec: Spec; handlers: Record<string, string> }, key: unknown, review: unknown): ApproveCheck {
   if (typeof key !== 'string' || typeof review !== 'string') return { ok: false, error: 'an approval names a key and what was reviewed' };
-  const field = placedFields(shim.spec).find((f) => f.key === key);
-  if (!field) return { ok: false, error: `"${key}" is not one of this shim's placed secrets` };
-  const digest = manifestDigest(shim.spec, shim.handlers);
-  if (review !== reviewToken(field.use, digest)) return { ok: false, error: 'the shim changed since this was shown; review it again', code: 'stale' };
-  return { ok: true, row: { shimId: shim.id, key, binding: credentialUseBinding(field.use), digest } };
-}
-
-/**
- * After the engine's rebase moved an anchor: the digest a grant current for
- * `before` moves to, when nothing but anchors changed; null otherwise (the
- * grant then stays bound to the old code, suspended).
- */
-export function rebindDigest(before: Spec, after: Spec, handlers: Record<string, string>): { from: string; to: string } | null {
-  if (executionManifestDigestWithoutAnchors(before, handlers) !== executionManifestDigestWithoutAnchors(after, handlers)) return null;
-  return { from: executionManifestDigest(before, handlers), to: executionManifestDigest(after, handlers) };
+  if (!placedFields(shim.spec).some((f) => f.key === key)) return { ok: false, error: `"${key}" is not one of this shim's placed secrets` };
+  const checked = checkGrantApproval(shim.spec, shim.handlers, key, review);
+  if (!checked.ok) return checked;
+  return { ok: true, row: { shimId: shim.id, key, binding: checked.binding, digest: checked.digest } };
 }

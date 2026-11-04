@@ -7,9 +7,9 @@
 // same source runs in the Shim browser's preload and, bundled for the browser
 // platform (`@shimbrowser/core/page`), in any page a driver injects it into.
 //
-// This root re-exports the page-side runtime surface. Every module is also
-// reachable on its own subpath (`@shimbrowser/core/<module>`), which is how
-// the Shim browser consumes it today.
+// This root re-exports the page-side runtime surface. Each public module is
+// also reachable on its own subpath (`@shimbrowser/core/<module>`), listed in
+// package.json's `exports` (D19); the engine's internal modules have none.
 
 export { run, isShimOwnedElement, outputOwnerOf } from './engine';
 export {

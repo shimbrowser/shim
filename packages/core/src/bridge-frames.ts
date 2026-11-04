@@ -1,13 +1,10 @@
-// The messages between Shim for Chrome's bridge process and this worker
-// (the mcp package's bridge-frames.ts, the half a worker needs: Chrome
-// frames the port's messages itself): Chrome's native messaging framing on stdio, and the
-// messages the two exchange over it. Pure: a harness drives it with buffers.
-//
-// Framing (Chrome's): each message is a 32-bit length in the host's native
-// byte order, then that many bytes of UTF-8 JSON. Chrome caps a message
-// from the host to the extension at 1 MB; the other direction is far larger.
-// A request whose JSON would exceed CHUNK_BYTES travels as ordered chunks the
-// worker reassembles by id, so a shim working copy (up to 8 MB) fits.
+// The messages between Shim for Chrome's bridge process (`shim bridge`, in
+// @shimbrowser/mcp) and the extension's service worker. Both ends speak them:
+// the bridge sends requests and reads replies over Chrome's native messaging
+// stdio, the worker reads requests off its native port and replies. The byte
+// framing on stdio is the bridge's alone (Chrome frames the port's messages
+// for the worker), so it stays with the bridge; this is the Node-free half
+// both share. Pure: a harness drives it with plain objects.
 //
 // Messages, host → extension:
 //   { id, method, url, body? }            one request, whole
@@ -18,7 +15,7 @@
 //   { id, status, body }                  the reply
 //   { hello: true, version }              the worker's greeting on connect
 
-import { isRecord } from '@shimbrowser/core/is-record';
+import { isRecord } from './is-record';
 
 export interface BridgeRequest {
   id: string;
@@ -85,4 +82,3 @@ export function isReply(message: unknown): message is BridgeReply {
 export function isHello(message: unknown): message is { hello: true; version: string } {
   return isRecord(message) && message.hello === true && typeof message.version === 'string';
 }
-

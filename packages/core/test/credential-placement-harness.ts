@@ -16,7 +16,12 @@
 //   - redactCredentialText replaces echoes, longest first, and withholds a
 //     trailing partial echo when the text was cut short;
 //   - executionManifestDigest moves with authored changes to what runs and
-//     not with witnesses, versions or key order.
+//     not with witnesses, versions or key order;
+//   - the grant rule every host shares: placed fields in declaration order,
+//     a review token that moves with the placement and the code, a stored
+//     grant current only for exactly what was approved, an approval refused
+//     when stale or for a key that isn't placed, and a rebase re-bind only
+//     when nothing but anchors moved.
 //
 //   node out/packages/core/test/credential-placement-harness.js
 
@@ -25,7 +30,10 @@ import {
   CREDENTIAL_REQUEST_POLICY, CREDENTIAL_ERRORS, CREDENTIAL_REDACTED, CREDENTIAL_MAX_VALUE_BYTES,
   type CredentialPlan,
 } from '../src/credential-placement';
-import { executionManifestDigest, executionManifestDigestWithoutAnchors } from '../src/credential-grant';
+import {
+  executionManifestDigest, executionManifestDigestWithoutAnchors, placedFields, grantReviewToken, grantState,
+  checkGrantApproval, rebindGrantDigest,
+} from '../src/credential-grant';
 import type { CredentialUse } from '../src/settings-schema';
 import type { Spec } from '../src/types';
 
@@ -222,6 +230,43 @@ console.log('executionManifestDigest');
   const moved = asSpec({ ...base, rules: [rule({ primary: { kind: 'css', value: '.y' } })] });
   check('without anchors, an anchor-only change keeps the digest', executionManifestDigestWithoutAnchors(moved, H) === a1);
   check('…and a handler change still moves it', executionManifestDigestWithoutAnchors(moved, { h: 'x' }) !== a1);
+}
+
+console.log('grant rule');
+{
+  const G = { go: 'module.exports = () => {}' };
+  const gspec = (value = '#x', use: CredentialUse = HEADER, go = 'go'): Spec => ({
+    id: 's1', version: 1, match: { hosts: ['site.example'] },
+    settings: [
+      { key: 'apiKey', type: 'secret', label: 'API key', use },
+      { key: 'plain', type: 'secret', label: 'Plain' },
+      { key: 'mapsKey', type: 'secret', label: 'Maps key', use: QUERY },
+    ],
+    rules: [{ id: 'r1', anchor: { primary: { kind: 'css', value } }, mutations: [{ kind: 'script', handler: go }] }],
+  } as unknown as Spec);
+  const s0 = gspec();
+  check('placed fields: only secrets that declare use, in order', placedFields(s0).map((f) => f.key).join() === 'apiKey,mapsKey');
+  const digest = executionManifestDigest(s0, G);
+  const review = grantReviewToken(HEADER, digest);
+  check('the review token moves with the placement', grantReviewToken(XKEY, digest) !== review);
+  check('…and with the code', grantReviewToken(HEADER, executionManifestDigest(s0, { go: 'x' })) !== review);
+  const ok = checkGrantApproval(s0, G, 'apiKey', review);
+  check('an approval of what is shown stores its binding and digest',
+    ok.ok && ok.binding === credentialUseBinding(HEADER) && ok.digest === digest);
+  const stale = checkGrantApproval(s0, G, 'apiKey', grantReviewToken(HEADER, 'other'));
+  check('a stale approval is refused as stale', !stale.ok && stale.code === 'stale');
+  check('an approval for a secret that isn\'t placed is refused', !checkGrantApproval(s0, G, 'plain', review).ok);
+  const row = { binding: credentialUseBinding(HEADER), digest };
+  check('no row is none', grantState(undefined, HEADER, digest) === 'none');
+  check('the approved placement and code is granted', grantState(row, HEADER, digest) === 'granted');
+  check('another placement suspends it', grantState(row, XKEY, digest) === 'suspended');
+  check('other code suspends it', grantState(row, HEADER, 'other') === 'suspended');
+  check('no code to bind to suspends it', grantState(row, HEADER, null) === 'suspended');
+  const moved = gspec('#y');
+  const rb = rebindGrantDigest(s0, moved, G);
+  check('an anchor-only change re-binds', rb !== null && rb.from === digest && rb.to === executionManifestDigest(moved, G));
+  check('a handler change does not', rebindGrantDigest(s0, gspec('#y', HEADER, 'go2'), G) === null);
+  check('a placement change does not', rebindGrantDigest(s0, gspec('#y', XKEY), G) === null);
 }
 
 if (failures) { console.error(`\n${failures} credential-placement check(s) failed`); process.exit(1); }
