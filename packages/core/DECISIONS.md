@@ -1,6 +1,6 @@
 # Design decisions
 
-Comments in `@shimbrowser/core` and `@shimbrowser/mcp` cite these as `D1`…`D16`. Each is a
+Comments in `@shimbrowser/core` and `@shimbrowser/mcp` cite these as `D1`…`D18`. Each is a
 decision the two packages are built around; the comment that cites one says how it applies
 there.
 
@@ -23,3 +23,4 @@ there.
 | D15 | Headless supports a stated subset of shim features and refuses the rest up front; each rule's result is `full` or `partial` verification. |
 | D16 | A session is trusted while it authors (and never spends the user's AI key); anything sensitive a commit would grant is approved once, on a card, at commit. |
 | D17 | A secret setting a handler uses at a service declares `use`: one exact HTTPS origin, one header or one query parameter, and a format. The host places the value there itself, so the handler never sees it; a user approves each placement, and any authored change to the code suspends the approval. |
+| D18 | A shim can be limited to some pages of its hosts (`match.paths`): globs, and `re:` regexes that agree with JavaScript's but run on core's own engine, whose size is checked before it is built, so matching has a fixed worst case. A list with any entry that doesn't compile runs the shim nowhere, never everywhere. A host that doesn't enforce paths refuses a spec that has them. |

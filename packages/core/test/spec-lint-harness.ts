@@ -30,6 +30,14 @@ let res = lintSpec(clean);
 check('clean: no errors', res.errors.length === 0, JSON.stringify(res.errors));
 check('clean: no warnings', res.warnings.length === 0, JSON.stringify(res.warnings));
 
+console.log('match.paths → refused until this version enforces it');
+res = lintSpec({ match: { hosts: ['a.com'], paths: ['/history'] }, rules: [{ id: 'a', anchor: { primary: { kind: 'css', value: '.x' } }, mutations: [{ kind: 'hide' }] }] });
+check('match.paths is an error', res.errors.some((e) => /match\.paths/.test(e)), JSON.stringify(res.errors));
+res = lintSpec({ match: { hosts: ['a.com'], paths: [] }, rules: [] }, undefined, { imported: true });
+check('…even empty, and on import', res.errors.some((e) => /match\.paths/.test(e)), JSON.stringify(res.errors));
+res = lintSpec({ match: { hosts: ['a.com'] }, rules: [] });
+check('hosts alone is fine', !res.errors.some((e) => /match/.test(e)), JSON.stringify(res.errors));
+
 console.log('unknown mutation kind → error');
 res = lintSpec({ rules: [{ id: 'a', mutations: [{ kind: 'cspRelax' }] }] });
 const [cspError] = res.errors;

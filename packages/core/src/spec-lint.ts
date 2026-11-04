@@ -833,6 +833,13 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown, options: LintOptions
     errors.push(`the spec-level "mutations" must be an object mapping custom kinds to their definitions — got ${shapeName(declaredKindsValue)}`);
   }
 
+  // Path scope (D18) isn't enforced by this version: a spec carrying it would
+  // run site-wide here, wider than its author chose, so it's refused.
+  const match: unknown = s?.match;
+  if (isRecord(match) && match.paths !== undefined) {
+    errors.push('match.paths limits a shim to some pages, which this version of Shim doesn\'t support yet — remove it, or update Shim');
+  }
+
   // Declared remote connections. Spec-level,
   // not per-rule — computed once, same as declaredKinds above.
   //   - engine-enum ERROR: cheap same-turn feedback for an unknown engine,
