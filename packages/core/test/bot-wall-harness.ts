@@ -14,6 +14,7 @@
 import {
   isCloudflareInterstitial, readBotWallSignals, classifyBotWall, detectBotWall, asBotWallSignals, describeBotWall,
   botWallNote, withBotWallNote, withBotWallEvidence, botWallOnHost, rememberedBotWall, type BotWallMemory, BOT_WALL_SCRIPT, RUNNER_SELECTOR, CONTAINER_SELECTOR,
+  CHL_PAGE_RUNNER_SELECTOR, CHL_WIDGET_SELECTOR, INLINE_SCRIPT_SELECTOR, CHL_CONFIG_MARKER, MAX_INLINE_SCRIPTS,
   MAX_WALL_TEXT, BARE_BLOCK_TEXT, type BotWall,
 } from '../src/bot-wall';
 
@@ -32,22 +33,36 @@ function bodyHtml(html: string): string {
     uncommented.replace(/<head[\s\S]*?<\/head>/i, '').replace(/<\/?(?:!doctype|html|head|body)\b[^>]*>/gi, ' ');
 }
 
-// The selectors the reader uses: `#id` and `tag[attr*="value"]`, in comma lists.
+// The selectors the reader uses: `#id` and `tag[attr*="value"]` (one or more
+// attribute tests, `*=` or `^=`), in comma lists. `<noscript>` content is text
+// to a browser running script, so nothing inside it matches.
 function matchesSimple(html: string, sel: string): boolean {
+  const live = html.replace(/<noscript\b[\s\S]*?<\/noscript>/gi, ' ');
   if (sel === 'body *') return /<\w/.test(bodyHtml(html));
   const tag = /^(\w+)$/.exec(sel);
   if (tag) return new RegExp(`<${tag[1]}\\b`, 'i').test(html);
   const hasAttr = /^(\w+)\[(\w+)\]$/.exec(sel);
   if (hasAttr) return new RegExp(`<${hasAttr[1]}\\b[^>]*\\s${hasAttr[2]}=`, 'i').test(html);
   const id = /^#([\w-]+)$/.exec(sel);
-  if (id) return new RegExp(`\\sid=["']${id[1]}["']`, 'i').test(html);
-  const attr = /^(\w+)\[(\w+)\*="([^"]+)"\]$/.exec(sel);
-  if (attr) {
-    const [, tag, name, value] = attr;
-    const esc = (value ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`<${tag}\\b[^>]*\\s${name}=["'][^"']*${esc}`, 'i').test(html);
+  if (id) return new RegExp(`\\sid=["']${id[1]}["']`, 'i').test(live);
+  const tagged = /^(\w+)((?:\[\w[\w-]*[*^]?="[^"]+"\])+)$/.exec(sel);
+  if (tagged) {
+    const [, tag, attrs] = tagged;
+    const tests = [...(attrs ?? '').matchAll(/\[(\w[\w-]*)([*^]?)="([^"]+)"\]/g)];
+    return [...live.matchAll(new RegExp(`<${tag}\\b[^>]*>`, 'gi'))].some(([el]) => tests.every(([, name, op, value]) => {
+      const v = new RegExp(`\\s${name}=["']([^"']*)["']`, 'i').exec(el)?.[1];
+      if (v === undefined) return false;
+      return op === '^' ? v.startsWith(value ?? '') : op === '*' ? v.includes(value ?? '') : v === value;
+    }));
   }
   throw new Error(`the stub does not know selector ${sel}`);
+}
+
+// `script:not([src])`: the inline scripts, with their text.
+function inlineScripts(html: string): Array<{ textContent: string }> {
+  return [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
+    .filter(([, attrs]) => !/\ssrc=/i.test(attrs ?? ''))
+    .map(([, , body]) => ({ textContent: body ?? '' }));
 }
 
 // Visible text, roughly as innerText: no head, script, style, template or
@@ -68,6 +83,10 @@ function stubDocument(html: string): Document {
     title,
     body: { innerText: text, textContent: text },
     querySelector: (sel: string) => (sel.split(',').map((p) => p.trim()).some((p) => matchesSimple(html, p)) ? {} : null),
+    querySelectorAll: (sel: string) => {
+      if (sel !== 'script:not([src])') throw new Error(`the stub does not know selector ${sel}`);
+      return inlineScripts(html);
+    },
   };
   return stub as unknown as Document;
 }
@@ -99,6 +118,53 @@ const CF_CHALLENGE = `<!DOCTYPE html><html lang="en-US"><head><title>Just a mome
 <div id="challenge-stage"></div><div id="challenge-running">Verifying you are human. This may take a few seconds.</div></div></div>
 <script>(function(){window._cf_chl_opt={cvId:'3',cZone:'www.example.com',cType:'managed'};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=8d2f';document.getElementsByTagName('head')[0].appendChild(a);})();</script>
 <script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=8d2f"></script></body></html>`;
+
+// Cloudflare's current challenge template: every id and class a random hash,
+// the one legacy id (#challenge-error-text) inside <noscript>, the inline
+// _cf_chl_opt config, the same-origin chl_page runner it inserts, and the
+// Turnstile widget's response input.
+const CF_CHALLENGE_2026 = `<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title>
+<meta http-equiv="X-UA-Compatible" content="IE=Edge"><meta name="robots" content="noindex,nofollow">
+<style>*{box-sizing:border-box;margin:0;padding:0}._6013524d{display:flex}</style>
+<script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=99aa77bb66cc55dd"></script></head><body>
+<div class="_6013524d" id="_6013524d0f1e2d3c"><div class="_a1b2c3d4"><h1 class="_e5f6a7b8">www.example.com</h1>
+<h2 id="_75bb04a6c9d8e7f6" class="_75bb04a6">Verifying you are human. This may take a few seconds.</h2>
+<div id="_0c1d2e3f4a5b6c7d"><input type="hidden" name="cf-turnstile-response" id="cf-chl-widget-a1b2c_response"></div>
+<noscript><div id="challenge-error-text">Enable JavaScript and cookies to continue</div></noscript>
+<div class="_9f8e7d6c">www.example.com needs to review the security of your connection before proceeding.</div></div></div>
+<script>(function(){window._cf_chl_opt={cvId:'3',cZone:'www.example.com',cType:'managed',cRay:'99aa77bb66cc55dd'};var cpo=document.createElement('script');cpo.src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=99aa77bb66cc55dd';document.getElementsByTagName('head')[0].appendChild(cpo);}());</script>
+<script src="https://challenges.cloudflare.com/turnstile/v0/g/2b3c/api.js?onload=cb&render=explicit" async defer></script></body></html>`;
+
+// The same template at DOMContentLoaded, before Turnstile renders its input:
+// the inline config and the runner it inserted, nothing else.
+const CF_CHALLENGE_2026_EARLY = CF_CHALLENGE_2026.replace(/<input type="hidden" name="cf-turnstile-response"[^>]*>/, '');
+// …and once Turnstile rendered, with the inline config not read (a host that
+// sees the DOM but no script text): the runner and the widget input.
+const CF_CHALLENGE_2026_NO_CONFIG = CF_CHALLENGE_2026.replace(/window\._cf_chl_opt=/, 'window.__x=');
+
+// A site's own sign-in page with Turnstile, rendered: the widget's response
+// input carries the same cf-chl-widget id, but no same-origin chl_page runner.
+const TURNSTILE_RENDERED = `<!doctype html><html><head><title>Sign in</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script></head><body>
+<form id="login-form"><input name="email"><input type="password" name="password">
+<div class="cf-turnstile" data-sitekey="0x4AAAAAAA"><input type="hidden" name="cf-turnstile-response" id="cf-chl-widget-z9y8x_response"></div>
+<button>Sign in</button></form><noscript><div id="challenge-error-text">Enable JavaScript</div></noscript></body></html>`;
+
+// A page that only loads Turnstile, and one carrying Cloudflare's invisible
+// JS-detection runner (a challenge-platform script, but not chl_page), here
+// with an inline config named like the challenge's: the runner decides.
+const TURNSTILE_ONLY = `<!doctype html><html><head><title>Contact us</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script></head><body><main><h1>Contact</h1><p>Write to us.</p></main></body></html>`;
+const CF_JSD_PAGE = `<!doctype html><html><head><title>Shop</title></head><body><main><h1>Products</h1></main>
+<script>(function(){window._cf_chl_opt={};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.head.appendChild(a);})();</script>
+<script src="/cdn-cgi/challenge-platform/scripts/jsd/main.js"></script></body></html>`;
+
+// An article that says "Just a moment..." and quotes the config's name.
+const JUST_A_MOMENT_ARTICLE = `<!doctype html><html><head><title>Just a moment... why sites make you wait</title></head><body><article>
+<h1>Just a moment...</h1><p>That page sets window._cf_chl_opt and runs a Turnstile widget (cf-chl-widget). Here is why.</p></article></body></html>`;
+
+const SITE_AFTER_CLEAR = `<!doctype html><html><head><title>Daft Punk - Discovery | Marketplace</title></head><body>
+<main id="app"><h1>Vinyl for sale</h1><ul><li>Discovery, 2xLP</li></ul></main></body></html>`;
 
 const AKAMAI = `<HTML><HEAD>
 <TITLE>Access Denied</TITLE>
@@ -169,6 +235,9 @@ const walls: Array<[string, string, Pick<BotWall, 'vendor' | 'kind'>]> = [
   ['Cloudflare block page ("Sorry, you have been blocked")', CF_BLOCK, { vendor: 'cloudflare', kind: 'block' }],
   ['Cloudflare access denied (Error 1020)', CF_1020, { vendor: 'cloudflare', kind: 'block' }],
   ['Cloudflare challenge ("Just a moment...")', CF_CHALLENGE, { vendor: 'cloudflare', kind: 'challenge' }],
+  ['Cloudflare challenge, current template (hashed ids)', CF_CHALLENGE_2026, { vendor: 'cloudflare', kind: 'challenge' }],
+  ['…at DOMContentLoaded, before Turnstile renders', CF_CHALLENGE_2026_EARLY, { vendor: 'cloudflare', kind: 'challenge' }],
+  ['…with the widget input but no config read', CF_CHALLENGE_2026_NO_CONFIG, { vendor: 'cloudflare', kind: 'challenge' }],
   ['Akamai "Access Denied" with its reference id', AKAMAI, { vendor: 'akamai', kind: 'block' }],
   ['DataDome challenge frame', DATADOME, { vendor: 'datadome', kind: 'challenge' }],
   ['PerimeterX press-and-hold', PERIMETERX, { vendor: 'perimeterx', kind: 'challenge' }],
@@ -191,6 +260,10 @@ const negatives: Array<[string, string]> = [
   ['a long article quoting every wall\'s wording', ARTICLE_LONG],
   ['a short note quoting Cloudflare\'s block wording (no template)', ARTICLE_SHORT],
   ['a login form with a Turnstile widget', TURNSTILE_LOGIN],
+  ['a login form with a rendered Turnstile widget (cf-chl-widget input)', TURNSTILE_RENDERED],
+  ['a page that only loads Turnstile', TURNSTILE_ONLY],
+  ['a page with Cloudflare\'s invisible JS-detection runner', CF_JSD_PAGE],
+  ['an article saying "Just a moment..." and naming the config', JUST_A_MOMENT_ARTICLE],
   ['a site\'s own "Access Denied" 403 page', SITE_403],
   ['a Cloudflare origin error (522): the template, but no bot refusal', CF_522],
   ['a short help page mentioning an Incapsula incident ID', SUPPORT_PAGE],
@@ -210,7 +283,18 @@ check('the Cloudflare challenge is a wall whatever the text length', detectBotWa
 
 console.log('\nthe boot check (isCloudflareInterstitial) agrees');
 check('challenge fixture → interstitial', isCloudflareInterstitial(stubDocument(CF_CHALLENGE)) === true);
-for (const [label, html] of [['block page', CF_BLOCK], ['Turnstile login', TURNSTILE_LOGIN], ['article', ARTICLE_LONG]] as const) {
+for (const [label, html] of [['current template', CF_CHALLENGE_2026], ['current template at DOMContentLoaded', CF_CHALLENGE_2026_EARLY],
+  ['current template, widget input only', CF_CHALLENGE_2026_NO_CONFIG]] as const) {
+  check(`${label} → interstitial`, isCloudflareInterstitial(stubDocument(html)) === true);
+}
+const longCurrent = CF_CHALLENGE_2026.replace('</body>', `<p>${FILLER}</p></body>`);
+check('the current template is a wall whatever the text length', detectBotWall(stubDocument(longCurrent))?.kind === 'challenge');
+// Cleared: the passed challenge navigates to the site, whose document carries none of it.
+check('the site after the challenge clears → not an interstitial', isCloudflareInterstitial(stubDocument(SITE_AFTER_CLEAR)) === false &&
+  detectBotWall(stubDocument(SITE_AFTER_CLEAR)) === null);
+for (const [label, html] of [['block page', CF_BLOCK], ['Turnstile login', TURNSTILE_LOGIN], ['article', ARTICLE_LONG],
+  ['rendered Turnstile login', TURNSTILE_RENDERED], ['Turnstile only', TURNSTILE_ONLY], ['JS-detection runner', CF_JSD_PAGE],
+  ['"Just a moment" article', JUST_A_MOMENT_ARTICLE]] as const) {
   check(`${label} → not an interstitial (boot unchanged)`, isCloudflareInterstitial(stubDocument(html)) === false);
 }
 check('null / {} / a throwing querySelector → false', isCloudflareInterstitial(null) === false && isCloudflareInterstitial({}) === false &&
@@ -221,6 +305,9 @@ console.log('\nthe page script');
 const source = readBotWallSignals.toString();
 check('the reader repeats the runner selector', source.includes(RUNNER_SELECTOR.replace(/"/g, '\\"')) || source.includes(RUNNER_SELECTOR), source.slice(0, 200));
 check('…and the container selector', source.includes(CONTAINER_SELECTOR));
+check('…and the chl_page runner, widget input and inline config', source.includes(CHL_PAGE_RUNNER_SELECTOR) &&
+  source.includes(CHL_WIDGET_SELECTOR) && source.includes(INLINE_SCRIPT_SELECTOR) && source.includes(CHL_CONFIG_MARKER) &&
+  source.includes(String(MAX_INLINE_SCRIPTS)), source.slice(0, 200));
 // Runs as a self-contained expression (no outer names) over a document.
 const run = new Function('document', `return ${BOT_WALL_SCRIPT};`) as (doc: Document) => unknown;
 const scripted = asBotWallSignals(run(stubDocument(CF_BLOCK)));

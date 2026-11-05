@@ -93,6 +93,20 @@ const WALLS: Record<string, string> = {
   '/wall/cf-challenge': `<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title></head><body>
 <h1>127.0.0.1</h1><div id="challenge-stage"></div><div id="challenge-running">Verifying you are human. This may take a few seconds.</div>
 <script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=8d2f"></script></body></html>`,
+  // The current template: random ids, the one legacy id inside <noscript>, and
+  // the inline config inserting the chl_page runner, run by real Chromium.
+  '/wall/cf-challenge-current': `<!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title></head><body>
+<div id="_6013524d0f1e2d3c" class="_6013524d"><h1 class="_e5f6a7b8">127.0.0.1</h1>
+<h2 id="_75bb04a6c9d8e7f6">Verifying you are human. This may take a few seconds.</h2><div id="_0c1d2e3f4a5b6c7d"></div>
+<noscript><div id="challenge-error-text">Enable JavaScript and cookies to continue</div></noscript></div>
+<script>(function(){window._cf_chl_opt={cvId:'3',cZone:'127.0.0.1',cType:'managed'};var cpo=document.createElement('script');cpo.src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=8d2f';document.getElementsByTagName('head')[0].appendChild(cpo);}());</script>
+</body></html>`,
+  // A site's own sign-in form with a rendered Turnstile response input: no
+  // same-origin challenge runner, so the site.
+  '/wall/turnstile-login': `<!doctype html><html><head><title>Sign in</title></head><body>
+<form><input name="email"><input type="password" name="password">
+<div class="cf-turnstile"><input type="hidden" name="cf-turnstile-response" id="cf-chl-widget-z9y8x_response"></div>
+<button>Sign in</button></form></body></html>`,
   '/wall/akamai': `<HTML><HEAD>
 <TITLE>Access Denied</TITLE>
 </HEAD><BODY>
@@ -125,18 +139,19 @@ Akamai's says Access Denied: You don't have permission to access "/" on this ser
   '/wall/shell-202': '<!doctype html><html><head><title>App</title></head><body><script>document.body.textContent = "Welcome back to the app";</script></body></html>',
 };
 // What each wall fixture answers with; the rest answer 403, as the services do.
-const WALL_STATUS: Record<string, number> = { '/wall/article': 200, '/wall/bare-200': 200, '/wall/empty-202': 202, '/wall/shell-202': 202 };
+const WALL_STATUS: Record<string, number> = { '/wall/article': 200, '/wall/turnstile-login': 200, '/wall/bare-200': 200, '/wall/empty-202': 202, '/wall/shell-202': 202 };
 // A challenge that clears by itself a second after it loads (the site then shows).
 const CLEARING_CHALLENGE = WALLS['/wall/cf-challenge']?.replace('</body>', `<script>setTimeout(() => { location.href = '/'; }, 1000);</script></body>`) ?? '';
+const CLEARING_CURRENT = WALLS['/wall/cf-challenge-current']?.replace('</body>', `<script>setTimeout(() => { location.href = '/'; }, 1000);</script></body>`) ?? '';
 
 async function main(): Promise<void> {
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url || '/', 'http://127.0.0.1').pathname;
     const wall = WALLS[pathname];
-    if (wall !== undefined || pathname === '/wall/cf-clears') {
+    if (wall !== undefined || pathname === '/wall/cf-clears' || pathname === '/wall/cf-clears-current') {
       // A wall answers with the status the services use.
       res.writeHead(WALL_STATUS[pathname] ?? 403, { 'Content-Type': 'text/html' });
-      res.end(wall ?? CLEARING_CHALLENGE);
+      res.end(wall ?? (pathname === '/wall/cf-clears' ? CLEARING_CHALLENGE : CLEARING_CURRENT));
       return;
     }
     if (pathname.startsWith('/cdn-cgi/')) {
@@ -507,7 +522,7 @@ async function main(): Promise<void> {
     await call('shim_end_session', {});
 
     // --- bot walls: refused at open, reported on every page tool --------------------
-    for (const [where, vendor] of [['/wall/cf-block', 'cloudflare'], ['/wall/cf-challenge', 'cloudflare'], ['/wall/akamai', 'akamai'], ['/wall/datadome', 'datadome']] as const) {
+    for (const [where, vendor] of [['/wall/cf-block', 'cloudflare'], ['/wall/cf-challenge', 'cloudflare'], ['/wall/cf-challenge-current', 'cloudflare'], ['/wall/akamai', 'akamai'], ['/wall/datadome', 'datadome']] as const) {
       const walled = await call('shim_open_session', { url: `${origin}${where}`, intent: 'x', newShimName: 'Walled', dir: path.join(tmp, 'walled') });
       const text = walled.content[0]?.text ?? '';
       check(`a ${where.slice(6)} page refuses the open with blocked-by-bot-wall`, walled.isError === true && text.startsWith('blocked-by-bot-wall')
@@ -517,6 +532,12 @@ async function main(): Promise<void> {
       && !fs.existsSync(path.join(tmp, 'walled.shim')));
     const clears = json(await call('shim_open_session', { url: `${origin}/wall/cf-clears`, intent: 'x', newShimName: 'Clears', dir: path.join(tmp, 'clears') }));
     check('a challenge that clears by itself opens on the site', typeof clears.sessionId === 'string' && String(clears.url).endsWith('/'), clears);
+    await call('shim_end_session', {});
+    const clearsCurrent = json(await call('shim_open_session', { url: `${origin}/wall/cf-clears-current`, intent: 'x', newShimName: 'Clears2', dir: path.join(tmp, 'clears2') }));
+    check('…and so does the current template', typeof clearsCurrent.sessionId === 'string' && String(clearsCurrent.url).endsWith('/'), clearsCurrent);
+    await call('shim_end_session', {});
+    const login = json(await call('shim_open_session', { url: `${origin}/wall/turnstile-login`, intent: 'x', newShimName: 'Login', dir: path.join(tmp, 'login') }));
+    check('a sign-in form with a Turnstile widget opens normally', typeof login.sessionId === 'string', login);
     await call('shim_end_session', {});
     const article = json(await call('shim_open_session', { url: `${origin}/wall/article`, intent: 'x', newShimName: 'Article', dir: path.join(tmp, 'article') }));
     check('an article quoting the walls\' wording opens normally', typeof article.sessionId === 'string', article);

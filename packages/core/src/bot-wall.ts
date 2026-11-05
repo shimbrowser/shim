@@ -25,9 +25,11 @@
 // with no body at all, which renders as an empty document.
 //
 // Two forms of one check:
-//   - isCloudflareInterstitial(doc): the selector-only Cloudflare challenge
-//     check a host runs before booting shims (unchanged in meaning: the
-//     same-origin challenge runner AND a challenge-only container);
+//   - isCloudflareInterstitial(doc): the Cloudflare challenge check a host
+//     runs before booting shims: the same-origin challenge runner AND a
+//     challenge-only container (the older template), or the challenge page's
+//     own chl_page runner AND its inline `_cf_chl_opt` config or its
+//     Turnstile response input (the current one, whose ids are random);
 //   - detectBotWall(doc) / classifyBotWall(signals): every wall below, over
 //     a document or over the signals BOT_WALL_SCRIPT reads in a page.
 // Pure, dependency-free; the signal reader is self-contained so it also
@@ -39,7 +41,7 @@ import type { DocumentStatus } from './page-host';
 
 export const RUNNER_SELECTOR = 'script[src*="/cdn-cgi/challenge-platform/"]';
 
-/** Containers unique to Cloudflare's full-page interstitial (not an embedded widget). */
+/** Containers unique to Cloudflare's full-page interstitial (not an embedded widget): the older template's fixed ids. */
 export const CONTAINER_SELECTOR = [
   '#challenge-running',
   '#cf-please-wait',
@@ -49,17 +51,54 @@ export const CONTAINER_SELECTOR = [
   '#challenge-error-text',
 ].join(', ');
 
-/** The slice of a `document` the selector check needs. Optional, so a stub without it answers false. */
+/**
+ * The challenge page's own runner (`/cdn-cgi/challenge-platform/h/<x>/orchestrate/chl_page/v1`),
+ * which only the full-page challenge loads: Cloudflare's invisible JS
+ * detection loads `/cdn-cgi/challenge-platform/scripts/jsd/` instead, and a
+ * Turnstile widget loads from challenges.cloudflare.com. The current
+ * template randomizes every id and class, so this runner plus one of the two
+ * markers below is what tells it.
+ */
+export const CHL_PAGE_RUNNER_SELECTOR = 'script[src*="/cdn-cgi/challenge-platform/"][src*="/chl_page/"]';
+/** The challenge's Turnstile response input. A site's own widget carries the same id, so it counts only beside the chl_page runner. */
+export const CHL_WIDGET_SELECTOR = 'input[name="cf-turnstile-response"][id^="cf-chl-widget-"]';
+/** The challenge's inline config (`window._cf_chl_opt = {…}`), server-rendered, so present at DOMContentLoaded. */
+export const CHL_CONFIG_MARKER = '_cf_chl_opt';
+/** Where the inline config is looked for. */
+export const INLINE_SCRIPT_SELECTOR = 'script:not([src])';
+/** How many inline scripts are read for it (the challenge page has a handful). */
+export const MAX_INLINE_SCRIPTS = 20;
+
+/** The slice of a `document` the check needs. Optional, so a stub without it answers false. */
 export interface DocumentLike {
   querySelector?: (selector: string) => unknown;
+  querySelectorAll?: (selector: string) => ArrayLike<{ textContent?: string | null }>;
 }
 
-/** A Cloudflare full-page challenge: the runner script AND a challenge-only container. */
+function hasChallengeConfig(doc: DocumentLike): boolean {
+  if (typeof doc.querySelectorAll !== 'function') return false;
+  const scripts = doc.querySelectorAll(INLINE_SCRIPT_SELECTOR);
+  const n = Math.min(scripts.length, MAX_INLINE_SCRIPTS);
+  for (let i = 0; i < n; i++) {
+    if (String(scripts[i]?.textContent ?? '').includes(CHL_CONFIG_MARKER)) return true;
+  }
+  return false;
+}
+
+/**
+ * A Cloudflare full-page challenge: the runner script AND a challenge-only
+ * container (the older template), or the chl_page runner AND the inline
+ * config or the challenge's Turnstile input (the current one). Markup that
+ * is text (inside `<noscript>`, with script on) is not markup and counts for
+ * nothing.
+ */
 export function isCloudflareInterstitial(doc: DocumentLike | null | undefined): boolean {
   if (!doc || typeof doc.querySelector !== 'function') return false;
   try {
     if (!doc.querySelector(RUNNER_SELECTOR)) return false;
-    return !!doc.querySelector(CONTAINER_SELECTOR);
+    if (doc.querySelector(CONTAINER_SELECTOR)) return true;
+    if (!doc.querySelector(CHL_PAGE_RUNNER_SELECTOR)) return false;
+    return !!doc.querySelector(CHL_WIDGET_SELECTOR) || hasChallengeConfig(doc);
   } catch (_) {
     return false;
   }
@@ -79,6 +118,10 @@ export interface BotWallSignals {
   cfChallengeRunner: boolean;
   /** A Cloudflare challenge-only container (CONTAINER_SELECTOR). */
   cfChallengeContainer: boolean;
+  /** The challenge page's chl_page runner (CHL_PAGE_RUNNER_SELECTOR). */
+  cfChallengePageRunner: boolean;
+  /** The challenge's inline `_cf_chl_opt` config or its Turnstile response input (CHL_CONFIG_MARKER, CHL_WIDGET_SELECTOR). */
+  cfChallengeMarker: boolean;
   /** Cloudflare's error-page template (#cf-error-details). */
   cfErrorTemplate: boolean;
   /** PerimeterX / HUMAN's challenge element (#px-captcha). */
@@ -164,6 +207,17 @@ export function readBotWallSignals(doc: Document): BotWallSignals {
     textLength: full.length,
     cfChallengeRunner: has('script[src*="/cdn-cgi/challenge-platform/"]'),
     cfChallengeContainer: has('#challenge-running, #cf-please-wait, #challenge-stage, #challenge-form, #trk_jschal_js, #challenge-error-text'),
+    cfChallengePageRunner: has('script[src*="/cdn-cgi/challenge-platform/"][src*="/chl_page/"]'),
+    cfChallengeMarker: has('input[name="cf-turnstile-response"][id^="cf-chl-widget-"]') || (() => {
+      try {
+        const scripts = doc.querySelectorAll('script:not([src])');
+        const n = Math.min(scripts.length, 20);
+        for (let i = 0; i < n; i++) {
+          if (String(scripts[i]?.textContent ?? '').includes('_cf_chl_opt')) return true;
+        }
+      } catch (_) { /* unreadable: no marker */ }
+      return false;
+    })(),
     cfErrorTemplate: has('#cf-error-details'),
     pxCaptcha: has('#px-captcha'),
     ddCaptcha: has('iframe[src*="captcha-delivery.com"], script[src*="captcha-delivery.com"]'),
@@ -188,6 +242,8 @@ export function asBotWallSignals(v: unknown): BotWallSignals | null {
     textLength: v.textLength,
     cfChallengeRunner: flag('cfChallengeRunner'),
     cfChallengeContainer: flag('cfChallengeContainer'),
+    cfChallengePageRunner: flag('cfChallengePageRunner'),
+    cfChallengeMarker: flag('cfChallengeMarker'),
     cfErrorTemplate: flag('cfErrorTemplate'),
     pxCaptcha: flag('pxCaptcha'),
     ddCaptcha: flag('ddCaptcha'),
@@ -214,6 +270,9 @@ export function classifyBotWall(s: BotWallSignals): BotWall | null {
   // Cloudflare's challenge: template markup alone, as the boot check judges it.
   if (s.cfChallengeRunner && s.cfChallengeContainer) {
     return wall('cloudflare', 'challenge', 'Cloudflare\'s challenge runner and challenge container');
+  }
+  if (s.cfChallengeRunner && s.cfChallengePageRunner && s.cfChallengeMarker) {
+    return wall('cloudflare', 'challenge', 'Cloudflare\'s challenge-page runner and its challenge config');
   }
   if (s.textLength > MAX_WALL_TEXT) return null;
   const text = s.text;
