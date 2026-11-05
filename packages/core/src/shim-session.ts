@@ -29,7 +29,9 @@
 //   - Every rule's evidence carries its verification level: `partial` when
 //     the witness carries component identity (a host without it can't check
 //     it) or an `unsupported-api` event fired for the rule since it was last
-//     applied.
+//     applied;
+//     `none` when it matched nothing or reported no status in the preview's
+//     window (nothing was observed, so nothing is claimed).
 //   - Witnesses never reach the agent: the evidence carries none, checkout
 //     writes none; they live in the session and in the committed shim. They
 //     are taken whenever the engine reports one for a live rule (a standing
@@ -77,7 +79,7 @@ import { decodeWorkingCopy, encodeWorkingCopy, WorkingCopyWireError } from './wo
 import {
   preflightSpec, scanRuleHandlers, verificationLevel, UNSUPPORTED_API_EVENT, type UnsupportedFeature,
 } from './capability-preflight';
-import { describeRuleStatus, previewKey, previewNoMatch, shimViewPageCaption } from './preview-evidence';
+import { describeRuleStatus, previewKey, previewNoMatch, previewUnobserved, shimViewPageCaption } from './preview-evidence';
 import type { StatusCapture } from './preview-evidence';
 import { createConsoleFeed, formatAutoBlock, formatConsoleRead, type ConsoleFeed } from './console-feed';
 import {
@@ -874,7 +876,9 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
         // The working rule carries whatever this preview captured.
         status: describeRuleStatus(rule, status, { capture: statusCapture(handle, key) }),
         verification: verificationLevel(
-          live?.anchor, handle.host.capabilities, (handle.unsupported.get(key)?.size ?? 0) > 0, noMatchIds.has(rule.id),
+          live?.anchor, handle.host.capabilities, (handle.unsupported.get(key)?.size ?? 0) > 0,
+          // Nothing to verify: it matched nothing, or reported nothing at all.
+          noMatchIds.has(rule.id) || previewUnobserved(rule, status),
         ),
       };
     });

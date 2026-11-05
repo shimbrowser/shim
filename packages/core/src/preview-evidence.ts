@@ -42,6 +42,32 @@ export function previewKeyPatchId(key: string): string | null {
   return end > prefix.length ? key.slice(prefix.length, end) : null;
 }
 
+// The status line of a rule that reported no `rule-status` in the preview's
+// window, by what the rule is. A redirect never reports one (it applies at the
+// network layer), so it has none here.
+const NO_STATUS_LINES = {
+  rewrite: 'rewrite registered (no status event yet)',
+  intercept: 'intercept registered (no status event yet)',
+  route: 'route registered (no status event yet)',
+  anchored: 'no status event received — the engine may not have scanned yet',
+} as const;
+const NO_STATUS_LINE_SET: ReadonlySet<string> = new Set(Object.values(NO_STATUS_LINES));
+
+/**
+ * Did the engine say nothing about this previewed rule in the preview's
+ * window? Then nothing about it was observed, so nothing was verified: its
+ * verification is `none`, never `full`. A redirect is the exception (it
+ * never reports a status).
+ */
+export function previewUnobserved(rule: Rule | undefined, status: RuleStatusEvent | undefined): boolean {
+  return status === undefined && !(rule?.mutations || []).some((m) => m?.kind === 'redirect');
+}
+
+/** Is `line` (a describeRuleStatus line) the line of a rule that reported no status? */
+export function statusLineUnobserved(line: unknown): boolean {
+  return typeof line === 'string' && NO_STATUS_LINE_SET.has(line);
+}
+
 // Human-readable per-rule status line from the freshest rule-status event
 // this emit produced. mount-route rules report matched: 0 whenever the
 // current path isn't the route — that's the normal resting state, not a
@@ -75,9 +101,7 @@ export function describeRuleStatus(
   // elements" text below.
   const isRewrite = (rule?.mutations || []).some((m) => m?.kind === 'rewrite-response');
   if (isRewrite) {
-    if (!status) {
-      return 'rewrite registered (no status event yet)';
-    }
+    if (!status) return NO_STATUS_LINES.rewrite;
     const note = typeof status.note === 'string' && status.note ? status.note : undefined;
     if (status.matched) {
       return `applied ${status.matched} time(s) via rewrite${note ? ` — NOTE: ${note}` : ''}`;
@@ -91,7 +115,7 @@ export function describeRuleStatus(
   // registered, or registered but not yet called), not a broken anchor.
   const isIntercept = (rule?.mutations || []).some((m) => m?.kind === 'intercept');
   if (isIntercept) {
-    if (!status) return 'intercept registered (no status event yet)';
+    if (!status) return NO_STATUS_LINES.intercept;
     const note = typeof status.note === 'string' && status.note ? status.note : undefined;
     if (status.matched) {
       return `wrap ran ${status.matched} time(s)${note ? ` — NOTE: ${note}` : ''}`;
@@ -99,9 +123,7 @@ export function describeRuleStatus(
     return note || 'wrap attached — 0 calls observed yet; trigger the wrapped behavior or reload to verify';
   }
   if (!status) {
-    return isRoute
-      ? 'route registered (no status event yet)'
-      : 'no status event received — the engine may not have scanned yet';
+    return isRoute ? NO_STATUS_LINES.route : NO_STATUS_LINES.anchored;
   }
   if (isRoute) {
     return status.matched

@@ -148,6 +148,43 @@ async function main(): Promise<void> {
     check('the evidence names the rule as still running in the preview', (ev.notes ?? []).some((n) => /tag/.test(n) && /could not hold/.test(n)), JSON.stringify(ev.notes));
   }
 
+  console.log('a rule the engine reported no status for is not verified:');
+  {
+    // The reported shape: one mid-file rule replaced by four, so the four and
+    // every rule after them apply again; the page reports a status for only
+    // some of them inside the preview's window.
+    const opts = { holds: new Map<string, boolean>(), toldHeld: [] as Array<[string, boolean]>, writes: [] as PreparedCommit[] };
+    const backend = makeBackend(opts);
+    const host = fakeHost();
+    const orig = host.applyPreview.bind(host);
+    const reporting = new Set(['b1', 'last']);
+    host.applyPreview = (p) => { if (reporting.has(p.rule.id)) orig(p); };
+    const source: Source = { shimId: 'shim-x', name: 'X', spec, handlers: {}, envelope: {}, created: false };
+    const target: ShimSessionTarget<Source> = { page: { host, close: async () => undefined }, source };
+    const lease = { signal: new AbortController().signal, release: () => undefined };
+    const handle = await backend.begin({ sessionId: 's9', artifactId: 'shim-x', target, agent: 'a', intent: 'i', created: false, mint: null, lease, signal: new AbortController().signal }) as ShimSessionHandle<Source>;
+    const hide = (id: string, sel: string) => ({ id, anchor: { primary: { kind: 'css', value: sel } }, mutations: [{ kind: 'hide' }] });
+    const write = async (ids: Array<[string, string]>): Promise<unknown> => {
+      const files = checkoutShim({ spec, handlers: {} });
+      const sj = JSON.parse(files['shim.json'] as string) as { rules: unknown[] };
+      sj.rules = ids.map(([id, sel]) => hide(id, sel));
+      files['shim.json'] = JSON.stringify(sj);
+      return encodeWorkingCopy(files);
+    };
+    await backend.preview(handle, { workingCopy: await write([['hide-ad', '#ad'], ['mid', '#m'], ['tag', '#t'], ['last', '#l']]) }, new AbortController().signal);
+    const out = await backend.preview(handle, {
+      workingCopy: await write([['hide-ad', '#ad'], ['b1', '.b1'], ['b2', '.b2'], ['b3', '.b3'], ['b4', '.b4'], ['tag', '#t'], ['last', '#l']]),
+    }, new AbortController().signal);
+    const rules = (out.evidence as { rules: Array<{ ruleId: string; status: string; verification: string }> }).rules;
+    const by = new Map(rules.map((r) => [r.ruleId, r]));
+    check('the four new rules and every rule after them are in the evidence',
+      ['b1', 'b2', 'b3', 'b4', 'tag', 'last'].every((id) => by.has(id)), JSON.stringify(rules));
+    check('a rule that reported a status keeps full verification', by.get('b1')?.verification === 'full' && by.get('last')?.verification === 'full', JSON.stringify(rules));
+    const silent = ['b2', 'b3', 'b4', 'tag'].map((id) => by.get(id));
+    check('a rule with no status event is verification none, never full',
+      silent.every((r) => r?.verification === 'none' && /no status event/.test(r.status)), JSON.stringify(silent));
+  }
+
   console.log('the prepared commit carries the ops and the history:');
   {
     const opts = { holds: new Map<string, boolean>(), toldHeld: [] as Array<[string, boolean]>, writes: [] as PreparedCommit[] };

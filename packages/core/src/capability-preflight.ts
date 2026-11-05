@@ -235,8 +235,9 @@ export function scanRuleHandlers(
 /**
  * A rule's verification level on a host (D15): `full` only when every signal in
  * its fingerprint was checked there, `partial` when something couldn't be, and
- * `none` when the rule matched nothing (it is in the preview's `noMatch[]`), so
- * there was nothing to verify. It never says the rule looks right.
+ * `none` when the rule matched nothing (it is in the preview's `noMatch[]`) or
+ * reported no status in the preview's window, so there was nothing to verify.
+ * It never says the rule looks right.
  */
 export type VerificationLevel = 'full' | 'partial' | 'none';
 
