@@ -275,7 +275,7 @@ All of them act on the session's tab.
   after a destructive mistake (a handler moved or removed site DOM and teardown broke the
   page — fix the rule first, then reload) or after a `page-away` error (the user navigated
   the tab off the site; every page tool refuses rather than touching the wrong page). It
-  never navigates anywhere else, and it is limited to a few uses per session.
+  goes nowhere else and is capped (fresh loads: `references/page-driving.md`).
 - **An attach session's tab off screen.** Shim keeps the session's tab running while
   Shim is behind your terminal, and in a shim session the tab need not be selected: Shim
   keeps it painting for each `view_page` and `interact_page` batch without showing it (the

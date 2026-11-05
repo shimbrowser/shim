@@ -52,6 +52,11 @@ from outside (AppleScript, another browser).
   with `page-away` until it is back (navigate again, or `reload_page`). On the site your
   previews are re-applied (`reapplied`). In an attach session a page load is a GET as the
   signed-in user, like following a link: never navigate to logout or action URLs.
+- **Re-testing a fresh page load** (after a commit, or to see a rule on first paint):
+  `navigate` to the page's current URL. It loads a new document, as following a link
+  does, and costs one of the 20 navigations. Leave off any `#fragment`: a URL with one, on
+  the page already shown, moves within the same document and loads nothing. Keep `reload_page` for recovery; it allows only a few uses, and once they are
+  spent it answers `reload limit … reached`.
 
 ## `verify_across_pages`
 
@@ -63,6 +68,21 @@ route is replayed by its path alone, so a view that depends on the query string 
 the one you previewed. Sign-in, session, account-action and checkout pages are never
 replayed (the result counts them in `skippedSensitive`), so a view of that kind stays
 unverified.
+
+### A rule meant for several page types
+
+The rule's fingerprint follows what your preview showed on *this* page, and every other
+page type is checked against it:
+
+- **A selector that matches one element here can still be a set.** A class that recurs
+  across the site (a story card that appears once on one section page and many times on
+  another) gets an element witness from a one-match preview, and on pages where it means
+  other elements the rule is held for review instead of applying. Preview where it matches
+  two or more, or declare `"cardinality": "many"` on the anchor.
+- **Don't union different tags in one anchor** (`ytd-reel-shelf-renderer,
+  ytd-rich-shelf-renderer` style lists). Where both show, the rule gets no fingerprint;
+  where only one shows, it gets that tag's, and pages showing the other tag fail it. Write
+  one rule per tag.
 
 ## Pages that hide what you're building on
 

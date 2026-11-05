@@ -20,8 +20,26 @@ resolves to, and a rejection is reported as a handler error, as a throw is. Unti
 settles, that element doesn't count in the rule's match count and isn't handled again. So
 a handler that awaits `api.db` or `api.fetch` before building anything shows nothing, and
 can read as `matched 0` in a preview that settles first. Build and return the root
-synchronously (a placeholder), then fill it in from an un-awaited async step that checks
-the root is still connected. Mount strategies:
+synchronously (a placeholder), then fill it in from an un-awaited async step. To tell
+whether the mount has gone meanwhile, set a flag in teardown and check it after every
+`await`:
+
+```js
+let dead = false;
+api.cleanup(() => { dead = true; });
+(async () => {
+  const r = await api.fetch(url);
+  if (dead) return;
+  root.textContent = r.ok ? r.text : '–';
+})();
+return root;
+```
+
+Don't test `root.isConnected` for this. The engine places a `portal`, `overlay` or `shadow`
+root only once the handler's result has settled, a few microtasks after the handler
+returns, so an async step that resumes before that (one that awaited an already-resolved
+promise or a cached value) finds the root not on the page yet and gives up on a mount that
+is about to show. Mount strategies:
 
 - `inline` (default) — your output goes where you put it: the engine places nothing, so
   insert what you return (`anchor.appendChild(el)`) before returning it. A returned node
@@ -30,7 +48,11 @@ the root is still connected. Mount strategies:
 - `portal` — the engine parks your output in a floating root positioned at the anchor
   (`align: "below" | "above"`). **Use `portal` or `overlay` for anything inside a
   React/Vue/Angular-rendered region**: inline nodes there get displaced by the framework
-  even when they aren't removed.
+  even when they aren't removed. The engine sets only the root's position (`position:
+  fixed`, its top-left following the anchor), never its width, so the root is as wide as
+  its content. To line it up with the anchor, set the width yourself from
+  `anchor.getBoundingClientRect().width` (and again from a `ResizeObserver` on the anchor,
+  disconnected in `api.cleanup`, if the anchor can resize).
 - `overlay` — a portal sized to cover the anchor (good for tagging). It always takes the
   pointer: clicks anywhere over the anchor reach your overlay, not the site, and your own
   `pointer-events: none` on it is overridden. To annotate something the user still clicks
@@ -69,6 +91,19 @@ Rules that keep handlers safe — every one learned from real breakage:
   the top of the handler's module (outside the exported function: it starts fresh whenever
   the code changes), persist with `api.storage`, key a cache on something that changes
   with the logic (a version string), or delete the global in `api.cleanup`.
+- **A programmatic `click()` on a site control can be silently ignored.** A
+  framework-rendered page may not have wired up a region yet (React hydrates some parts
+  only after the user's first real input), so `el.click()` on its toggle does nothing, and
+  several toggles clicked in the same tick can drop some of the clicks. After clicking a
+  site control, check that its state changed (`aria-expanded`, `aria-pressed`, a class,
+  the content it shows), click one at a time and re-check each, and keep a fallback that
+  doesn't depend on the site's handler (collapse a section by hiding its body with CSS)
+  rather than assuming the click took.
+- **Read a framework-rendered selection from what the site draws, not from a native
+  input.** A React page may keep an uncontrolled `<input type="checkbox">` whose
+  `:checked` stays set after the site's own "deselect all" re-renders the tiles. Read the
+  state the visible element shows (its class, `aria-checked`, `aria-pressed`,
+  `aria-selected`), and confirm it with `query_page` after using the site's own controls.
 - **Never move or reparent the site's own DOM into containers you create.** When the rule
   tears down, your container goes and the site's nodes go with it, permanently. Clone
   (`node.cloneNode(true)`) and `hide` the original instead.
@@ -185,6 +220,21 @@ Don't wrap `history.pushState` to catch navigations. Handlers run in an isolated
 the site's own calls never go through your wrapper. After the change, verify a second
 in-site page: navigate in the tab, then `query_page` or `view_page` again.
 
+### State shared by several rules
+
+Each handler file is its own module, so a variable at the top of one handler's file isn't
+visible to another handler (and starts fresh whenever the shim's code is reloaded). When
+several rules need the same state (a filter one rule's control sets and another rule's
+rows read):
+
+- Prefer one page-level controller (anchored on `body` or `html`) that owns the state and
+  does the work for every element it covers, as in the recipe below.
+- Otherwise keep the state in `api.storage` and announce changes with a DOM event:
+  `document.dispatchEvent(new CustomEvent('myshim:filter', { detail }))` in one handler and
+  `document.addEventListener('myshim:filter', fn)` (removed in `api.cleanup`) in the
+  others. Prefix the event name with something unique to the shim: every shim on the page
+  can hear it. Not `globalThis` (see above).
+
 ### Recipe: a page-wide sort or filter
 
 To sort or filter the site's list (cards in a grid, rows in a feed), anchor one
@@ -221,7 +271,15 @@ rules so the framework that owns the list keeps working:
 Hides the anchor's children and mounts your handler's tree in their place; reversible.
 Same contract as `script`, except the handler must `anchor.appendChild(root)` and return
 the root. Use it to turn a region (or `<body>`) into a new mini-app; use `script` to add
-UI alongside the site's.
+UI alongside the site's. "Reversible" means turning the shim off brings the site's
+content back; there is no supported way yet for the shim to offer its own toggle back to
+the original view.
+
+**An anchor that is a grid or flex container lays your root out as one of its items**: one
+grid cell, or one item in the flex line. Give the root `grid-column: 1 / -1` (grid) or
+`flex: 1 1 100%` (flex) to take the full width, and `order: -1` to keep it first: the
+engine hides the site's child elements, but the anchor's `::before` / `::after` and any
+bare text still take a place. Check the result with `view_page`.
 
 ## A new page: `mount-route`
 
