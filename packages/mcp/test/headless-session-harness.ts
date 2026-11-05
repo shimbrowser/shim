@@ -1223,6 +1223,27 @@ async function main(): Promise<void> {
     const c2 = await req(second.r, 'POST', `/sessions/${second.sid}/commit`, { revision: 1, commitId: 'q2', summary: 'again' });
     check('once the rule resolves through its primary again, a commit advances the baseline', c2.ok === true && bundleOnDisk() === 'deploy-2', bundleOnDisk());
     await req(second.r, 'DELETE', `/sessions/${second.sid}`);
+
+    // A break reported against an anchor the working copy has since changed
+    // is stale: the preview that re-anchors the rule doesn't repeat it.
+    buyHealthy = false;
+    const third = await openQ();
+    const reported = await editOther(third, '0.7');
+    const reportedNotes = isRecord(reported.evidence) && Array.isArray(reported.evidence.notes) ? reported.evidence.notes.map(String) : [];
+    check('the quarantine is reported once', reportedNotes.some((n) => n.includes('rule "buy" is quarantined')), reportedNotes);
+    // The page keeps changing: the engine reconciles the old anchor again, between previews.
+    const old = [...third.host.applied].reverse().find((p) => p.rule.id === 'buy');
+    if (old) third.host.emit({ kind: 'rule-quarantined', specId: old.ruleKey, ruleId: 'buy', selector: '.buy-v1', applyId: old.applyId });
+    const folder = decodeWorkingCopy((await req(third.r, 'GET', `/sessions/${third.sid}/checkout`)).files);
+    const qSpec = JSON.parse(String(folder['shim.json'])) as Record<string, unknown> & { rules: Array<Record<string, unknown>> };
+    const reanchored = qSpec.rules.map((rule) => (rule.id === 'buy' ? { ...rule, anchor: css('.buy-v2') } : rule));
+    const pv3 = await preview(third.r, third.sid, { ...folder, 'shim.json': json({ ...qSpec, rules: reanchored }) } as Record<string, string>);
+    const ev3 = isRecord(pv3.evidence) ? pv3.evidence : {};
+    const notes3 = Array.isArray(ev3.notes) ? ev3.notes.map(String) : [];
+    const buyStatus = Array.isArray(ev3.rules) ? ev3.rules.find((r) => isRecord(r) && r.ruleId === 'buy') : undefined;
+    check('the re-anchored rule matches', isRecord(buyStatus) && String(buyStatus.status).includes('matched 1'), buyStatus);
+    check('its preview carries no stale quarantine note', !notes3.some((n) => n.includes('rule "buy"')), notes3);
+    await req(third.r, 'DELETE', `/sessions/${third.sid}`);
   }
 
   console.log('shutdown settles opens in flight');

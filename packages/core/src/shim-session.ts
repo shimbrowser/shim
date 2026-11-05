@@ -887,7 +887,15 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
     for (const { ruleId, member } of unsupportedApi) {
       notes.push(deps.unsupportedNote(ruleId, member));
     }
+    // A report is evidence only while its rule still stands broken that way:
+    // one made against an anchor the working copy has since changed, or
+    // cleared by a healthy report since, describes a rule that no longer
+    // exists. Each rule's break is said once.
+    const stillBroken = new Set(brokenRules(handle));
+    const said = new Set<string>();
     for (const { ruleId, outcome, strategy, to } of handle.unreportedBroken.splice(0)) {
+      if (!stillBroken.has(ruleId) || handle.broken.get(ruleId)?.outcome !== outcome || said.has(ruleId)) continue;
+      said.add(ruleId);
       notes.push(outcome === 'recovery'
         ? `rule "${ruleId}" no longer resolves through its anchor on this deploy; the engine found its element again ` +
           `(${strategy ?? 'rebase'}${to ? `, as ${to}` : ''}) but nothing applied that to the shim — update its anchor in shim.json. ` +
