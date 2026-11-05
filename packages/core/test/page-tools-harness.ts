@@ -13,6 +13,7 @@
 import {
   SHIM_PAGE_TOOLS, COMPOSITION_PAGE_TOOLS, SESSION_PAGE_TOOLS, PAGE_TOOL_NAMES, isPageToolName,
 } from '../src/page-tools';
+import { EVALUATE_TIMEOUT_MS, EVALUATE_MAX_TIMEOUT_MS } from '../src/page-host-tools';
 import type { ToolDefinition } from '../src/page-tools';
 
 let failures = 0;
@@ -101,6 +102,20 @@ check('navigate states its fixed origin, budget and contained redirects',
   /same scheme, host and port/.test(navigate.description) && /20 per session/.test(navigate.description) && /contained, not prevented/.test(navigate.description));
 check('navigate requires a url', JSON.stringify(navigate.input_schema.required) === '["url"]');
 check('the session evaluate warns that site actions are real', /not undone/.test(SESSION_PAGE_TOOLS.evaluate_in_page.description));
+// timeoutMs: the session's evaluate only, with page-host-tools' numbers; the
+// in-app workers' schemas (part of every internal request) don't offer it.
+const evalTimeout = SESSION_PAGE_TOOLS.evaluate_in_page.input_schema.properties.timeoutMs;
+check('the session evaluate offers timeoutMs, bounded by the ceiling', isRecord(evalTimeout) && evalTimeout.type === 'integer'
+  && evalTimeout.minimum === 1 && evalTimeout.maximum === EVALUATE_MAX_TIMEOUT_MS
+  && String(evalTimeout.description).includes(`default ${EVALUATE_TIMEOUT_MS}`) && String(evalTimeout.description).includes(`at most ${EVALUATE_MAX_TIMEOUT_MS}`), JSON.stringify(evalTimeout));
+check('the session evaluate names the default and the ceiling in seconds',
+  SESSION_PAGE_TOOLS.evaluate_in_page.description.includes(`${EVALUATE_TIMEOUT_MS / 1000} seconds wall clock unless you pass timeoutMs (up to ${EVALUATE_MAX_TIMEOUT_MS / 1000} seconds)`));
+check('the session evaluate says a timeout stops the wait, not the page', /stops the wait, not the page/.test(SESSION_PAGE_TOOLS.evaluate_in_page.description));
+check('timeoutMs is not required', !(SESSION_PAGE_TOOLS.evaluate_in_page.input_schema.required ?? []).includes('timeoutMs'));
+for (const [label, tool] of [['shim', SHIM_PAGE_TOOLS.evaluate_in_page], ['composition', COMPOSITION_PAGE_TOOLS.evaluate_in_page]] as const) {
+  check(`the ${label} worker's evaluate offers no timeoutMs and keeps its 3 seconds`, !('timeoutMs' in tool.input_schema.properties)
+    && tool.description.endsWith('3 seconds wall clock.'));
+}
 // Both hosts reload an on-site page in place (its current URL, hash and all)
 // and go back to the start URL only after a page-away; the description must
 // say so, or an agent reads "returns to where the session started" into a

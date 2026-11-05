@@ -83,8 +83,8 @@ import { describeRuleStatus, previewKey, previewNoMatch, previewUnobserved, shim
 import type { StatusCapture } from './preview-evidence';
 import { createConsoleFeed, formatAutoBlock, formatConsoleRead, type ConsoleFeed } from './console-feed';
 import {
-  viewPageOnHost, queryPageByScript, inspectElementByScript, evaluateOnHost, expressionProblem,
-  QUERY_TIMEOUT_MS, INSPECT_TIMEOUT_MS, EVALUATE_TIMEOUT_MS,
+  viewPageOnHost, queryPageByScript, inspectElementByScript, evaluateOnHost, expressionProblem, evaluateTimeoutOf,
+  QUERY_TIMEOUT_MS, INSPECT_TIMEOUT_MS,
 } from './page-host-tools';
 import { navigationScopeOf, runNavigate, isSameDocumentNavigation, type NavigationState, type NavigateLoad } from './navigate-scope';
 import { rememberedBotWall, BOT_WALL_TOOLS, withBotWallEvidence, withBotWallNote, type BotWallNote, type BotWallMemory } from './bot-wall';
@@ -988,9 +988,11 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
         const expression = args.expression;
         const problem = expressionProblem(expression);
         if (problem) return JSON.stringify({ error: problem });
+        const timeout = evaluateTimeoutOf(args.timeoutMs);
+        if ('error' in timeout) return JSON.stringify(timeout);
         const away = await guardOr();
         if (away) return away;
-        return JSON.stringify(await evaluateOnHost(handle.host, String(expression), EVALUATE_TIMEOUT_MS, 'main'));
+        return JSON.stringify(await evaluateOnHost(handle.host, String(expression), timeout.timeoutMs, 'main', { signal }));
       }
       case 'read_console': {
         const level = args.level === 'error' || args.level === 'warning' ? args.level : 'all';

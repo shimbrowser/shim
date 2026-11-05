@@ -12,6 +12,7 @@
 import {
   viewPageOnHost, evaluateOnHost, queryPageByScript, inspectElementByScript, expressionProblem,
   withTimeout, cropMeasureSource, cropMovedSource, MAX_SHOT_WIDTH, MAX_EXPRESSION, MAX_RESULT,
+  evaluateTimeoutOf, EVALUATE_TIMEOUT_MS, EVALUATE_MAX_TIMEOUT_MS, EVALUATE_SESSION_ENDED,
 } from '../src/page-host-tools';
 import { PAGE_HOST_API_MEMBERS } from '../src/page-host';
 import type { PageHost, PageWorld, ScreenshotOptions, ScreenshotResult } from '../src/page-host';
@@ -301,9 +302,58 @@ async function testEvaluate(): Promise<void> {
   });
   // (Only a host whose parser is unavailable probes in the page.)
   const noParser = (): { ok: false; error: string } => ({ ok: false, error: 'syntax check unavailable in this host (no eval)' });
-  const slow = await evaluateOnHost(slowProbe, '1', 10, 'main', noParser);
+  const slow = await evaluateOnHost(slowProbe, '1', 10, 'main', { probe: noParser });
   await new Promise((r) => setTimeout(r, 80));
   check('a run never starts after its timeout', 'error' in slow && slow.error === 'evaluateInPage timeout' && late === 0, `${JSON.stringify(slow)} late=${late}`);
+
+  // timeoutMs: the default when absent, a whole number in 1..ceiling, else refused (never clamped).
+  check('timeoutMs absent: the default', JSON.stringify(evaluateTimeoutOf(undefined)) === JSON.stringify({ timeoutMs: EVALUATE_TIMEOUT_MS }));
+  check('timeoutMs at the bounds is taken as given', JSON.stringify(evaluateTimeoutOf(1)) === '{"timeoutMs":1}'
+    && JSON.stringify(evaluateTimeoutOf(EVALUATE_MAX_TIMEOUT_MS)) === `{"timeoutMs":${EVALUATE_MAX_TIMEOUT_MS}}`);
+  check('the ceiling is 10 seconds', EVALUATE_MAX_TIMEOUT_MS === 10_000);
+  for (const bad of [EVALUATE_MAX_TIMEOUT_MS + 1, 0, -5, 1.5, '5000', null, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const r = evaluateTimeoutOf(bad);
+    check(`timeoutMs ${String(bad)} is refused with the range`, 'error' in r && r.error.includes(`1 to ${EVALUATE_MAX_TIMEOUT_MS}`), JSON.stringify(r));
+  }
+
+  // A wait longer than the default resolves when the caller allows it.
+  const waits = scriptedHost(() => new Promise((r) => setTimeout(() => r(JSON.stringify({ result: 'late' })), 60)));
+  check('a wait shorter than the timeout answers its value', JSON.stringify(await evaluateOnHost(waits, '1', 200, 'main')) === '{"result":"\\"late\\""}');
+  check('the same wait over a shorter timeout times out', (await evaluateOnHost(waits, '1', 20, 'main') as { error?: string }).error === 'evaluateInPage timeout');
+
+  // The session's signal: aborted before, the page is never touched;
+  // aborted while the page works, the call answers at once.
+  const untouched = scriptedHost(() => JSON.stringify({ result: 1 }));
+  const pre = new AbortController();
+  pre.abort();
+  const preR = await evaluateOnHost(untouched, '1', 1000, 'main', { signal: pre.signal });
+  check('an aborted session never reaches the page', 'error' in preR && preR.error === EVALUATE_SESSION_ENDED && untouched.evals.length === 0, JSON.stringify(preR));
+  const forever = scriptedHost(() => new Promise(() => { /* never settles */ }));
+  const mid = new AbortController();
+  const started = Date.now();
+  setTimeout(() => mid.abort(), 20);
+  const midR = await evaluateOnHost(forever, '1', EVALUATE_MAX_TIMEOUT_MS, 'main', { signal: mid.signal });
+  check('an abort mid-wait answers at once, not at the timeout', 'error' in midR && midR.error === EVALUATE_SESSION_ENDED && Date.now() - started < 1000,
+    `${JSON.stringify(midR)} after ${Date.now() - started}ms`);
+
+  // An abort while the in-page form probe is pending: whether the probe then
+  // resolves or rejects, the input never runs.
+  for (const outcome of ['resolves', 'rejects'] as const) {
+    let ranAfter = 0;
+    const pendingProbe = scriptedHost((code) => {
+      if (code.includes('__shimNeverCalled')) {
+        return new Promise((res, rej) => setTimeout(() => (outcome === 'resolves' ? res('ok') : rej(new Error('SyntaxError'))), 40));
+      }
+      ranAfter++;
+      return JSON.stringify({ result: 1 });
+    });
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 10);
+    const r = await evaluateOnHost(pendingProbe, '1', 5000, 'main', { probe: noParser, signal: ac.signal });
+    await new Promise((res) => setTimeout(res, 80));
+    check(`an abort while the probe is pending (it then ${outcome}) never runs the input`, 'error' in r && r.error === EVALUATE_SESSION_ENDED && ranAfter === 0,
+      `${JSON.stringify(r)} ran=${ranAfter}`);
+  }
 }
 
 async function testQueryInspect(): Promise<void> {

@@ -257,7 +257,7 @@ All of them act on the session's tab.
   under a computed criterion, `getComputedStyle`, sampling site globals. It is for
   reading: never use it to change the page (that is what the folder is for), dispatch
   events, call `click()` or set `location` — `interact_page` and `navigate` do that — and
-  remember it runs as the user. Capped at 5000 characters in, 8000 out, 3 seconds.
+  remember it runs as the user. Caps: 5000 chars in, 8000 out, 3 s (`timeoutMs`: to 10 s).
 - **`view_page { selector? }`** — a screenshot, as an image. With `selector`, a crop of its first visible
   match plus margin at native resolution (the verification shot; an element below the
   fold is scrolled into view for the shot and the scroll put back); without, the visible

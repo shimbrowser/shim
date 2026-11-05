@@ -67,7 +67,18 @@ export type WorkerPageToolName = Exclude<PageToolName, 'navigate'>;
 // and those must never reach a tool result.
 // `lead` is the target-specific opening (what the other tools are, and what
 // the page is); the rest is shared.
-function makeEvaluateTool(lead: string, emitToolName: string): ToolDefinition {
+// `timeoutMs` (external sessions only): the caller may wait longer than the
+// default, up to the ceiling. The in-app workers' definitions stay as they
+// were, byte for byte. The numbers are page-host-tools.ts's
+// EVALUATE_TIMEOUT_MS and EVALUATE_MAX_TIMEOUT_MS, written out to keep this
+// file pure data (page-tools-harness pins that they agree).
+function makeEvaluateTool(lead: string, emitToolName: string, timeoutMs = false): ToolDefinition {
+  const cap = timeoutMs
+    ? '3 seconds wall clock unless you pass timeoutMs (up to 10 seconds), which includes ' +
+      'anything the expression awaits. ' +
+      'A timeout stops the wait, not the page: work the expression started (a request, a write) ' +
+      'still completes and is not undone.'
+    : '3 seconds wall clock.';
   return {
     name: 'evaluate_in_page',
     description:
@@ -80,7 +91,7 @@ function makeEvaluateTool(lead: string, emitToolName: string): ToolDefinition {
       "`el.textContent`, `el.tagName.toLowerCase()`, `Array.from(NodeList).map(...)` " +
       "etc. instead. DO NOT use this to mutate the page — that's what " +
       `${emitToolName} is for. Capped at 5000 chars input, 8000 chars result, ` +
-      "3 seconds wall clock.",
+      cap,
     input_schema: {
       type: 'object',
       properties: {
@@ -92,6 +103,17 @@ function makeEvaluateTool(lead: string, emitToolName: string): ToolDefinition {
             '`getComputedStyle(document.querySelector("h1")).color` — read style, ' +
             '`Array.from(document.querySelectorAll("[role=button]")).map(b => b.textContent.trim()).slice(0, 10)` — sample.',
         },
+        ...(timeoutMs ? {
+          timeoutMs: {
+            type: 'integer',
+            minimum: 1,
+            maximum: 10000,
+            description:
+              'How long to wait for the answer, in milliseconds (default 3000, at most 10000). ' +
+              'Raise it only to await something the page is doing: a few ' +
+              'requests read in sequence, or a poll for state that is about to render.',
+          },
+        } : {}),
       },
       required: ['expression'],
     },
@@ -593,6 +615,7 @@ const SESSION_EVALUATE_IN_PAGE: ToolDefinition = makeEvaluateTool(
   'events, call click(), or set location with it — drive the page with ' +
   'interact_page and move it with navigate. ',
   'shim_preview',
+  true,
 );
 
 const SESSION_READ_CONSOLE: ToolDefinition = {

@@ -256,6 +256,49 @@ async function main(): Promise<void> {
     check('a page the committed shim covers is on-site', pageAway(handle) === null);
   }
 
+  console.log('evaluate_in_page takes the caller\'s timeoutMs and the session\'s signal:');
+  {
+    const opts = { holds: new Map<string, boolean>(), toldHeld: [] as Array<[string, boolean]>, writes: [] as PreparedCommit[] };
+    const backend = makeBackend(opts);
+    const handle = await openSession(backend);
+    // The page's answer to the evaluate wrapper arrives after `delayMs`; every
+    // other script (the session's own reads) answers as the fake host does.
+    let delayMs = 60;
+    let wrapperRuns = 0;
+    const base = handle.host.evaluate.bind(handle.host);
+    handle.host.evaluate = (code, world) => {
+      if (!code.includes('__ss(')) return base(code, world);
+      wrapperRuns++;
+      if (delayMs === Number.POSITIVE_INFINITY) return new Promise(() => { /* the page never answers */ });
+      return new Promise((r) => setTimeout(() => r(JSON.stringify({ result: 'waited' })), delayMs));
+    };
+    const call = (input: unknown, signal = new AbortController().signal): Promise<unknown> =>
+      backend.call(handle, 'evaluate_in_page', input, signal);
+    const parse = (raw: unknown): Record<string, unknown> => JSON.parse(String(raw)) as Record<string, unknown>;
+
+    const refused = parse(await call({ expression: '1', timeoutMs: 10_001 }));
+    check('a timeoutMs over the ceiling is refused before the page runs anything', typeof refused.error === 'string'
+      && refused.error.includes('1 to 10000') && wrapperRuns === 0, JSON.stringify(refused));
+    const fraction = parse(await call({ expression: '1', timeoutMs: 2.5 }));
+    check('a fractional timeoutMs is refused', typeof fraction.error === 'string' && wrapperRuns === 0, JSON.stringify(fraction));
+    const ok = parse(await call({ expression: '1', timeoutMs: 500 }));
+    check('a wait inside the given timeoutMs answers its value', ok.result === '"waited"', JSON.stringify(ok));
+    const short = parse(await call({ expression: '1', timeoutMs: 20 }));
+    check('the given timeoutMs is the one applied', short.error === 'evaluateInPage timeout', JSON.stringify(short));
+    const dflt = parse(await call({ expression: '1' }));
+    check('no timeoutMs: the default (well over this wait)', dflt.result === '"waited"', JSON.stringify(dflt));
+
+    // The session ends while the page works: the call answers at once, not
+    // when the evaluate's own deadline passes.
+    delayMs = Number.POSITIVE_INFINITY;
+    const ac = new AbortController();
+    const started = Date.now();
+    setTimeout(() => ac.abort(), 20);
+    const ended = parse(await call({ expression: '1', timeoutMs: 10_000 }, ac.signal));
+    check('ending the session settles a pending evaluate at once', ended.error === 'session-ended' && Date.now() - started < 2000,
+      `${JSON.stringify(ended)} after ${Date.now() - started}ms`);
+  }
+
   if (failures) {
     console.error(`\nshim-session: ${failures} failed, ${passes} passed`);
     process.exit(1);

@@ -21,6 +21,12 @@ import { isRecord } from './is-record';
 export const QUERY_TIMEOUT_MS = 8000;
 export const INSPECT_TIMEOUT_MS = 5000;
 export const EVALUATE_TIMEOUT_MS = 3000;
+/**
+ * The most an external session may ask evaluate_in_page to wait (its
+ * `timeoutMs`). A waiting budget only: it bounds how long the tool waits for
+ * the page's answer, never the page work the expression started.
+ */
+export const EVALUATE_MAX_TIMEOUT_MS = 10_000;
 /** evaluate_in_page's input cap, in characters. */
 export const MAX_EXPRESSION = 5000;
 /** evaluate_in_page's serialized result cap, in characters; longer is truncated. */
@@ -537,6 +543,20 @@ export function expressionProblem(expression: unknown): string | null {
   return null;
 }
 
+/**
+ * evaluate_in_page's `timeoutMs`: the default when absent, else a whole
+ * number of milliseconds in 1..EVALUATE_MAX_TIMEOUT_MS. Anything else is
+ * refused with the range, never clamped.
+ */
+export function evaluateTimeoutOf(value: unknown): { timeoutMs: number } | { error: string } {
+  if (value === undefined) return { timeoutMs: EVALUATE_TIMEOUT_MS };
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= EVALUATE_MAX_TIMEOUT_MS) return { timeoutMs: value };
+  return { error: `timeoutMs must be a whole number of milliseconds from 1 to ${EVALUATE_MAX_TIMEOUT_MS}` };
+}
+
+/** What evaluate_in_page answers when the session's signal aborts: the registry's own spelling. */
+export const EVALUATE_SESSION_ENDED = 'session-ended';
+
 // evaluate_in_page takes either a single expression (`document.title`) or a
 // statement body that returns its value (`const n = 1; return n`). Which one
 // is decided by compiling, never by running, and HOST-SIDE: the host's own
@@ -599,8 +619,21 @@ export function evaluateForm(expression: string, probe: CompileProbe = syntaxPro
   return { error: `SyntaxError: ${asBody.error ?? 'the input compiles as neither an expression nor a statement body'}` };
 }
 
-export async function evaluateOnHost(host: PageHost, expression: string, timeoutMs: number, world: PageWorld, probe: CompileProbe = syntaxProbe): Promise<EvaluateResult> {
-  const decided = evaluateForm(expression, probe);
+export interface EvaluateOptions {
+  /** The host's parser; tests stand in for one that is unavailable. */
+  probe?: CompileProbe;
+  /**
+   * The session's signal. Aborted before the run starts, the run never
+   * starts; aborted while the page works, the call answers at once. Either
+   * way the page keeps whatever it already started: only the wait stops.
+   */
+  signal?: AbortSignal | null;
+}
+
+export async function evaluateOnHost(host: PageHost, expression: string, timeoutMs: number, world: PageWorld, opts: EvaluateOptions = {}): Promise<EvaluateResult> {
+  const signal = opts.signal ?? null;
+  if (signal?.aborted) return { error: EVALUATE_SESSION_ENDED };
+  const decided = evaluateForm(expression, opts.probe ?? syntaxProbe);
   if (decided && 'error' in decided) return { error: decided.error };
   let settled = false;
   const run = async (): Promise<string> => {
@@ -609,19 +642,30 @@ export async function evaluateOnHost(host: PageHost, expression: string, timeout
     const isExpression = decided
       ? decided.form === 'expression'
       : await host.evaluate(expressionProbeSource(expression), world).then(() => true, () => false);
-    // A probe that outlived the timeout must not start the run after the
-    // caller was told it timed out.
+    // A probe that outlived the timeout, or the session, must not start the
+    // run after the caller was answered.
     if (settled) throw new Error('evaluateInPage timeout');
     return await host.evaluate(evaluateWrapperSource(expression, isExpression ? 'expression' : 'body'), world) as string;
   };
 
   let raw: string;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
   try {
-    raw = await withTimeout(run(), timeoutMs, 'evaluateInPage timeout');
+    // One race: the run, the timeout, the session's end. Both timer and
+    // listener go in `finally`, so neither outlives the answer.
+    const stopped = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('evaluateInPage timeout')), timeoutMs);
+      onAbort = () => reject(new Error(EVALUATE_SESSION_ENDED));
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+    raw = await Promise.race([run(), stopped]);
   } catch (err) {
     return { error: errMessage(err) };
   } finally {
     settled = true;
+    clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener('abort', onAbort);
   }
   let parsed: { error?: string; result?: unknown };
   try { parsed = JSON.parse(raw); } catch (_) {

@@ -103,8 +103,34 @@ page type is checked against it:
 
 ## Waiting for the site
 
-`evaluate_in_page`'s 3-second cap includes any waiting inside your expression, so keep an
-in-page wait well under it (about 2 seconds) or it answers `evaluateInPage timeout`. To wait
-longer for the site to change (replies to arrive before a "since your last visit" revisit,
-a feed to refresh), wait outside the page tools, e.g. a background `sleep`, then look again.
-A session ends after 10 idle minutes, so keep each wait shorter than that.
+`evaluate_in_page` waits 3 seconds for its answer, and that includes anything your
+expression awaits. Pass `timeoutMs` (up to 10000) when the expression has to await
+something the page is doing:
+
+- **A short chain of reads**: two or three same-origin requests in sequence, each using the
+  last one's answer, then return what you need. This is for reading. A request that changes
+  the user's data is still a real action, whatever the timeout.
+- **State about to render** after an SPA route change or a click through `interact_page`:
+  poll against a deadline inside the expression, shorter than `timeoutMs`, and return an
+  explicit answer when it isn't met:
+
+  ```js
+  const end = Date.now() + 6000;
+  while (!document.querySelector('.next-item') && Date.now() < end) {
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return { found: !!document.querySelector('.next-item') };
+  ```
+
+  with `timeoutMs: 8000`. Never count iterations instead of time: sleeps alone can use up
+  the whole budget.
+
+A timeout stops the wait, not the page: what the expression started keeps running, a
+request it sent completes, nothing is undone, and it can still be running during your next
+call. Retrying a timed-out expression can repeat what it did. In a background tab of a
+browser that throttles timers, a poll can wake late, so the tool's timeout may answer
+before your own deadline does.
+
+To wait longer than 10 seconds for the site to change (replies to arrive before a "since
+your last visit" revisit, a feed to refresh), wait outside the page tools, e.g. a
+background `sleep`, then look again. A session ends after 10 idle minutes, so keep each wait shorter than that.

@@ -1099,6 +1099,19 @@ const pageToolsCase: ConformanceCase = {
     kit.check('evaluate: choosing the form never runs the input twice', runs === 2, runs);
     const broken = await evaluateOnHost(kit.host, 'const = ;', 3000, 'main');
     kit.check('evaluate: input that is neither an expression nor a body is an error value', 'error' in broken && broken.error.length > 0, broken);
+    // An external session's timeoutMs: no host imposes a lower bound of its
+    // own on an awaiting expression, in either world.
+    const waited = await evaluateOnHost(kit.host, `await new Promise((r) => setTimeout(r, 3300)); return document.title`, 6000, 'main');
+    kit.check('evaluate: a wait past the 3 s default answers when the timeout allows it', 'result' in waited && waited.result === '"apply"', waited);
+    const engineWaited = await evaluateOnHost(kit.host, `await new Promise((r) => setTimeout(r, 3300)); return document.querySelectorAll('#list li').length`, 6000, 'engine');
+    kit.check('evaluate (engine world): the same wait answers too', 'result' in engineWaited && engineWaited.result === '3', engineWaited);
+    // A timeout stops the wait, not the page: the work completes afterwards.
+    await kit.read('window.__confEvalLate = 0');
+    const cut = await evaluateOnHost(kit.host, `await new Promise((r) => setTimeout(r, 400)); window.__confEvalLate = 1; return 'too late'`, 100, 'main');
+    kit.check('evaluate: a wait past a short timeout answers the timeout', 'error' in cut && cut.error === 'evaluateInPage timeout', cut);
+    await new Promise((r) => setTimeout(r, 700));
+    const late = await kit.read('window.__confEvalLate');
+    kit.check('evaluate: what the timed-out expression started still completes in the page', late === 1, late);
   },
 };
 
