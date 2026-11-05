@@ -479,6 +479,13 @@ const H = {
   d.textContent = 'floating';
   return d;
 }`,
+  foldPortal: `function foldPortal() {
+  const d = document.createElement('div');
+  d.className = 'conf-fold-portal';
+  d.style.cssText = 'width:735px;height:62px;background:rgb(30,160,90)';
+  d.textContent = 'portal below the fold';
+  return d;
+}`,
   overlayOut: `function overlayOut() {
   const d = document.createElement('div');
   d.className = 'conf-overlay';
@@ -1248,6 +1255,77 @@ const cropScrollCase: ConformanceCase = {
   },
 };
 
+const cropPortalCase: ConformanceCase = {
+  id: 'view-crop-portal',
+  title: 'a view_page crop of portal-mounted output below the fold scrolls its anchor in and captures it',
+  covers: ['page-tools', 'mount:portal'],
+  async run(kit) {
+    if (!(await kit.load('/fold'))) return;
+    // Portal output is position:fixed in the engine's 0x0 portal root and
+    // follows its anchor on scroll, so it sits below the viewport while its
+    // anchor does: scrolling the output itself into view moves nothing.
+    const key = kit.apply({ id: 'fold-portal', anchor: css('#fold-target'), mutations: [{ kind: 'script', handler: 'foldPortal', mount: { strategy: 'portal' } }], handlers: { foldPortal: H.foldPortal } });
+    const placed = await kit.until(async () => {
+      const r = await kit.read(`(() => {
+        const el = document.querySelector('[data-shim="portal-root"] .conf-fold-portal');
+        if (!el) return null;
+        const b = el.getBoundingClientRect();
+        return { top: b.top, h: b.height, vh: window.innerHeight, position: getComputedStyle(el).position };
+      })()`);
+      return isRecord(r) ? r : null;
+    });
+    kit.check('the fixture: the portal output is fixed and below the viewport', isRecord(placed) && placed.position === 'fixed'
+      && typeof placed.top === 'number' && typeof placed.vh === 'number' && placed.top > placed.vh, placed);
+    await kit.read(`(window.scrollTo({ left: 0, top: 7, behavior: 'instant' }), 0)`);
+    const scrollY = (): Promise<unknown> => kit.read('[window.scrollX, window.scrollY].join(",")');
+    const before = await scrollY();
+
+    let seen: unknown = null;
+    let target = '.conf-fold-portal';
+    const watched: PageHost = Object.assign(Object.create(kit.host) as PageHost, {
+      async screenshot(opts?: Parameters<PageHost['screenshot']>[0]) {
+        const clip = opts?.clip;
+        if (clip) {
+          seen = await kit.read(`(() => {
+            const el = document.querySelector(${JSON.stringify(target)});
+            const r = el.getBoundingClientRect();
+            const c = ${JSON.stringify(clip)};
+            const inside = r.x >= c.x && r.y >= c.y && r.x + r.width <= c.x + c.width && r.y + r.height <= c.y + c.height;
+            const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+            return inside && !!hit && el.contains(hit);
+          })()`);
+        }
+        return kit.host.screenshot(opts);
+      },
+    });
+    const shot = await viewPageOnHost(watched, { selector: '.conf-fold-portal' }, 'main');
+    kit.check('view_page crop of portal output below the fold: all of it, in view', shot.error === undefined && seen === true
+      && isRecord(shot.elementBox) && shot.elementBox.w === 735 && shot.elementBox.h === 62, { ...shot, dataBase64: shot.dataBase64?.length, seen });
+    kit.check('…and the page\'s scroll is put back', (await scrollY()) === before, { before, after: await scrollY() });
+    kit.remove(key);
+
+    // A target below the fold of a fixed scrolling container (a modal) but
+    // inside the viewport: the container is scrolled to show it, not the page.
+    await kit.read(`(() => {
+      const modal = document.createElement('div');
+      modal.id = 'conf-fixed-modal';
+      modal.style.cssText = 'position:fixed;top:0;right:0;width:220px;height:200px;overflow:auto;z-index:2147483647;background:#fff';
+      modal.innerHTML = '<div style="height:400px"></div><div id="conf-modal-target" style="width:150px;height:60px;background:rgb(160,90,30)">in the modal</div><div style="height:400px"></div>';
+      document.body.appendChild(modal);
+      return 0;
+    })()`);
+    const modalState = (): Promise<unknown> => kit.read('[window.scrollX, window.scrollY, document.querySelector("#conf-fixed-modal").scrollTop].join(",")');
+    const modalBefore = await modalState();
+    target = '#conf-modal-target';
+    seen = null;
+    const modalShot = await viewPageOnHost(watched, { selector: '#conf-modal-target' }, 'main');
+    kit.check('view_page crop of a target below a fixed container\'s fold: the container is scrolled to show it', modalShot.error === undefined && seen === true,
+      { ...modalShot, dataBase64: modalShot.dataBase64?.length, seen });
+    kit.check('…and the container\'s and page\'s scroll are put back', (await modalState()) === modalBefore, { modalBefore, after: await modalState() });
+    await kit.read(`(document.querySelector('#conf-fixed-modal').remove(), 0)`);
+  },
+};
+
 const strictCspCase: ConformanceCase = {
   id: 'strict-csp',
   title: 'handlers compile and run on a page whose CSP forbids eval and inline style',
@@ -1929,7 +2007,7 @@ const noNodeCase: ConformanceCase = {
 };
 
 export const CONFORMANCE_CASES: readonly ConformanceCase[] = [
-  applyCase, setWitnessCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, cropScrollCase, strictCspCase, sharedModuleCase, noMatchCase, ariaCase,
+  applyCase, setWitnessCase, teardownCase, rerenderCase, spaCase, storageCase, throwingCase, deployCase, pageToolsCase, cropScrollCase, cropPortalCase, strictCspCase, sharedModuleCase, noMatchCase, ariaCase,
   inputCase, supersededLoadCase, anchorChangeCase, unattachedOutputCase, noNodeCase,
 ];
 

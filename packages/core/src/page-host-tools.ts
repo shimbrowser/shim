@@ -321,11 +321,30 @@ export function cropMeasureSource(selector: string, waitMs: number = VIEW_WAIT_M
       for (let n = el.parentElement; n; n = n.parentElement) before.push([n, n.scrollLeft, n.scrollTop]);
       if (scroller && !before.some((s) => s[0] === scroller)) before.push([scroller, scroller.scrollLeft, scroller.scrollTop]);
       const pad = ${CROP_PAD};
-      el.scrollIntoView({
-        behavior: 'instant',
-        block: m.h + 2 * pad <= m.vh ? 'center' : 'start',
-        inline: m.w + 2 * pad <= m.vw ? 'center' : 'start',
-      });
+      const block = m.h + 2 * pad <= m.vh ? 'center' : 'start';
+      const inline = m.w + 2 * pad <= m.vw ? 'center' : 'start';
+      // Scrolls every scrolling ancestor, a fixed one's (a modal's) included.
+      el.scrollIntoView({ behavior: 'instant', block, inline });
+      // A fixed-position target (portal output parked in a fixed layer that
+      // follows its anchor on scroll) has the viewport as its scroll
+      // container, so scrollIntoView can't move the page for it. When one is
+      // still outside the viewport, scroll the page by the distance that
+      // would bring it in: output that follows the page comes along, and
+      // output that doesn't stays out and answers the error.
+      let fixed = false;
+      for (let n = el; n && n !== document.documentElement; n = n.parentElement) {
+        if (getComputedStyle(n).position === 'fixed') { fixed = true; break; }
+      }
+      if (fixed && scroller) {
+        const f = measure();
+        const vOff = f.y < 0 || f.y + f.h > f.vh;
+        const hOff = f.x < 0 || f.x + f.w > f.vw;
+        if (vOff || hOff) {
+          const dy = !vOff ? 0 : block === 'center' ? f.y + f.h / 2 - f.vh / 2 : f.y - pad;
+          const dx = !hOff ? 0 : inline === 'center' ? f.x + f.w / 2 - f.vw / 2 : f.x - pad;
+          scroller.scrollTo({ left: scroller.scrollLeft + dx, top: scroller.scrollTop + dy, behavior: 'instant' });
+        }
+      }
       globalThis[__leaseKey].saved = before.filter((s) => s[0].scrollLeft !== s[1] || s[0].scrollTop !== s[2]);
       if (globalThis[__leaseKey].saved.length === 0) return held(m);
       await Promise.race([
