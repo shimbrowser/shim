@@ -874,7 +874,10 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
       return {
         ruleId: rule.id,
         // The working rule carries whatever this preview captured.
-        status: describeRuleStatus(rule, status, { capture: statusCapture(handle, key) }),
+        status: describeRuleStatus(rule, status, {
+          capture: statusCapture(handle, key),
+          pageUrl: handle.host.isClosed() ? null : handle.host.url(),
+        }),
         verification: verificationLevel(
           live?.anchor, handle.host.capabilities, (handle.unsupported.get(key)?.size ?? 0) > 0,
           // Nothing to verify: it matched nothing, or reported nothing at all.

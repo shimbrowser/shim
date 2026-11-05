@@ -89,7 +89,7 @@ Mutation kinds, from least to most invasive:
 - additive DOM: `script`, `inject-element`, `inject-html`
 - deletion: `remove`
 - region replacement and virtual routes: `replace-root`, `mount-route`
-- network: `redirect`, `rewrite-response`, `intercept`
+- network: `redirect` (host, or path and query), `rewrite-response`, `intercept`
 
 The network kinds need host integration, so only the Shim browser runs them. A `script`
 handler gets `{ anchor, mutation, rule, spec, api }`. It registers teardown with

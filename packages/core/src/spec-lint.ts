@@ -40,6 +40,7 @@ import { canonicalModuleSource, expressionToModule, handlerModuleProblem, withou
 import { ENGINE_MANAGED_ANCHOR_KEYS } from './managed-anchor';
 import { isRecord } from './is-record';
 import { compilePathScope } from './path-match';
+import { compileRewrite, isBareHostname } from './redirect-rewrite';
 
 // A transform / wrap is kept by transformLiteral only if it evaluates to a
 // function; anything else parses fine and then leaves the rule silently
@@ -91,8 +92,8 @@ const ANCHOR_KEYS = new Set<string>(['primary', 'fallbacks', 'iframe', 'cardinal
 // to match a set (every row, every card) — never fingerprinted as one element.
 const ANCHOR_CARDINALITIES = new Set(['many']);
 // Union across kinds: properties (restyle), handler/mount (script,
-// replace-root, mount-route), pattern/title (mount-route), from/to/exceptPaths
-// (redirect), position/before/after (reorder), layout/direction/columns/rows/
+// replace-root, mount-route), pattern/title (mount-route), from/to/exceptPaths/
+// rewrite (redirect), position/before/after (reorder), layout/direction/columns/rows/
 // gap/wrap/align/justify (reshape — note "wrap" here is reshape's flex-wrap
 // boolean, a DIFFERENT field from intercept's wrap handler name below; same
 // key name, two kinds, no collision since MUTATION_KEYS is just an allowlist
@@ -100,7 +101,7 @@ const ANCHOR_CARDINALITIES = new Set(['many']);
 // (inject-element, inject-html), endpoint/transform (rewrite-response),
 // module/symbol/wrap (intercept).
 const MUTATION_KEYS = new Set([
-  'kind', 'properties', 'handler', 'mount', 'pattern', 'title', 'from', 'to', 'exceptPaths',
+  'kind', 'properties', 'handler', 'mount', 'pattern', 'title', 'from', 'to', 'exceptPaths', 'rewrite',
   'position', 'before', 'after',
   'layout', 'direction', 'columns', 'rows', 'gap', 'wrap', 'align', 'justify',
   'element', 'html', 'placement',
@@ -512,6 +513,23 @@ function lintLayoutMutation(rid: string, mut: Mutation, errors: string[], warnin
 // (the runtime strip is the belt — the model should hear it before apply).
 // inject-element's tree is inspectable, so active content there is an ERROR
 // at emit rather than a runtime strip.
+// `redirect`: a host change (`to`), a path/query `rewrite`, or both. The
+// rewrite is checked by the same compiler the browser collects it with, so a
+// clean lint is exactly a rewrite that runs.
+function lintRedirectMutation(rid: string, mut: Mutation, errors: string[]): void {
+  if (mut.kind !== 'redirect') return;
+  const hasTo = typeof mut.to === 'string' && mut.to.trim() !== '';
+  if (mut.rewrite === undefined) {
+    if (!hasTo) errors.push(`rule "${rid}": redirect needs "to" (a host) or "rewrite" (a path/query change).`);
+    return;
+  }
+  const compiled = compileRewrite(mut.rewrite);
+  if (!compiled.ok) errors.push(`rule "${rid}": ${compiled.error}.`);
+  if (mut.to !== undefined && !isBareHostname(mut.to)) {
+    errors.push(`rule "${rid}": with "rewrite", "to" must be a bare lowercase hostname (no scheme, port or path) — leave it out to stay on the same site.`);
+  }
+}
+
 function lintInjectMutation(rid: string, mut: Mutation, errors: string[], warnings: string[]): void {
   if (mut.kind !== 'inject-element' && mut.kind !== 'inject-html') return;
   if (mut.placement !== undefined && !INJECT_PLACEMENTS.has(mut.placement)) {
@@ -1036,6 +1054,7 @@ function lintSpec(spec: unknown, carriedHandlers?: unknown, options: LintOptions
       }
       lintLayoutMutation(rid, mut, errors, warnings);
       lintInjectMutation(rid, mut, errors, warnings);
+      lintRedirectMutation(rid, mut, errors);
       lintRewriteMutation(rid, mut, handlerScope, errors, warnings);
       lintInterceptMutation(rid, mut, handlerScope, errors, warnings);
     }

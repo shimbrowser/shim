@@ -10,6 +10,7 @@ import type { Rule } from './types';
 import { fingerprintKind, hasManagedKeys } from './managed-anchor';
 import type { CaptureNote } from './capture-event';
 import { anchorSelectorOf } from './anchor-selector';
+import { describeRewriteSimulation } from './redirect-rewrite';
 
 /** The part of a `rule-status` runtime event a status line reads. */
 export interface RuleStatusEvent {
@@ -83,7 +84,7 @@ export interface StatusCapture {
 export function describeRuleStatus(
   rule: Rule | undefined,
   status: RuleStatusEvent | undefined,
-  opts: { witnessed?: boolean; capture?: StatusCapture | null } = {},
+  opts: { witnessed?: boolean; capture?: StatusCapture | null; pageUrl?: string | null } = {},
 ): string {
   const isRoute = (rule?.mutations || []).some((m) => m?.kind === 'mount-route');
   // `redirect` rules are handled in main (the network hook rewrites the
@@ -91,6 +92,9 @@ export function describeRuleStatus(
   // rule-status for them — a missing status is the expected, healthy state.
   const isRedirect = (rule?.mutations || []).some((m) => m?.kind === 'redirect');
   if (isRedirect) {
+    // A path/query rewrite is simulated against the page the preview is on.
+    const rewriting = (rule?.mutations || []).find((m) => m?.kind === 'redirect' && m.rewrite !== undefined);
+    if (rewriting) return describeRewriteSimulation(rewriting, opts.pageUrl ?? null);
     return 'redirect registered (applied in main at the network layer — no DOM status; takes effect on the next navigation to the source host)';
   }
   // `rewrite-response` rules are anchorless (Tier-5) — their status

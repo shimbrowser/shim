@@ -210,6 +210,11 @@
       "types": "./dist/rewrite-response.d.ts",
       "default": "./dist/rewrite-response.js"
     },
+    "./redirect-rewrite": {
+      "shim-source": "./src/redirect-rewrite.ts",
+      "types": "./dist/redirect-rewrite.d.ts",
+      "default": "./dist/redirect-rewrite.js"
+    },
     "./route-match": {
       "shim-source": "./src/route-match.ts",
       "types": "./dist/route-match.d.ts",

@@ -16,6 +16,29 @@ boundary is consent, not domain. Each new redirect target asks the user at commi
 target they haven't allowed never redirects. Not on a global shim (see `mount-route`
 in `references/handlers.md`).
 
+**`redirect` with `rewrite`** — change the path and query of a full page load before it
+leaves, on the same site (add `to`, a bare lowercase hostname, to change host too). Prefer it
+to a script calling `location.replace`, which loads the wrong page first:
+
+```json
+{ "kind": "redirect", "rewrite": { "drop": ["tl"] } }
+{ "kind": "redirect", "rewrite": { "path": "/search", "set": { "udm": "14" }, "unless": ["udm", "tbm"] } }
+{ "kind": "redirect", "rewrite": { "path": "/shorts/:id", "toPath": "/watch", "set": { "v": ":id" } } }
+```
+
+`path` matches the pathname: literal segments and whole-segment `:name` captures, all
+required (no `?`, `*` or regex; omitted = any path). `toPath` is the new pathname from
+literals and declared `:name`s (omitted = kept). `set` sets query keys to a literal or a whole
+`:name`, `drop` removes keys, `unless` skips the whole rewrite when any listed key is present.
+Every other parameter and the fragment are kept byte for byte. It must not match its own
+result (give it an `unless`, or a `path` its output leaves): one that would fire again never
+runs. It runs on GET full loads only — typed URLs, outside links, reloads, the site's links
+and forms that load a new page — never on the site's in-page navigation (`pushState`); for that
+the work stays a `script`. It respects `match.paths`; when two shims rewrite the same page the
+one higher in the user's list wins alone; a same-site rewrite asks nothing at commit, a `to`
+asks like any redirect target. A preview can't run it: the rule's status line simulates it
+against the page's current URL. Headless sessions refuse it, like every network rule.
+
 **`rewrite-response`** — reshape the JSON the site's own code fetches, before it reads it
 (the right tool for filtering a list the site loads, so its counts and pagination stay
 right):

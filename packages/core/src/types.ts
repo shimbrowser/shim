@@ -5,6 +5,10 @@
 // engine tolerates their absence at runtime; do not tighten a field to
 // required unless the engine would crash without it.
 
+import type { RedirectRewrite } from './redirect-rewrite';
+
+export type { RedirectRewrite };
+
 // One rung of the anchor ladder. `kind` selects which of the sibling fields
 // is meaningful (css/text use `value`; data-attr uses `name`+`value`; aria
 // uses `role`/`label`; text may add `match`). Kept as a flat optional-field
@@ -109,6 +113,7 @@ export interface Mutation {
   from?: string;                        // redirect
   to?: string;                          // redirect
   exceptPaths?: string[];               // redirect
+  rewrite?: RedirectRewrite;             // redirect (path/query)
   position?: 'first' | 'last' | number;  // reorder
   before?: AnchorSpec;                   // reorder (relative)
   after?: AnchorSpec;                    // reorder (relative)
