@@ -264,6 +264,19 @@ export type PageInputResult =
   /** Command `sent` could not be delivered (the page closed, the input channel failed); nothing after it went out. */
   | { sent: number; outcome: 'failed'; error: string };
 
+/**
+ * The HTTP status of the response that delivered the main frame's current
+ * document, as the browser's network layer reported it (never the page's
+ * own word). `status` is null when the document came with none (an error
+ * page, about:blank, a restore the host didn't see load). `commit` counts
+ * the main frame's document commits, so a caller can tell whether the
+ * document changed between two reads.
+ */
+export interface DocumentStatus {
+  status: number | null;
+  commit: number;
+}
+
 export interface PageHost {
   readonly capabilities: PageHostCapabilities;
 
@@ -335,6 +348,13 @@ export interface PageHost {
    * caller to the document token and URL.
    */
   navigationCount?(): number;
+
+  /**
+   * The main frame's current document's HTTP status (DocumentStatus).
+   * Synchronous. Optional: a host without it never has a wall judged by
+   * status (bot-wall.ts).
+   */
+  documentStatus?(): DocumentStatus;
 
   /**
    * While at least one listener is subscribed, every popup or new window the

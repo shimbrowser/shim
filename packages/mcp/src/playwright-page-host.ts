@@ -25,7 +25,7 @@ import type { CDPSession, Page, Request } from 'playwright';
 import type {
   PageHost, PageHostCapabilities, PageWorld, ScreenshotOptions, ScreenshotResult, PreviewRule,
   PageRuntimeEvent, PageConsoleMessage, PageLoadOutcome, LoadWaitOptions, Unsubscribe,
-  PageInputCommand, PageInputResult,
+  PageInputCommand, PageInputResult, DocumentStatus,
 } from '@shimbrowser/core/page-host';
 import { DOCUMENT_TOKEN_SCRIPT, NET_ERR_ABORTED, SUPERSEDED_LOAD_GRACE_MS, sendInputCommands } from '@shimbrowser/core/page-host';
 import { remoteObjectValue, netErrorCode, consoleLevel, formatConsoleArg, handlerSource } from '@shimbrowser/core/cdp-host';
@@ -174,6 +174,8 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
   let worldWaiters: Array<(id: number | null) => void> = [];
   let detached = false;
   let navigations = 0;
+  const documentResponses = new Map<string, number>();
+  let docStatus: DocumentStatus = { status: null, commit: 0 };
   // Pending load waits, so detach can settle them and drop their listeners
   // at once rather than leaving them watching a page it no longer drives.
   const loadWaits = new Set<(outcome: PageLoadOutcome) => void>();
@@ -227,7 +229,23 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
   });
   cdp.on('Runtime.executionContextsCleared', () => setWorld(null));
   cdp.on('Page.frameNavigated', ({ frame }) => {
-    if (!frame.parentId) { mainFrameId = frame.id; navigations++; }
+    if (frame.parentId) return;
+    mainFrameId = frame.id;
+    navigations++;
+    // A document committed: its status is its own loader's response, or none.
+    docStatus = { status: documentResponses.get(frame.loaderId) ?? null, commit: docStatus.commit + 1 };
+    documentResponses.delete(frame.loaderId);
+  });
+  // The main frame's document responses, by loader, until that loader
+  // commits (documentStatus): the network layer's status, never the page's.
+  cdp.on('Network.responseReceived', ({ type, frameId, loaderId, response }) => {
+    if (type !== 'Document' || frameId !== mainFrameId) return;
+    documentResponses.set(loaderId, response.status);
+    // A handful at most: one per navigation the frame starts before a commit.
+    for (const key of documentResponses.keys()) {
+      if (documentResponses.size <= 8) break;
+      documentResponses.delete(key);
+    }
   });
   // Every main-frame navigation advances the count as soon as it is asked
   // for or starts, and same-document ones too (navigationCount).
@@ -304,6 +322,8 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
   await cdp.send('Page.enable');
   const { frameTree } = await cdp.send('Page.getFrameTree');
   mainFrameId = frameTree.frame.id;
+  // Status lines only: this session keeps no bodies (Playwright's own does).
+  await cdp.send('Network.enable', { maxTotalBufferSize: 0, maxResourceBufferSize: 0, maxPostDataSize: 0 });
   await cdp.send('Runtime.addBinding', { name: BINDING, executionContextName: HEADLESS_ENGINE_WORLD });
   const worldScript = `${bundle}\n${pageRuntimeSource({ binding: BINDING, globalName: RUNTIME_GLOBAL, unsupportedError: REQUIRES_SHIM_BROWSER })}`;
   const { identifier: scriptId } = await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
@@ -621,6 +641,8 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
     documentToken,
     onPopup: (listener) => subscribe(popupListeners, listener),
     navigationCount: () => navigations,
+    // Detached reads as no status, as it reads as closed.
+    documentStatus: () => (detached ? { status: null, commit: docStatus.commit } : docStatus),
     async detach() {
       if (detached) return;
       detached = true;

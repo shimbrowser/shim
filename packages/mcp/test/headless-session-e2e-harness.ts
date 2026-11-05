@@ -108,7 +108,24 @@ Reference&#32;&#35;18&#46;4f3c1702&#46;1730000000&#46;1a2b3c4d
 <h1>Sorry, you have been blocked</h1><p>Cloudflare's block page shows a Ray ID and says you are unable to access the site.
 Akamai's says Access Denied: You don't have permission to access "/" on this server. Reference #18.4f3c1702.1730000000.1a2b3c4d.</p>
 <p>${'The article goes on about the services and how they decide. '.repeat(10)}</p></article></body></html>`,
+  // A bare refusal: the status and a line, no vendor template (served 403).
+  '/wall/bare': '<center><h1>403 Forbidden</h1></center>',
+  // The same markup served 200: markup alone is never a wall.
+  '/wall/bare-200': '<center><h1>403 Forbidden</h1></center>',
+  // A site's own error page, served 403: sentences of its own, a nav, a footer.
+  '/wall/site-error': `<!doctype html><html><head><title>Not allowed | Example</title></head><body>
+<header><nav><a href="/">Home</a> <a href="/films">Films</a> <a href="/people">People</a></nav></header>
+<main><h1>You can't see this page</h1><p>This list is private to its owner. Sign in with the account that made it, or ask them to share it with you.</p></main>
+<footer>© Example</footer></body></html>`,
+  // AWS WAF's refusal: a 403 whose whole body is a long HTML comment.
+  '/wall/comment-403': `<!-- ${'k7Qz>p9-Xw2 '.repeat(90)} -->`,
+  // AWS WAF's challenge: 202 with no body at all.
+  '/wall/empty-202': '',
+  // An app shell that renders from its script, served 202: the site.
+  '/wall/shell-202': '<!doctype html><html><head><title>App</title></head><body><script>document.body.textContent = "Welcome back to the app";</script></body></html>',
 };
+// What each wall fixture answers with; the rest answer 403, as the services do.
+const WALL_STATUS: Record<string, number> = { '/wall/article': 200, '/wall/bare-200': 200, '/wall/empty-202': 202, '/wall/shell-202': 202 };
 // A challenge that clears by itself a second after it loads (the site then shows).
 const CLEARING_CHALLENGE = WALLS['/wall/cf-challenge']?.replace('</body>', `<script>setTimeout(() => { location.href = '/'; }, 1000);</script></body>`) ?? '';
 
@@ -118,7 +135,7 @@ async function main(): Promise<void> {
     const wall = WALLS[pathname];
     if (wall !== undefined || pathname === '/wall/cf-clears') {
       // A wall answers with the status the services use.
-      res.writeHead(pathname === '/wall/article' ? 200 : 403, { 'Content-Type': 'text/html' });
+      res.writeHead(WALL_STATUS[pathname] ?? 403, { 'Content-Type': 'text/html' });
       res.end(wall ?? CLEARING_CHALLENGE);
       return;
     }
@@ -472,6 +489,24 @@ async function main(): Promise<void> {
     const article = json(await call('shim_open_session', { url: `${origin}/wall/article`, intent: 'x', newShimName: 'Article', dir: path.join(tmp, 'article') }));
     check('an article quoting the walls\' wording opens normally', typeof article.sessionId === 'string', article);
     await call('shim_end_session', {});
+    // A bare 403 is judged by the status the browser saw, not by the markup.
+    const bareWall = await call('shim_open_session', { url: `${origin}/wall/bare`, intent: 'x', newShimName: 'Bare', dir: path.join(tmp, 'bare') });
+    const bareText = bareWall.content[0]?.text ?? '';
+    check('a bare 403 page refuses the open with blocked-by-bot-wall', bareWall.isError === true && bareText.startsWith('blocked-by-bot-wall')
+      && bareText.includes('a block page (HTTP 403)') && bareText.includes('Shim browser'), bareText);
+    const commentWall = await call('shim_open_session', { url: `${origin}/wall/comment-403`, intent: 'x', newShimName: 'Comment', dir: path.join(tmp, 'comment-403') });
+    const commentText = commentWall.content[0]?.text ?? '';
+    check('a 403 whose body is only a long comment refuses the open with blocked-by-bot-wall', commentWall.isError === true &&
+      commentText.startsWith('blocked-by-bot-wall') && commentText.includes('a block page (HTTP 403)'), commentText);
+    const emptyWall = await call('shim_open_session', { url: `${origin}/wall/empty-202`, intent: 'x', newShimName: 'Empty', dir: path.join(tmp, 'empty-202') });
+    const emptyText = emptyWall.content[0]?.text ?? '';
+    check('a 202 with an empty body refuses the open with blocked-by-bot-wall', emptyWall.isError === true &&
+      emptyText.startsWith('blocked-by-bot-wall') && emptyText.includes('an empty challenge response (HTTP 202)'), emptyText);
+    for (const [where, label] of [['/wall/bare-200', 'the same markup served 200'], ['/wall/site-error', 'a site\'s own error page served 403'], ['/wall/shell-202', 'an app shell served 202']] as const) {
+      const opened = json(await call('shim_open_session', { url: `${origin}${where}`, intent: 'x', newShimName: 'Fine', dir: path.join(tmp, `fine${where.slice(6)}`) }));
+      check(`${label} opens normally`, typeof opened.sessionId === 'string', opened);
+      await call('shim_end_session', {});
+    }
 
     const wallDir = path.join(tmp, 'wall-session');
     const ws = json(await call('shim_open_session', { url: `${origin}/`, intent: 'Outline headings', newShimName: 'Headings', dir: wallDir }));
@@ -509,6 +544,9 @@ async function main(): Promise<void> {
     const qCovered = json(await call('query_page', { description: 'the heading' }));
     check('…and so does the next page tool', isRecord(qCovered.botWall), qCovered);
     fs.writeFileSync(path.join(wallDir, 'shim.json'), JSON.stringify({ ...wallSpec, rules: [{ id: 'outline', anchor: { primary: { kind: 'css', value: 'h1' } }, mutations: [{ kind: 'restyle', properties: { outline: '2px solid red' } }] }] }, null, 2));
+    const navBare = json(await call('navigate', { url: '/wall/bare' }));
+    const bareNote = isRecord(navBare.botWall) ? navBare.botWall : {};
+    check('navigate onto a bare 403 carries botWall (unknown block)', navBare.ok === true && bareNote.vendor === 'unknown' && bareNote.kind === 'block', navBare);
     const navBack = json(await call('navigate', { url: '/' }));
     check('back on the site, navigate carries no botWall', navBack.ok === true && navBack.botWall === undefined, navBack);
     const pBack = json(await call('shim_preview', {}));

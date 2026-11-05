@@ -14,7 +14,7 @@
 import {
   isCloudflareInterstitial, readBotWallSignals, classifyBotWall, detectBotWall, asBotWallSignals, describeBotWall,
   botWallNote, withBotWallNote, withBotWallEvidence, botWallOnHost, rememberedBotWall, type BotWallMemory, BOT_WALL_SCRIPT, RUNNER_SELECTOR, CONTAINER_SELECTOR,
-  MAX_WALL_TEXT, type BotWall,
+  MAX_WALL_TEXT, BARE_BLOCK_TEXT, type BotWall,
 } from '../src/bot-wall';
 
 let failures = 0;
@@ -25,8 +25,20 @@ function check(label: string, cond: boolean, detail?: unknown): void {
 
 // --- a stub document over fixture HTML ------------------------------------------
 
+// The body's markup, without comments (which hold no element and no text).
+function bodyHtml(html: string): string {
+  const uncommented = html.replace(/<!--[\s\S]*?-->/g, ' ');
+  return /<body[^>]*>([\s\S]*)<\/body>/i.exec(uncommented)?.[1] ??
+    uncommented.replace(/<head[\s\S]*?<\/head>/i, '').replace(/<\/?(?:!doctype|html|head|body)\b[^>]*>/gi, ' ');
+}
+
 // The selectors the reader uses: `#id` and `tag[attr*="value"]`, in comma lists.
 function matchesSimple(html: string, sel: string): boolean {
+  if (sel === 'body *') return /<\w/.test(bodyHtml(html));
+  const tag = /^(\w+)$/.exec(sel);
+  if (tag) return new RegExp(`<${tag[1]}\\b`, 'i').test(html);
+  const hasAttr = /^(\w+)\[(\w+)\]$/.exec(sel);
+  if (hasAttr) return new RegExp(`<${hasAttr[1]}\\b[^>]*\\s${hasAttr[2]}=`, 'i').test(html);
   const id = /^#([\w-]+)$/.exec(sel);
   if (id) return new RegExp(`\\sid=["']${id[1]}["']`, 'i').test(html);
   const attr = /^(\w+)\[(\w+)\*="([^"]+)"\]$/.exec(sel);
@@ -41,8 +53,7 @@ function matchesSimple(html: string, sel: string): boolean {
 // Visible text, roughly as innerText: no head, script, style, template or
 // display:none subtrees, tags dropped, entities decoded.
 function visibleText(html: string): string {
-  const body = /<body[^>]*>([\s\S]*)<\/body>/i.exec(html)?.[1] ?? html.replace(/<head[\s\S]*?<\/head>/i, '');
-  return body
+  return bodyHtml(html)
     .replace(/<(script|style|template|noscript)\b[\s\S]*?<\/\1>/gi, ' ')
     .replace(/<(\w+)\b[^>]*style="[^"]*display:\s*none[^"]*"[^>]*>[\s\S]*?<\/\1>/gi, ' ')
     .replace(/<[^>]+>/g, ' ')
@@ -237,6 +248,104 @@ check('evidence: full drops to partial, none and partial stay', levels === 'part
 check('evidence: the message joins the warnings, the note rides as botWall', JSON.stringify(evidence.warnings) === JSON.stringify(['w0', note.message]) && (evidence.botWall as { code: string }).code === 'bot-wall', evidence);
 check('evidence that is not an object is untouched', withBotWallEvidence('x', note) === 'x');
 
+// --- bare block pages: a status only the host can report ------------------------
+
+console.log('\nbare block pages (the host\'s HTTP status)');
+// What a site's edge serves headless Chromium in place of every page: the
+// status and a line, no vendor template (a real IMDb response, whole).
+const BARE_403 = '<center><h1>403 Forbidden</h1></center>';
+const NGINX_403 = `<html>\r\n<head><title>403 Forbidden</title></head>\r\n<body>\r\n<center><h1>403 Forbidden</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>`;
+const APACHE_403 = `<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML 2.0//EN"><html><head><title>403 Forbidden</title></head><body>
+<h1>Forbidden</h1><p>You don't have permission to access this resource.</p><hr><address>Apache/2.4.62 (Debian) Server at www.example.com Port 443</address></body></html>`;
+const BARE_429 = '<html><head><title>429 Too Many Requests</title></head><body><h1>Too Many Requests</h1></body></html>';
+// Negatives: a site's own error pages, an app shell, a login page.
+const STYLED_404 = `<!doctype html><html><head><title>Page not found | Example</title><link rel="stylesheet" href="/site.css"></head><body>
+<header><nav><a href="/">Home</a> <a href="/films">Films</a> <a href="/people">People</a></nav></header>
+<main><h1>Page not found</h1><p>We couldn't find the page you were looking for. It may have moved, or the link you followed may be broken.</p>
+<p>Try searching for a title, or head back to the home page to see what's on.</p></main><footer>© Example</footer></body></html>`;
+const APP_SHELL_403 = '<!doctype html><html><head><title>Example</title><script src="/app.js" defer></script></head><body><div id="root">Loading…</div></body></html>';
+// Short, script-free and the site's own: a way on is what tells them from a refusal.
+const SHORT_SIGN_IN_403 = '<h1>Access denied</h1><p>Sign in to view this page.</p><form action="/login" method="post"><input name="user"><input name="password" type="password"><button>Sign in</button></form>';
+const SHORT_LINK_403 = '<html><head><title>Forbidden</title></head><body><h1>Forbidden</h1><p>This page is private. <a href="/">Back to the home page</a></p></body></html>';
+const LOGIN_401 = '<!doctype html><html><head><title>Sign in</title></head><body><form><input name="user"><input name="pass" type="password"><button>Sign in</button></form></body></html>';
+
+const bare = (html: string, httpStatus: number | null | undefined) => classifyBotWall({ ...readBotWallSignals(stubDocument(html)), httpStatus });
+for (const [label, html, status] of [
+  ['the bare "403 Forbidden" (IMDb, whole)', BARE_403, 403],
+  ['nginx\'s default 403', NGINX_403, 403],
+  ['Apache\'s default 403', APACHE_403, 403],
+  ['a bare 429 Too Many Requests', BARE_429, 429],
+] as const) {
+  const got = bare(html, status);
+  check(`${label} with HTTP ${status} → an unknown block page`, got?.vendor === 'unknown' && got.kind === 'block' && got.status === status, got);
+}
+const imdb = bare(BARE_403, 403);
+check('described by its status', imdb !== null && describeBotWall(imdb) === 'a block page (HTTP 403)', imdb && describeBotWall(imdb));
+const nginx = bare(NGINX_403, 403);
+check('…and its title when it has one', nginx !== null && describeBotWall(nginx) === 'a block page (HTTP 403, "403 Forbidden")', nginx && describeBotWall(nginx));
+check(`the reader counts the page's visible text, under ${BARE_BLOCK_TEXT} characters on these`, readBotWallSignals(stubDocument(APACHE_403)).textLength < BARE_BLOCK_TEXT);
+const bareNegatives: Array<[string, string, number | null | undefined]> = [
+  ['the same page with no host status (markup alone never says 403)', BARE_403, undefined],
+  ['…or a status the host could not tell', BARE_403, null],
+  ['the same page served 200', BARE_403, 200],
+  ['…served 404 (a missing page, not a refusal)', BARE_403, 404],
+  ['…served 500', BARE_403, 500],
+  ['a 401 login page', LOGIN_401, 401],
+  ['a site\'s own "Access Denied" page served 403 (sentences of its own)', SITE_403, 403],
+  ['a short, script-free sign-in page served 403', SHORT_SIGN_IN_403, 403],
+  ['…and served 429', SHORT_SIGN_IN_403, 429],
+  ['a short, script-free 403 page with a link home', SHORT_LINK_403, 403],
+  ['a site\'s styled error page served 403', STYLED_404, 403],
+  ['…and served 404', STYLED_404, 404],
+  ['an app shell served 403 (its script renders the page)', APP_SHELL_403, 403],
+  ['a long article served 403', ARTICLE_LONG, 403],
+  ['a Turnstile login served 403', TURNSTILE_LOGIN, 403],
+];
+for (const [label, html, status] of bareNegatives) {
+  const got = bare(html, status);
+  check(`${label} → no wall`, got === null, got);
+}
+check('a vendor\'s own template served 403 is still named for its vendor', bare(AKAMAI, 403)?.vendor === 'akamai');
+const claimed = asBotWallSignals({ ...readBotWallSignals(stubDocument(BARE_403)), httpStatus: 403 });
+check('a status the page claims in its signals is dropped', claimed !== null && claimed.httpStatus === undefined && classifyBotWall(claimed) === null, claimed);
+const flagless = asBotWallSignals({ title: '', text: '', textLength: 0 });
+check('a document without the scripts / interactive / body-element flags reads as having all three',
+  flagless?.scripts === true && flagless.interactive === true && flagless.bodyElements === true, flagless);
+
+console.log('\nempty edge answers (AWS WAF\'s, as goodreads served headless)');
+// A 403 whose whole body is an HTML comment of random length (835–1142 bytes
+// served): the document renders empty, and visible text, not bytes, is counted.
+const COMMENT_403 = `<!-- ${'k7Qz>p9-Xw2 '.repeat(90)} -->`;
+check('a comment-only body has no visible text, however long the comment', readBotWallSignals(stubDocument(COMMENT_403)).textLength === 0 && COMMENT_403.length > 1000);
+const comment403 = bare(COMMENT_403, 403);
+check('a comment-only body served 403 → an unknown block page', comment403?.vendor === 'unknown' && comment403.kind === 'block' && comment403.status === 403, comment403);
+// A 202 with no body (content-length: 0, x-amzn-waf-action: challenge), and the
+// empty document Chromium makes of it.
+const EMPTY_DOC = '<html><head></head><body></body></html>';
+for (const [label, html] of [['an empty body', ''], ['the empty document it renders as', EMPTY_DOC], ['a comment-only body', COMMENT_403]] as const) {
+  const got = bare(html, 202);
+  check(`${label} served 202 → an unknown block (an empty challenge)`, got?.vendor === 'unknown' && got.kind === 'block' && got.status === 202, got);
+}
+const empty202 = bare('', 202);
+check('described as an empty challenge response', empty202 !== null && describeBotWall(empty202) === 'an empty challenge response (HTTP 202)', empty202 && describeBotWall(empty202));
+const ACCEPTED_202 = '<html><head><title>Accepted</title></head><body><p>Your request has been accepted and will be processed shortly.</p></body></html>';
+const IMAGE_ONLY_202 = '<html><body><img src="/status.png" alt=""></body></html>';
+const EMPTY_ROOT = '<html><head></head><body><div id="root"></div></body></html>';
+const SPA_SHELL = '<!doctype html><html><head><title></title><script src="/app.js" defer></script></head><body></body></html>';
+for (const [label, html, status] of [
+  ['an empty document served 200', EMPTY_DOC, 200],
+  ['…served 204', EMPTY_DOC, 204],
+  ['…with no host status', EMPTY_DOC, undefined],
+  ['a 202 that renders real content', ACCEPTED_202, 202],
+  ['a 202 whose body holds only an image', IMAGE_ONLY_202, 202],
+  ['a 202 whose body holds only an empty element', EMPTY_ROOT, 202],
+  ['an SPA shell, empty at first paint, served 200', SPA_SHELL, 200],
+  ['…served 202', SPA_SHELL, 202],
+] as const) {
+  const got = bare(html, status);
+  check(`${label} → no wall`, got === null, got);
+}
+
 async function hostCases(): Promise<void> {
   console.log('\nreading a host');
   const host = (value: unknown) => ({ evaluate: async (code: string, world: string) => (code === BOT_WALL_SCRIPT ? (world === 'engine' ? { engine: true } : value) : null) });
@@ -258,6 +367,26 @@ async function hostCases(): Promise<void> {
   check('a new document without the signals is no wall', (await rememberedBotWall(doc, memory, 'x')) === null);
   token = null;
   check('an unreadable document is never matched to a remembered one', (await rememberedBotWall(doc, memory, 'x')) === null);
+  // The status comes from the host's network layer, for the document it read.
+  const bareSignals = readBotWallSignals(stubDocument(BARE_403));
+  let commit = 1;
+  const statusHost = (status: number | null, moveDuringRead = false) => ({
+    evaluate: async () => { if (moveDuringRead) commit++; return bareSignals; },
+    documentStatus: () => ({ status, commit }),
+  });
+  const viaHost = await botWallOnHost(statusHost(403));
+  check('a host reporting 403 for a bare page answers an unknown block', viaHost?.vendor === 'unknown' && viaHost.kind === 'block' && viaHost.status === 403, viaHost);
+  check('a host reporting 200 for it answers null', (await botWallOnHost(statusHost(200))) === null);
+  check('a host without documentStatus answers null for it', (await botWallOnHost({ evaluate: async () => bareSignals })) === null);
+  check('a document committed while the page was read takes no status', (await botWallOnHost(statusHost(403, true))) === null);
+  const statusDoc = { ...statusHost(403), documentToken: async () => 'doc-bare' };
+  const bareMemory: BotWallMemory = { last: null };
+  const remembered = await rememberedBotWall(statusDoc, bareMemory, 'Use a browser the site lets in.');
+  check('the note names the status', remembered?.vendor === 'unknown' && remembered.message.includes('a block page (HTTP 403)'), remembered);
+  const emptySignals = readBotWallSignals(stubDocument(''));
+  const emptyHost = { evaluate: async () => emptySignals, documentStatus: () => ({ status: 202, commit }) };
+  const viaEmpty = await botWallOnHost(emptyHost);
+  check('a host reporting 202 for an empty document answers an unknown block', viaEmpty?.vendor === 'unknown' && viaEmpty.status === 202, viaEmpty);
   const started = Date.now();
   const hung = await botWallOnHost({ evaluate: () => new Promise(() => {}) }, 50);
   check('a page that never answers counts as no wall, after the timeout', hung === null && Date.now() - started < 1000);

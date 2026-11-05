@@ -15,6 +15,15 @@
 // A page that merely talks about Cloudflare, embeds a Turnstile widget, or
 // shows its own "access denied" message matches none of them.
 //
+// One wall carries no template: a site's edge refusing the browser with a
+// bare 403 or 429 (the status and a line, nothing else). Markup can't tell
+// that from a page that says "403", so it is judged only with the HTTP
+// status the HOST's network layer reported for the document (PageHost
+// documentStatus) on a page with almost no text and no script, form or
+// link; a host that can't report a status never sees this wall. The same
+// holds for an empty challenge: an edge (AWS WAF's, for one) answering 202
+// with no body at all, which renders as an empty document.
+//
 // Two forms of one check:
 //   - isCloudflareInterstitial(doc): the selector-only Cloudflare challenge
 //     check a host runs before booting shims (unchanged in meaning: the
@@ -26,6 +35,7 @@
 
 /** Cloudflare's same-origin challenge runner: the interstitial's own orchestrator. A standalone Turnstile widget loads from challenges.cloudflare.com instead. */
 import { isRecord } from './is-record';
+import type { DocumentStatus } from './page-host';
 
 export const RUNNER_SELECTOR = 'script[src*="/cdn-cgi/challenge-platform/"]';
 
@@ -77,10 +87,23 @@ export interface BotWallSignals {
   ddCaptcha: boolean;
   /** An Imperva / Incapsula challenge resource frame. */
   incapsulaResource: boolean;
+  /** The document has any script element (an app shell renders a page; a bare refusal has none). */
+  scripts: boolean;
+  /** The document has a form control or a link (a site's own page offers a way on; a bare refusal offers none). */
+  interactive: boolean;
+  /** The body holds any element (an empty challenge response renders a body with none). */
+  bodyElements: boolean;
+  /**
+   * The HTTP status of the response that delivered the document, as the
+   * host's network layer reported it (botWallOnHost sets it). Never read
+   * from the page: the reader leaves it out and asBotWallSignals drops it.
+   */
+  httpStatus?: number | null;
 }
 
 export type BotWallKind = 'challenge' | 'block';
-export type BotWallVendor = 'cloudflare' | 'akamai' | 'datadome' | 'perimeterx' | 'imperva';
+/** `unknown`: a bare refusal no vendor template names (judged by the host's HTTP status). */
+export type BotWallVendor = 'cloudflare' | 'akamai' | 'datadome' | 'perimeterx' | 'imperva' | 'unknown';
 
 /** A page judged to be a wall: who served it, which kind, and what gave it away. */
 export interface BotWall {
@@ -90,6 +113,8 @@ export interface BotWall {
   title: string;
   /** The signals that matched, in words. */
   reason: string;
+  /** The host-reported HTTP status, when the wall was judged by it. */
+  status?: number;
 }
 
 /** How much visible text the reader keeps. */
@@ -100,6 +125,19 @@ export const TEXT_SAMPLE = 4000;
  * is exempt, as the boot check always was.)
  */
 export const MAX_WALL_TEXT = 3000;
+/**
+ * A bare refusal is a status line and maybe a server name: nginx's and
+ * Apache's defaults are well under this, a site's own error page (a
+ * sentence or two of its own, navigation, a footer) is over it.
+ */
+export const BARE_BLOCK_TEXT = 120;
+/** The statuses a bare refusal answers with: forbidden, and too many requests. */
+const BARE_BLOCK_STATUSES: ReadonlySet<number> = new Set([403, 429]);
+/**
+ * The status an edge answers with when it serves an empty challenge in place
+ * of the page (202 Accepted, no body). Judged only on a wholly empty document.
+ */
+const EMPTY_CHALLENGE_STATUS = 202;
 
 /**
  * Reads BotWallSignals from a document. Self-contained (no outer names), so
@@ -130,6 +168,9 @@ export function readBotWallSignals(doc: Document): BotWallSignals {
     pxCaptcha: has('#px-captcha'),
     ddCaptcha: has('iframe[src*="captcha-delivery.com"], script[src*="captcha-delivery.com"]'),
     incapsulaResource: has('iframe[src*="_Incapsula_Resource"]'),
+    scripts: has('script'),
+    interactive: has('form, input, button, select, textarea, a[href]'),
+    bodyElements: has('body *'),
   };
 }
 
@@ -151,6 +192,11 @@ export function asBotWallSignals(v: unknown): BotWallSignals | null {
     pxCaptcha: flag('pxCaptcha'),
     ddCaptcha: flag('ddCaptcha'),
     incapsulaResource: flag('incapsulaResource'),
+    // Unknown reads as having scripts, the side that never makes a wall.
+    // No httpStatus: a page's own answer never carries one.
+    scripts: v.scripts !== false,
+    interactive: v.interactive !== false,
+    bodyElements: v.bodyElements !== false,
   };
 }
 
@@ -198,6 +244,20 @@ export function classifyBotWall(s: BotWallSignals): BotWall | null {
   if (s.textLength < 300 && /^request unsuccessful\.\s*incapsula incident id:\s*[\d-]{6,}/i.test(text)) {
     return wall('imperva', 'block', 'Imperva\'s "Request unsuccessful" page with its incident id');
   }
+  // A bare refusal: the host saw 403 / 429 for a document with next to no
+  // text, no script, and nothing to do. A site's own error page has more to
+  // say or a way on (a sign-in form, a link home), and an app shell served
+  // with that status renders the page from its scripts.
+  const status = s.httpStatus;
+  if (typeof status === 'number' && BARE_BLOCK_STATUSES.has(status) && !s.scripts && !s.interactive && s.textLength < BARE_BLOCK_TEXT) {
+    return { ...wall('unknown', 'block', `HTTP ${status} with a bare page (${s.textLength} characters of text, no script, form or link)`), status };
+  }
+  // An empty challenge: the host saw 202 for a document with nothing in it
+  // at all (no text, no element in the body, no script). A 202 that renders
+  // anything, or an app shell whose scripts will, is the site.
+  if (status === EMPTY_CHALLENGE_STATUS && s.textLength === 0 && !s.bodyElements && !s.scripts && !s.interactive) {
+    return { ...wall('unknown', 'block', `HTTP ${status} with an empty document (no text, no element, no script)`), status };
+  }
   return null;
 }
 
@@ -212,11 +272,20 @@ export function detectBotWall(doc: Document | null | undefined): BotWall | null 
 }
 
 const VENDOR_NAMES: Record<BotWallVendor, string> = {
-  cloudflare: 'Cloudflare', akamai: 'Akamai', datadome: 'DataDome', perimeterx: 'PerimeterX', imperva: 'Imperva',
+  cloudflare: 'Cloudflare', akamai: 'Akamai', datadome: 'DataDome', perimeterx: 'PerimeterX', imperva: 'Imperva', unknown: '',
 };
 
-/** The wall in a few words: `a Cloudflare block page ("Attention Required! | Cloudflare")`. */
+/**
+ * The wall in a few words: `a Cloudflare block page ("Attention Required! | Cloudflare")`,
+ * for a bare refusal `a block page (HTTP 403, "403 Forbidden")`, and for an
+ * empty challenge `an empty challenge response (HTTP 202)`.
+ */
 export function describeBotWall(w: BotWall): string {
+  if (w.vendor === 'unknown') {
+    if (w.status === EMPTY_CHALLENGE_STATUS) return `an empty challenge response (HTTP ${w.status})`;
+    const status = w.status !== undefined ? `HTTP ${w.status}` : 'no vendor named';
+    return `a block page (${w.title ? `${status}, "${w.title.slice(0, 80)}"` : status})`;
+  }
   const what = `${w.vendor === 'akamai' || w.vendor === 'imperva' ? 'an' : 'a'} ${VENDOR_NAMES[w.vendor]} ${w.kind === 'challenge' ? 'challenge' : 'block page'}`;
   return w.title ? `${what} ("${w.title.slice(0, 80)}")` : what;
 }
@@ -289,9 +358,10 @@ export const BOT_WALL_TOOLS: ReadonlySet<string> = new Set([
   'view_page', 'query_page', 'inspect_element', 'evaluate_in_page', 'interact_page', 'reload_page', 'navigate',
 ]);
 
-/** The one PageHost member reading a page's wall needs. */
+/** The PageHost members reading a page's wall uses: `evaluate`, and `documentStatus` where the host has it. */
 export interface BotWallReader {
   evaluate(code: string, world: 'main' | 'engine'): Promise<unknown>;
+  documentStatus?(): DocumentStatus;
 }
 
 /** How long reading a page's signals may take before the page counts as no wall. */
@@ -307,12 +377,18 @@ export const BOT_WALL_READ_TIMEOUT_MS = 2000;
 export async function botWallOnHost(host: BotWallReader, timeoutMs: number = BOT_WALL_READ_TIMEOUT_MS, world: 'main' | 'engine' = 'main'): Promise<BotWall | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
+    // The status is the read document's only when no document committed
+    // while the page was read.
+    const before = host.documentStatus?.();
     const raw = await Promise.race([
       host.evaluate(BOT_WALL_SCRIPT, world),
       new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); }),
     ]);
+    const after = host.documentStatus?.();
     const signals = asBotWallSignals(raw);
-    return signals ? classifyBotWall(signals) : null;
+    if (!signals) return null;
+    const httpStatus = before && after && before.commit === after.commit ? after.status : null;
+    return classifyBotWall({ ...signals, httpStatus });
   } catch (_) {
     return null;
   } finally {
