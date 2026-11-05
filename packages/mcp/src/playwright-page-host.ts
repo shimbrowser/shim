@@ -247,11 +247,15 @@ export async function attachPlaywrightPageHost(page: Page, options: PlaywrightPa
       documentResponses.delete(key);
     }
   });
-  // Every main-frame navigation advances the count as soon as it is asked
-  // for or starts, and same-document ones too (navigationCount).
+  // Every cross-document main-frame navigation advances the count as soon as
+  // it is asked for or starts; a same-document one (a fragment, pushState,
+  // replaceState, a same-document history step) doesn't (navigationCount).
+  // A requested navigation is always cross-document: Chromium commits a
+  // fragment or history API change without asking for one.
   cdp.on('Page.frameRequestedNavigation', ({ frameId }) => { if (frameId === mainFrameId) navigations++; });
-  cdp.on('Page.frameStartedNavigating', ({ frameId }) => { if (frameId === mainFrameId) navigations++; });
-  cdp.on('Page.navigatedWithinDocument', ({ frameId }) => { if (frameId === mainFrameId) navigations++; });
+  cdp.on('Page.frameStartedNavigating', ({ frameId, navigationType }) => {
+    if (frameId === mainFrameId && navigationType !== 'sameDocument' && navigationType !== 'historySameDocument') navigations++;
+  });
   cdp.on('Runtime.bindingCalled', ({ name, payload, executionContextId }) => {
     if (name !== BINDING || executionContextId !== worldContextId) return;
     let msg: unknown;

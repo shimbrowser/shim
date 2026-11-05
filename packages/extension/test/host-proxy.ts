@@ -1,8 +1,11 @@
 // A PageHost in the test process, proxied over the worker's own handle on
 // the real one (`shimPageHosts` on the worker's global): one member call at
 // a time through worker.evaluate, and what the page reported (runtime
-// events, console lines, popups, the URL, whether the host closed) drained
-// by polling, in order. Shared by the conformance and the session harness.
+// events, console lines, popups, the URL, the navigation count, whether the
+// host closed) drained by polling, in order. The URL and count are also
+// re-read after each evaluate and load wait, so a caller reading them next
+// sees the worker's own; the count only grows, so a late poll can't lower
+// it. Shared by the conformance and the session harness.
 
 import type { Worker } from 'playwright';
 import type {
@@ -23,7 +26,7 @@ export async function until<T>(probe: () => Promise<T | null | undefined> | T | 
 
 export const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-export interface Drained { url: string; closed: boolean; events: PageRuntimeEvent[]; console: PageConsoleMessage[]; popups: string[] }
+export interface Drained { url: string; closed: boolean; navigations: number; events: PageRuntimeEvent[]; console: PageConsoleMessage[]; popups: string[] }
 
 /** A PageHost in this process over the worker's handle on the real one. */
 export function proxyHost(worker: Worker, id: string): PageHost & { stop(): Promise<void> } {
@@ -35,6 +38,13 @@ export function proxyHost(worker: Worker, id: string): PageHost & { stop(): Prom
   let draining = true;
   let urlCache = '';
   let closedCache = false;
+  let navigationsCache = 0;
+  const refresh = async (): Promise<void> => {
+    try {
+      urlCache = String(await call('url'));
+      navigationsCache = Math.max(navigationsCache, Number(await call('navigationCount')) || 0);
+    } catch { /* the next drain refreshes them */ }
+  };
   const drain = async (): Promise<void> => {
     while (draining) {
       let got: Drained | null;
@@ -49,6 +59,7 @@ export function proxyHost(worker: Worker, id: string): PageHost & { stop(): Prom
       if (got) {
         urlCache = got.url;
         closedCache = got.closed;
+        navigationsCache = Math.max(navigationsCache, got.navigations);
         for (const e of got.events) for (const l of [...runtimeListeners]) l(e);
         for (const m of got.console) for (const l of [...consoleListeners]) l(m);
         for (const u of got.popups) for (const l of [...popupListeners]) l(u);
@@ -67,7 +78,7 @@ export function proxyHost(worker: Worker, id: string): PageHost & { stop(): Prom
     isClosed: () => closedCache,
     async evaluate(code, world) {
       const v = await call('evaluate', [code, world]);
-      try { urlCache = String(await call('url')); } catch { /* the next drain refreshes it */ }
+      await refresh();
       return v;
     },
     screenshot: (opts) => call('screenshot', [opts]) as Promise<ScreenshotResult>,
@@ -78,7 +89,7 @@ export function proxyHost(worker: Worker, id: string): PageHost & { stop(): Prom
     reload(url) { void call('reload', [url]); },
     async waitForLoad(options) {
       const outcome = await call('waitForLoad', [{ timeoutMs: options.timeoutMs, failures: options.failures }]) as PageLoadOutcome;
-      try { urlCache = String(await call('url')); } catch { /* the next drain refreshes it */ }
+      await refresh();
       return outcome;
     },
     async input(commands: readonly PageInputCommand[], stillPinned): Promise<PageInputResult> {
@@ -95,7 +106,7 @@ export function proxyHost(worker: Worker, id: string): PageHost & { stop(): Prom
       return { sent, outcome: 'done' };
     },
     documentToken: () => call('documentToken') as Promise<string | null>,
-    navigationCount: () => 0,
+    navigationCount: () => navigationsCache,
     onPopup(listener) {
       const off = subscribe(popupListeners, listener);
       void worker.evaluate(([hostId]) => (globalThis as unknown as { shimPageHosts: { watchPopups(id: string, on: boolean): boolean } }).shimPageHosts.watchPopups(hostId, true), [id] as const);

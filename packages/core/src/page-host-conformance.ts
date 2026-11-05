@@ -1716,7 +1716,7 @@ const setWitnessCase: ConformanceCase = {
 // batch with an exact count, and the channel works again afterwards.
 const inputCase: ConformanceCase = {
   id: 'trusted-input',
-  title: 'trusted input: click, type, keys, wheel, pinning, focus theft, overlay, failure; document token',
+  title: 'trusted input: click, type, keys, wheel, pinning, focus theft, overlay, failure; document token and navigation count',
   covers: ['trusted-input'],
   async run(kit) {
     const { host } = kit;
@@ -1738,6 +1738,13 @@ const inputCase: ConformanceCase = {
     await kit.read(`history.pushState({}, '', '/input#moved'); location.hash`);
     const token2 = await host.documentToken();
     kit.check('the document token is stable across a same-document URL change', typeof token1 === 'string' && token1.length > 0 && token1 === token2, { token1, token2 });
+    // The navigation count, where a host keeps one, counts only new
+    // documents: a fragment, pushState and replaceState are not navigations.
+    const count0 = host.navigationCount?.();
+    await kit.read(`location.hash = 'frag'; history.pushState({}, '', '/input#pushed'); history.replaceState({}, '', '/input?r=1#replaced'); location.href = '/input?r=1#href'; location.hash`);
+    await kit.sleep(100);
+    kit.check('a fragment, pushState, replaceState or same-page href are not navigations', host.navigationCount?.() === count0
+      && (await host.documentToken()) === token1, { count0, count: host.navigationCount?.() });
 
     // A trusted click.
     const btn = await locate('#in-btn');
@@ -1816,13 +1823,18 @@ const inputCase: ConformanceCase = {
       kit.check('…and neither the target nor the overlay was clicked', (await attr('in-hover', 'clicks')) === null && (await attr('in-overlay', 'clicks')) === null);
     } else kit.check('the engine world locates the hover target', false);
 
-    // Wheel: a trusted wheel at the viewport's centre scrolls the page.
-    await kit.read('window.scrollTo(0, 0); window.scrollY');
+    // Wheel: a trusted wheel at the viewport's centre scrolls the page — one
+    // that rewrites its fragment as it scrolls, which keeps the document.
+    await kit.read(`window.scrollTo(0, 0); window.addEventListener('scroll', () => { location.hash = 'search=' + Math.round(window.scrollY); }); window.scrollY`);
     const vp = await kit.read('({ w: window.innerWidth, h: window.innerHeight })');
     if (isRecord(vp) && typeof vp.w === 'number' && typeof vp.h === 'number') {
+      const countBefore = host.navigationCount?.();
       const wheel = await input([{ method: 'Input.dispatchMouseEvent', params: { type: 'mouseWheel', x: Math.round(vp.w / 2), y: Math.round(vp.h / 2), deltaX: 0, deltaY: 400 } }], always);
       const moved = await kit.until(async () => { const y = await kit.read('window.scrollY'); return typeof y === 'number' && y > 0 ? y : null; }, 3000);
       kit.check('a trusted wheel scrolls the page', wheel.outcome === 'done' && moved !== null, { wheel, moved });
+      const hash = await kit.until(async () => { const h = await kit.read('location.hash'); return typeof h === 'string' && h.startsWith('#search=') && h !== '#search=0' ? h : null; }, 2000);
+      kit.check('…and the fragment it rewrote while scrolling is no navigation', hash !== null && host.navigationCount?.() === countBefore
+        && (await host.documentToken()) === token1, { hash, countBefore, count: host.navigationCount?.() });
     } else kit.check('the viewport is measurable', false, vp);
 
     // A command the channel rejects ends the batch with the count before it,
@@ -1843,9 +1855,14 @@ const inputCase: ConformanceCase = {
 
     kit.check('an empty batch is done with nothing sent', JSON.stringify(await input([], always)) === JSON.stringify({ sent: 0, outcome: 'done' }));
 
+    const countBeforeLoad = host.navigationCount?.();
     if (!(await kit.load('/input'))) return;
     const token3 = await host.documentToken();
     kit.check('a new document has a new token', typeof token3 === 'string' && token3 !== token1, { token1, token3 });
+    const countAfterLoad = host.navigationCount?.();
+    kit.check('…and, where the host counts navigations, advances the count', countBeforeLoad === undefined
+      ? countAfterLoad === undefined
+      : typeof countAfterLoad === 'number' && countAfterLoad > countBeforeLoad, { countBeforeLoad, countAfterLoad });
   },
 };
 

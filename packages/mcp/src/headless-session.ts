@@ -191,11 +191,12 @@ async function interactPage(handle: HeadlessHandle, input: unknown, signal: Abor
   const engine = async (code: string): Promise<unknown> => host.evaluate(code, 'engine');
   const deps: InteractDeps = {
     guard: () => pageAway(handle),
-    // A new document (its token) or a same-document URL change ends the batch.
-    // The token and URL, plus the host's navigation count when it has one:
-    // a navigation that has started but not committed yet (a slow page)
+    // A new document ends the batch; a same-document URL change (a fragment
+    // the site rewrites while it scrolls, pushState) doesn't. The token, plus
+    // the host's cross-document navigation count when it has one: a
+    // navigation that has started but not committed yet (a slow page)
     // already moves it, and so does one away and back during a settle.
-    currentDocument: () => (token === null ? null : `${token} ${host.url()} ${host.navigationCount?.() ?? ''}`),
+    currentDocument: () => (token === null ? null : `${token} ${host.navigationCount?.() ?? ''}`),
     async syncDocument() { token = await host.documentToken(); },
     policy: {
       accepts: (doc) => doc !== null,

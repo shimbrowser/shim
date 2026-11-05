@@ -358,15 +358,17 @@ export async function openPageHost(tabId: number, deps: PageHostDeps, options: P
         }
         return;
       }
+      // Only cross-document navigations count (navigationCount): Chromium
+      // commits a fragment or history API change without requesting one, and
+      // starts a same-document history step as one of its two types.
       case 'Page.frameRequestedNavigation':
-      case 'Page.frameStartedNavigating':
         if (params.frameId === mainFrameId) navigations++;
         return;
+      case 'Page.frameStartedNavigating':
+        if (params.frameId === mainFrameId && params.navigationType !== 'sameDocument' && params.navigationType !== 'historySameDocument') navigations++;
+        return;
       case 'Page.navigatedWithinDocument':
-        if (params.frameId === mainFrameId) {
-          navigations++;
-          if (typeof params.url === 'string') currentUrl = params.url;
-        }
+        if (params.frameId === mainFrameId && typeof params.url === 'string') currentUrl = params.url;
         return;
       case 'Runtime.bindingCalled': {
         if (params.name !== BINDING || params.executionContextId !== worldContextId) return;

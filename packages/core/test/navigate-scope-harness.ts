@@ -67,6 +67,12 @@ async function tool(): Promise<void> {
   check('an off-origin request loads nothing and costs nothing', refused.error === 'off-origin' && loads.length === 1 && state.used === 1, JSON.stringify(refused));
   const redirected = await runNavigate({ url: '/a' }, state, at({ url: 'https://www.reddit.com/b' }));
   check('a redirect within the site is reported', redirected.ok === true && redirected.redirected === true && typeof redirected.note === 'string' && redirected.url === 'https://www.reddit.com/b');
+  const fragState: NavigationState = { scope, used: 0 };
+  const fragAdded = await runNavigate({ url: '/search?q=bike' }, fragState, at({ url: 'https://www.reddit.com/search?q=bike#search=1~gallery~0' }));
+  check('a fragment the page adds after it loads is not a redirect', fragAdded.ok === true && !('redirected' in fragAdded) && !('note' in fragAdded)
+    && fragAdded.url === 'https://www.reddit.com/search?q=bike#search=1~gallery~0', JSON.stringify(fragAdded));
+  const fragRewritten = await runNavigate({ url: '/c#top' }, fragState, at({ url: 'https://www.reddit.com/c#other' }));
+  check('…nor one it rewrites', fragRewritten.ok === true && !('redirected' in fragRewritten), JSON.stringify(fragRewritten));
   const away = await runNavigate({ url: '/login' }, state, at({ url: 'https://accounts.example/sso', offSite: { error: 'page-away', detail: 'the tab left reddit.com' }, reapplied: 0 }));
   check('a redirect off the site is contained and said plainly', away.ok === true && away.onSite === false && /back on the site/.test(String(away.note)) && !('reapplied' in away), JSON.stringify(away));
   const failed = await runNavigate({ url: '/x' }, state, at({ ok: false, error: 'the page failed to load (ERR_NAME_NOT_RESOLVED)' }));

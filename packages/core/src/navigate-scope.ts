@@ -108,6 +108,11 @@ export interface NavigateLoad {
   error?: string;
 }
 
+const withoutFragment = (url: string): string => {
+  const hash = url.indexOf('#');
+  return hash === -1 ? url : url.slice(0, hash);
+};
+
 /**
  * One navigate call: check the destination against the scope and the
  * budget, then load it (the host's job) and report where the page landed.
@@ -131,7 +136,9 @@ export async function runNavigate(
   const left = MAX_NAVIGATIONS_PER_SESSION - state.used;
   const r = await load(target.url);
   const scope = state.scope as NavigationScope;
-  const redirected = r.url !== '' && r.url !== target.url;
+  // Only a different page is a redirect: a fragment the page's own script
+  // adds or rewrites once it loads leaves the request where it landed.
+  const redirected = r.url !== '' && withoutFragment(r.url) !== withoutFragment(target.url);
   if (!r.ok) {
     return { error: 'load-failed', detail: r.error ?? 'the page did not load', requested: target.url, url: r.url, navigationsLeft: left };
   }

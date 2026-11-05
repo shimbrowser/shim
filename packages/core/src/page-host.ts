@@ -341,11 +341,12 @@ export interface PageHost {
   documentToken(): Promise<string | null>;
 
   /**
-   * A count of the page's main-frame navigations, advanced as each one is
-   * requested or started (before it commits) and for same-document ones
-   * (pushState, fragments). Synchronous, for a caller that must stop the
-   * moment the page starts to move. Optional: a host without it leaves the
-   * caller to the document token and URL.
+   * A count of the page's cross-document main-frame navigations, advanced as
+   * each one is requested or started (before it commits). A same-document
+   * URL change (a fragment, pushState, replaceState, a same-document history
+   * step) keeps the document and doesn't count. Synchronous, for a caller
+   * that must stop the moment the page starts to move. Optional: a host
+   * without it leaves the caller to the document token.
    */
   navigationCount?(): number;
 

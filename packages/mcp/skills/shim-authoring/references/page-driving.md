@@ -36,7 +36,8 @@ from outside (AppleScript, another browser).
   user to restore the window.
   Scroll steps may happen anywhere, and can make the site load or
   mark things. When the user touches the tab (keyboard or mouse) the batch stops
-  (`interrupted: "user"`); so does any navigation. What your control does when clicked is
+  (`interrupted: "user"`); so does a navigation to a new document (a fragment or
+  pushState change on the same page doesn't). What your control does when clicked is
   real: your handler acts as the user. The result lists each step (a scroll: `requested`,
   `sent` and `observed` movement), DOM changes, console errors and any window the page
   tried to open (not opened). A shim session's site requests are **not observed**:
@@ -47,7 +48,8 @@ from outside (AppleScript, another browser).
   page from a listing, a search, a profile. The url must be on the origin the session
   started on — same scheme, host and port — or a path on it; anything else answers
   `off-origin` before loading. Up to 20 per session. The site's own redirects are contained,
-  not prevented: the answer says where the page landed (`url`, `redirected`); when the
+  not prevented: the answer says where the page landed (`url`, `redirected` — a fragment the
+  page adds by itself isn't a redirect); when the
   site sent it off the site (a sign-in page) `onSite` is false and the page tools refuse
   with `page-away` until it is back (navigate again, or `reload_page`). On the site your
   previews are re-applied (`reapplied`). In an attach session a page load is a GET as the

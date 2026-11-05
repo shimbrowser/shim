@@ -406,7 +406,37 @@ async function main(): Promise<void> {
     const slowAfter = await evalInPage(`sessionStorage.getItem('slowUp') === null`);
     check('a navigation that has started (not yet committed) stops the batch: no release, nothing after', Number(slow.notRun) >= 1
       && Array.isArray(slow.steps) && slow.steps.length === 1 && slowAfter === true, { slow, slowAfter });
-    const nav1 = json(await call('navigate', { url: '/next' }));
+    // Same-document URL changes are not navigations: a page that rewrites its
+    // fragment while it scrolls, a button that only sets location.hash and a
+    // replaceState keep the document (a main-world expando survives), and the
+    // batch runs on. (First let /slow, still loading, arrive.)
+    await new Promise((r) => setTimeout(r, 3500));
+    await evalInPage(`(() => {
+      window.__sameDoc = 1;
+      let n = 0;
+      window.addEventListener('scroll', () => { n++; location.hash = 'search=2~gallery~' + n; });
+      const b = document.createElement('button'); b.id = 'hash-btn'; b.textContent = 'tab two';
+      b.onclick = () => { location.hash = 'tab=2'; };
+      const r = document.createElement('button'); r.id = 'replace-btn'; r.textContent = 'filter';
+      r.onclick = () => { history.replaceState(null, '', location.pathname + '?filter=1#f'); };
+      document.body.prepend(b, r);
+      window.scrollTo(0, 0);
+      return true;
+    })()`);
+    const hashy = json(await call('interact_page', { actions: [{ scroll: { by: 300 } }, { scroll: { by: 300 } }, { scroll: { by: 300 } }, { click: '#hash-btn' }, { click: '#replace-btn' }, { click: '#site-btn' }] }));
+    const hs = Array.isArray(hashy.steps) ? hashy.steps.filter(isRecord) : [];
+    check('a fragment rewritten while scrolling, a hash-only click and a replaceState are not navigations: every step runs', hashy.notRun === 0 && hs.length === 6
+      && hs.every((st) => st.ok === true && st.navigated === undefined) && hashy.note === undefined, hashy);
+    check('…on the same document, whose URL did change', await evalInPage(`window.__sameDoc === 1 && location.search === '?filter=1' && location.hash === '#f'`) === true);
+    // A real load still stops the batch.
+    await evalInPage(`(document.querySelector('#hash-btn').onclick = () => { location.href = '/next'; }, true)`);
+    const crossDoc = json(await call('interact_page', { actions: [{ click: '#hash-btn' }, { click: '#site-btn' }] }));
+    const cd = Array.isArray(crossDoc.steps) ? crossDoc.steps.filter(isRecord) : [];
+    check('a click that loads a new document stops the batch, marked navigated', crossDoc.notRun === 1 && cd.length === 1 && cd[0]?.navigated === true
+      && typeof crossDoc.note === 'string', crossDoc);
+    await new Promise((r) => setTimeout(r, 800));
+    check('…and it is a new document', await evalInPage(`window.__sameDoc === undefined`) === true);
+    const nav1 =json(await call('navigate', { url: '/next' }));
     check('navigate loads a page on the start origin and re-applies the previews', nav1.ok === true && nav1.onSite === true && String(nav1.url).endsWith('/next')
       && nav1.reapplied === 2 && nav1.navigationsLeft === 19, nav1);
     check('…the previews run on the new page', await evalInPage(`getComputedStyle(document.querySelector('.promo')).display`) === 'none');

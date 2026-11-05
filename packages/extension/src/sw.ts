@@ -1800,10 +1800,10 @@ async function closeHost(id: string): Promise<boolean> {
 const pageHosts = {
   open: openHost,
   close: closeHost,
-  drain(id: string): { url: string; closed: boolean; events: PageRuntimeEvent[]; console: PageConsoleMessage[]; popups: string[] } | null {
+  drain(id: string): { url: string; closed: boolean; navigations: number; events: PageRuntimeEvent[]; console: PageConsoleMessage[]; popups: string[] } | null {
     const entry = openHosts.get(id);
     if (!entry) return null;
-    const out = { url: entry.host.url(), closed: entry.host.isClosed(), events: entry.events, console: entry.console, popups: entry.popups };
+    const out = { url: entry.host.url(), closed: entry.host.isClosed(), navigations: entry.host.navigationCount?.() ?? 0, events: entry.events, console: entry.console, popups: entry.popups };
     entry.events = [];
     entry.console = [];
     entry.popups = [];
