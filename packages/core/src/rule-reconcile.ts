@@ -365,7 +365,9 @@ export function makeReconciler(
         // DOM, which the own-DOM scan filter would then treat as a permanent
         // no-match on every subsequent scan.
         const matched = rawMatch && !isShimOwnedElement(rawMatch, mountedOutputRoots) ? rawMatch : null;
-        const ladder = matched ? anchors.suggestAnchorLadder(matched) : [];
+        // A recovered single-element rule re-points only onto rungs that select
+        // the match alone (anchors.uniqueAnchorLadder); none → no recovery.
+        const ladder = matched ? anchors.uniqueAnchorLadder(matched, document) : [];
         const [ladderHead] = ladder;
         if (matched && ladderHead) {
           const fresh = witnessMod.buildWitness(matched, { component: stored })
@@ -390,7 +392,9 @@ export function makeReconciler(
           ? 'component-id: no match'
           : rawMatch && !matched
             ? 'component-id: unique match is shim-created DOM'
-            : `component-id: ${matches.length} matches (not unique)`);
+            : matched
+              ? 'component-id: no anchor selects only the match'
+              : `component-id: ${matches.length} matches (not unique)`);
       }
       if (canRebase && elementRecovery) {
         const rec = anchors.witnessRecoverDetail(rule.anchor?.witness, document);
@@ -400,10 +404,14 @@ export function makeReconciler(
         // includes anything the engine mounted. A shape match there is never a
         // legitimate recovery target.
         const found = rawFound && !isShimOwnedElement(rawFound, mountedOutputRoots) ? rawFound : null;
-        const ladder = found ? anchors.suggestAnchorLadder(found) : [];
+        // Same rule as the component arm: only rungs that select the found
+        // element alone. The fresh witness below is captured from that one
+        // element, so a crowd selector would let its look-alikes verify too.
+        const ladder = found ? anchors.uniqueAnchorLadder(found, document) : [];
         const [ladderHead] = ladder;
         if (rec.reason) recoveryNotes.push(`witness-scan: ${rec.reason}`);
         else if (rawFound && !found) recoveryNotes.push('witness-scan: match is shim-created DOM');
+        else if (found && !ladderHead) recoveryNotes.push('witness-scan: no anchor selects only the found element');
         if (found && ladderHead) {
           emitRebase({
             strategy: 'recover',

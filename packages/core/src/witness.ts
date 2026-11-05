@@ -132,9 +132,11 @@ function textStemOf(el: Element) {
 function legacyTextStemOf(el: Element) {
   return stemOf(el.textContent || '');
 }
-function stemMatches(stem: string, expectedStem: string) {
+function stemMatches(stem: string, expectedStem: string, fullStem: boolean) {
+  if (!stem) return false;
+  if (fullStem) return stem.startsWith(expectedStem);
   const shared = sharedPrefixLen(stem, expectedStem);
-  return !!stem && (shared === Math.min(stem.length, expectedStem.length) || shared >= STEM_SHARED_PREFIX_MIN);
+  return shared === Math.min(stem.length, expectedStem.length) || shared >= STEM_SHARED_PREFIX_MIN;
 }
 
 // Build a witness from a live element. Returns a plain-JSON object safe
@@ -199,8 +201,22 @@ function buildWitness(el: Element, opts: { component?: ComponentDescriptor } = {
 // exactly one element (the selector carries the identity claim there);
 // text-kind rungs, multi-match narrowing, and the recovery scans stay
 // strict — for them the text is the identity or the discriminator.
+//
+// opts.fullStem — the stem matches only when the candidate's stem begins with
+// the WHOLE stored stem: the candidate still shows every word the witness
+// remembers (trailing additions allowed), and a candidate that misses it fails
+// outright, whatever its other signals score. For the recovery scans, which pick
+// ONE element out of the whole page with no selector behind it. There the two
+// looser matches are circumstance, not identity: a shared head is what a
+// container's heading gives every ancestor and sibling region (a publication
+// name opens the navbar and a late-rendering popup alike), and a candidate
+// whose short text is a prefix of the stored stem (the navbar's bare title
+// against the popup's "title + blurb") holds a fragment of the identity, not
+// the identity. Resolve-time verification keeps both tolerances, because there
+// the selector narrowed the candidates first.
 interface MatchWitnessOptions {
   lenientText?: boolean;
+  fullStem?: boolean;
 }
 
 function matchWitness(witness: Witness | null | undefined, el: Element | null | undefined, opts: MatchWitnessOptions = {}) {
@@ -258,6 +274,8 @@ function matchWitness(witness: Witness | null | undefined, el: Element | null | 
     //     identity. ≥12 shared chars is far beyond coincidence for normalized
     //     lowercase text, while sibling headings ("estimates …" vs "expenses
     //     …") diverge within a word or two and still fail.
+    //   Under `fullStem` (the recovery scans) neither: the candidate's stem
+    //   must begin with the whole stored stem (see MatchWitnessOptions).
     //
     // Generations: witnesses stored before the stem switched to visible text
     // carry a textContent stem (inline CSS/JS first, where the element holds
@@ -268,7 +286,9 @@ function matchWitness(witness: Witness | null | undefined, el: Element | null | 
     // ordinary label (a <noscript> "Recent payments"), and matching a visible
     // stem against it would verify the wrong element.
     const legacyStem = witness.textStemFrom !== 'visible';
-    if (stemMatches(stem, expectedStem) || (legacyStem && stemMatches(legacyTextStemOf(el), expectedStem))) {
+    const fullStem = opts.fullStem === true;
+    if (stemMatches(stem, expectedStem, fullStem)
+      || (legacyStem && stemMatches(legacyTextStemOf(el), expectedStem, fullStem))) {
       matched += WEIGHTS.textStem;
     } else {
       stemMissed = true;
@@ -313,6 +333,10 @@ function matchWitness(witness: Witness | null | undefined, el: Element | null | 
   if (total === 0) return { pass: true, score: 1, detail: [] };
 
   const score = matched / total;
+  // Under `fullStem` a stored stem the candidate doesn't show is a veto, not a
+  // penalty: other soft signals (a role, a child shape) are shared by
+  // look-alikes, and must not outweigh the text that named the target.
+  if (opts.fullStem === true && stemMissed) return { pass: false, score, detail };
   if (score >= PASS_THRESHOLD) return { pass: true, score, detail };
 
   // Lenient-text rescue (see MatchWitnessOptions): the stem was the ONLY

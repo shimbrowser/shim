@@ -465,6 +465,31 @@ function suggestAnchorLadder(el: AnchorElement, root?: Document | Element): Anch
   return ranked.slice(0, LADDER_MAX);
 }
 
+// The ladder a recovery may commit for a single-element rule: only rungs that
+// select exactly `el` in `root` and nothing else, strongest first, with the
+// positional path considered even when the ladder's cap dropped it. A rung
+// that also matches other elements is never a recovered anchor: the fresh
+// witness is captured from `el` alone, and resolve-time verification of a
+// crowd against it can pass the crowd's look-alikes too. Empty (refuse, and
+// let the break quarantine) when nothing selects `el` alone, or when `root`
+// can't be queried to prove it.
+function uniqueAnchorLadder(el: AnchorElement, root: Document | Element): AnchorSpec[] {
+  if (!el || !el.tagName || !root || typeof root.querySelectorAll !== 'function') return [];
+  const ladder = suggestAnchorLadder(el, root);
+  const positional: AnchorSpec = { kind: 'css', value: positionalPath(el) };
+  if (!ladder.some((s) => s.kind === 'css' && s.value === positional.value)) ladder.push(positional);
+  return ladder.filter((spec) => {
+    let found: Element[];
+    try {
+      found = resolveOne(spec, root);
+    } catch (_) {
+      return false;
+    }
+    // Identity comparison only, as in suggestAnchorLadder's verification pass.
+    return found.length === 1 && found[0] === (el as unknown as Element);
+  });
+}
+
 // Back-compat single-spec form — the strongest rung of the ladder.
 function suggestAnchorFor(el: AnchorElement, root?: Document | Element): AnchorSpec | null {
   const [head] = suggestAnchorLadder(el, root);
@@ -672,7 +697,11 @@ function witnessRecoverDetail(w: Witness | null | undefined, root: ScanRoot | Do
     // own DOM. Skip BEFORE scoring so an injected node
     // can't count toward the ambiguity/uniqueness decisions below either.
     if (isEngineInjected(el)) continue;
-    const verdict = witness.matchWitness(w, el);
+    // Whole-stem text: with no selector narrowing the pool, a stem sharing
+    // only a leading heading with the witness's, or holding only a fragment of
+    // it, is circumstance (witness.ts MatchWitnessOptions), and here it would
+    // decide the target.
+    const verdict = witness.matchWitness(w, el, { fullStem: true });
     if (verdict.pass && verdict.score >= RECOVER_MIN_SCORE) {
       strong.push({ el, score: verdict.score });
       if (strong.length > RECOVER_MAX_STRONG) {
@@ -753,6 +782,6 @@ function shouldAppendPositional(annotatedLadder: Array<{ matches?: number }>): b
 // (they never went through `isStableGroupClass`, which only ever looked at
 // `css`-kind class candidates).
 export {
-  resolveAll, resolveAllWithSource, suggestAnchorFor, suggestAnchorLadder, positionalPath,
+  resolveAll, resolveAllWithSource, suggestAnchorFor, suggestAnchorLadder, uniqueAnchorLadder, positionalPath,
   shouldAppendPositional, isStableGroupClass, looksGeneratedClass, witnessRecover, witnessRecoverDetail,
 };
