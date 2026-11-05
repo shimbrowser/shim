@@ -1,7 +1,8 @@
-// The headless host's file-backed `api.storage`:
-// what handlers store while a headless session runs survives the session, in
-// one JSON file the session names — never in the Shim browser's profile
-// (invariant 10: headless never reads persist:user).
+// The headless host's file-backed `api.storage`: a shim's saved data, in one
+// JSON file beside its `.shim` — never in the Shim browser's profile
+// (invariant 10: headless never reads persist:user). A session only reads it,
+// through a scratch overlay (scratch-storage.ts); `shim preview --storage`
+// writes a file its caller named.
 //
 // Same semantics as the browser's api.storage (and memoryStorage): one bucket
 // per shim per origin, JSON values, a missing key reads null, `set` answers

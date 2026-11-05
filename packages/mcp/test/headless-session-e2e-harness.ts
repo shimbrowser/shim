@@ -8,7 +8,7 @@
 //   page headless, trusted, popups closed, traffic not observed) and move it
 //   (navigate: the start origin only, previews re-applied, an off-site
 //   redirect contained) → commit (the .shim file: version, witness,
-//   history, deploy baseline; api.storage in its file) → end → reopen the
+//   history, deploy baseline; preview api.storage left out) → end → reopen the
 //   committed .shim (its rules run again, witnesses stay out of shim.json)
 //   then `shim preview` of an unpacked folder on a new deploy: witness-less
 //   rules whose anchor is unchanged refresh the baseline / promote a working
@@ -481,9 +481,11 @@ async function main(): Promise<void> {
     const history = Array.isArray(file.authoringHistory) ? file.authoringHistory.filter(isRecord) : [];
     check('the session\'s exchange is in the history, stamped', history.length === 2 && history[0]?.external === true
       && history[1]?.content === 'Hid the promo and marked tracks.' && history[1]?.versionId === 2, history);
+    // What previews stored is scratch: neither the session nor its commit
+    // writes the shim's saved api.storage, and the .shim carries none.
     const storageFile = `${shimFile}.storage.json`;
-    const stored = fs.existsSync(storageFile) ? JSON.parse(fs.readFileSync(storageFile, 'utf8')) as Record<string, unknown> : {};
-    check('api.storage persisted to its file', JSON.stringify(stored).includes('seen:t1'), stored);
+    check('the preview\'s api.storage never reaches the shim\'s storage file', !fs.existsSync(storageFile));
+    check('…nor the .shim file', !('userData' in file) && !JSON.stringify(file).includes('seen:t1'));
     const again = json(await call('shim_commit', { summary: 'again', revision: 1 }));
     check('committing an old revision is stale', JSON.stringify(again).includes('stale-revision') || (again.raw ?? '').toString().startsWith('stale-revision'), again);
 

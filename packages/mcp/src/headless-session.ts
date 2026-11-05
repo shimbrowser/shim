@@ -8,7 +8,8 @@
 // per host, kept here with its scripts.
 //
 // Nothing here reads the Shim browser's profile (invariant 10): the page is
-// the caller's, `api.storage` is the caller's file.
+// the caller's, `api.storage` reads the caller's file through a scratch
+// overlay the session drops.
 
 import * as fs from 'fs';
 import * as path from 'path';

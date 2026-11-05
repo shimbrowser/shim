@@ -27,8 +27,13 @@ The loop is the same, with three differences:
   the user's account; use it to test SPA navigation or a site toggle your shim reacts to.
   A popup it causes is closed and reported. `navigate` works as in attach.
 - **`shim_commit` writes the file**: a new version, with its history and what the session
-  verified. `api.storage` lives in `<shimFile>.storage.json`. Hand the `.shim` file to the
-  user; they import it into Shim.
+  verified. Hand the `.shim` file to the user; they import it into Shim.
+- **`api.storage` is scratch for the whole session.** Every rule on a headless page runs as
+  a preview, committed ones included, so handlers read the shim's saved data
+  (`<shimFile>.storage.json`, if there is one) with this session's writes over it, and those
+  writes go when the session ends: neither a preview nor `shim_commit` writes that file, and
+  the `.shim` carries no storage. Don't read a value carried over from an earlier preview in
+  this session as evidence of a fresh run; reopen the session to start from the saved data.
 - **A subset of features.** Headless runs `hide`, `restyle`, `reorder`, `reshape`, `script`,
   `inject-element`, `inject-html`, `remove` and `replace-root`, with `api.storage` and
   `api.cleanup`. A preview that uses anything else — the network and route kinds,

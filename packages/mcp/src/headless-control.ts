@@ -41,6 +41,7 @@ import type { ControlClient, ControlInfo, ControlReply } from './control-client'
 import type { HeadlessStorage } from './playwright-page-host';
 import { HEADLESS_CAPABILITIES, REQUIRES_SHIM_BROWSER } from './playwright-page-host';
 import { fileStorage } from './file-storage';
+import { scratchStorage } from './scratch-storage';
 import { HeadlessUnavailableError, PLAYWRIGHT_MISSING } from './playwright-launch';
 import { tryLockFile, type FileLock, type FileLockOptions } from './file-lock';
 import {
@@ -61,8 +62,17 @@ export interface HeadlessControlOptions {
   version: string;
   /** Open a fresh page at `url` with `storage` backing its api.storage. Throws when it can't. */
   openPage(url: string, storage: HeadlessStorage): Promise<HeadlessSessionPage>;
-  /** Where a session's api.storage lives, for its `.shim` file. Default: `<file>.storage.json` beside it. */
+  /**
+   * The shim's saved api.storage, for its `.shim` file. Default: `<file>.storage.json` beside it.
+   * A session reads it and never writes it: what handlers store during a session is preview
+   * data, kept in a scratch overlay that goes with the session (scratch-storage.ts).
+   */
   storageFileFor?(shimFile: string): string;
+  /**
+   * Write api.storage straight through to `storageFileFor`'s file instead of a scratch
+   * overlay. Only for a file the caller named for exactly that (`shim preview --storage`).
+   */
+  persistStorage?: boolean;
   /** Whether Playwright is installed (reported by /status). */
   playwrightAvailable?(): boolean;
   backend?: HeadlessBackendOptions;
@@ -229,7 +239,7 @@ export function defaultStorageFile(shimFile: string): string {
 // its pack siblings): none of them exists in a fresh headless Chromium.
 function browserOnlySessionTool(name: string): string | undefined {
   if (isApiMapToolName(name)) return `${name} reads the API map the Shim browser records; headless mode has none. Author in the Shim browser to use a site's API.`;
-  if (isDataToolName(name)) return `${name} reads the data a shim has saved in the Shim browser (its storage, its tables, its pack); a headless session has none. Read api.storage's file (<shimFile>.storage.json) directly, or author in the Shim browser.`;
+  if (isDataToolName(name)) return `${name} reads the data a shim has saved in the Shim browser (its storage, its tables, its pack); a headless session has none. Read api.storage's saved data from <shimFile>.storage.json directly (what this session's previews stored is never written there), or author in the Shim browser.`;
   if (isCompositionSessionToolName(name)) return `${name} works on a composition, and compositions run only in the Shim browser.`;
   return undefined;
 }
@@ -362,7 +372,11 @@ export function createHeadlessControl(options: HeadlessControlOptions): Headless
     if (closing) return refuse('shutting-down', SHUTTING_DOWN);
     let page: HeadlessSessionPage;
     try {
-      page = await options.openPage(parsedUrl.href, fileStorage(storageFileFor(shimFile)));
+      // Every rule here runs as a preview, so what a session stores never
+      // reaches the shim's saved data: a scratch overlay over it, dropped
+      // with the session (a commit persists none of it).
+      const saved = fileStorage(storageFileFor(shimFile));
+      page = await options.openPage(parsedUrl.href, options.persistStorage ? saved : scratchStorage(saved));
     } catch (e) {
       // No Playwright, or no Chromium for it: say which, with the exact
       // command that fixes it (Shim never bundles a browser).

@@ -53,6 +53,9 @@
 //     page or lock;
 //   - file storage: a failed write rejects and changes nothing, in memory
 //     or in the next write;
+//   - a session's api.storage is scratch over the shim's storage file: it
+//     reads the saved data, and neither a preview nor a commit writes it;
+//     a reopened session starts from the saved data again;
 //   - a .shim with a spec-level css block refused at open (D15: headless
 //     installs no whole-patch stylesheet);
 //   - commit: the .shim written once per commitId, version + deploy baseline +
@@ -1433,6 +1436,61 @@ async function main(): Promise<void> {
     const blank = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
     check('a whitespace-only css block styles nothing, so the shim opens', blank.ok === true, blank);
     if (blank.ok === true) await req(r, 'DELETE', `/sessions/${String(blank.sessionId)}`);
+  }
+
+  console.log('a session\'s api.storage is scratch over the committed file');
+  {
+    const r = rig();
+    const shimFile = path.join(tmp, 'scratch.shim');
+    const storageFile = `${shimFile}.storage.json`;
+    fs.writeFileSync(shimFile, json({
+      format: 'shim/1', name: 'Scratch', handlers: {},
+      spec: { id: 'shim-scratch', version: 1, match: { hosts: ['site.test'] }, rules: [{ id: 'h', anchor: css('.ad'), mutations: [{ kind: 'hide' }] }] },
+    }));
+    const scope = { patchId: 'shim-scratch', origin: 'https://site.test' };
+    await fileStorage(storageFile).set(scope, 'saved', 'committed');
+    await fileStorage(storageFile).set(scope, 'dropme', 1);
+    const committedText = fs.readFileSync(storageFile, 'utf8');
+    const opened = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('the session opens', opened.ok === true, opened);
+    const id = String(opened.sessionId);
+    const st = r.storages.at(-1) as HeadlessStorage;
+    check('the session reads what the shim has saved', (await st.get(scope, 'saved')) === 'committed');
+    await st.set(scope, 'seen', [1, 2, 3]);
+    await st.set(scope, 'saved', 'preview');
+    check('…and its own writes', JSON.stringify(await st.get(scope, 'seen')) === '[1,2,3]' && (await st.get(scope, 'saved')) === 'preview');
+    check('a delete hides a saved key', (await st.delete(scope, 'dropme')) === true && (await st.get(scope, 'dropme')) === null
+      && (await st.delete(scope, 'dropme')) === false);
+    check('list merges saved keys with the session\'s', JSON.stringify(await st.list(scope)) === JSON.stringify({ saved: 'preview', seen: [1, 2, 3] }), await st.list(scope));
+    const other = { patchId: 'shim-other', origin: 'https://site.test' };
+    await st.set(other, 'k', 1);
+    check('buckets stay per shim', (await st.get(other, 'k')) === 1 && (await st.get(scope, 'k')) === null);
+    await st.set(scope, '__proto__', 7);
+    const listed = await st.list(scope);
+    check('"__proto__" is a plain key in the scratch too', (await st.get(scope, '__proto__')) === 7
+      && Object.prototype.hasOwnProperty.call(listed, '__proto__') && Object.getPrototypeOf(listed) === Object.prototype);
+    await st.delete(scope, '__proto__');
+    check('nothing the session stores reaches the file', fs.readFileSync(storageFile, 'utf8') === committedText);
+
+    const co = await req(r, 'GET', `/sessions/${id}/checkout`);
+    const files = decodeWorkingCopy(co.files);
+    const shimJson = files['shim.json'];
+    const spec = JSON.parse(typeof shimJson === 'string' ? shimJson : new TextDecoder().decode(shimJson)) as Record<string, unknown>;
+    const p = await preview(r, id, { 'shim.json': json({ ...spec, rules: [{ id: 'h2', anchor: css('.ad2'), mutations: [{ kind: 'hide' }] }] }) });
+    check('a preview applies', p.applied === true, p);
+    const c = await req(r, 'POST', `/sessions/${id}/commit`, { revision: p.revision, commitId: 'scratch-1', summary: 'swap' });
+    check('the commit lands', c.ok === true, c);
+    check('a commit leaves the storage file as committed', fs.readFileSync(storageFile, 'utf8') === committedText);
+    const written = JSON.parse(fs.readFileSync(shimFile, 'utf8')) as Record<string, unknown>;
+    check('…and the .shim carries no storage (no userData)', !('userData' in written) && !JSON.stringify(written).includes('"seen"'), Object.keys(written));
+    await req(r, 'DELETE', `/sessions/${id}`);
+
+    const again = await req(r, 'POST', '/sessions', { kind: 'shim', target: { url }, agent: 'a', intent: 'x', shimFile });
+    check('the shim reopens', again.ok === true, again);
+    const st2 = r.storages.at(-1) as HeadlessStorage;
+    check('a reopened session starts from the saved data, not the last session\'s',
+      (await st2.get(scope, 'saved')) === 'committed' && (await st2.get(scope, 'seen')) === null && (await st2.get(scope, 'dropme')) === 1);
+    await req(r, 'DELETE', `/sessions/${String(again.sessionId)}`);
   }
 }
 

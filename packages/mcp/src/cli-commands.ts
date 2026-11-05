@@ -472,7 +472,9 @@ export async function previewFolder(opts: PreviewOptions, deps: PreviewDeps): Pr
       });
       return page;
     },
-    ...(storageFile ? { storageFileFor: () => storageFile } : {}),
+    // A file named with --storage is the caller's to write: api.storage goes
+    // straight to it. Without one, the store is a throwaway scratch.
+    ...(storageFile ? { storageFileFor: () => storageFile, persistStorage: true } : {}),
     backend: {
       ...(deps.settleMs !== undefined ? { settleMs: deps.settleMs } : {}),
       ...(seedWitnesses ? { seedWitnesses } : {}),
