@@ -65,7 +65,9 @@ const MIN_CHROME = 135;
 const CHROME_KEYS_ALLOWED = new Set(['runtime', 'csi', 'loadTimes']);
 const RUNTIME_KEYS_ALLOWED = new Set([
   'id', 'dynamicId', 'connect', 'sendMessage', 'onConnect', 'onMessage',
-  'ContextType', 'OnInstalledReason', 'OnRestartRequiredReason', 'PlatformArch', 'PlatformNaclArch', 'PlatformOs', 'RequestUpdateCheckStatus',
+  // Capitalized keys are Chrome's enums, plain objects of names: the harness
+  // checks each one is, so a capitalized key that carries anything else fails.
+  'ContextType', 'OnInstalledReason', 'OnLoadedReason', 'OnRestartRequiredReason', 'PlatformArch', 'PlatformNaclArch', 'PlatformOs', 'RequestUpdateCheckStatus',
 ]);
 
 /** The NEL fixture's host (resolved to loopback in the browser). */
@@ -117,6 +119,15 @@ self.report = (w) => \`setTimeout(() => chrome.runtime.sendMessage({
   storage: typeof chrome.storage,
   chromeKeys: Object.keys(chrome).sort(),
   runtimeKeys: Object.keys(chrome.runtime).sort(),
+  notEnums: Object.keys(chrome.runtime).filter((k) => /^[A-Z]/.test(k)).filter((k) => {
+    // A plain object whose every own key, hidden ones included, is a string data property.
+    const v = chrome.runtime[k];
+    if (!v || typeof v !== 'object' || Object.getPrototypeOf(v) !== Object.prototype) return true;
+    return !Reflect.ownKeys(v).every((key) => {
+      const d = Object.getOwnPropertyDescriptor(v, key);
+      return !!d && 'value' in d && typeof d.value === 'string';
+    });
+  }).sort(),
 }), 100);\`;
 self.reset = async () => {
   await chrome.userScripts.unregister();
@@ -166,7 +177,7 @@ self.workerStorage = async () => {
 };
 `;
 
-interface Report { w: string; sees: string[]; storage: string; chromeKeys: string[]; runtimeKeys: string[] }
+interface Report { w: string; sees: string[]; storage: string; chromeKeys: string[]; runtimeKeys: string[]; notEnums: string[] }
 interface Sender { msg: Report; keys: string[] }
 
 async function server(): Promise<{ origin: string; close(): void }> {
@@ -285,6 +296,8 @@ async function main(): Promise<void> {
       check('nothing on chrome beyond runtime', extraChrome.length === 0, extraChrome);
       const extraRuntime = [...new Set(reports.flatMap((r) => r.msg.runtimeKeys))].filter((k) => !RUNTIME_KEYS_ALLOWED.has(k));
       check('and nothing on chrome.runtime beyond messaging', extraRuntime.length === 0, extraRuntime);
+      const notEnums = [...new Set(reports.flatMap((r) => r.msg.notEnums ?? []))];
+      check('and its capitalized keys are only enums of names', notEnums.length === 0, notEnums);
       check('messaging itself is reachable', reports.every((r) => r.msg.runtimeKeys.includes('sendMessage')), reports.map((r) => r.msg.runtimeKeys));
       await page.close();
     }
