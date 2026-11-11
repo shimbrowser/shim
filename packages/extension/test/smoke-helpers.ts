@@ -122,10 +122,29 @@ export function launch(ext: string, profile: string, extra: { hosts?: string[]; 
   });
 }
 
-export async function workerOf(ctx: BrowserContext): Promise<{ worker: Worker; extId: string }> {
-  let sw: Worker | undefined = ctx.serviceWorkers()[0];
-  sw ??= await ctx.waitForEvent('serviceworker', { timeout: 15000 });
-  return { worker: sw, extId: new URL(sw.url()).host };
+/**
+ * The extension's service worker, once its extension APIs are bound. Right
+ * after a launch Chrome can report the worker before `chrome.permissions` and
+ * friends exist in it, and a call made then throws; a worker that closes
+ * under the check is looked up again.
+ */
+export async function workerOf(ctx: BrowserContext, timeoutMs = 15000): Promise<{ worker: Worker; extId: string }> {
+  const end = Date.now() + timeoutMs;
+  let last = 'no service worker';
+  while (Date.now() < end) {
+    const sw: Worker = ctx.serviceWorkers()[0] ?? await ctx.waitForEvent('serviceworker', { timeout: Math.max(1, end - Date.now()) });
+    try {
+      const ready = await sw.evaluate(() => typeof chrome !== 'undefined'
+        && typeof chrome.runtime?.id === 'string'
+        && typeof chrome.permissions?.contains === 'function');
+      if (ready) return { worker: sw, extId: new URL(sw.url()).host };
+      last = 'its chrome APIs were not bound yet';
+    } catch (e) {
+      last = e instanceof Error ? e.message : String(e);
+    }
+    await sleep(50);
+  }
+  throw new Error(`the extension's service worker was never ready: ${last}`);
 }
 
 export interface Installer {
