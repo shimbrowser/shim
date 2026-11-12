@@ -93,7 +93,7 @@ page type is checked against it:
   there, so their previews prove nothing. Build and verify on a page the site serves in
   full (a free post), opening the session there or using `navigate`. A site's own listing
   may say which posts are free (Substack's archive API, `/api/v1/archive`, marks them
-  `audience: "everyone"`). Never bypass or hide a paywall to get at the content.
+  `audience: "everyone"`).
 - **A popup shown once per visit** (a sign-up modal, an intro popup). The site
   usually remembers that it showed it, so it may not come back after a reload or on a
   later visit, and the committed rule may never be seen firing. Take the evidence where it
