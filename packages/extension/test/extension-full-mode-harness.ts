@@ -512,7 +512,8 @@ async function main(): Promise<void> {
     watch(ctx);
     ({ worker } = await workerOf(ctx));
     const d2 = Date.now() + 5000;
-    while (Date.now() < d2 && (await userScripts()).length !== 2) await sleep(100);
+    // The old content script is unregistered after the user scripts land, so wait for both.
+    while (Date.now() < d2 && ((await userScripts()).length !== 2 || (await contentScripts()).length !== 0)) await sleep(100);
     check('toggle back on: both shims are user scripts again', (await userScripts()).length === 2 && (await contentScripts()).length === 0);
     const page2 = await ctx.newPage();
     await page2.goto(`${origin}/apply`);

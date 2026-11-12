@@ -102,9 +102,7 @@ Don't repeat it.
   `"permissions": ["ai"]`; the user grants it in Shim after the commit, and until then calls
   answer `{ ok: false }`. It spends the user's money: batch, cache in `api.storage`, never
   call it from a mutation-driven loop, and don't trigger AI features over and over while
-  previewing. Tell the user in your summary that the feature needs their approval. The user
-  can set limits on a shim's calls: past one, a call answers `{ ok: false, error }` with
-  `ai-budget-exceeded` or `ai-input-too-large`, so the fallback has to cover those too.
+  previewing. Tell the user in your summary that the feature needs their approval.
 - **`api.onRouteChange(fn)`** — for `mount-route` pages (`references/handlers.md`) only. A `script`
   handler's `api` has no `onRouteChange`: to follow in-site navigation, see `references/handlers.md`.
 - **`api.modules.invoke(id, fnPath, args)`** — for modules an `intercept` declared.
