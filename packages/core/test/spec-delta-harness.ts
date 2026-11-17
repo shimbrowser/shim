@@ -82,6 +82,24 @@ check('a malformed set-match leaves the match as it was',
   JSON.stringify(applyDelta(base, [{ op: 'set-match', match: { hosts: 'a.com' } }]).match) === JSON.stringify(base.match)
   && JSON.stringify(applyDelta(base, [{ op: 'set-match', match: null }]).match) === JSON.stringify(base.match));
 
+{
+  const scoped = { ...base, match: { hosts: ['a.com'], paths: ['/history', '!/history/old'] } };
+  const set = applyDelta(scoped, [{ op: 'set-paths', paths: ['/recipes/*'] }]);
+  check('set-paths sets the list and keeps the hosts', JSON.stringify(set.match) === '{"hosts":["a.com"],"paths":["/recipes/*"]}', JSON.stringify(set.match));
+  check('…without mutating the input', JSON.stringify(scoped.match.paths) === '["/history","!/history/old"]');
+  const cleared = applyDelta(scoped, [{ op: 'set-paths', paths: [] }]);
+  check('[] removes the field', JSON.stringify(cleared.match) === '{"hosts":["a.com"]}' && !('paths' in (cleared.match ?? {})), JSON.stringify(cleared.match));
+  const absent = applyDelta(scoped, [{ op: 'set-paths' }]);
+  check('an absent list is the same value as []', JSON.stringify(absent.match) === JSON.stringify(cleared.match));
+  check('a malformed list leaves the spec unchanged',
+    [null, 'x', {}, [1], ['/a', null]].every((paths) => JSON.stringify(applyDelta(scoped, [{ op: 'set-paths', paths }]).match) === JSON.stringify(scoped.match)));
+  const added = applyDelta(base, [{ op: 'set-paths', paths: ['/x'] }]);
+  check('set-paths on a shim with no paths adds them', JSON.stringify(added.match?.paths) === '["/x"]');
+  check('an empty list on a shim with no paths changes nothing', JSON.stringify(applyDelta(base, [{ op: 'set-paths', paths: [] }]).match) === JSON.stringify(base.match));
+  const both = applyDelta(scoped, [{ op: 'set-paths', paths: ['/z'] }, { op: 'set-match', match: { hosts: ['b.com'] } }]);
+  check('set-match after set-paths keeps the new paths', JSON.stringify(both.match) === '{"hosts":["b.com"],"paths":["/z"]}', JSON.stringify(both.match));
+}
+
 if (failures) {
   console.error(`\n${failures} failure(s)`);
   process.exit(1);

@@ -368,6 +368,10 @@ rejects('shared handlers on a non-global shim', 'not-editable',
   () => diffWorkingCopy(state, withSpec((spec) => { spec.sharedHandlers = { fmt: 'function fmt() {}' }; })),
   '"sharedHandlers"');
 
+check('set-paths reads in plain words',
+  describeWorkingCopyOps([{ op: 'set-paths', paths: ['/a', '!/a/b'] }, { op: 'set-paths', paths: [] }]).join(' | ')
+    === 'set-paths (limits where it runs, 2 entries) | set-paths (runs on every page of its sites)');
+
 if (failures) {
   console.error(`\n${failures} failure(s)`);
   process.exit(1);

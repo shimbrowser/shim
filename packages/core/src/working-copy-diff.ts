@@ -397,6 +397,9 @@ export function describeWorkingCopyOps(ops: readonly DeltaOp[]): string[] {
     } else if (op.op === 'add-rule' || op.op === 'update-rule') {
       const id = op.rule?.id ?? '?';
       out.push(op.rule?.id && moved.has(op.rule.id) ? `update-rule ${id} (moved)` : `${op.op} ${id}`);
+    } else if (op.op === 'set-paths') {
+      const n = Array.isArray(op.paths) ? op.paths.length : 0;
+      out.push(n === 0 ? 'set-paths (runs on every page of its sites)' : `set-paths (limits where it runs, ${n} ${n === 1 ? 'entry' : 'entries'})`);
     } else {
       out.push(op.op ?? 'unknown-op');
     }

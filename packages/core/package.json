@@ -190,6 +190,11 @@
       "types": "./dist/page-tools.d.ts",
       "default": "./dist/page-tools.js"
     },
+    "./path-coverage": {
+      "shim-source": "./src/path-coverage.ts",
+      "types": "./dist/path-coverage.d.ts",
+      "default": "./dist/path-coverage.js"
+    },
     "./path-match": {
       "shim-source": "./src/path-match.ts",
       "types": "./dist/path-match.d.ts",

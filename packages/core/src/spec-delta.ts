@@ -51,11 +51,15 @@ export interface DeltaOp {
   // person on the commit card before any newly covered host commits; an
   // internal turn's emit never carries it (its normalizer drops it).
   match?: unknown;
+  // `set-paths`: the whole new `spec.match.paths` list (path-match.ts), which
+  // replaces the old one and leaves `match.hosts` alone. Absent and `[]` both
+  // mean every page and are stored as no field.
+  paths?: unknown;
 }
 
 // Apply a spec delta: rule ops (add-rule / remove-rule / update-rule) and the
 // replace-wholesale declaration ops (set-settings / set-permissions /
-// set-intent / set-storage / set-connections / set-match), plus the shared
+// set-intent / set-storage / set-connections / set-match / set-paths), plus the shared
 // code-space upserts. Returns a new spec; the input is never mutated.
 export function applyDelta(spec: Spec, ops: DeltaOp[] | undefined): Spec {
   const rules = [...(spec.rules || [])];
@@ -154,10 +158,24 @@ export function applyDelta(spec: Spec, ops: DeltaOp[] | undefined): Spec {
       if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
         const hosts = (value as { hosts?: unknown }).hosts;
         if (Array.isArray(hosts) && hosts.every((h) => typeof h === 'string')) {
-          const paths = spec.match?.paths;
+          const paths = match?.paths;
           match = { hosts: [...(hosts as string[])], ...(paths !== undefined ? { paths: [...paths] } : {}) };
           matchTouched = true;
         }
+      }
+    } else if (op.op === 'set-paths') {
+      // Replace which pages of its hosts the shim runs on. Only a list of text
+      // lands; anything else leaves the paths as they were. An empty list
+      // drops the field (one stored form for "every page"). Hosts are carried
+      // through untouched.
+      const list = op.paths === undefined ? [] : op.paths;
+      if (Array.isArray(list) && list.every((p) => typeof p === 'string')) {
+        const next: { hosts?: string[]; paths?: string[] } = { ...(match ?? {}) };
+        if (list.length > 0) next.paths = [...(list as string[])];
+        else delete next.paths;
+        // A spec that has no match and gets no paths stays without one.
+        match = match === undefined && list.length === 0 ? undefined : next;
+        matchTouched = true;
       }
     } else if (op.op === 'remove-shared-handler') {
       // Delete one entry from the shared code-space. The evolution contract
