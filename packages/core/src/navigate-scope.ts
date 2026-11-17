@@ -105,6 +105,8 @@ export interface NavigateLoad {
   sameDocument?: boolean;
   /** What putting the previews back on the new document said (reported as `newDocument`). */
   note?: string;
+  /** Where a redirect rule of an enabled shim sent this load, when one did (the host saw it). */
+  shimRedirectTo?: string;
   error?: string;
 }
 
@@ -112,6 +114,15 @@ const withoutFragment = (url: string): string => {
   const hash = url.indexOf('#');
   return hash === -1 ? url : url.slice(0, hash);
 };
+
+// A shim's redirect rule moved the page (as the host saw it), then perhaps
+// the site; null when only the site did.
+function movedByWording(r: NavigateLoad, requested: string): string | null {
+  const to = r.shimRedirectTo;
+  if (to === undefined || withoutFragment(to) === withoutFragment(requested)) return null;
+  const rule = `a redirect rule of an enabled shim on this site sent the tab to ${to}`;
+  return withoutFragment(to) === withoutFragment(r.url) ? rule : `${rule}, and the site then sent it to ${r.url}`;
+}
 
 /**
  * One navigate call: check the destination against the scope and the
@@ -142,6 +153,7 @@ export async function runNavigate(
   if (!r.ok) {
     return { error: 'load-failed', detail: r.error ?? 'the page did not load', requested: target.url, url: r.url, navigationsLeft: left };
   }
+  const movedBy = movedByWording(r, target.url);
   if (r.offSite) {
     return {
       ok: true,
@@ -150,14 +162,14 @@ export async function runNavigate(
       redirected,
       onSite: false,
       navigationsLeft: left,
-      note: `the site sent the tab to ${r.url} — off the session's site (${r.offSite.detail ?? r.offSite.error}). The page tools and previews act only once the tab is back on the site: navigate to a page on ${describeScope(scope)}, or reload_page to return to where the session started.${r.reapplied > 0 ? '' : ' Nothing was re-applied here.'}`,
+      note: `${movedBy ?? `the site sent the tab to ${r.url}`} — off the session's site (${r.offSite.detail ?? r.offSite.error}). The page tools and previews act only once the tab is back on the site: navigate to a page on ${describeScope(scope)}, or reload_page to return to where the session started.${r.reapplied > 0 ? '' : ' Nothing was re-applied here.'}`,
     };
   }
   return {
     ok: true,
     requested: target.url,
     url: r.url,
-    ...(redirected ? { redirected: true, note: `the site redirected the request to ${r.url}` } : {}),
+    ...(redirected ? { redirected: true, note: movedBy ?? `the site redirected the request to ${r.url}` } : {}),
     onSite: true,
     ...(r.note ? { newDocument: r.note } : {}),
     ...(r.sameDocument

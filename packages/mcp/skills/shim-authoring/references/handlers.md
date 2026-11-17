@@ -127,6 +127,12 @@ Rules that keep handlers safe — every one learned from real breakage:
   `border`, `border-radius`, `padding`, `box-shadow`; and the site's CSS custom properties
   (`getComputedStyle(document.documentElement).getPropertyValue('--color-primary')`). A
   default-styled button next to the site's own is a first-preview failure, not polish.
+- **The site's CSS reaches what you add.** Outside `shadow`, every site rule whose selector
+  your elements match applies to them: `ol li::before` counters, `ul` bullets and padding,
+  `button` and `h2` styles. `all: initial` on your root resets only the root. For a panel
+  meant to look like your own (a reading card, a dialog), build lists and headings from
+  `div`s and `span`s with your own prefixed classes and numbering, and view the result on a
+  second site before calling it done.
 
 ### Re-running when the anchor's content changes: `api.onAnchorChange`
 
@@ -261,6 +267,12 @@ rules so the framework that owns the list keeps working:
   own writes are never observed, and add `api.cleanup(() => observer.disconnect())`.
 - Put the control (the sort menu, the filter box) in the same handler's returned DOM, and
   refresh on in-site navigation as above.
+- **When the list sits inside a site `<form>`** (some sites wrap the whole results page in
+  their search form; check with `closest('form')`), mount the controls as a `portal`, not
+  inline. A control inside the site's form sends its `change` events to the site's form
+  listeners, which may re-run the search, and `interact_page` refuses it (`site-activation`).
+  A portal follows its anchor's top, so once the page scrolls past that point the controls
+  are off screen: scroll back up before you drive them.
 
 ## Replacing a region: `replace-root`
 

@@ -35,7 +35,8 @@ approves the new site on the commit card); then open a session on the new site.
 
 **A new site is untried.** Your session's evidence covers only the pages it previewed on:
 a wildcard is never verified by one subdomain. The commit's `notes` name every pattern
-your rules weren't tried on. To try a new site, commit first, then open a session on a
+your rules weren't tried on in this session; a site an earlier session tried is listed
+too, because the rules you just changed weren't checked there. To try a new site, commit first, then open a session on a
 page of that site (`shim_open_session` with its `url`; the person allows that tab too).
 In that session the shim's committed rules run there, and you can preview and fix rules
 for that site. Tell the user which sites you didn't try.

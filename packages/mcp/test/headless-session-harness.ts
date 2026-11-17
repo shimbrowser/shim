@@ -651,7 +651,7 @@ async function main(): Promise<void> {
     const cnotes = Array.isArray(committed.notes) ? committed.notes.map(String) : [];
     check('the commit says the new site was not approved here', committed.ok === true && cnotes.some((n) => n.includes('new sites: site.test') && n.includes('Nobody approved')), committed);
     check('…and where it was not tried — a page reached mid-settle is not "tried"', mv.applied === true
-      && cnotes.some((n) => n.includes('other.test (not tried)') && n.includes('rule evidence only on https://site.test')), cnotes);
+      && cnotes.some((n) => n.includes('other.test (not tried in this session)') && n.includes('rule evidence only on https://site.test')), cnotes);
     const onDisk = JSON.parse(fs.readFileSync(wideFile, 'utf8')) as { spec: { match: { hosts: string[] } } };
     check('the file carries the widened match', JSON.stringify(onDisk.spec.match.hosts) === '["other.test","site.test"]', onDisk.spec.match);
     const many = Array.from({ length: 21 }, (_, i) => `h${i}.test`);

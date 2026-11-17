@@ -214,18 +214,20 @@ export function locationsMatching(pattern: string, locations: Iterable<string>):
 /**
  * The commit note saying where the shim runs beyond what this session tried,
  * or null when every pattern is an exact host the session got rule evidence
- * on. A wildcard is never "tried" by one member.
+ * on. A wildcard is never "tried" by one member. Evidence is per session:
+ * a host an earlier session tried still reads "not tried in this session",
+ * since the rules it checked there may have changed since.
  */
 export function untriedMatchNote(hosts: readonly unknown[] | undefined, locations: Iterable<string>): string | null {
   const seen = [...locations];
   const parts: string[] = [];
   for (const pattern of stringHosts(hosts)) {
     const tried = locationsMatching(pattern, seen);
-    if (tried.length === 0) parts.push(`${pattern} (not tried)`);
+    if (tried.length === 0) parts.push(`${pattern} (not tried in this session)`);
     else if (pattern.startsWith('*.')) parts.push(`${pattern} (tried only on ${tried.join(', ')})`);
   }
   if (parts.length === 0) return null;
   const where = seen.length ? `this session got rule evidence only on ${seen.join(', ')}` : 'this session got no rule evidence';
   return `${where}. The shim ${seen.length ? 'also ' : ''}runs on ${parts.join(', ')}: ` +
-    'beyond the pages this session tried, its rules are untested there. To check a site, open a session on a page of it';
+    'beyond the pages this session tried, this version of its rules is untested there (an earlier session\'s check doesn\'t carry over). To check a site, open a session on a page of it';
 }

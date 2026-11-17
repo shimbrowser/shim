@@ -27,7 +27,7 @@
 //     with traffic "not observed", never an empty list
 
 import {
-  runInteract, parseInteractInput, locateScript, selectScript, OBSERVE_START_SCRIPT, OBSERVE_READ_SCRIPT, MAX_SCROLL_PX,
+  runInteract, parseInteractInput, locateScript, selectScript, HIDDEN_BY_ANCESTOR_SOURCE, OBSERVE_START_SCRIPT, OBSERVE_READ_SCRIPT, MAX_SCROLL_PX,
   type InteractDeps, type InteractDocumentPolicy, type CdpCommand, type LocateResult, type InteractStepEvent,
 } from '../src/interact';
 
@@ -54,6 +54,9 @@ function fake(over: { dispatch?: InteractDeps['dispatch']; afterDispatch?: (f: F
   };
   const targets: Record<string, LocateResult> = {
     '.go': { count: 1, x: 5, y: 6, visible: true, covered: null, disabled: false, tag: 'button' },
+    '.far': { count: 1, x: 5, y: -3900, visible: true, offscreen: true, covered: null, disabled: false, tag: 'select' },
+    '.gated': { count: 1, x: 5, y: 6, visible: false, covered: null, disabled: false, tag: 'select', hiddenBy: 'div#outer has visibility: hidden' },
+    '.ghost': { count: 1, x: 5, y: 6, visible: false, covered: null, disabled: false, tag: 'button', hiddenBy: null },
   };
   f.deps = {
     guard: () => null,
@@ -92,6 +95,47 @@ async function main(): Promise<void> {
     const f = fake();
     const r = await runInteract({ actions: [{ click: '.go' }] }, f.deps);
     check('an accepted string document takes input', !('error' in r) && r.steps[0]?.ok === true && f.sent.length === 1, JSON.stringify(r));
+  }
+  {
+    // A portal following an anchor scrolled out of view: scrollIntoView
+    // can't move a fixed layer, and nothing covers it — say so, not "covered".
+    const f = fake();
+    const r = await runInteract({ actions: [{ click: '.far' }] }, f.deps);
+    const err = 'error' in r ? '' : String(r.steps[0]?.error);
+    check('a target left outside the viewport is reported off screen, not covered, nothing sent',
+      err.includes('outside the viewport') && err.includes('anchor is on screen') && !err.includes('covered by') && f.sent.length === 0, JSON.stringify(r));
+  }
+  {
+    // The site hides the page behind a gate (a terms prompt): name the
+    // ancestor that hides the target, so it doesn't read as the shim's fault.
+    const f = fake();
+    const r = await runInteract({ actions: [{ select: '.gated', value: 'x' }] }, f.deps);
+    const err = 'error' in r ? '' : String(r.steps[0]?.error);
+    check('a target an ancestor hides names that ancestor, nothing sent',
+      err.startsWith('.gated is not visible: the page hides it') && err.includes('div#outer has visibility: hidden') && f.sent.length === 0, err);
+    const r2 = await runInteract({ actions: [{ click: '.ghost' }] }, fake().deps);
+    check('a target hidden by itself keeps the plain answer',
+      !('error' in r2) && r2.steps[0]?.error === '.ghost is not visible', JSON.stringify(r2));
+  }
+  {
+    // The page-side finder, over stub nodes: the outermost display:none
+    // ancestor wins; otherwise the top of the run of hidden ancestors.
+    type Stub = { tagName: string; id?: string; className?: string; parentElement: Stub | null; display?: string; visibility?: string };
+    const find = new Function(`return (${HIDDEN_BY_ANCESTOR_SOURCE});`)() as (el: Stub, styleOf: (n: Stub) => { display: string; visibility: string }) => string | null;
+    const styleOf = (n: Stub) => ({ display: n.display ?? 'block', visibility: n.visibility ?? 'visible' });
+    const body: Stub = { tagName: 'BODY', parentElement: null };
+    const outer: Stub = { tagName: 'DIV', id: 'outer', parentElement: body, visibility: 'hidden' };
+    const inner: Stub = { tagName: 'DIV', className: 'wrapper  main', parentElement: outer, visibility: 'hidden' };
+    const btn: Stub = { tagName: 'BUTTON', parentElement: inner, visibility: 'hidden' };
+    check('inherited visibility is blamed on the ancestor that set it', find(btn, styleOf) === 'div#outer has visibility: hidden', String(find(btn, styleOf)));
+    const self: Stub = { tagName: 'SPAN', parentElement: body, visibility: 'hidden' };
+    check('an element hidden by itself blames no ancestor', find(self, styleOf) === null);
+    const shown: Stub = { tagName: 'SPAN', parentElement: inner };
+    check('a visible element blames no ancestor', find(shown, styleOf) === null);
+    const tpl: Stub = { tagName: 'SECTION', className: 'tpl', parentElement: body, display: 'none' };
+    const mid: Stub = { tagName: 'DIV', parentElement: tpl, display: 'none' };
+    const leaf: Stub = { tagName: 'A', parentElement: mid };
+    check('the outermost display:none ancestor is named, by class when it has no id', find(leaf, styleOf) === 'section.tpl has display: none', String(find(leaf, styleOf)));
   }
   {
     const f = fake();

@@ -96,7 +96,10 @@ Don't repeat it.
   true` past it) and a request gives up after 15 s. Bot-protected sites often answer a
   cookie-less, non-browser request with a 403 or a challenge page, so check `status` and
   the text before parsing; for the site's own public pages, the page's `fetch` (same
-  origin) is the request the site expects.
+  origin) is the request the site expects. Such a fetch can still be sent off the site
+  now and then (a sign-in single-sign-on bounce): it rejects with a CORS error that the
+  console shows as `[site]`. Pass `redirect: 'manual'` and treat a `res.type` of
+  `'opaqueredirect'` like a 5xx: wait, retry a few times, then give up on that item.
 - **`api.ai.complete({ prompt | messages, system?, model?, maxTokens? })`** — Claude, on the
   user's own Anthropic key, which the shim never sees: `{ ok, text }`. Requires
   `"permissions": ["ai"]`; the user grants it in Shim after the commit, and until then calls

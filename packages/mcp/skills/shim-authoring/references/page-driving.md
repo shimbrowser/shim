@@ -94,6 +94,14 @@ page type is checked against it:
   full (a free post), opening the session there or using `navigate`. A site's own listing
   may say which posts are free (Substack's archive API, `/api/v1/archive`, marks them
   `audience: "everyone"`).
+- **A terms or consent gate.** Some sites keep the whole page hidden until the user
+  accepts their terms (AO3 shows its Terms of Service prompt to a new visitor and hides
+  everything behind it). Your rules still apply, but `view_page` crops and
+  `interact_page` answer that the page hides your output and name the hidden ancestor.
+  Accepting is the user's decision: never accept it with a rule or a script, and never
+  hide the gate. Ask the user to accept it in Shim, then `reload_page`. Until they do,
+  check what you can by numbers (`evaluate_in_page` reading your output's state) and
+  say in the summary that the visual check and your controls are unverified.
 - **A popup shown once per visit** (a sign-up modal, an intro popup). The site
   usually remembers that it showed it, so it may not come back after a reload or on a
   later visit, and the committed rule may never be seen firing. Take the evidence where it

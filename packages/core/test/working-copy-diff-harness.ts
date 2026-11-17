@@ -13,7 +13,7 @@
 //
 // Bare node.
 
-import { diffWorkingCopy } from '../src/working-copy-diff';
+import { diffWorkingCopy, describeWorkingCopyOps } from '../src/working-copy-diff';
 import type { WorkingState } from '../src/working-copy-diff';
 import { checkoutShim, ShimFolderError, SHIM_JSON, stableStringify } from '../src/shim-folder';
 import type { FolderInput, ShimFolderErrorCode } from '../src/shim-folder';
@@ -122,16 +122,19 @@ const withoutB = withSpec((spec) => { spec.rules = spec.rules?.filter((r) => r.i
 delete withoutB['handlers/mountB.js'];
 applied = expectApplied('a deleted rule', withoutB);
 check('remove-rule', kinds(applied.ops) === 'remove-rule:b', kinds(applied.ops));
+check('a deleted rule still reads as removed', describeWorkingCopyOps(applied.ops).join(' ') === 'remove-rule b', describeWorkingCopyOps(applied.ops).join(' '));
 
 applied = expectApplied('a reorder', withSpec((spec) => { spec.rules = [find(spec, 'c'), find(spec, 'a'), find(spec, 'b')]; }));
 check('the folder\'s order wins', ids(applied.next) === 'c,a,b', ids(applied.next));
 check('moved rules are removed then re-emitted (applyDelta only appends)', kinds(applied.ops) === 'remove-rule:a remove-rule:b update-rule:a update-rule:b', kinds(applied.ops));
+check('the agent reads a moved rule as moved, never removed', describeWorkingCopyOps(applied.ops).join(' ') === 'update-rule a (moved) update-rule b (moved)', describeWorkingCopyOps(applied.ops).join(' '));
 check('a moved rule keeps its witness', applied.ops.filter((o) => o.op === 'update-rule').every((o) => o.rule?.anchor?.witness !== undefined));
 
 applied = expectApplied('a rule inserted mid-list', withSpec((spec) => {
   spec.rules?.splice(1, 0, { id: 'mid', anchor: { primary: { kind: 'css', value: '.mid' } }, mutations: [{ kind: 'hide' }] });
 }));
 check('lands where the folder puts it', ids(applied.next) === 'a,mid,b,c', `${ids(applied.next)} via ${kinds(applied.ops)}`);
+check('a new rule and the rules after it read as add + moved', describeWorkingCopyOps(applied.ops).join(' ') === 'add-rule mid update-rule b (moved) update-rule c (moved)', describeWorkingCopyOps(applied.ops).join(' '));
 
 applied = expectApplied('a rename', withSpec((spec) => { find(spec, 'c').id = 'c2'; }));
 check('remove the old id, add the new one, no witness carried across ids',

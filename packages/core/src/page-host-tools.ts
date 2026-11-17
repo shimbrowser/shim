@@ -17,6 +17,7 @@ import { errMessage } from './error';
 import { syntaxProbe } from './syntax-probe';
 import type { CompileProbe } from './rewrite-response';
 import { isRecord } from './is-record';
+import { HIDDEN_BY_ANCESTOR_SOURCE, hiddenByPhrase } from './interact';
 
 export const QUERY_TIMEOUT_MS = 8000;
 export const INSPECT_TIMEOUT_MS = 5000;
@@ -266,8 +267,9 @@ export function viewLeaseAcquireSource(waitMs: number = VIEW_WAIT_MS): string {
  * scrolling it into view first when the viewport or a scrolling ancestor cuts
  * it off. The crop target is the first match with a non-empty box that is
  * not display:none or visibility:hidden. Resolves to null (nothing matched;
- * no lease held), { noneVisible, count } (matches, none rendered; no lease
- * held) or the measurement plus the lease token.
+ * no lease held), { noneVisible, count, hiddenBy } (matches, none rendered,
+ * and the ancestor hiding the first, if one does; no lease held) or the
+ * measurement plus the lease token.
  */
 export function cropMeasureSource(selector: string, waitMs: number = VIEW_WAIT_MS): string {
   return `(async () => {
@@ -286,7 +288,7 @@ export function cropMeasureSource(selector: string, waitMs: number = VIEW_WAIT_M
         return cs.display !== 'none' && cs.visibility !== 'hidden' && cs.visibility !== 'collapse';
       };
       const el = Array.prototype.find.call(all, rendered);
-      if (!el) { delete globalThis[__leaseKey]; return { noneVisible: true, count: all.length }; }
+      if (!el) { delete globalThis[__leaseKey]; return { noneVisible: true, count: all.length, hiddenBy: (${HIDDEN_BY_ANCESTOR_SOURCE})(all[0], (n) => getComputedStyle(n)) }; }
       const measure = () => {
         const r = el.getBoundingClientRect();
         return { x: r.x, y: r.y, w: r.width, h: r.height, vw: window.innerWidth, vh: window.innerHeight };
@@ -396,7 +398,7 @@ export function viewLeaseReleaseSource(token: string): string {
   })()`;
 }
 
-type Measured = CropMeasurement & { token?: unknown; scrolled?: boolean; busy?: boolean; noneVisible?: boolean; count?: unknown };
+type Measured = CropMeasurement & { token?: unknown; scrolled?: boolean; busy?: boolean; noneVisible?: boolean; count?: unknown; hiddenBy?: unknown };
 type CropMeasured = { rect: CropRect; elementBox: { w: number; h: number }; token: string | null };
 
 async function measureCropRect(host: PageHost, selector: string, world: PageWorld, waitMs: number): Promise<CropMeasured | { error: string; token: string | null }> {
@@ -413,6 +415,9 @@ async function measureCropRect(host: PageHost, selector: string, world: PageWorl
   if (m.busy === true) return { error: BUSY_ERROR, token: null };
   if (m.noneVisible === true) {
     const n = typeof m.count === 'number' ? m.count : 0;
+    if (typeof m.hiddenBy === 'string' && m.hiddenBy !== '') {
+      return { error: `crop selector matched ${n} element${n === 1 ? '' : 's'}, none visible: ${selector} — for the first, ${hiddenByPhrase(m.hiddenBy)}`, token: null };
+    }
     return { error: `crop selector matched ${n} element${n === 1 ? '' : 's'}, none visible (each has no size, or is display:none / visibility:hidden): ${selector} — narrow the selector to the element on screen, or call view_page without a selector`, token: null };
   }
   const token = typeof m.token === 'string' ? m.token : null;

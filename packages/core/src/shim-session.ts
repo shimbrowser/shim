@@ -70,7 +70,7 @@ import {
 } from './shim-folder';
 import type { CompileProbe } from './rewrite-response';
 import { handlerWorlds, moduleToExpression } from './handler-source';
-import { diffWorkingCopy } from './working-copy-diff';
+import { diffWorkingCopy, describeWorkingCopyOps } from './working-copy-diff';
 import { boundQueryCandidates } from './query-bound';
 import { hasManagedKeys, withManagedFingerprint, withoutManagedKeys } from './managed-anchor';
 import { readCaptureEvent, inCaptureBinding, supersedes, fingerprintOfCapture } from './capture-event';
@@ -431,13 +431,6 @@ function describeLoadOutcome(outcome: PageLoadOutcome): string {
 
 function refused(evidence: Record<string, unknown>): BackendPreview {
   return { applied: false, evidence: { applied: false, ...evidence } };
-}
-
-// What each op did, for the agent (the browser's describeOp).
-function describeOp(op: DeltaOp): string {
-  if (op.op === 'add-rule' || op.op === 'update-rule') return `${op.op} ${op.rule?.id ?? '?'}`;
-  if (op.op === 'remove-rule') return `remove-rule ${op.ruleId ?? '?'}`;
-  return op.op ?? 'unknown-op';
 }
 
 /** The evidence for a preflight refusal. */
@@ -931,7 +924,7 @@ export function createShimSessionBackend<S extends ShimSessionSource = ShimSessi
       ...(notes.length ? { notes } : {}),
       ...(unsupportedApi.length ? { unsupportedApi } : {}),
       ...(consoleBlock ? { console: consoleBlock } : {}),
-      changes: diff.ops.map(describeOp),
+      changes: describeWorkingCopyOps(diff.ops),
     };
     return { applied: true, evidence };
   }

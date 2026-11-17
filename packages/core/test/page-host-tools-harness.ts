@@ -98,6 +98,10 @@ async function testViewPage(): Promise<void> {
   const hidden = await viewPageOnHost(hiddenHost, { selector: '.ghost' }, 'main');
   check('a crop selector whose matches are all hidden says so, with no capture',
     /^crop selector matched 3 elements, none visible .*: \.ghost/.test(hidden.error ?? '') && hidden.dataBase64 === undefined && hiddenHost.shots.length === 0, hidden.error);
+  const gatedHost = scriptedHost((code) => (isMeasure(code) ? { noneVisible: true, count: 1, hiddenBy: 'div#outer has visibility: hidden' } : null));
+  const gated = await viewPageOnHost(gatedHost, { selector: '.bar' }, 'main');
+  check('a crop whose first match an ancestor hides names that ancestor, with no capture',
+    /^crop selector matched 1 element, none visible: \.bar — for the first, the page hides it — its ancestor div#outer has visibility: hidden/.test(gated.error ?? '') && gatedHost.shots.length === 0, gated.error);
   const measureSrc = cropMeasureSource('.card');
   check('the measure script crops to the first rendered match, skipping hidden ones',
     measureSrc.includes('querySelectorAll(".card")') && measureSrc.includes("cs.display !== 'none'") && measureSrc.includes("cs.visibility !== 'hidden'") && measureSrc.includes('r.width > 0 && r.height > 0'));

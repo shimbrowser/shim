@@ -88,6 +88,16 @@ async function tool(): Promise<void> {
     && !isSameDocumentNavigation('https://a.example/p', 'https://a.example/p')
     && !isSameDocumentNavigation('https://a.example/p', 'https://a.example/q#x')
     && !isSameDocumentNavigation('https://a.example/p?q=1', 'https://a.example/p?q=2#x'));
+  const ruleState: NavigationState = { scope: navigationScopeOf('https://minecraft.fandom.com/wiki/Creeper'), used: 0 };
+  const byRule = await runNavigate({ url: '/wiki/Zombie#Behavior' }, ruleState, at({ url: 'https://minecraft.wiki/w/Zombie#Behavior', shimRedirectTo: 'https://minecraft.wiki/w/Zombie#Behavior', offSite: { error: 'page-away', detail: 'the tab left minecraft.fandom.com' }, reapplied: 0 }));
+  check('a shim redirect rule that sent the tab off the site is named, not blamed on the site',
+    byRule.onSite === false && /^a redirect rule of an enabled shim on this site sent the tab to https:\/\/minecraft\.wiki\/w\/Zombie/.test(String(byRule.note)) && !/the site sent/.test(String(byRule.note)), JSON.stringify(byRule));
+  const ruleThenSite = await runNavigate({ url: '/wiki/Zombie' }, ruleState, at({ url: 'https://login.example/sso', shimRedirectTo: 'https://minecraft.wiki/w/Zombie', offSite: { error: 'page-away' }, reapplied: 0 }));
+  check('…and a site hop after the rule says both', /sent the tab to https:\/\/minecraft\.wiki\/w\/Zombie, and the site then sent it to https:\/\/login\.example\/sso/.test(String(ruleThenSite.note)), JSON.stringify(ruleThenSite));
+  const sameHostRule = await runNavigate({ url: '/wiki/Zombie' }, ruleState, at({ url: 'https://minecraft.fandom.com/w/Zombie', shimRedirectTo: 'https://minecraft.fandom.com/w/Zombie' }));
+  check('an on-site rewrite by a rule is named too', sameHostRule.onSite === true && sameHostRule.redirected === true && /^a redirect rule/.test(String(sameHostRule.note)), JSON.stringify(sameHostRule));
+  const noRule = await runNavigate({ url: '/wiki/Zombie' }, ruleState, at({ url: 'https://minecraft.fandom.com/wiki/Zombie', shimRedirectTo: 'https://minecraft.fandom.com/wiki/Zombie' }));
+  check('a rule record that only repeats the request is no redirect', !('redirected' in noRule) && !('note' in noRule), JSON.stringify(noRule));
   state.used = MAX_NAVIGATIONS_PER_SESSION;
   const before = loads.length;
   const limit = await runNavigate({ url: '/y' }, state, at({}));

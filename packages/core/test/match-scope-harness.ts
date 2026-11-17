@@ -75,7 +75,7 @@ check('a location keeps scheme and port', evidenceLocation('https://en.wikipedia
 check('locations a pattern matches', JSON.stringify(locationsMatching('*.wikipedia.org', ['https://en.wikipedia.org', 'https://example.com'])) === '["https://en.wikipedia.org"]');
 const note = untriedMatchNote(['*.wikipedia.org', 'old.reddit.com', 'en.wikipedia.org'], ['https://en.wikipedia.org']);
 check('the commit note: a wildcard is tried only on its members seen, an exact host not seen is not tried',
-  note !== null && note.includes('*.wikipedia.org (tried only on https://en.wikipedia.org)') && note.includes('old.reddit.com (not tried)') && !note.includes('en.wikipedia.org (not'), note);
+  note !== null && note.includes('*.wikipedia.org (tried only on https://en.wikipedia.org)') && note.includes('old.reddit.com (not tried in this session)') && !note.includes('en.wikipedia.org (not'), note);
 check('no note when every pattern is an exact host the session tried', untriedMatchNote(['example.com'], ['https://example.com']) === null);
 check('a session with no rule evidence says so', (untriedMatchNote(['example.com'], []) ?? '').startsWith('this session got no rule evidence'));
 check('evidence is attributed only to an unchanged document',

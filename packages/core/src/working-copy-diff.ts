@@ -375,3 +375,31 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
 
   return { ops, warnings };
 }
+
+/**
+ * What a diff's ops did, for the agent: `update-rule hide-banner`,
+ * `set-settings`. A rule the diff removed and re-emitted because it moved
+ * (or sits after a new rule) reads as one `update-rule <id> (moved)`, never
+ * as a removal: it is still in the shim, re-applied whole with any edits.
+ */
+export function describeWorkingCopyOps(ops: readonly DeltaOp[]): string[] {
+  const reEmitted = new Set<string>();
+  for (const op of ops) {
+    if ((op.op === 'add-rule' || op.op === 'update-rule') && op.rule?.id) reEmitted.add(op.rule.id);
+  }
+  const moved = new Set<string>();
+  const out: string[] = [];
+  for (const op of ops) {
+    if (op.op === 'remove-rule') {
+      const id = op.ruleId ?? '?';
+      if (op.ruleId && reEmitted.has(op.ruleId)) moved.add(op.ruleId);
+      else out.push(`remove-rule ${id}`);
+    } else if (op.op === 'add-rule' || op.op === 'update-rule') {
+      const id = op.rule?.id ?? '?';
+      out.push(op.rule?.id && moved.has(op.rule.id) ? `update-rule ${id} (moved)` : `${op.op} ${id}`);
+    } else {
+      out.push(op.op ?? 'unknown-op');
+    }
+  }
+  return out;
+}

@@ -79,7 +79,12 @@ export interface InteractParseOptions {
 export type LocateResult =
   | { error: string }
   | {
-    count: number; x?: number; y?: number; visible?: boolean; covered?: string | null; disabled?: boolean; tag?: string; editable?: boolean;
+    count: number; x?: number; y?: number; visible?: boolean;
+    /** Visible, but its centre is outside the viewport even after it was scrolled into view. */
+    offscreen?: boolean;
+    covered?: string | null; disabled?: boolean; tag?: string; editable?: boolean;
+    /** Not visible because an ancestor hides it: that ancestor and how (`div#outer has visibility: hidden`). */
+    hiddenBy?: string | null;
     /** The session refuses this target, and why (`<code>: <detail>`). */
     refused?: string;
   };
@@ -343,8 +348,13 @@ function targetProblem(loc: LocateResult, selector: string, typing = false): str
   if (loc.count === 0) return `no element matches ${selector}`;
   if (loc.count > 1) return `${loc.count} elements match ${selector} — make the selector unique`;
   if (loc.refused) return loc.refused;
-  if (loc.visible !== true || typeof loc.x !== 'number' || typeof loc.y !== 'number') return `${selector} is not visible`;
+  if (loc.visible !== true || typeof loc.x !== 'number' || typeof loc.y !== 'number') {
+    return typeof loc.hiddenBy === 'string' && loc.hiddenBy !== ''
+      ? `${selector} is not visible: ${hiddenByPhrase(loc.hiddenBy)}`
+      : `${selector} is not visible`;
+  }
   if (loc.disabled === true) return `${selector} is disabled`;
+  if (loc.offscreen === true) return `${selector} is outside the viewport and scrolling it into view doesn't move it (it sits in a fixed layer, such as a portal or overlay that follows its anchor) — scroll the page until its anchor is on screen first`;
   if (loc.covered) return `${selector} is covered by ${loc.covered} — close or scroll it out of the way first`;
   if (typing && loc.editable !== true) return `${selector} is not a field you can type into (a ${loc.tag ?? 'element'} that is not an enabled, writable text input, textarea or contenteditable)`;
   return null;
@@ -533,6 +543,38 @@ export async function runInteract(
 
 // --- page-side scripts --------------------------------------------------------
 //
+/**
+ * Page-side source of `function (el, styleOf)`: names the outermost ancestor
+ * of `el` that hides it, as `tag#id has display: none` or
+ * `tag#id has visibility: hidden`, or null when no ancestor does (the element
+ * hides itself, has no size, or is visible). Visibility is inherited, so the
+ * ancestor that set it is the top of the unbroken run of hidden ancestors
+ * above `el`. A site that keeps its whole page hidden behind a gate (a terms
+ * or consent prompt) shows up here as one wrapper high in the tree.
+ */
+export const HIDDEN_BY_ANCESTOR_SOURCE = `function (el, styleOf) {
+  const name = (n) => {
+    const tag = String(n.tagName || '').toLowerCase();
+    if (n.id) return tag + '#' + n.id;
+    const cls = typeof n.className === 'string' ? n.className.trim().split(/\\s+/)[0] : '';
+    return cls ? tag + '.' + cls : tag;
+  };
+  let none = null;
+  for (let n = el.parentElement; n; n = n.parentElement) {
+    if (styleOf(n).display === 'none') none = n;
+  }
+  if (none) return name(none) + ' has display: none';
+  if (styleOf(el).visibility !== 'hidden') return null;
+  let top = null;
+  for (let n = el.parentElement; n && styleOf(n).visibility === 'hidden'; n = n.parentElement) top = n;
+  return top ? name(top) + ' has visibility: hidden' : null;
+}`;
+
+/** How a "not visible" answer names the ancestor that hides the target. */
+export function hiddenByPhrase(hiddenBy: string): string {
+  return `the page hides it — its ancestor ${hiddenBy}, often because of a site dialog or gate in front of the page (look with view_page and no selector)`;
+}
+
 // What a host runs in its isolated world (the DOM shared, the page's own
 // globals unreachable) to serve `locate`, `selectValue` and DOM change
 // counting. Each is a self-contained expression.
@@ -556,9 +598,14 @@ export function locateScript(selector: string): string {
     const r = el.getBoundingClientRect();
     const cs = getComputedStyle(el);
     const visible = r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none';
+    const hiddenBy = visible ? null : (${HIDDEN_BY_ANCESTOR_SOURCE})(el, (n) => getComputedStyle(n));
     const x = r.left + r.width / 2, y = r.top + r.height / 2;
-    const top = visible ? document.elementFromPoint(x, y) : null;
-    const covered = visible && (!top || !(top === el || el.contains(top)))
+    // Still outside the viewport after scrollIntoView: it sits in a fixed
+    // layer scrolling doesn't move (a portal or overlay that follows its
+    // anchor). Nothing covers it; it just isn't on screen.
+    const offscreen = visible && !(x >= 0 && y >= 0 && x < innerWidth && y < innerHeight);
+    const top = visible && !offscreen ? document.elementFromPoint(x, y) : null;
+    const covered = visible && !offscreen && (!top || !(top === el || el.contains(top)))
       ? (top ? top.tagName.toLowerCase() + (top.id ? '#' + top.id : '') : 'nothing hit-testable') : null;
     // :disabled is the effective state — it covers a <fieldset disabled>
     // ancestor, which leaves the control's own .disabled false.
@@ -567,7 +614,7 @@ export function locateScript(selector: string): string {
     const editable = el.isContentEditable === true
       || (el.tagName === 'TEXTAREA' && !el.readOnly && !disabled)
       || (el.tagName === 'INPUT' && !el.readOnly && !disabled && TEXT_TYPES.includes((el.getAttribute('type') || '').toLowerCase()));
-    return { count: 1, x, y, visible, covered, disabled, tag: el.tagName.toLowerCase(), editable };
+    return { count: 1, x, y, visible, offscreen, covered, disabled, tag: el.tagName.toLowerCase(), editable, hiddenBy };
   })()`;
 }
 
