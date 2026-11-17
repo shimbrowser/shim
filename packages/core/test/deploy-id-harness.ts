@@ -8,7 +8,7 @@
 // NOT change the id (lazy chunks / route CSS / third-party tags are noise), but
 // a deploy (content-hashed entry filename rewritten) MUST change it.
 
-import { computeDeployId, sameRegistrableDomain, pagePathKey, baselineForPath } from '../src/deploy-id';
+import { computeDeployId, deployIdForDocument, watchDeployId, sameRegistrableDomain, pagePathKey, baselineForPath } from '../src/deploy-id';
 import { makeReconciler } from '../src/rule-reconcile';
 import { makeRuleState } from '../src/rule-state';
 import type { RuntimeSpec } from '../src/engine-internal';
@@ -164,6 +164,79 @@ async function tReconcileGate() {
   check('a real deploy on /search still quarantines', deployed.includes('rule-quarantined'), JSON.stringify(deployed));
 }
 
+// A fake document: its scripts can grow, its readyState can move, and it fires
+// DOMContentLoaded to whoever listens.
+function fakeDocument(initial: string[], readyState: 'loading' | 'interactive' | 'complete' = 'loading') {
+  const scripts = [...initial];
+  const listeners: (() => void)[] = [];
+  const doc = {
+    readyState: readyState as string,
+    location: { hostname: 'www.allrecipes.com' },
+    querySelectorAll: (sel: string) => (sel.startsWith('script') ? scripts.map((src) => ({ src })) : []),
+    addEventListener: (type: string, fn: () => void) => { if (type === 'DOMContentLoaded') listeners.push(fn); },
+  };
+  return {
+    doc: doc as unknown as Document,
+    add: (src: string) => { scripts.push(src); },
+    contentLoaded: () => { doc.readyState = 'interactive'; for (const fn of listeners.splice(0)) fn(); },
+    parsed: () => { doc.readyState = 'interactive'; },
+    complete: () => { doc.readyState = 'complete'; },
+  };
+}
+
+function tDomContentLoaded() {
+  console.log('taken at DOMContentLoaded (late-injected scripts are not a deploy):');
+  const APP = 'https://www.allrecipes.com/static/5.189.0/cache/app.js';
+  const LATE = ['https://forms.allrecipes.com/main.js', 'https://www.allrecipes.com/ayAnalytics.js'];
+  const quiet = fakeDocument([APP]);
+  watchDeployId(quiet.doc);
+  check('before DOMContentLoaded the gate can\'t judge (null)', deployIdForDocument(quiet.doc) === null, '');
+  quiet.contentLoaded();
+  const quietId = deployIdForDocument(quiet.doc);
+  const busy = fakeDocument([APP]);
+  watchDeployId(busy.doc);
+  busy.contentLoaded();
+  for (const src of LATE) busy.add(src);
+  const busyId = deployIdForDocument(busy.doc);
+  check('a load whose page later injects same-site scripts has the quiet load\'s id', quietId !== null && busyId === quietId, `${quietId} vs ${busyId}`);
+  busy.add('https://www.allrecipes.com/more.js');
+  check('…and keeps it for the document\'s life', deployIdForDocument(busy.doc) === quietId, '');
+  const deployed = fakeDocument(['https://www.allrecipes.com/static/5.190.0/cache/app.js']);
+  watchDeployId(deployed.doc);
+  deployed.contentLoaded();
+  check('a new entry bundle at DOMContentLoaded is still a deploy', deployIdForDocument(deployed.doc) !== quietId, '');
+  // Parsed, but DOMContentLoaded still waits on a deferred script, which
+  // inserts another same-site script: the event-time set includes it.
+  const deferred = fakeDocument([APP]);
+  watchDeployId(deferred.doc);
+  deferred.parsed();
+  check('parsed but before DOMContentLoaded the gate still can\'t judge', deployIdForDocument(deferred.doc) === null, '');
+  deferred.add('https://www.allrecipes.com/deferred-loader.js');
+  deferred.contentLoaded();
+  const withDeferred = fakeDocument([APP, 'https://www.allrecipes.com/deferred-loader.js']);
+  watchDeployId(withDeferred.doc);
+  withDeferred.contentLoaded();
+  check('…and the id is the event-time set, deferred insertions included', deployIdForDocument(deferred.doc) === deployIdForDocument(withDeferred.doc) && deployIdForDocument(deferred.doc) !== quietId, '');
+  const firstInteractive = fakeDocument([APP], 'interactive');
+  check('a document first seen parsed, with no sign the event fired, waits for it', deployIdForDocument(firstInteractive.doc) === null, '');
+  firstInteractive.contentLoaded();
+  check('…and takes it at the event', deployIdForDocument(firstInteractive.doc) === quietId, '');
+  const missed = fakeDocument([APP]);
+  watchDeployId(missed.doc);
+  missed.complete();
+  check('an event the watch never heard is taken at the first ask once the document is complete', deployIdForDocument(missed.doc) === quietId, '');
+  const late = fakeDocument([APP], 'complete');
+  check('a document first seen complete is taken then', deployIdForDocument(late.doc) === quietId, '');
+  const heard: (string | null)[] = [];
+  const handed = fakeDocument([APP]);
+  watchDeployId(handed.doc, (id) => { heard.push(id); });
+  check('a listener hears nothing before the event', heard.length === 0, '');
+  handed.contentLoaded();
+  watchDeployId(handed.doc, (id) => { heard.push(id); });
+  check('…then hears the id once, and a later one at once', heard.length === 2 && heard.every((id) => id === quietId), JSON.stringify(heard));
+}
+
+tDomContentLoaded();
 tRouteStability();
 tFallback();
 tRegistrable();

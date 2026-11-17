@@ -75,6 +75,8 @@ export function startRuntime(vault: VaultBoot | null): void {
   }
   const ShimCore = host.ShimCore as typeof Core | undefined;
   if (!ShimCore || typeof ShimCore.run !== 'function') return;
+  // At document start: the deploy id is taken at DOMContentLoaded (deploy-id.ts).
+  ShimCore.watchDeployId(document);
   // The messaging primitives, captured before any handler compiles: a handler
   // that wraps chrome.runtime afterwards sees nothing of this runtime's
   // traffic. (In a vault world only that shim's own handlers run; in the

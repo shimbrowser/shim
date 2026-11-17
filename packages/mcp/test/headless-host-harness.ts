@@ -126,6 +126,7 @@ function bootRuntime(send: (payload: string) => void, serves?: readonly ('settin
       },
       createFetchBudget: () => ({ take: () => ({ delayMs: 0, throttled: false }) }),
       deployIdForDocument: () => null,
+      watchDeployId: () => undefined,
       sameRegistrableDomain: () => true,
     },
   };

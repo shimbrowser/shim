@@ -94,12 +94,9 @@ function computeDeployId(
   return hashUrls([...httpScripts, ...styleUrls.filter(isHttp)]);
 }
 
-// The deploy identity of a live document: computeDeployId over its
-// `<script src>` and stylesheet links. Every host gates rebase on this one
-// collection (the Shim browser's page-preload and a headless driver's page
-// runtime), so the two can't disagree about what a deploy is. Null on any
-// failure — the gate then reads "no deploy detected".
-function deployIdForDocument(doc: Document): string | null {
+// computeDeployId over what a document has now: its `<script src>` and
+// stylesheet links. Null on any failure.
+function liveDeployId(doc: Document): string | null {
   try {
     const scriptUrls: string[] = [];
     for (const s of doc.querySelectorAll<HTMLScriptElement>('script[src]')) {
@@ -110,6 +107,89 @@ function deployIdForDocument(doc: Document): string | null {
       if (l.href) styleUrls.push(l.href);
     }
     return computeDeployId({ scriptUrls, styleUrls, pageHost: doc.location ? doc.location.hostname : '' });
+  } catch (_) {
+    return null;
+  }
+}
+
+// Taken once per document, at DOMContentLoaded. The scripts the page's HTML
+// declares are all in the DOM by then; what the page's own code injects later
+// (a pop-up vendor, an ad or analytics loader, often different from one visit
+// to the next) mostly isn't. Collected whenever a host happened to ask, two
+// loads of the same deploy hashed different sets, read as a deploy, and a rule
+// whose target was legitimately absent (a pop-up shown once per visit)
+// quarantined. One value per document also keeps the judging and the baseline
+// it refreshes the same. A page whose main bundle a loader injects after
+// DOMContentLoaded is judged by what it had then (the all-assets fallback when
+// that is no same-site script): a weaker gate, never a false one.
+interface Snapshot { taken: boolean; id: string | null; waiting: ((id: string | null) => void)[] }
+const snapshots = new WeakMap<Document, Snapshot>();
+
+// Whether DOMContentLoaded has fired. `interactive` alone doesn't say: parsing
+// is over, but the event waits for deferred and module scripts, which can
+// still insert scripts the event-time set includes. The navigation timing
+// entry does say, and `complete` comes only after the event.
+function contentLoaded(doc: Document): boolean {
+  if (doc.readyState === 'complete') return true;
+  if (doc.readyState === 'loading') return false;
+  try {
+    const nav = doc.defaultView?.performance?.getEntriesByType?.('navigation')[0] as PerformanceNavigationTiming | undefined;
+    return typeof nav?.domContentLoadedEventStart === 'number' && nav.domContentLoadedEventStart > 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+function take(doc: Document, entry: Snapshot): void {
+  if (entry.taken) return;
+  entry.id = liveDeployId(doc);
+  entry.taken = true;
+  for (const fn of entry.waiting.splice(0)) {
+    try { fn(entry.id); } catch (_) { /* one listener can't cost the others */ }
+  }
+}
+
+function snapshotOf(doc: Document): Snapshot {
+  const seen = snapshots.get(doc);
+  if (seen) {
+    // The listener can miss the event (a page listener before ours stopped
+    // it): once it has fired, take the id at the first ask.
+    if (!seen.taken && contentLoaded(doc)) take(doc, seen);
+    return seen;
+  }
+  const entry: Snapshot = { taken: false, id: null, waiting: [] };
+  snapshots.set(doc, entry);
+  if (contentLoaded(doc)) take(doc, entry);
+  else doc.addEventListener('DOMContentLoaded', () => { take(doc, entry); }, { once: true });
+  return entry;
+}
+
+/**
+ * Starts the watch that takes `doc`'s deploy id at DOMContentLoaded. Every
+ * host calls it as its runtime starts in a document (document start, where it
+ * can), since a first ask after the page has injected more scripts can only
+ * take what is there by then. `onTaken` hears the id once it is taken (at
+ * once when it already is): a host whose engine runs elsewhere hands it on.
+ */
+function watchDeployId(doc: Document, onTaken?: (id: string | null) => void): void {
+  try {
+    const snap = snapshotOf(doc);
+    if (!onTaken) return;
+    if (snap.taken) onTaken(snap.id);
+    else snap.waiting.push(onTaken);
+  } catch (_) { /* the gate then reads "no deploy detected" */ }
+}
+
+// The deploy identity of a live document, the one every host gates rebase on
+// (the Shim browser's page-preload and shim world, a headless driver's page
+// runtime, Shim for Chrome), so they can't disagree about what a deploy is:
+// computeDeployId over the `<script src>` and stylesheet links it had at
+// DOMContentLoaded. Null before then (the gate can't judge a half-parsed page)
+// and on any failure: the gate then reads "no deploy detected".
+function deployIdForDocument(doc: Document): string | null {
+  try {
+    const snap = snapshotOf(doc);
+    return snap.taken ? snap.id : null;
   } catch (_) {
     return null;
   }
@@ -169,4 +249,4 @@ function baselineForPath(baselines: Record<string, string> | null | undefined, p
   return typeof hit === 'string' && hit ? hit : null;
 }
 
-export { computeDeployId, deployIdForDocument, sameRegistrableDomain, pagePathKey, baselineForPath };
+export { computeDeployId, deployIdForDocument, watchDeployId, sameRegistrableDomain, pagePathKey, baselineForPath };

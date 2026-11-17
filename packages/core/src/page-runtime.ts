@@ -75,6 +75,8 @@ export function installPageRuntime(config: PageRuntimeConfig): void {
   const ShimCore = host.ShimCore as typeof Core | undefined;
   const send = host[config.binding] as ((payload: string) => void) | undefined;
   if (!ShimCore || typeof ShimCore.run !== 'function' || typeof send !== 'function') return;
+  // At document start: the deploy id is taken at DOMContentLoaded (deploy-id.ts).
+  ShimCore.watchDeployId(document);
 
   // Events are fire-and-forget: one that cannot be serialized, or a driver
   // that went away, drops it. An api call goes through `call`, which rejects
