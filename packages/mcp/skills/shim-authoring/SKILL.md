@@ -164,8 +164,8 @@ Rules of the folder:
   `aux`, `nul`, `com0`–`com9`, `lpt0`–`lpt9`, in any case) are refused, and two names that
   differ only in case (`markPlayed` and `markplayed`) count as the same name.
 - **Rule ids** are short kebab-case slugs, unique within the shim (`hide-sidebar`).
-- **What you may change:** `rules`, `match.hosts` (where allowed), and the declarations `intent`, `settings`, `permissions`,
-  `storage`, `connections`. `id` is fixed (`not-editable`).
+- **What you may change:** `rules`, `match.hosts` (where allowed), `match.paths` (attach only, not headless) and the declarations `intent`, `settings`,
+  `permissions`, `storage`, `connections`. `id` is fixed (`not-editable`).
 - **On a global shim** (`"global": true`), you may also change `sharedHandlers`: an object
   of function sources (`{ "<name>": "function <name>(…) { … }" }`, never `__proto__`) that
   every site's handlers call as `api.shared.<name>(…)`. It is the one piece of code every
@@ -465,13 +465,12 @@ in) targets an element inside that frame. Warn the user before touching payment 
 ## 7. Committing and reporting
 
 - Commit when the evidence is clean and anything visual has been looked at. Commit more
-  than once in a session if the work comes in stages.
+  than once if the work comes in stages.
 - Your `summary` is what the user reads in the shim's chat: what changed and what you
   verified, in 1–3 sentences, for someone who didn't watch you work.
 - Be honest about what you didn't verify: a rule that didn't match on another page-type, a
   feature waiting on the user's grant, a data path you could only check after commit.
-- When the ask is ambiguous ("make this look better"), propose one concrete change and ask
-  whether they want something different.
+- When the ask is ambiguous ("make this look better"), propose one concrete change and ask.
 
 ## 8. Reference files
 
@@ -488,6 +487,6 @@ preview goes wrong: a guessed field, `api` member or tool answer is refused or d
 | `references/site-data.md` | using the site's own API (the API map tools), or reading what a shim saved (`inspect_storage`, `query_db`, `read_sibling_shim`) |
 | `references/compositions.md` | any composition session |
 | `references/page-driving.md` | `interact_page` (your shim's own controls, scroll) or `navigate` in a shim session: what each may touch, refusals, what stops a batch; paywalls, one-time popups |
-| `references/sites.md` | changing `match.hosts` |
+| `references/sites.md` | `match.hosts` or `match.paths` |
 | `references/headless.md` | a headless session: `shim_status` offers only headless, an open answers `mode: "headless"`, or the user wants a standalone `.shim` file |
 | `references/hosts.md` | a `chrome` host in `shim_status`, a tab with `host`, `ambiguous-target` / `multiple-targets` |

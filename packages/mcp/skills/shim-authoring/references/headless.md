@@ -26,6 +26,7 @@ The loop is the same, with three differences:
   (`scope: "page"`, top frame only) — the site's own controls too, since nothing there is
   the user's account; use it to test SPA navigation or a site toggle your shim reacts to.
   A popup it causes is closed and reported. `navigate` works as in attach.
+- **`match.paths` can't be edited.** A preview that changes it answers `malformed-shim-folder`: it limits where code runs, and a `.shim` file has no step where the person approves that. Leave it as it was; a session on the Shim browser can set it (`references/sites.md`).
 - **`shim_commit` writes the file**: a new version, with its history and what the session
   verified. Hand the `.shim` file to the user; they import it into Shim.
 - **`api.storage` is scratch for the whole session.** Every rule on a headless page runs as

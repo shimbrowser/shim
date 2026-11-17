@@ -197,17 +197,42 @@ rejects('a non-list', 'malformed-shim-folder',
 rejects('another key under match (the seam for later match kinds)', 'malformed-shim-folder',
   () => diffWorkingCopy(state, withSpec((spec) => { (spec as unknown as Record<string, unknown>).match = { hosts: ['example.com'], signature: '#x' }; })), '"signature"');
 {
-  // Paths are the person's, set in Shim: a working copy carries them unchanged.
+  // A host that can't put a widening in front of the person (headless, Shim for
+  // Chrome) carries paths unchanged and refuses an edit, with the reason.
   const scoped: WorkingState = { spec: { ...WORKING, match: { hosts: ['example.com'], paths: ['/history'] } }, matchEditable: true };
   const hostsOnly = diffWorkingCopy(scoped, withSpec((spec) => { spec.match = { hosts: ['example.com', 'a.com'], paths: ['/history'] }; }, checkoutShim(scoped)));
   check('a hosts edit beside unchanged paths is a set-match', hostsOnly.ops.length === 1 && hostsOnly.ops[0]?.op === 'set-match', JSON.stringify(hostsOnly.ops));
   check('…which still keeps the paths', JSON.stringify(applyDelta(scoped.spec, hostsOnly.ops).match?.paths) === '["/history"]');
-  rejects('an edit to match.paths', 'malformed-shim-folder',
-    () => diffWorkingCopy(scoped, withSpec((spec) => { spec.match = { hosts: ['example.com'], paths: ['/**'] }; }, checkoutShim(scoped))), 'set in the shim');
-  rejects('dropping match.paths', 'malformed-shim-folder',
-    () => diffWorkingCopy(scoped, withSpec((spec) => { spec.match = { hosts: ['example.com', 'a.com'] }; }, checkoutShim(scoped))), 'set in the shim');
-  rejects('adding match.paths', 'malformed-shim-folder',
-    () => diffWorkingCopy(state, withSpec((spec) => { spec.match = { hosts: ['example.com'], paths: ['/x'] }; })), 'set in the shim');
+  rejects('an edit to match.paths where the host has no approval step', 'malformed-shim-folder',
+    () => diffWorkingCopy(scoped, withSpec((spec) => { spec.match = { hosts: ['example.com'], paths: ['/**'] }; }, checkoutShim(scoped))), 'session on the Shim browser');
+  rejects('dropping match.paths there', 'malformed-shim-folder',
+    () => diffWorkingCopy(scoped, withSpec((spec) => { spec.match = { hosts: ['example.com', 'a.com'] }; }, checkoutShim(scoped))), 'session on the Shim browser');
+  rejects('adding match.paths there', 'malformed-shim-folder',
+    () => diffWorkingCopy(state, withSpec((spec) => { spec.match = { hosts: ['example.com'], paths: ['/x'] }; })), 'session on the Shim browser');
+  check('an unchanged match.paths there is no op', diffWorkingCopy(scoped, checkoutShim(scoped)).ops.length === 0);
+  check('absent and [] are one value (no op)', diffWorkingCopy(state, withSpec((spec) => { spec.match = { hosts: ['example.com'], paths: [] }; })).ops.length === 0);
+
+  // Where it can ask (pathsEditable), the folder's paths become a set-paths op.
+  const askable: WorkingState = { ...scoped, pathsEditable: true };
+  const edit = (paths: unknown, base: WorkingState = askable): DeltaOp[] =>
+    diffWorkingCopy(base, withSpec((spec) => { (spec as unknown as Record<string, unknown>).match = { hosts: ['example.com'], paths }; }, checkoutShim(base))).ops;
+  const set = edit(['/history', '!/history/private']);
+  check('a paths edit is one set-paths op carrying the whole list',
+    set.length === 1 && set[0]?.op === 'set-paths' && JSON.stringify(set[0].paths) === '["/history","!/history/private"]', JSON.stringify(set));
+  check('…which applies without touching the hosts',
+    JSON.stringify(applyDelta(askable.spec, set).match) === '{"hosts":["example.com"],"paths":["/history","!/history/private"]}');
+  const cleared = edit([]);
+  check('clearing the list is set-paths []', cleared.length === 1 && cleared[0]?.op === 'set-paths' && Array.isArray(cleared[0].paths) && cleared[0].paths.length === 0);
+  check('…which drops the field', applyDelta(askable.spec, cleared).match?.paths === undefined);
+  const both = diffWorkingCopy(askable, withSpec((spec) => { spec.match = { hosts: ['example.com', 'a.com'], paths: ['/x'] }; }, checkoutShim(askable))).ops.map((o) => o.op);
+  check('hosts and paths together are set-match then set-paths', both.join() === 'set-match,set-paths', both.join());
+  rejects('a list that is not text', 'malformed-shim-folder', () => edit(['/a', 3]), 'list of path patterns');
+  rejects('a pattern that does not compile', 'malformed-shim-folder', () => edit(['re:(']), 'match.paths[0]');
+  rejects('too many entries', 'malformed-shim-folder', () => edit(Array.from({ length: 60 }, (_, i) => `/p${i}`)), 'more than');
+  const globalScoped: WorkingState = { spec: { ...WORKING, global: true, match: { hosts: ['example.com'] } }, matchEditable: true, pathsEditable: true };
+  let globalRefused = false;
+  try { diffWorkingCopy(globalScoped, withSpec((spec) => { spec.match = { hosts: ['example.com'], paths: ['/x'] }; }, checkoutShim(globalScoped))); } catch (e) { globalRefused = e instanceof ShimFolderError; }
+  check('a global shim never takes paths', globalRefused);
 }
 rejects('a pattern listed twice', 'malformed-shim-folder',
   () => diffWorkingCopy(state, withSpec((spec) => { spec.match = { hosts: ['example.com', 'a.com', 'a.com'] }; })), 'twice');
@@ -360,6 +385,8 @@ rejects('a global shim\'s match (impl-presence) stays not-editable', 'not-editab
 
 rejects('a host with no commit card (matchEditable:false) keeps match not-editable', 'not-editable',
   () => diffWorkingCopy({ ...state, matchEditable: false }, withSpec((spec) => { spec.match = { hosts: ['example.com', 'new.com'] }; })), '"match"');
+rejects('…and so does a paths edit there, even with pathsEditable', 'not-editable',
+  () => diffWorkingCopy({ ...state, matchEditable: false, pathsEditable: true }, withSpec((spec) => { spec.match = { hosts: ['example.com'], paths: ['/x'] }; })), '"match"');
 check('matchEditable:false leaves an unchanged match alone', diffWorkingCopy({ ...state, matchEditable: false }, withSpec(() => {})).ops.length === 0);
 rejects('match is not-editable by default (fail-closed: the host must opt in)', 'not-editable',
   () => diffWorkingCopy({ spec: WORKING }, withSpec((spec) => { spec.match = { hosts: ['example.com', 'new.com'] }; })), '"match"');

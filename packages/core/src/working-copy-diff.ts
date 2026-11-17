@@ -61,6 +61,8 @@ import {
 import type { FolderInput } from './shim-folder';
 import { hostPatternProblem, widenedPatterns, MAX_NEW_MATCH_PATTERNS } from './match-scope';
 import { isRecord } from './is-record';
+import { canonicalPaths } from './path-coverage';
+import { compilePathScope } from './path-match';
 
 /** The session's working state: the spec it would commit, and the stored handler modules. */
 export interface WorkingState {
@@ -80,6 +82,14 @@ export interface WorkingState {
    * match not-editable, as a global shim's is. Fail-closed by default.
    */
   matchEditable?: boolean;
+  /**
+   * Whether this host allows editing `match.paths` from the folder, on top of
+   * `matchEditable`. Only a host that puts a widening in front of the person
+   * before it commits (the Shim browser's commit card) opts in: a host that
+   * writes a file with no approval step, or has no card, refuses the edit.
+   * Fail-closed by default.
+   */
+  pathsEditable?: boolean;
 }
 
 export interface WorkingCopyDiff {
@@ -152,11 +162,11 @@ function isStringList(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((h) => typeof h === 'string');
 }
 
-// The `set-match` op a changed `match` makes, or null when it is unchanged.
-// Shape and admission problems go to `problems` (malformed-shim-folder); a
-// widening past the cap throws not-editable.
+// The `set-match` op a changed `match.hosts` makes, or null when the hosts are
+// unchanged. Shape and admission problems go to `problems`
+// (malformed-shim-folder); a widening past the cap throws not-editable. The
+// pages (`match.paths`) are pathsOp's.
 function matchOp(before: unknown, after: unknown, committed: readonly unknown[] | undefined, problems: string[]): DeltaOp | null {
-  if (stableStringify(before) === stableStringify(after)) return null;
   if (!isRecord(after) || !isStringList(after.hosts)) {
     problems.push('"match" must be { "hosts": [host patterns] }');
     return null;
@@ -166,19 +176,14 @@ function matchOp(before: unknown, after: unknown, committed: readonly unknown[] 
     problems.push(`"match" takes only "hosts" and "paths" (not ${extra.map((k) => JSON.stringify(k)).join(', ')})`);
     return null;
   }
-  // Which pages a shim runs on is the person's choice, made in Shim's settings
-  // (D18). A working copy carries its paths as they were and can't edit them.
-  const beforePaths = isRecord(before) ? before.paths : undefined;
-  if (stableStringify(beforePaths) !== stableStringify(after.paths)) {
-    problems.push('"match.paths" is set in the shim\'s settings in Shim, not from a session — leave it as it was');
-    return null;
-  }
   const hosts = after.hosts;
+  const beforeHosts = isRecord(before) && isStringList(before.hosts) ? before.hosts : [];
+  if (stableStringify(beforeHosts) === stableStringify(hosts)) return null;
   if (hosts.length === 0) {
     problems.push('"match.hosts" needs at least one host pattern');
     return null;
   }
-  const had = new Set(isRecord(before) && isStringList(before.hosts) ? before.hosts : []);
+  const had = new Set(beforeHosts);
   const seen = new Set<string>();
   for (const pattern of hosts) {
     if (seen.has(pattern)) { problems.push(`"match.hosts" lists ${JSON.stringify(pattern)} twice`); continue; }
@@ -196,6 +201,35 @@ function matchOp(before: unknown, after: unknown, committed: readonly unknown[] 
     ]);
   }
   return { op: 'set-match', match: { hosts: [...hosts] } };
+}
+
+/** The refusal a host that can't put a widening in front of the person gives a `match.paths` edit. */
+export const PATHS_NOT_EDITABLE_HERE =
+  '"match.paths" can only be edited in a session on the Shim browser, which asks the person before a change lets the shim run on more pages — ' +
+  'this host has no such step. Leave it as it was';
+
+// The `set-paths` op a changed `match.paths` makes, or null when the two lists
+// are the same value (absent and `[]` both mean every page). A list that isn't
+// text or doesn't compile is refused here, so a preview never applies one that
+// would run the shim nowhere.
+function pathsOp(before: unknown, after: unknown, editable: boolean, problems: string[]): DeltaOp | null {
+  const was = canonicalPaths(isRecord(before) ? before.paths : undefined);
+  const next = canonicalPaths(isRecord(after) ? after.paths : undefined);
+  if (next === null) {
+    problems.push('"match.paths" must be a list of path patterns (strings)');
+    return null;
+  }
+  if (was !== null && stableStringify(was) === stableStringify(next)) return null;
+  if (!editable) {
+    problems.push(PATHS_NOT_EDITABLE_HERE);
+    return null;
+  }
+  const scope = compilePathScope(next);
+  if (!scope.ok) {
+    for (const error of scope.errors) problems.push(error);
+    return null;
+  }
+  return { op: 'set-paths', paths: next };
 }
 
 function declarationOp(field: DeclarationField, value: unknown, problems: string[]): DeltaOp | null {
@@ -262,8 +296,12 @@ export function diffWorkingCopy(previous: WorkingState, folder: FolderInput): Wo
   }
   if (sharedEditable) ops.push(...sharedHandlerOps(prevRecord.sharedHandlers, nextRecord.sharedHandlers, problems));
   if (matchEditable) {
-    const op = matchOp(prevRecord.match, nextRecord.match, previous.committedMatchHosts, problems);
-    if (op) ops.push(op);
+    if (stableStringify(prevRecord.match) !== stableStringify(nextRecord.match)) {
+      const op = matchOp(prevRecord.match, nextRecord.match, previous.committedMatchHosts, problems);
+      if (op) ops.push(op);
+      const pathsEdit = pathsOp(prevRecord.match, nextRecord.match, previous.pathsEditable === true, problems);
+      if (pathsEdit) ops.push(pathsEdit);
+    }
   }
   if (problems.length) throw new ShimFolderError('malformed-shim-folder', problems);
 

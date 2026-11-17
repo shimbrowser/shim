@@ -195,6 +195,11 @@
       "types": "./dist/path-coverage.d.ts",
       "default": "./dist/path-coverage.js"
     },
+    "./path-evidence": {
+      "shim-source": "./src/path-evidence.ts",
+      "types": "./dist/path-evidence.d.ts",
+      "default": "./dist/path-evidence.js"
+    },
     "./path-match": {
       "shim-source": "./src/path-match.ts",
       "types": "./dist/path-match.d.ts",
@@ -234,6 +239,11 @@
       "shim-source": "./src/session-registry.ts",
       "types": "./dist/session-registry.d.ts",
       "default": "./dist/session-registry.js"
+    },
+    "./session-urls": {
+      "shim-source": "./src/session-urls.ts",
+      "types": "./dist/session-urls.d.ts",
+      "default": "./dist/session-urls.js"
     },
     "./settings-schema": {
       "shim-source": "./src/settings-schema.ts",
