@@ -18,7 +18,7 @@
     "@shimbrowser/core": "0.7.1",
     "@types/chrome": "0.3.7",
     "esbuild": "0.28.2",
-    "fake-indexeddb": "6.2.7",
+    "fake-indexeddb": "6.2.8",
     "typescript": "6.0.3"
   },
   "publishConfig": {
