@@ -1,8 +1,8 @@
 // The release steps, run by .github/workflows/release.yml when a `v<version>`
 // tag is pushed (and runnable by hand to try them):
 //
-//   node scripts/release.mjs check <tag>        the tag names the version every package,
-//                                               the plugin and the marketplace entry carry
+//   node scripts/release.mjs check <tag>        the tag names the version every package
+//                                               and the plugin carry
 //   node scripts/release.mjs assets <tag>       release/: shim-for-chrome.zip,
 //                                               shimbrowser-core.tgz, shimbrowser-mcp.tgz,
 //                                               SHA256SUMS, NOTES.md. The names carry no
@@ -47,10 +47,10 @@ function check(tag) {
   }
   const plugin = read('packages', 'mcp', '.claude-plugin', 'plugin.json').version;
   if (plugin !== version) problems.push(`the plugin's plugin.json is ${plugin}`);
-  const entry = read('.claude-plugin', 'marketplace.json').plugins?.find((p) => p.name === 'shim');
-  if (entry?.source?.ref !== `plugin-${tag}`) problems.push(`the marketplace entry's ref is ${entry?.source?.ref}, not plugin-${tag}`);
+  // The marketplace entry isn't checked: it names a plugin tag that must already exist,
+  // so it moves to plugin-<tag> only after this release has published that tag.
   if (problems.length) fail(`the tag ${tag} does not match: ${problems.join('; ')}`);
-  console.log(`release: ${tag} matches every package, the plugin and the marketplace entry`);
+  console.log(`release: ${tag} matches every package and the plugin`);
 }
 
 function sha256(file) {

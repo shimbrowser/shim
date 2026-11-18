@@ -14,8 +14,10 @@
 # which .claude-plugin/marketplace.json points at (Claude Code installs a plugin
 # from git without building it). The steps are scripts/release.mjs.
 #
-# Before tagging: every package, packages/mcp/.claude-plugin/plugin.json and the
-# marketplace entry's ref carry the version (`release.mjs check` refuses otherwise).
+# Before tagging: every package and packages/mcp/.claude-plugin/plugin.json carry
+# the version (`release.mjs check` refuses otherwise). The marketplace entry's ref
+# moves to plugin-v<version> only after this workflow has published that tag, so
+# the default branch never names a plugin tag that doesn't exist.
 
 name: release
 
